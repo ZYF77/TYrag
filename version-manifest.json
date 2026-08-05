@@ -2,10 +2,14 @@
   "project": "TYrag Enterprise Knowledge Base",
   "ragflow_upstream": {
     "source_tag": "v0.26.4",
-    "commit": "68e955e8703e4b3aaec9b0d4699f2d3f4a5a7824",
+    "source_commit": "68e955e8703e4b3aaec9b0d4699f2d3f4a5a7824",
     "pyproject_version": "0.26.4",
-    "docker_image": "infiniflow/ragflow:v0.26.4",`n    "docker_image_digest": "sha256:16d24d1968ab59e2715a85d2590f1569c9539e0362344a42f3a23e8be06a655b",
+    "docker_image": "infiniflow/ragflow:v0.26.4",
+    "docker_image_digest": "sha256:16d24d1968ab59e2715a85d2590f1569c9539e0362344a42f3a23e8be06a655b",
+    "entrypoint": "ragflow/docker/entrypoint.sh (image built-in, local mount disabled per RF-PATCH-001)",
+    "compose_file": "ragflow/docker/docker-compose.yml",
     "doc_engine": "elasticsearch",
+    "database_migration_baseline": "Peewee ORM auto-migration via init_database_tables() (api/db/db_models.py)",
     "python_version": ">=3.13,<3.14"
   },
   "handoff_spec_version": "1.0",
@@ -22,6 +26,7 @@
     "deploy_overlays": "deploy/overlays/",
     "patches": "patches/"
   },
+  "patches_applied": ["RF-PATCH-001"],
   "baseline_date": "2026-08-05",
-  "notes": "RAGFlow upstream git tracking removed. Standalone repo at https://github.com/ZYF77/TYrag.git. No patches applied yet."
+  "notes": "RAGFlow upstream git tracking removed. Standalone repo at https://github.com/ZYF77/TYrag.git."
 }
