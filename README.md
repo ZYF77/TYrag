@@ -1,7 +1,7 @@
 # RAGFlow 企业知识库二次开发交接包
 
 > 基线日期：2026-08-04  
-> 推荐上游基线：RAGFlow `v0.26.0`，正式实施时必须再次核对官方 release、source tag、Docker image digest 与迁移脚本一致性。  
+> 推荐上游基线：RAGFlow `v0.26.4`，正式实施时必须再次核对官方 release、source tag、Docker image digest 与迁移脚本一致性。  
 > 项目定位：在 RAGFlow 通用 RAG 能力之上建设客户专属的身份、权限、文件同步、业务数据联邦查询和业务化前端，不重新实现完整 RAG 平台。
 
 ## 1. 交接包用途

@@ -1,0 +1,27 @@
+{
+  "project": "TYrag Enterprise Knowledge Base",
+  "ragflow_upstream": {
+    "source_tag": "v0.26.4",
+    "commit": "68e955e8703e4b3aaec9b0d4699f2d3f4a5a7824",
+    "pyproject_version": "0.26.4",
+    "docker_image": "infiniflow/ragflow:v0.26.4",
+    "doc_engine": "elasticsearch",
+    "python_version": ">=3.13,<3.14"
+  },
+  "handoff_spec_version": "1.0",
+  "contracts": {
+    "integration_openapi": "contracts/integration-openapi.yaml (v1.0.0)",
+    "metadata_schema": "contracts/metadata-schema.json (v1)",
+    "error_codes": "contracts/error-codes.yaml (v1)",
+    "status_state_machine": "contracts/status-state-machine.md (v1)",
+    "acl_policy_examples": "contracts/acl-policy-examples.json (v1)"
+  },
+  "directories": {
+    "ragflow_source": "ragflow/",
+    "enterprise": "enterprise/",
+    "deploy_overlays": "deploy/overlays/",
+    "patches": "patches/"
+  },
+  "baseline_date": "2026-08-05",
+  "notes": "RAGFlow upstream git tracking removed. Standalone repo at https://github.com/ZYF77/TYrag.git. No patches applied yet."
+}

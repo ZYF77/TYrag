@@ -1,0 +1,5 @@
+# RAGFlow upstream patch registry
+# Every upstream source modification must be registered here with ADR, tests, and upgrade notes.
+# Format per docs/03-版本冻结源码管理与升级.md.
+
+patches: []
