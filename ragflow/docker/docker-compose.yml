@@ -61,6 +61,15 @@ services:
       - ./service_conf.yaml.template:/ragflow/conf/service_conf.yaml.template
       - ../web/dist:/ragflow/web/dist
       # - ./entrypoint.sh:/ragflow/entrypoint.sh  # use image built-in entrypoint
+      - ../api:/ragflow/api
+      - ../rag:/ragflow/rag
+      - ../deepdoc:/ragflow/deepdoc
+      - ../common:/ragflow/common
+      - ../agent:/ragflow/agent
+      - ../memory:/ragflow/memory
+      - ../admin:/ragflow/admin
+      - ../mcp:/ragflow/mcp
+      - ../conf:/ragflow/conf
     env_file: .env
     networks:
       - ragflow

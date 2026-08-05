@@ -167,3 +167,7 @@ internal/ingestion/task/tool/README.md
 internal/cpp/cmake-build-release
 
 artifacts/
+
+# Dev artifacts
+.pytest_cache/
+CodingProgram/

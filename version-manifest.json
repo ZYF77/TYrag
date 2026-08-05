@@ -18,7 +18,8 @@
     "metadata_schema": "contracts/metadata-schema.json (v1)",
     "error_codes": "contracts/error-codes.yaml (v1)",
     "status_state_machine": "contracts/status-state-machine.md (v1)",
-    "acl_policy_examples": "contracts/acl-policy-examples.json (v1)"
+    "acl_policy_examples": "contracts/acl-policy-examples.json (v1)",
+    "api_capability_matrix": "contracts/ragflow-api-capability-matrix.md (v1)"
   },
   "directories": {
     "ragflow_source": "ragflow/",
@@ -26,7 +27,9 @@
     "deploy_overlays": "deploy/overlays/",
     "patches": "patches/"
   },
-  "patches_applied": ["RF-PATCH-001"],
+  "patches_applied": [
+    "RF-PATCH-001"
+  ],
   "baseline_date": "2026-08-05",
   "notes": "RAGFlow upstream git tracking removed. Standalone repo at https://github.com/ZYF77/TYrag.git."
 }

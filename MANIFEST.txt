@@ -5,7 +5,9 @@ contracts/acl-policy-examples.json
 contracts/error-codes.yaml
 contracts/integration-openapi.yaml
 contracts/metadata-schema.json
+contracts/ragflow-api-capability-matrix.md
 contracts/status-state-machine.md
+deploy/scripts/start.sh
 decisions/ADR-001-文档引擎默认选择.md
 decisions/ADR-002-企业外围层优先.md
 docs/00-项目总纲与执行摘要.md

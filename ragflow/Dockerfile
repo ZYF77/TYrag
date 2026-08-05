@@ -48,11 +48,8 @@ COPY docs docs
 RUN --mount=type=cache,id=ragflow_npm,target=/root/.npm,sharing=locked \
     cd web && NODE_OPTIONS="--max-old-space-size=8192" VITE_BUILD_SOURCEMAP=false VITE_MINIFY=esbuild npm run build
 
-# Get version from git (mount .git directory to compute version dynamically)
-RUN --mount=type=bind,source=.git,target=/ragflow/.git \
-    version_info=$(git describe --tags --match=v* --first-parent --always); \
-    echo "RAGFlow version: $version_info"; \
-    echo "$version_info" > /ragflow/VERSION
+# Version hardcoded (no .git in build context)
+RUN echo "v0.26.4" > /ragflow/VERSION
 
 # production stage
 FROM infiniflow/ragflow-base:v2.1 AS production
@@ -111,7 +108,7 @@ COPY tools/scripts tools/scripts
 COPY --from=builder /ragflow/web/dist /ragflow/web/dist
 
 # Copy version info
-COPY --from=builder /ragflow/VERSION /ragflow/VERSION
+RUN echo "v0.26.4" > /ragflow/VERSION
 
 # Set environment variables
 ENV HF_ENDPOINT=https://hf-mirror.com

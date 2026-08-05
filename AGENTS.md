@@ -92,3 +92,35 @@
 - 尚未解决的风险；
 - 是否修改上游；
 - 后续集成注意事项。
+
+## 8. 开发环境
+
+本项目使用自定义 Docker 镜像 	yrag/ragflow:v0.26.4（基于上游 v0.26.4 源码构建），Python 源码通过 volume 挂载到容器，修改后无需重建镜像。
+
+### 启动环境
+`ash
+cd ragflow/docker
+docker compose --profile cpu up -d
+`
+
+### 前端改动生效
+前端 web/dist 已挂载，重新构建前端后执行：
+`ash
+docker restart docker-ragflow-cpu-1
+`
+
+### 后端 Python 改动生效
+修改 agflow/ 下任意 Python 源码后执行：
+`ash
+docker restart docker-ragflow-cpu-1
+`
+
+### 重建镜像（新增依赖或修改 Dockerfile 时）
+`ash
+docker build -t tyrag/ragflow:v0.26.4 -f ragflow/Dockerfile ragflow/
+docker compose -f ragflow/docker/docker-compose.yml up -d --no-deps ragflow-cpu
+`
+
+### 访问地址
+- 前端：http://localhost:8080
+- API：http://localhost:9380
