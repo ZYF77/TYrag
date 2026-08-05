@@ -143,7 +143,7 @@ export default {
   checkEmbedding: (datasetId: string) =>
     `${restAPIv1}/datasets/${datasetId}/embedding/check`,
   kbList: `${restAPIv1}/datasets`,
-  datasetFilter: `${restAPIv1}/datasets?type=filter`,
+  datasetFilter: `${restAPIv1}/datasets`,
   createKb: `${restAPIv1}/datasets`,
   updateKb: (datasetId: string) => `${restAPIv1}/datasets/${datasetId}`,
   rmKb: `${restAPIv1}/datasets`,
@@ -268,8 +268,7 @@ export default {
     `${restAPIv1}/datasets/${datasetId}/documents?type=web`,
   documentInfoUpload: `${restAPIv1}/documents/upload`,
   setMeta: `${webAPI}/document/set_meta`,
-  getDatasetFilter: (datasetId: string) =>
-    `${restAPIv1}/datasets/${datasetId}/documents?type=filter`,
+  getDatasetFilter: (datasetId: string) => `${restAPIv1}/datasets/${datasetId}/documents?type=filter`,
 
   // chat
   createChat: `${restAPIv1}/chats`,
