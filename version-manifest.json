@@ -4,7 +4,7 @@
     "source_tag": "v0.26.4",
     "commit": "68e955e8703e4b3aaec9b0d4699f2d3f4a5a7824",
     "pyproject_version": "0.26.4",
-    "docker_image": "infiniflow/ragflow:v0.26.4",
+    "docker_image": "infiniflow/ragflow:v0.26.4",`n    "docker_image_digest": "sha256:16d24d1968ab59e2715a85d2590f1569c9539e0362344a42f3a23e8be06a655b",
     "doc_engine": "elasticsearch",
     "python_version": ">=3.13,<3.14"
   },

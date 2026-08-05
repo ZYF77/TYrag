@@ -2,4 +2,4 @@
 # Every upstream source modification must be registered here with ADR, tests, and upgrade notes.
 # Format per docs/03-版本冻结源码管理与升级.md.
 
-patches: []
+patches: [{id: RF-PATCH-001, reason: "entrypoint.sh mount disabled for local compatibility", upstream_files: [ragflow/docker/docker-compose.yml], adr: "decisions/ADR-002", introduced_in: "WP-00", tests: ["docker compose up -d", "curl /api/v1/system/ping"]}]
