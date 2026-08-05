@@ -21,6 +21,8 @@ from enterprise.gateway.sync.ragflow_document_client import (
 )
 from enterprise.gateway.sync.source_adapter import SourceStub
 os.environ['ENTERPRISE_SYNC_AUTH_ENABLED'] = 'false'
+os.environ['ENTERPRISE_TEST_MODE'] = '1'
+import enterprise.gateway.app as app_module
 from enterprise.gateway.app import app, validate_metadata
 
 
@@ -149,6 +151,7 @@ class TestStatusMapping:
 
 # ── Contract: OpenAPI request/response shape ──
 
+@pytest.mark.usefixtures("isolated_gateway_db")
 class TestContractOpenAPI:
     @pytest.mark.asyncio
     async def test_post_documents_202(self):
@@ -224,6 +227,33 @@ class TestContractOpenAPI:
             data = resp.json()
             assert "code" in data
             assert "requestId" in data
+
+
+# ── Regression: lifespan restart must not reuse a closed connection ──
+
+@pytest.mark.asyncio
+async def test_lifespan_can_restart_in_same_process(tmp_path):
+    previous_db_path = os.environ.get("ENTERPRISE_SYNC_DB_PATH")
+    os.environ["ENTERPRISE_SYNC_DB_PATH"] = str(tmp_path / "lifespan.db")
+    try:
+        if app_module._db is not None:
+            await app_module._db.close()
+            app_module._db = None
+        for _ in range(2):
+            async with app_module.lifespan(app_module.app):
+                assert app_module._db is not None
+                async with app_module._db.execute("SELECT 1") as cursor:
+                    row = await cursor.fetchone()
+                assert row[0] == 1
+            assert app_module._db is None
+    finally:
+        if app_module._db is not None:
+            await app_module._db.close()
+            app_module._db = None
+        if previous_db_path is None:
+            os.environ.pop("ENTERPRISE_SYNC_DB_PATH", None)
+        else:
+            os.environ["ENTERPRISE_SYNC_DB_PATH"] = previous_db_path
 
 
 # ── Integration: persistence ──

@@ -105,6 +105,7 @@ class TestServiceAuth:
         assert "secret" not in str(detail).lower()
 
 
+@pytest.mark.usefixtures("isolated_gateway_db")
 class TestServiceAuthHTTP:
     @pytest.mark.asyncio
     async def test_documents_endpoint_rejects_no_auth(self):
@@ -202,16 +203,20 @@ class TestStatusMapping:
 # Regression: Idempotency + Deduplication
 # ============================================================
 
+@pytest.mark.usefixtures("isolated_gateway_db")
 class TestRegressionIdempotency:
     @pytest.mark.asyncio
-    async def test_duplicate_event_id_still_dedup(self):
+    async def test_duplicate_event_id_still_dedup(self, isolated_gateway_db):
+        db, _ = isolated_gateway_db
         os.environ["ENTERPRISE_SYNC_AUTH_ENABLED"] = "false"
         transport = ASGITransport(app=app)
         headers = {}
+        evt_id = "evt-dedup-test"
+        doc_id = "DOC-DEDUP-TEST"
         body = {
-            "eventId": "evt-reg-001",
+            "eventId": evt_id,
             "sourceSystem": "EAM",
-            "externalDocumentId": "DOC-REG-001",
+            "externalDocumentId": doc_id,
             "sourceVersionId": "v1",
             "sha256": hashlib.sha256(b"reg1").hexdigest(),
             "fileName": "test.pdf",
@@ -229,13 +234,34 @@ class TestRegressionIdempotency:
             d2 = r2.json()
             assert d2["deduplicated"] is True
 
+            async with db.execute(
+                "SELECT COUNT(*) AS n FROM ext_document_map WHERE event_id=?",
+                (evt_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+            assert row["n"] == 1
+
     @pytest.mark.asyncio
     async def test_status_endpoint_returns_valid_data(self):
         os.environ["ENTERPRISE_SYNC_AUTH_ENABLED"] = "false"
+        evt_id = "evt-status-001"
+        doc_id = "DOC-STATUS-001"
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as c:
+            # First insert a document so the status endpoint can find it
+            body = {
+                "eventId": evt_id,
+                "sourceSystem": "EAM",
+                "externalDocumentId": doc_id,
+                "sourceVersionId": "v1",
+                "sha256": hashlib.sha256(b"status1").hexdigest(),
+                "fileName": "test.pdf",
+                "source": {"bucket": "x", "objectKey": "y"},
+                "metadata": VALID_METADATA,
+            }
+            await c.post("/enterprise/api/v1/documents", json=body)
             resp = await c.get(
-                "/enterprise/api/v1/documents/DOC-REG-001/status",
+                f"/enterprise/api/v1/documents/{doc_id}/status",
                 params={"tenant_id": "tenant-001"})
             assert resp.status_code == 200
             data = resp.json()

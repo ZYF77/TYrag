@@ -41,17 +41,20 @@ _db: aiosqlite.Connection | None = None
 async def get_db() -> aiosqlite.Connection:
     global _db
     if _db is None:
-        _db = await init_db()
+        db_path = os.environ.get(
+            "ENTERPRISE_SYNC_DB_PATH", "enterprise/ext_document_map.db")
+        _db = await init_db(db_path)
     return _db
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _db
-    _db = await init_db()
+    _db = await get_db()
     yield
     if _db:
         await _db.close()
+        _db = None
 
 
 app = FastAPI(title="Enterprise RAGFlow Gateway", version="1.0.0", lifespan=lifespan)
@@ -160,6 +163,7 @@ def make_status_response(doc: ExtDocumentMap, deduplicated: bool = False,
 async def upsert_document(
     req: DocumentUpsertRequest,
     request: Request,
+    db: aiosqlite.Connection = Depends(get_db),
     principal: ServicePrincipal = Depends(require_service_principal),
 ):
     request_id = str(uuid.uuid4())
@@ -171,7 +175,6 @@ async def upsert_document(
     if err:
         return error_response(err, "Metadata validation failed", request_id)
 
-    db = await get_db()
     existing = await get_mapping_by_event_id(db, req.eventId)
     if existing:
         return make_status_response(existing, deduplicated=True, request_id=request_id)
@@ -268,10 +271,10 @@ async def upsert_document(
 async def get_document_status(
     external_document_id: str,
     request: Request,
+    db: aiosqlite.Connection = Depends(get_db),
     principal: ServicePrincipal = Depends(require_service_principal),
 ):
     request_id = str(uuid.uuid4())
-    db = await get_db()
 
     tenant_id = request.query_params.get("tenant_id", "default")
     refresh = request.query_params.get("refresh", "").lower() in ("1", "true", "yes")
