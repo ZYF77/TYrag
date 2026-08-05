@@ -171,3 +171,4 @@ artifacts/
 # Dev artifacts
 .pytest_cache/
 CodingProgram/
+enterprise/ext_document_map.db*
