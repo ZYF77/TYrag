@@ -1,0 +1,150 @@
+// Types derived from contracts/integration-openapi.yaml (frozen v1.0.0)
+
+export interface DocumentUpsertRequest {
+  eventId: string;
+  sourceSystem: string;
+  externalDocumentId: string;
+  sourceVersionId: string;
+  sha256: string;
+  fileName: string;
+  mediaType?: string;
+  source: {
+    bucket: string;
+    objectKey: string;
+  };
+  metadata: Record<string, unknown>;
+}
+
+export interface ErrorResponse {
+  code: string;
+  message: string;
+  requestId: string;
+  retryable?: boolean;
+  details?: Record<string, unknown>;
+}
+
+export interface DocumentSyncResponse {
+  externalDocumentId: string;
+  sourceVersionId: string;
+  ragflowDatasetId: string | null;
+  ragflowDocumentId: string | null;
+  status: string;
+  stage: string | null;
+  deduplicated: boolean;
+  error: ErrorResponse | null;
+}
+
+export interface CreateConversationRequest {
+  equipmentId?: string | null;
+  fixedAssetNo?: string | null;
+  faultCode?: string | null;
+}
+
+export interface Conversation {
+  conversationId: string;
+  ragflowSessionId: string;
+  createdAt: string;
+  // UI-only fields for the list
+  title?: string;
+  equipmentId?: string | null;
+  fixedAssetNo?: string | null;
+  faultCode?: string | null;
+}
+
+export interface AskRequest {
+  question: string;
+  equipmentId?: string | null;
+  faultCode?: string | null;
+}
+
+export type SourceType = 'document' | 'business_record';
+
+export interface Citation {
+  citationId: string;
+  sourceType: SourceType;
+  title: string;
+  documentId: string | null;
+  versionId: string | null;
+  pageNo: number | null;
+  bbox: { x1: number; y1: number; x2: number; y2: number } | null;
+  assetId: string | null;
+  excerpt: string | null;
+  recordType: string | null;
+  recordId: string | null;
+}
+
+// SSE Event types (per contracts/status-state-machine.md and docs/07)
+export type SseEventType =
+  | 'run.started'
+  | 'retrieval.completed'
+  | 'citation'
+  | 'answer.delta'
+  | 'answer.completed'
+  | 'run.failed'
+  | 'heartbeat';
+
+export interface SseEvent {
+  event: SseEventType;
+  data: string;
+}
+
+export interface SseRunStartedData {
+  runId: string;
+}
+
+export interface SseCitationData {
+  citationId: string;
+}
+
+export interface SseAnswerDeltaData {
+  content: string;
+}
+
+export interface SseAnswerCompletedData {
+  runId: string;
+}
+
+export interface SseRunFailedData {
+  runId: string;
+  error: ErrorResponse;
+}
+
+// Reply message model
+export interface ReplyMessage {
+  id: string;
+  role: 'assistant';
+  content: string;
+  citations: Citation[];
+  status: 'streaming' | 'completed' | 'failed' | 'degraded' | 'no_evidence';
+  error?: ErrorResponse;
+  createdAt: string;
+}
+
+export interface UserMessage {
+  id: string;
+  role: 'user';
+  content: string;
+  createdAt: string;
+}
+
+export type ChatMessage = UserMessage | ReplyMessage;
+
+// File sync status
+export type SyncStatus =
+  | 'uploaded'
+  | 'waiting'
+  | 'parsing'
+  | 'indexing'
+  | 'review_required'
+  | 'ready'
+  | 'failed'
+  | 'disabled';
+
+export interface FileSyncItem {
+  externalDocumentId: string;
+  fileName: string;
+  status: SyncStatus;
+  stage: string | null;
+  error: ErrorResponse | null;
+  updatedAt: string;
+}
