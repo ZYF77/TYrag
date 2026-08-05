@@ -3,6 +3,7 @@ Uses synchronous urllib calls via thread executor for FastAPI compatibility."""
 import asyncio
 import json
 import logging
+import re
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -10,6 +11,49 @@ from typing import Any
 from enterprise.gateway.config import config
 
 logger = logging.getLogger(__name__)
+
+_SENSITIVE_LOG_TERMS = (
+    "authorization",
+    "apikey",
+    "token",
+    "password",
+    "secret",
+)
+
+
+def _is_sensitive_key(key: str) -> bool:
+    normalized = re.sub(r"[-_\s]", "", key).lower()
+    return any(term in normalized for term in _SENSITIVE_LOG_TERMS)
+
+
+def _redact_json_string(match: re.Match[str]) -> str:
+    key, value = match.group(1), match.group(2)
+    if _is_sensitive_key(key):
+        return f'"{key}": "<redacted>"'
+    return match.group(0)
+
+
+def _redact_query_param(match: re.Match[str]) -> str:
+    key = match.group(1)
+    if _is_sensitive_key(key):
+        return f"{key}=<redacted>"
+    return match.group(0)
+
+
+def sanitize_log_payload(payload: str | bytes, limit: int = 1000) -> str:
+    """Return a truncated, redacted copy of a raw payload for logs only."""
+    text = payload.decode(errors="replace") if isinstance(payload, bytes) else str(payload)
+    text = re.sub(
+        r'"((?:[^"\\]|\\.)*)"\s*:\s*"((?:[^"\\]|\\.)*)"',
+        _redact_json_string,
+        text,
+    )
+    text = re.sub(
+        r"([A-Za-z_][A-Za-z0-9_-]*)=([^\s&]+)",
+        _redact_query_param,
+        text,
+    )
+    return text[:limit]
 
 
 class RAGFlowAPIError(Exception):
@@ -71,10 +115,23 @@ class RAGFlowDocumentClient:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 return json.loads(resp.read().decode())
         except urllib.error.HTTPError as e:
-            err_body = e.read().decode() if e.fp else ""
-            raise RAGFlowAPIError(f"HTTP {e.code}: {err_body}", e.code, request_id)
+            err_body = e.read().decode(errors="replace") if e.fp else ""
+            logger.warning(
+                "RAGFlow HTTP %s request_id=%s response sanitized: %s",
+                e.code,
+                request_id,
+                sanitize_log_payload(err_body),
+            )
+            raise RAGFlowAPIError(
+                "RAGFlow API request failed", e.code, request_id
+            ) from e
         except Exception as e:
-            raise RAGFlowAPIError(str(e), 0, request_id)
+            logger.warning(
+                "RAGFlow request failed request_id=%s error_type=%s",
+                request_id,
+                type(e).__name__,
+            )
+            raise RAGFlowAPIError("RAGFlow API request failed", 0, request_id) from e
 
     async def _run_sync(self, fn, *args, **kwargs):
         return await asyncio.to_thread(fn, *args, **kwargs)
@@ -107,6 +164,63 @@ class RAGFlowDocumentClient:
                                        f"/api/v1/datasets/{dataset_id}/documents", rid)
         return result.get("data", []) if isinstance(result, dict) else result
 
+    async def update_document_metadata(
+        self,
+        dataset_id: str,
+        document_id: str,
+        meta_fields: dict,
+        enabled: bool | None = None,
+        request_id: str | None = None,
+    ) -> dict:
+        rid = request_id or self._new_request_id()
+        body: dict = {"meta_fields": meta_fields}
+        if enabled is not None:
+            body["enabled"] = 1 if enabled else 0
+        return await self._run_sync(
+            self._sync_request, "PATCH",
+            f"/api/v1/datasets/{dataset_id}/documents/{document_id}",
+            rid, json_data=body,
+        )
+
+    async def delete_documents(
+        self,
+        dataset_id: str,
+        document_ids: list[str],
+        request_id: str | None = None,
+    ) -> dict:
+        rid = request_id or self._new_request_id()
+        return await self._run_sync(
+            self._sync_request, "DELETE",
+            f"/api/v1/datasets/{dataset_id}/documents",
+            rid, json_data={"ids": document_ids},
+        )
+
+    async def batch_update_status(
+        self,
+        dataset_id: str,
+        document_ids: list[str],
+        enabled: bool,
+        request_id: str | None = None,
+    ) -> dict:
+        rid = request_id or self._new_request_id()
+        return await self._run_sync(
+            self._sync_request, "POST",
+            f"/api/v1/datasets/{dataset_id}/documents/batch-update-status",
+            rid, json_data={"doc_ids": document_ids, "status": "1" if enabled else "0"},
+        )
+
+    async def find_or_create_dataset(
+        self,
+        name: str,
+        request_id: str | None = None,
+    ) -> dict:
+        rid = request_id or self._new_request_id()
+        datasets = await self.list_datasets(rid)
+        for ds in datasets:
+            if ds.get("name") == name:
+                return ds
+        return await self.create_dataset(name, request_id=rid)
+
 
 # Stub for testing
 class RAGFlowDocumentStub(RAGFlowDocumentClient):
@@ -116,6 +230,10 @@ class RAGFlowDocumentStub(RAGFlowDocumentClient):
         self._documents: dict[str, dict] = {}
         self._next_id = 1
         self._fail_next = False
+        self._fail_metadata_next = False
+        self.run_status = "UNSTART"
+        self._status_updates: list[tuple[str, list[str], bool]] = []
+        self._deleted: list[str] = []
 
     async def create_dataset(self, name: str, description: str = "",
                              request_id: str | None = None) -> dict:
@@ -135,6 +253,75 @@ class RAGFlowDocumentStub(RAGFlowDocumentClient):
             raise RAGFlowAPIError("Stub: simulated RAGFlow failure", 503)
         doc_id = f"doc-{self._next_id}"; self._next_id += 1
         doc = {"data": [{"id": doc_id, "name": file_name, "dataset_id": dataset_id,
-                         "run": "UNSTART", "chunk_method": "naive"}]}
+                         "run": self.run_status, "chunk_method": "naive",
+                         "meta_fields": {}, "enabled": 1}]}
         self._documents[doc_id] = doc
         return doc
+
+    async def list_documents(self, dataset_id: str,
+                             request_id: str | None = None) -> list[dict]:
+        return [
+            doc["data"][0]
+            for doc in self._documents.values()
+            if doc["data"][0].get("dataset_id") == dataset_id
+        ]
+
+    async def update_document_metadata(
+        self,
+        dataset_id: str,
+        document_id: str,
+        meta_fields: dict,
+        enabled: bool | None = None,
+        request_id: str | None = None,
+    ) -> dict:
+        if self._fail_next or self._fail_metadata_next:
+            self._fail_metadata_next = False
+            raise RAGFlowAPIError("Stub: simulated RAGFlow failure", 503)
+        doc = self._documents.get(document_id)
+        if not doc:
+            raise RAGFlowAPIError("Stub: document not found", 404)
+        if doc["data"][0].get("dataset_id") != dataset_id:
+            raise RAGFlowAPIError("Stub: document not in dataset", 400)
+        doc["data"][0]["meta_fields"] = {
+            **doc["data"][0].get("meta_fields", {}),
+            **meta_fields,
+        }
+        if enabled is not None:
+            doc["data"][0]["enabled"] = 1 if enabled else 0
+        return doc
+
+    async def delete_documents(
+        self,
+        dataset_id: str,
+        document_ids: list[str],
+        request_id: str | None = None,
+    ) -> dict:
+        if self._fail_next:
+            raise RAGFlowAPIError("Stub: simulated RAGFlow failure", 503)
+        missing = [did for did in document_ids if did not in self._documents]
+        if missing:
+            raise RAGFlowAPIError("Stub: documents not found", 404)
+        for did in document_ids:
+            del self._documents[did]
+            self._deleted.append(did)
+        return {"data": {"deleted": len(document_ids)}}
+
+    async def batch_update_status(
+        self,
+        dataset_id: str,
+        document_ids: list[str],
+        enabled: bool,
+        request_id: str | None = None,
+    ) -> dict:
+        if self._fail_next:
+            raise RAGFlowAPIError("Stub: simulated RAGFlow failure", 503)
+        self._status_updates.append((dataset_id, document_ids, enabled))
+        result = {}
+        for doc_id in document_ids:
+            doc = self._documents.get(doc_id)
+            if not doc or doc["data"][0].get("dataset_id") != dataset_id:
+                result[doc_id] = {"error": "Document not found"}
+                continue
+            doc["data"][0]["enabled"] = 1 if enabled else 0
+            result[doc_id] = {"status": "1" if enabled else "0"}
+        return {"data": result}

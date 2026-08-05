@@ -92,7 +92,7 @@ class UserPrincipal:
         security_level: int,
     ) -> tuple[str, ...]:
         caps: set[str] = {"read"}
-        if "end_user" in role_codes or not role_codes:
+        if "end_user" in role_codes:
             caps.update({"ask", "list_sessions", "view_citations"})
         if "knowledge_maintainer" in role_codes:
             caps.update({"upload", "manage_metadata", "review"})

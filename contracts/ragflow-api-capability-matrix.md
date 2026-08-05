@@ -19,10 +19,10 @@
 | user_api | `/api/v1/user` | 用户注册/登录/信息 | 需封装 (WP-01) | SSO 接入后替换注册流程；LDAP/OIDC 身份映射 |
 | tenant_api | `/api/v1/tenant` | 租户/团队管理 | 需封装 (WP-01) | 企业租户与业务组织映射 |
 | dataset_api | `/api/v1/dataset` | 知识库 CRUD | 需封装 (WP-02/04) | 业务文档集映射；ACL 过滤 |
-| document_api | `/api/v1/document` | 文档上传/解析/状态 | 契约已定义 | integration-openapi.yaml 已定义 upsert/status/disable |
+| document_api | `/api/v1/document` | 文档上传/解析/状态 | upsert/status/disable/restore/delete/sync-status 已实现 | integration-openapi.yaml：文档同步与生命周期端点已实现 |
 | chunk_api | `/api/v1/chunk` | 切片管理 | 内部/不暴露 | 由 RAGFlow 自动管理 |
 | file_api | `/api/v1/file` | 文件上传/管理 | 需封装 (WP-02) | 与对象存储桥接 |
-| chat_api | `/api/v1/chat` | 对话/补全 | 契约已定义 | conversations + messages:stream |
+| chat_api | `/api/v1/chat` | 对话/补全 | planned | conversations + messages:stream 仅契约，未实现 |
 | search_api | `/api/v1/search` | 检索 | 需封装 (WP-04) | 带 ACL 过滤的检索 |
 | agent_api | `/api/v1/agent` | Agent 画布 | P2 | MVP 不开放 |
 | bot_api | `/api/v1/bot` | 对话机器人 | 需封装 (WP-04) | 嵌入式问答组件 |
@@ -54,9 +54,10 @@
 | POST /documents (upsert) | dataset_api + document_api | enterprise/gateway/sync/ |
 | POST /documents/{id}/disable | document_api (status) | enterprise/gateway/sync/ |
 | GET /documents/{id}/status | task_api + document_api | enterprise/gateway/sync/ |
-| POST /conversations | chat_api (session) | enterprise/gateway/query/ |
-| POST /conversations/{id}/messages:stream | chat_api (completion) | enterprise/gateway/query/ |
-| GET /citations/{id} | chunk_api + reference | enterprise/gateway/query/ + acl/ |
+| POST /conversations | chat_api (session) | planned（未实现） |
+| POST /conversations/{id}/messages:stream | chat_api (completion) | planned（未实现） |
+| GET /citations/{id} | chunk_api + reference | planned（未实现） |
+| GET /documents/sync-status | task_api + document_api | enterprise/gateway/sync/ |
 
 ## 不在 MVP 范围的能力
 

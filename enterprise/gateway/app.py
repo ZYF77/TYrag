@@ -1,9 +1,9 @@
 """Enterprise Gateway FastAPI application - WP-02A Closure."""
-import hashlib
 import json
 import logging
 import os
 import re
+import asyncio
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -12,23 +12,33 @@ from typing import Any
 import aiosqlite
 import jsonschema
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from enterprise.gateway.sync.models import (
-    ExtDocumentMap, init_db, insert_mapping, get_mapping,
-    get_mapping_by_event_id, update_mapping_status,
+    ExtDocumentMap, OutboxEvent, init_db, insert_mapping, get_mapping,
+    get_mapping_by_event_id, list_mappings,
+    enqueue_outbox, get_outbox_by_event_id, row_to_mapping,
+    update_mapping_status,
 )
 from enterprise.gateway.auth.service_auth import require_service_principal
 from enterprise.gateway.auth.service_principal import ServicePrincipal
 from enterprise.gateway.auth.middleware import UserAuthError, require_user_principal
 from enterprise.gateway.auth.user_principal import UserPrincipal
 from enterprise.gateway.models.ext_user_map import ExtUserMapRepo
-from enterprise.gateway.sync.status_mapping import enterprise_stage, map_ragflow_run_to_sync_status
+from enterprise.gateway.sync.status_mapping import enterprise_stage
 from enterprise.gateway.sync.ragflow_document_client import (
-    RAGFlowDocumentClient, RAGFlowAPIError,
+    RAGFlowDocumentClient, RAGFlowDocumentStub,
 )
-from enterprise.gateway.sync.source_adapter import SourceAdapter
+from enterprise.gateway.sync.source_adapter import (
+    S3SourceAdapter, SourceAdapter, SourceStub,
+)
+from enterprise.gateway.sync.sync_service import (
+    DocumentSyncError, DocumentNotFoundError, SyncService,
+)
+from enterprise.gateway.sync.worker import OutboxWorker, StatusReconciler
+from enterprise.gateway.config import config
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +49,26 @@ with open(_SCHEMA_PATH) as f:
     METADATA_SCHEMA = json.load(f)
 
 _db: aiosqlite.Connection | None = None
+_background_tasks: list[asyncio.Task] = []
+
+
+def _test_mode() -> bool:
+    return os.environ.get("ENTERPRISE_TEST_MODE") == "1"
+
+
+def _source_adapter() -> SourceAdapter:
+    return SourceStub() if _test_mode() else S3SourceAdapter()
+
+
+def _ragflow_client() -> RAGFlowDocumentClient:
+    api_key = os.environ.get("RAGFLOW_API_KEY", "stub-key")
+    if _test_mode():
+        return RAGFlowDocumentStub()
+    return RAGFlowDocumentClient(api_key=api_key)
+
+
+def _sync_service(db: aiosqlite.Connection) -> SyncService:
+    return SyncService(db, _source_adapter(), _ragflow_client())
 
 
 async def get_db() -> aiosqlite.Connection:
@@ -54,10 +84,33 @@ async def get_db() -> aiosqlite.Connection:
 async def lifespan(app: FastAPI):
     global _db
     _db = await get_db()
-    yield
-    if _db:
-        await _db.close()
-        _db = None
+    started_tasks: list[asyncio.Task] = []
+    if config.worker_enabled and not _test_mode():
+        service = _sync_service(_db)
+        worker_task = asyncio.create_task(
+            OutboxWorker(service).run_forever(config.outbox_poll_seconds)
+        )
+        reconciler_task = asyncio.create_task(
+            StatusReconciler(service).run_forever(config.reconcile_seconds)
+        )
+        started_tasks.extend([worker_task, reconciler_task])
+        _background_tasks.extend(started_tasks)
+    try:
+        yield
+    finally:
+        for task in started_tasks:
+            task.cancel()
+        for task in started_tasks:
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        for task in started_tasks:
+            if task in _background_tasks:
+                _background_tasks.remove(task)
+        if _db:
+            await _db.close()
+            _db = None
 
 
 app = FastAPI(title="Enterprise RAGFlow Gateway", version="1.0.0", lifespan=lifespan)
@@ -75,6 +128,62 @@ async def user_auth_error_handler(request: Request, exc: UserAuthError):
     )
 
 
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError):
+    request_id = str(uuid.uuid4())
+    logger.warning(
+        "Request validation failed with %d errors", len(exc.errors())
+    )
+    return JSONResponse(
+        status_code=422,
+        content=ErrorResponse(
+            code="VALIDATION_ERROR",
+            message=safe_error_message("VALIDATION_ERROR"),
+            requestId=request_id,
+        ).model_dump(),
+    )
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    request_id = str(uuid.uuid4())
+    if isinstance(exc.detail, dict) and "code" in exc.detail:
+        code = str(exc.detail["code"])
+        message = str(
+            exc.detail.get("message") or safe_error_message(code)
+        )
+    elif exc.status_code == 404:
+        code = "REQUEST_FAILED"
+        message = safe_error_message(code)
+    else:
+        code = "VALIDATION_ERROR" if exc.status_code < 500 else "INTERNAL_ERROR"
+        message = safe_error_message(code)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=ErrorResponse(
+            code=code,
+            message=message,
+            requestId=request_id,
+        ).model_dump(),
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    request_id = str(uuid.uuid4())
+    logger.exception(
+        "Unhandled gateway error for %s %s", request.method, request.url.path
+    )
+    return JSONResponse(
+        status_code=500,
+        content=ErrorResponse(
+            code="INTERNAL_ERROR",
+            message=safe_error_message("INTERNAL_ERROR"),
+            requestId=request_id,
+        ).model_dump(),
+    )
+
+
 # -- Pydantic models --
 
 class SourceInfo(BaseModel):
@@ -84,6 +193,7 @@ class SourceInfo(BaseModel):
 
 class DocumentUpsertRequest(BaseModel):
     eventId: str = Field(min_length=1)
+    eventType: str = Field(default="upsert", pattern="^(upsert|reindex)$")
     sourceSystem: str = Field(min_length=1, max_length=64)
     externalDocumentId: str = Field(min_length=1, max_length=128)
     sourceVersionId: str = Field(min_length=1, max_length=64)
@@ -92,6 +202,7 @@ class DocumentUpsertRequest(BaseModel):
     mediaType: str = Field(default="application/pdf")
     source: SourceInfo
     metadata: dict
+    batchId: str | None = Field(default=None, max_length=128)
 
 
 class ErrorResponse(BaseModel):
@@ -111,6 +222,10 @@ class DocumentSyncResponse(BaseModel):
     stage: str | None = None
     deduplicated: bool = False
     error: ErrorResponse | None = None
+    businessStatus: str = "active"
+    currentVersion: bool = False
+    eventStatus: str = "received"
+    updatedAt: str = ""
 
 
 # -- error codes --
@@ -120,24 +235,55 @@ ERROR_CODES = {
     "DOCUMENT_METADATA_INVALID": (422, False),
     "DOCUMENT_HASH_MISMATCH": (422, False),
     "DOCUMENT_SOURCE_NOT_FOUND": (422, True),
+    "DOCUMENT_NOT_FOUND": (404, False),
     "DOCUMENT_SYNC_FAILED": (502, True),
     "RAGFLOW_UNAVAILABLE": (503, True),
     "RAGFLOW_API_INCOMPATIBLE": (503, False),
     "VALIDATION_ERROR": (422, False),
     "INTERNAL_ERROR": (500, False),
+    "REQUEST_FAILED": (404, False),
+}
+
+SAFE_ERROR_MESSAGES = {
+    "AUTH_TOKEN_INVALID": "Invalid authentication token",
+    "AUTH_TOKEN_MISSING": "Authentication token is required",
+    "AUTH_USER_DISABLED": "User account is disabled",
+    "AUTH_USER_MAPPING_MISSING": "User mapping not found",
+    "ACL_DENIED": "Access denied",
+    "DOCUMENT_EVENT_DUPLICATE": "Document event already processed",
+    "DOCUMENT_METADATA_INVALID": "Metadata validation failed",
+    "DOCUMENT_HASH_MISMATCH": "Invalid SHA256 format",
+    "DOCUMENT_SOURCE_NOT_FOUND": "Source file could not be retrieved",
+    "DOCUMENT_NOT_FOUND": "Document not found",
+    "DOCUMENT_SYNC_FAILED": "Document synchronization failed",
+    "RAGFLOW_UNAVAILABLE": "RAGFlow service is temporarily unavailable",
+    "RAGFLOW_API_INCOMPATIBLE": "RAGFlow API is not compatible with the gateway",
+    "VALIDATION_ERROR": "Request validation failed",
+    "INTERNAL_ERROR": "Internal service error",
+    "REQUEST_FAILED": "Request could not be completed",
 }
 
 
-def error_response(code: str, message: str, request_id: str,
+def safe_error_message(code: str, fallback: str = "") -> str:
+    return SAFE_ERROR_MESSAGES.get(code, fallback or "Request failed")
+
+
+def error_response(code: str, request_id: str,
                    details: dict | None = None) -> JSONResponse:
     http_status, retryable = ERROR_CODES.get(code, (500, False))
     return JSONResponse(
         status_code=http_status,
         content=ErrorResponse(
-            code=code, message=message, requestId=request_id,
+            code=code,
+            message=safe_error_message(code),
+            requestId=request_id,
             retryable=retryable, details=details,
         ).model_dump()
     )
+
+
+def accepted_response(payload: dict) -> JSONResponse:
+    return JSONResponse(status_code=202, content=payload)
 
 
 # -- helpers --
@@ -153,7 +299,6 @@ def validate_metadata(metadata: dict, request_id: str) -> str | None:
 
 def make_status_response(doc: ExtDocumentMap, deduplicated: bool = False,
                          error_code: str | None = None,
-                         error_msg: str | None = None,
                          request_id: str = "") -> dict:
     resp = DocumentSyncResponse(
         externalDocumentId=doc.external_document_id,
@@ -164,12 +309,36 @@ def make_status_response(doc: ExtDocumentMap, deduplicated: bool = False,
         stage=enterprise_stage(doc.sync_status),
         deduplicated=deduplicated,
     )
+    extra = {
+        "businessStatus": doc.business_status,
+        "currentVersion": bool(doc.current_version),
+        "eventStatus": doc.event_status,
+        "updatedAt": doc.updated_at,
+    }
+    resp = resp.model_dump()
+    resp.update(extra)
     if error_code:
-        resp.error = ErrorResponse(
-            code=error_code, message=error_msg or "",
+        resp["error"] = ErrorResponse(
+            code=error_code,
+            message=safe_error_message(error_code),
             requestId=request_id,
-        )
-    return resp.model_dump()
+            retryable=ERROR_CODES.get(error_code, (500, False))[1],
+        ).model_dump()
+    return resp
+
+
+def sync_error_response(exc: DocumentSyncError, request_id: str) -> JSONResponse:
+    code = getattr(exc, "code", "INTERNAL_ERROR")
+    http_status, _ = ERROR_CODES.get(code, (500, False))
+    return JSONResponse(
+        status_code=http_status,
+        content=ErrorResponse(
+            code=code,
+            message=str(exc) or safe_error_message(code),
+            requestId=request_id,
+            retryable=bool(getattr(exc, "retryable", False)),
+        ).model_dump(),
+    )
 
 
 # -- routes --
@@ -184,17 +353,40 @@ async def upsert_document(
     request_id = str(uuid.uuid4())
 
     if not SHA256_RE.match(req.sha256):
-        return error_response("DOCUMENT_HASH_MISMATCH", "Invalid SHA256 format", request_id)
+        return error_response("DOCUMENT_HASH_MISMATCH", request_id)
 
     err = validate_metadata(req.metadata, request_id)
     if err:
-        return error_response(err, "Metadata validation failed", request_id)
-
-    existing = await get_mapping_by_event_id(db, req.eventId)
-    if existing:
-        return make_status_response(existing, deduplicated=True, request_id=request_id)
+        return error_response(err, request_id)
 
     tenant_id = req.metadata.get("tenant_id", "default")
+    existing_outbox = await get_outbox_by_event_id(db, req.eventId)
+    existing_mapping = await get_mapping_by_event_id(db, req.eventId)
+    if not existing_mapping:
+        existing_mapping = await get_mapping(
+            db, tenant_id, req.sourceSystem,
+            req.externalDocumentId, req.sourceVersionId,
+        )
+    if existing_outbox and existing_mapping:
+        return accepted_response(
+            make_status_response(
+                existing_mapping, deduplicated=True, request_id=request_id,
+            )
+        )
+
+    payload = req.model_dump(mode="json")
+    event = OutboxEvent(
+        event_id=req.eventId,
+        event_type=req.eventType,
+        tenant_id=tenant_id,
+        source_system=req.sourceSystem,
+        external_document_id=req.externalDocumentId,
+        source_version_id=req.sourceVersionId,
+        batch_id=req.batchId,
+        payload=json.dumps(payload),
+        max_attempts=config.outbox_max_attempts,
+    )
+    await enqueue_outbox(db, event)
 
     doc = ExtDocumentMap(
         tenant_id=tenant_id,
@@ -202,84 +394,35 @@ async def upsert_document(
         external_document_id=req.externalDocumentId,
         source_version_id=req.sourceVersionId,
         event_id=req.eventId,
+        event_type=req.eventType,
+        event_status="received",
         sha256=req.sha256,
         file_name=req.fileName,
         media_type=req.mediaType,
+        bucket=req.source.bucket,
+        object_key=req.source.objectKey,
+        batch_id=req.batchId,
         sync_status="received",
     )
 
     try:
         doc = await insert_mapping(db, doc)
-    except Exception as e:
-        logger.error("Failed to insert mapping: %s", e)
-        return error_response("INTERNAL_ERROR", str(e), request_id)
+    except Exception:
+        logger.exception("Failed to insert mapping")
+        return error_response("INTERNAL_ERROR", request_id)
 
-    if doc.sync_status != "received":
-        existing2 = await get_mapping(
-            db, tenant_id, req.sourceSystem,
-            req.externalDocumentId, req.sourceVersionId)
-        if existing2:
-            return make_status_response(existing2, deduplicated=True, request_id=request_id)
+    if doc.event_id != req.eventId:
+        return accepted_response(
+            make_status_response(doc, deduplicated=True, request_id=request_id)
+        )
 
-    await update_mapping_status(db, doc, "validated")
-
-    try:
-        source_adapter = SourceAdapter()
-        source_file = await source_adapter.fetch(
-            req.source.bucket, req.source.objectKey, req.sha256)
-    except Exception as e:
-        await update_mapping_status(db, doc, "failed",
-                                     error_code="DOCUMENT_SOURCE_NOT_FOUND",
-                                     error_message=str(e))
-        return error_response("DOCUMENT_SOURCE_NOT_FOUND",
-                              f"Source file fetch failed: {e}", request_id)
-
-    if os.environ.get("ENTERPRISE_TEST_MODE") == "1":
-        await update_mapping_status(db, doc, "registered")
+    if _test_mode():
+        await update_mapping_status(
+            db, doc, "registered", event_status="completed",
+        )
         doc.sync_status = "registered"
-        return make_status_response(doc, request_id=request_id)
 
-    # Upload to RAGFlow with real status mapping
-    try:
-        client = RAGFlowDocumentClient(api_key=os.environ.get("RAGFLOW_API_KEY", "stub-key"))
-        datasets = await client.list_datasets()
-        dataset_id = None
-        for ds in datasets:
-            if ds.get("name") == f"enterprise-{tenant_id}":
-                dataset_id = ds["id"]
-                break
-        if not dataset_id:
-            result = await client.create_dataset(f"enterprise-{tenant_id}")
-            dataset_id = result.get("data", {}).get("id", "")
-
-        upload_result = await client.upload_document(
-            dataset_id, req.fileName, source_file.content)
-        docs_data = upload_result.get("data", [])
-        if docs_data:
-            ragflow_doc = docs_data[0]
-            doc.ragflow_dataset_id = dataset_id
-            doc.ragflow_document_id = ragflow_doc.get("id", "")
-            doc.ragflow_task_id = ragflow_doc.get("id", "")
-
-            # Store initial status from RAGFlow
-            ragflow_run = ragflow_doc.get("run", "")
-            mapped = map_ragflow_run_to_sync_status(ragflow_run)
-            await update_mapping_status(db, doc, mapped,
-                                         pipeline_status=ragflow_run)
-        else:
-            await update_mapping_status(db, doc, "failed",
-                                         error_code="DOCUMENT_SYNC_FAILED",
-                                         error_message="RAGFlow returned empty document data")
-            return error_response("DOCUMENT_SYNC_FAILED",
-                                  "RAGFlow returned empty document data", request_id)
-
-    except RAGFlowAPIError as e:
-        await update_mapping_status(db, doc, "failed",
-                                     error_code="DOCUMENT_SYNC_FAILED",
-                                     error_message=str(e))
-        return error_response("DOCUMENT_SYNC_FAILED", str(e), request_id)
-
-    return make_status_response(doc, request_id=request_id)
+    return accepted_response(make_status_response(doc, request_id=request_id))
 
 
 @app.get("/enterprise/api/v1/documents/{external_document_id}/status")
@@ -292,69 +435,175 @@ async def get_document_status(
     request_id = str(uuid.uuid4())
 
     tenant_id = request.query_params.get("tenant_id", "default")
+    source_system = request.query_params.get("source_system")
     refresh = request.query_params.get("refresh", "").lower() in ("1", "true", "yes")
 
-    async with db.execute(
-        """SELECT * FROM ext_document_map
-           WHERE external_document_id=? AND tenant_id=?
-           ORDER BY updated_at DESC LIMIT 1""",
-        (external_document_id, tenant_id)
-    ) as cursor:
+    if source_system:
+        query = (
+            """SELECT * FROM ext_document_map
+               WHERE external_document_id=? AND tenant_id=? AND source_system=?
+               ORDER BY updated_at DESC LIMIT 1"""
+        )
+        params = (external_document_id, tenant_id, source_system)
+    else:
+        query = (
+            """SELECT * FROM ext_document_map
+               WHERE external_document_id=? AND tenant_id=?
+               ORDER BY updated_at DESC LIMIT 1"""
+        )
+        params = (external_document_id, tenant_id)
+    async with db.execute(query, params) as cursor:
         row = await cursor.fetchone()
         if not row:
             return JSONResponse(
                 status_code=404,
                 content=ErrorResponse(
                     code="DOCUMENT_NOT_FOUND",
-                    message=f"Document {external_document_id} not found",
+                    message=safe_error_message("DOCUMENT_NOT_FOUND"),
                     requestId=request_id,
                 ).model_dump()
             )
 
-    doc = ExtDocumentMap(
-        id=row["id"], tenant_id=row["tenant_id"], source_system=row["source_system"],
-        external_document_id=row["external_document_id"],
-        source_version_id=row["source_version_id"],
-        event_id=row["event_id"], sha256=row["sha256"],
-        file_name=row["file_name"], media_type=row["media_type"],
-        ragflow_dataset_id=row["ragflow_dataset_id"],
-        ragflow_document_id=row["ragflow_document_id"],
-        ragflow_task_id=row["ragflow_task_id"],
-        sync_status=row["sync_status"], pipeline_status=row["pipeline_status"],
-        last_error_code=row["last_error_code"],
-        last_error_message=row["last_error_message"],
-        last_sync_at=row["last_sync_at"],
-        source_updated_at=row["source_updated_at"]
-    )
+    doc = row_to_mapping(row)
 
     # Optional refresh from RAGFlow
     if refresh and doc.ragflow_dataset_id and doc.ragflow_document_id:
         try:
-            client = RAGFlowDocumentClient(
-                api_key=os.environ.get("RAGFLOW_API_KEY", "stub-key"))
-            rf_docs = await client.list_documents(doc.ragflow_dataset_id)
-            for rf in rf_docs:
-                if rf.get("id") == doc.ragflow_document_id:
-                    ragflow_run = rf.get("run", "")
-                    if ragflow_run:
-                        mapped = map_ragflow_run_to_sync_status(ragflow_run)
-                        current = doc.sync_status
-                        # Never downgrade a terminal success
-                        if current == "ready" and mapped != "ready":
-                            pass
-                        else:
-                            await update_mapping_status(
-                                db, doc, mapped,
-                                pipeline_status=ragflow_run)
-                            doc.sync_status = mapped
-                            doc.pipeline_status = ragflow_run
-                    break
-        except RAGFlowAPIError:
+            doc = await _sync_service(db).refresh_status(doc)
+        except DocumentSyncError:
             logger.warning("RAGFlow status refresh failed for %s", doc.ragflow_document_id)
-        except Exception:
-            logger.exception("Unexpected error refreshing RAGFlow status")
 
     return make_status_response(doc, request_id=request_id)
+
+
+@app.get("/enterprise/api/v1/documents/sync-status")
+async def list_sync_status(
+    request: Request,
+    db: aiosqlite.Connection = Depends(get_db),
+    principal: ServicePrincipal = Depends(require_service_principal),
+):
+    tenant_id = request.query_params.get("tenant_id")
+    source_system = request.query_params.get("source_system")
+    status = request.query_params.get("status")
+    batch_id = request.query_params.get("batch_id")
+    try:
+        limit = min(int(request.query_params.get("limit", "100")), 500)
+        offset = max(int(request.query_params.get("offset", "0")), 0)
+    except ValueError:
+        limit, offset = 100, 0
+    docs = await list_mappings(
+        db,
+        tenant_id=tenant_id,
+        source_system=source_system,
+        status=status,
+        batch_id=batch_id,
+        limit=limit,
+        offset=offset,
+    )
+    return [
+        {
+            "externalDocumentId": doc.external_document_id,
+            "sourceVersionId": doc.source_version_id,
+            "fileName": doc.file_name,
+            "status": doc.sync_status,
+            "stage": enterprise_stage(doc.sync_status),
+            "error": (
+                ErrorResponse(
+                    code=doc.last_error_code or "INTERNAL_ERROR",
+                    message=doc.last_error_message or safe_error_message(
+                        doc.last_error_code or "INTERNAL_ERROR"
+                    ),
+                    requestId=str(uuid.uuid4()),
+                    retryable=ERROR_CODES.get(
+                        doc.last_error_code or "INTERNAL_ERROR", (500, False)
+                    )[1],
+                ).model_dump()
+                if doc.last_error_code
+                else None
+            ),
+            "updatedAt": doc.updated_at,
+            "businessStatus": doc.business_status,
+            "currentVersion": bool(doc.current_version),
+            "batchId": doc.batch_id,
+        }
+        for doc in docs
+    ]
+
+
+@app.post("/enterprise/api/v1/documents/{external_document_id}/disable")
+async def disable_document(
+    external_document_id: str,
+    request: Request,
+    db: aiosqlite.Connection = Depends(get_db),
+    principal: ServicePrincipal = Depends(require_service_principal),
+):
+    request_id = str(uuid.uuid4())
+    tenant_id = request.query_params.get("tenant_id", "default")
+    source_system = request.query_params.get("source_system", "")
+    if not source_system:
+        return error_response("VALIDATION_ERROR", request_id)
+    try:
+        versions = await _sync_service(db).disable_document(
+            tenant_id, source_system, external_document_id,
+        )
+    except DocumentSyncError as e:
+        return sync_error_response(e, request_id)
+    return accepted_response({
+        "externalDocumentId": external_document_id,
+        "status": "disabled",
+        "updatedVersions": len(versions),
+        "requestId": request_id,
+    })
+
+
+@app.post("/enterprise/api/v1/documents/{external_document_id}/restore")
+async def restore_document(
+    external_document_id: str,
+    request: Request,
+    db: aiosqlite.Connection = Depends(get_db),
+    principal: ServicePrincipal = Depends(require_service_principal),
+):
+    request_id = str(uuid.uuid4())
+    tenant_id = request.query_params.get("tenant_id", "default")
+    source_system = request.query_params.get("source_system", "")
+    if not source_system:
+        return error_response("VALIDATION_ERROR", request_id)
+    try:
+        doc = await _sync_service(db).restore_document(
+            tenant_id, source_system, external_document_id,
+        )
+    except DocumentSyncError as e:
+        return sync_error_response(e, request_id)
+    return accepted_response(make_status_response(doc, request_id=request_id))
+
+
+@app.delete("/enterprise/api/v1/documents/{external_document_id}")
+async def delete_document(
+    external_document_id: str,
+    request: Request,
+    db: aiosqlite.Connection = Depends(get_db),
+    principal: ServicePrincipal = Depends(require_service_principal),
+):
+    request_id = str(uuid.uuid4())
+    tenant_id = request.query_params.get("tenant_id", "default")
+    source_system = request.query_params.get("source_system", "")
+    if not source_system:
+        return error_response("VALIDATION_ERROR", request_id)
+    try:
+        versions = await _sync_service(db).delete_document(
+            tenant_id, source_system, external_document_id,
+        )
+    except DocumentSyncError as e:
+        return sync_error_response(e, request_id)
+    return JSONResponse(
+        status_code=202,
+        content={
+            "externalDocumentId": external_document_id,
+            "status": "deleted",
+            "deletedVersions": len(versions),
+            "requestId": request_id,
+        },
+    )
 
 
 @app.get("/enterprise/api/v1/health")
@@ -373,3 +622,25 @@ async def auth_me(
     Never returns raw token, RAGFlow API key, internal PKs, or credential material.
     """
     return JSONResponse(content=principal.to_safe_dict())
+
+
+# Temporary demo closed loop (does not modify the frozen WP-02 contract)
+from enterprise.gateway.demo import router as demo_router
+app.include_router(demo_router)
+
+
+@app.api_route(
+    "/enterprise/{full_path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+    include_in_schema=False,
+)
+async def enterprise_not_found(full_path: str):
+    request_id = str(uuid.uuid4())
+    return JSONResponse(
+        status_code=404,
+        content=ErrorResponse(
+            code="REQUEST_FAILED",
+            message=safe_error_message("REQUEST_FAILED"),
+            requestId=request_id,
+        ).model_dump(),
+    )

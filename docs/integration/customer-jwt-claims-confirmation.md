@@ -135,7 +135,7 @@
 
 - 所有角色默认包含 `read`。
 - **最小权限原则**：`role_codes` 缺失、为空或包含未知角色值时，统一只获得最小基础能力 `read`，不自动获得 `ask`/`list_sessions`/`view_citations`；需要这些能力的接口应在后续授权层检查 capability。未知角色与角色缺失不构成不同的提权结果。
-- **当前代码行为**：`UserPrincipal._derive_capabilities` 对 `role_codes` 缺失时会额外派生 `ask`/`list_sessions`/`view_citations`，与上述最小权限原则不一致；该行为是否调整需由 WP-01 Phase 1 Review 确认，本任务不修改代码。
+- **当前代码行为（P0 已冻结）**：`UserPrincipal._derive_capabilities` 只在 `role_codes` 明确包含 `end_user` 时派生 `ask`/`list_sessions`/`view_citations`；缺失或未知角色统一只有 `read`。
 - 若客户使用不同角色编码体系（如 `ROLE_OPERATOR`, `ROLE_ADMIN`），需要确认映射关系或在 `JWT_CLAIM_MAP` 中将客户角色 claim 指向 `role_codes` 并配合 Gateway 侧的角色值标准化。
 
 #### 6.6 `group_ids`（用户组 ID 列表）
@@ -154,7 +154,7 @@
 
 | 场景 | 当前 Gateway 支持 | 客户需确认 |
 |---|---|---|
-| 用户被禁用 | `ext_user_map.status = "disabled"` → 403。注意：契约中尚无独立 disabled 错误码，需由契约负责人确认新增 `AUTH_USER_DISABLED` 或采用其他语义 | 客户如何通知 Gateway 更新 ext_user_map？是否有用户状态变更回调/事件？ |
+| 用户被禁用 | `ext_user_map.status = "disabled"` → 403，稳定错误码 `AUTH_USER_DISABLED` | 客户如何通知 Gateway 更新 ext_user_map？是否有用户状态变更回调/事件？ |
 | 用户离职 | 同上 | 离职是否有独立的 termination 事件，还是等同于禁用？ |
 | 部门调整 | 无实时感知（依赖 Token 刷新后 department_ids 变化） | Token 有效期内部门变更是否需要立即生效？如需要，需提供 introspection 或事件通知机制 |
 | 角色调整 | 同上（依赖 Token 刷新） | 同部门调整 |

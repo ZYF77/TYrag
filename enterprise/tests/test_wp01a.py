@@ -79,7 +79,7 @@ def _validator(**kwargs) -> JWTValidator:
     return JWTValidator(cfg)
 
 
-async def _seed_mapping(db_path: str) -> None:
+async def _seed_mapping(db_path: str, status: str = "active") -> None:
     repo = ExtUserMapRepo(db_path=db_path)
     try:
         await repo.ensure_table()
@@ -88,6 +88,7 @@ async def _seed_mapping(db_path: str) -> None:
             business_subject="biz-user-001",
             business_user_id="biz-user-001",
             mapping_strategy="B",
+            status=status,
         ))
     finally:
         await repo.close()
@@ -246,6 +247,23 @@ class TestUserPrincipal:
         assert "audit" in caps
         caps = UserPrincipal._derive_capabilities(("end_user",), 1)
         assert "ask" in caps
+        caps = UserPrincipal._derive_capabilities((), 1)
+        assert caps == ("read",)
+        caps = UserPrincipal._derive_capabilities(("unknown_role",), 1)
+        assert caps == ("read",)
+
+    def test_missing_role_codes_only_read(self):
+        claims = {"sub": "u", "tenant": "t", "iat": 1000, "exp": 2000}
+        p = UserPrincipal.from_validated_claims(claims, _CLAIM_MAP)
+        assert p.role_codes == ()
+        assert p.capabilities == ("read",)
+
+    def test_unknown_role_codes_only_read(self):
+        claims = {"sub": "u", "tenant": "t", "roles": ["ROLE_OPERATOR"],
+                  "iat": 1000, "exp": 2000}
+        p = UserPrincipal.from_validated_claims(claims, _CLAIM_MAP)
+        assert p.role_codes == ("ROLE_OPERATOR",)
+        assert p.capabilities == ("read",)
 
     def test_to_safe_dict_excludes_internals(self):
         p = UserPrincipal(tenant_id="t", business_user_id="u", subject="sub-x",
@@ -364,6 +382,13 @@ class TestAuthMeAPI:
                 headers={"Authorization": "Bearer invalid-token-12345"},
             )
             assert resp.status_code == 401
+            body = resp.json()
+            assert body["code"] in ("CONFIG_ERROR", "AUTH_TOKEN_INVALID")
+            assert body["message"] in (
+                "Authentication is not configured",
+                "Authentication token is invalid",
+            )
+            assert "requestId" in body
 
     async def test_valid_token_returns_principal(self, tmp_path):
         os.environ["JWT_ISSUER"] = "https://auth.example.com"
@@ -408,6 +433,32 @@ class TestAuthMeAPI:
                 assert resp.status_code == 403
                 body = resp.json()
                 assert body["code"] == "AUTH_USER_MAPPING_MISSING"
+                assert "requestId" in body
+        finally:
+            for k in ["JWT_ISSUER", "JWT_AUDIENCE", "JWT_ENABLE_HS",
+                       "JWT_ALLOWED_ALGS", "JWT_JWKS_URL", "ENTERPRISE_DB_PATH"]:
+                os.environ.pop(k, None)
+
+    async def test_disabled_user_returns_stable_error_code(self, tmp_path):
+        os.environ["JWT_ISSUER"] = "https://auth.example.com"
+        os.environ["JWT_AUDIENCE"] = "tyrag-gateway"
+        os.environ["JWT_ENABLE_HS"] = "true"
+        os.environ["JWT_ALLOWED_ALGS"] = "HS256"
+        os.environ["JWT_JWKS_URL"] = ""
+        db_path = str(tmp_path / "test_disabled_auth_me.db")
+        os.environ["ENTERPRISE_DB_PATH"] = db_path
+        try:
+            await _seed_mapping(db_path, status="disabled")
+            token = _make_token()
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                resp = await client.get(
+                    "/enterprise/api/v1/auth/me",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                assert resp.status_code == 403
+                body = resp.json()
+                assert body["code"] == "AUTH_USER_DISABLED"
                 assert "requestId" in body
         finally:
             for k in ["JWT_ISSUER", "JWT_AUDIENCE", "JWT_ENABLE_HS",
@@ -484,6 +535,7 @@ class TestRegressionWP02A:
                 os.environ.pop(k, None)
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("isolated_gateway_db")
     async def test_user_jwt_not_accepted_as_service_token(self):
         _saved_auth = os.environ.get("ENTERPRISE_SYNC_AUTH_ENABLED")
         _saved_svc = os.environ.get("ENTERPRISE_SYNC_SERVICE_TOKEN")

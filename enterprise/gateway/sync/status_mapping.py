@@ -28,12 +28,22 @@ _RAGFLOW_TO_ENTERPRISE: dict[str, str] = {
 _ENTERPRISE_STAGE: dict[str, str] = {
     "received": "received",
     "validated": "validated",
+    "accepted": "accepted",
+    "transferring": "transferring",
     "registered": "registered",
+    "queued": "queued",
     "parsing": "parsing",
+    "indexing": "indexing",
+    "validating": "validating",
     "ready": "ready",
     "failed": "failed",
     "cancelled": "cancelled",
     "review_required": "review_required",
+    "superseded": "superseded",
+    "disabled": "disabled",
+    "deleted": "deleted",
+    "retry_wait": "retry_wait",
+    "completed": "completed",
 }
 
 

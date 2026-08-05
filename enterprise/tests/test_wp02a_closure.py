@@ -143,8 +143,8 @@ class TestServiceAuthHTTP:
                     "fileName": "test.pdf",
                     "source": {"bucket": "x", "objectKey": "y"},
                     "metadata": VALID_METADATA,
-                })
-            assert resp.status_code == 200
+            })
+            assert resp.status_code == 202
 
     @pytest.mark.asyncio
     async def test_health_endpoint_skips_auth(self):
@@ -225,12 +225,12 @@ class TestRegressionIdempotency:
         }
         async with AsyncClient(transport=transport, base_url="http://test") as c:
             r1 = await c.post("/enterprise/api/v1/documents", json=body, headers=headers)
-            assert r1.status_code == 200
+            assert r1.status_code == 202
             d1 = r1.json()
             assert d1["deduplicated"] is False
 
             r2 = await c.post("/enterprise/api/v1/documents", json=body, headers=headers)
-            assert r2.status_code == 200
+            assert r2.status_code == 202
             d2 = r2.json()
             assert d2["deduplicated"] is True
 

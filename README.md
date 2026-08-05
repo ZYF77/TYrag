@@ -1,7 +1,8 @@
 # RAGFlow 企业知识库二次开发交接包
 
-> 基线日期：2026-08-04  
+> 基线日期：2026-08-05
 > 推荐上游基线：RAGFlow `v0.26.4`，正式实施时必须再次核对官方 release、source tag、Docker image digest 与迁移脚本一致性。  
+> 官方上游 commit：`cb93883f3f8c975eecb2fed81210effeb3bdb06f`（`v0.26.4` tag）。
 > 项目定位：在 RAGFlow 通用 RAG 能力之上建设客户专属的身份、权限、文件同步、业务数据联邦查询和业务化前端，不重新实现完整 RAG 平台。
 
 ## 1. 交接包用途
@@ -88,7 +89,8 @@ repo-root/
 - `contracts/error-codes.yaml`：稳定错误码。
 - `contracts/status-state-machine.md`：同步、文档和问答状态机。
 - `contracts/acl-policy-examples.json`：ACL 编译示例。
+- `contracts/acl-design-freeze.md`：P0 ACL 冻结规则与 fail-closed 约束。
 
 ## 7. Agent 工作包
 
-`tasks/` 下每个文件是一份可独立交给 Agent 的实现任务。Lead 必须先完成 WP-00，之后才允许并行启动其他工作包。
+工作包任务清单由 Lead 在版本库内维护，入口见 [`docs/11-实施阶段与并行Agent方案.md`](docs/11-实施阶段与并行Agent方案.md)。`tasks/*.md` 为本地工作草稿，默认不进入版本控制。

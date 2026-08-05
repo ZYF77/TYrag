@@ -17,6 +17,30 @@ SCOPE_MODE_MATERIALIZED: ScopeMode = "materialized"
 SCOPE_MODE_METADATA_PREDICATE: ScopeMode = "metadata_predicate"
 
 
+def has_manual_conditions(metadata_filter: dict[str, Any] | None) -> bool:
+    """Return True only for a predicate with a non-empty manual condition list."""
+    if not isinstance(metadata_filter, dict):
+        return False
+    if metadata_filter.get("method") != "manual":
+        return False
+    if metadata_filter.get("logic") not in ("and", "or"):
+        return False
+    manual = metadata_filter.get("manual")
+    return (
+        isinstance(manual, list)
+        and len(manual) > 0
+        and all(
+            isinstance(item, dict)
+            and isinstance(item.get("key"), str)
+            and bool(item.get("key"))
+            and isinstance(item.get("op"), str)
+            and bool(item.get("op"))
+            and "value" in item
+            for item in manual
+        )
+    )
+
+
 @dataclass(frozen=True)
 class AclScope:
     """Allowed retrieval scope compiled by compile_scope().
@@ -39,6 +63,8 @@ class AclScope:
         document_ids: tuple[str, ...] | list[str],
         policy_version: str = "",
     ) -> "AclScope":
+        if not document_ids:
+            return cls.empty(policy_version)
         return cls(
             dataset_ids=tuple(dataset_ids),
             document_ids=tuple(document_ids),
@@ -53,6 +79,8 @@ class AclScope:
         metadata_filter: dict[str, Any],
         policy_version: str = "",
     ) -> "AclScope":
+        if not dataset_ids or not has_manual_conditions(metadata_filter):
+            return cls.empty(policy_version)
         return cls(
             dataset_ids=tuple(dataset_ids),
             metadata_filter=metadata_filter,
@@ -67,11 +95,11 @@ class AclScope:
     @property
     def is_empty(self) -> bool:
         """True when no retrieval can be performed with this scope."""
-        return (
-            not self.dataset_ids
-            and not self.document_ids
-            and self.metadata_filter in (None, {})
-        )
+        if self.scope_mode == SCOPE_MODE_MATERIALIZED:
+            return not self.document_ids
+        if self.scope_mode == SCOPE_MODE_METADATA_PREDICATE:
+            return not self.dataset_ids or not has_manual_conditions(self.metadata_filter)
+        return True
 
 
 @dataclass(frozen=True)

@@ -1,9 +1,9 @@
 # WP-01A 条件检查点
 
 **日期:** 2026-08-05
-**基线:** `9049dcf` — WP-02A Closure
-**结论:** CONDITIONAL PASS
-**组合测试:** 82/82 passed
+**基线:** `d12f0a2` — P0 Stabilization Review & Fix
+**结论:** P0 STABILIZED PASS
+**组合测试:** 162/162 Python tests passed（frontend tests/build 另行记录）
 
 ---
 
@@ -18,8 +18,15 @@
 | GET /auth/me | `enterprise/gateway/app.py` | 与 OpenAPI 一致 |
 | OpenAPI 契约 | `contracts/integration-openapi.yaml` | 已更新 |
 | JWT 配置 | `enterprise/gateway/config.py` | 可配置 claim mapping |
-| WP-01A 测试 | `enterprise/tests/test_wp01a.py` | 37 项 (JWT×12, Principal×8, Persistence×7, API×4, Regression×4, Concurrency×2) |
-| WP-02A 回归 | `enterprise/tests/test_wp02a.py` + `test_wp02a_closure.py` | 45/45 通过 |
+| ACL fail-closed | `enterprise/gateway/acl/schema.py` + `scope.py` | 空 materialized/document、空 manual、resolver 输出校验 |
+| ACL 策略冻结 | `enterprise/gateway/acl/policy.py` | 删除 admin bypass / empty allow public；UNRESOLVED 一律 deny |
+| 最小权限 | `enterprise/gateway/auth/user_principal.py` | role_codes 缺失/未知仅 read |
+| 禁用错误码 | `enterprise/gateway/auth/middleware.py` | `AUTH_USER_DISABLED` |
+| 错误安全 | `enterprise/gateway/app.py` + `sync/ragflow_document_client.py` | 稳定 code/safe message/requestId，RAGFlow 原始正文仅脱敏日志 |
+| WP-01A 测试 | `enterprise/tests/test_wp01a.py` | 41 项 (JWT×12, Principal×10, Persistence×7, API×6, Regression×4, Concurrency×2) |
+| WP-02A 回归 | `enterprise/tests/test_wp02a.py` + `test_wp02a_closure.py` | 46/46 通过 |
+| ACL 冻结回归 | `enterprise/tests/test_acl_core.py` | 39 项 |
+| P0 回归 | `enterprise/tests/test_p0_stabilization.py` | 10 项：错误安全、日志脱敏、404 契约、OpenAPI/error-codes/metadata 契约 |
 | Phase 0 spike | `enterprise/tests/validate_mapping_strategies.py` | 脚本就绪，Docker 不可用时 skip |
 
 ---
@@ -33,11 +40,11 @@
 - **输出:** `artifacts/mapping-strategy-comparison.json`
 - **阻塞:** 方案 A/B/C 未产生真实对比矩阵前，映射策略未锁定
 
-### 2. 确认 WP-02A dedup 回归基线
-- **文件:** `enterprise/tests/test_wp02a_closure.py:TestRegressionIdempotency`
-- **问题:** `test_duplicate_event_id_still_dedup` 在干净基线 (`9049dcf`) 上同样失败，源于共享 `_db` 全局状态
-- **当前修复:** 使用 `uuid.uuid4()` 生成唯一 eventId，82/82 组合测试通过
-- **待定:** WP-02A owner 确认此修复是否可合并，或是否有更根本的 test isolation 方案
+### 2. P0 契约校准已完成
+- POST `/documents` 实际返回 202，OpenAPI 同步为 202；
+- `GET /documents/{id}/status` 的真实查询参数 `tenant_id`、`refresh` 已写入 OpenAPI；
+- 未实现端点（disable、conversations、messages:stream、citations、sync-status）标记为 `x-status: planned`；
+- frontend 依赖的 `/documents/sync-status` 已在 OpenAPI 标记 planned，不伪装为已实现。
 
 ### 3. 确认客户 JWT claims
 - **文件:** `enterprise/gateway/auth/CHANGE-REQUEST-WP01A-CLAIMS.md`
@@ -75,4 +82,4 @@
 1. Docker 可用时执行 Phase 0 spike，产出 `artifacts/mapping-strategy-comparison.json`
 2. 根据 spike 结果确定最终映射策略（方案 B 为当前默认推荐）
 3. WP-02A owner 确认 dedup 修复
-4. 客户确认 JWT claims 映射或显式接受默认值
+4. 客户确认 JWT claims 映射或显式接受默认值（最小权限行为已冻结：缺失/未知 role 仅 read）

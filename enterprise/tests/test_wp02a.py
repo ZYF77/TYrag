@@ -168,7 +168,7 @@ class TestContractOpenAPI:
                 "source": {"bucket": "docs", "objectKey": "equipment/manual.pdf"},
                 "metadata": VALID_METADATA,
             })
-            assert resp.status_code == 200
+            assert resp.status_code == 202
             data = resp.json()
             assert "externalDocumentId" in data
             assert "status" in data

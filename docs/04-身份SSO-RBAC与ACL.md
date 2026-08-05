@@ -76,6 +76,9 @@ RAGFlow metadata 和 dataset/team 权限是执行载体，不是全部权威。
 
 ## 6. deny 优先规则
 
+P0 冻结的 ACL 决策规则见 [`contracts/acl-design-freeze.md`](../contracts/acl-design-freeze.md)，
+空部门/密级/allow 组等未决输入一律按 `UNRESOLVED` 拒绝，不构成公开访问。
+
 默认：
 
 1. 租户不匹配直接拒绝；

@@ -131,20 +131,38 @@ export type ChatMessage = UserMessage | ReplyMessage;
 
 // File sync status
 export type SyncStatus =
+  | 'received'
+  | 'validated'
+  | 'accepted'
+  | 'transferring'
+  | 'registering'
+  | 'tracking'
+  | 'registered'
+  | 'queued'
   | 'uploaded'
   | 'waiting'
   | 'parsing'
   | 'indexing'
+  | 'validating'
   | 'review_required'
   | 'ready'
   | 'failed'
-  | 'disabled';
+  | 'cancelled'
+  | 'superseded'
+  | 'disabled'
+  | 'deleted'
+  | 'retry_wait'
+  | 'completed';
 
 export interface FileSyncItem {
   externalDocumentId: string;
+  sourceVersionId?: string | null;
   fileName: string;
   status: SyncStatus;
   stage: string | null;
   error: ErrorResponse | null;
   updatedAt: string;
+  businessStatus?: string;
+  currentVersion?: boolean;
+  batchId?: string | null;
 }

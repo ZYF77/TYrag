@@ -14,6 +14,12 @@ function StatusIcon({ status }: { status: string }) {
       return <Check size={12} className="text-green-500" />;
     case 'parsing':
     case 'indexing':
+    case 'queued':
+    case 'registering':
+    case 'transferring':
+    case 'tracking':
+    case 'validating':
+    case 'validated':
     case 'waiting':
       return <Loader size={12} className="text-blue-500 animate-spin" />;
     case 'failed':
@@ -22,6 +28,19 @@ function StatusIcon({ status }: { status: string }) {
       return <Clock size={12} className="text-yellow-500" />;
     case 'disabled':
       return <Ban size={12} className="text-gray-400" />;
+    case 'deleted':
+      return <Ban size={12} className="text-gray-400" />;
+    case 'superseded':
+      return <Check size={12} className="text-gray-400" />;
+    case 'completed':
+      return <Check size={12} className="text-green-500" />;
+    case 'cancelled':
+      return <X size={12} className="text-gray-400" />;
+    case 'retry_wait':
+      return <Clock size={12} className="text-yellow-500" />;
+    case 'received':
+    case 'accepted':
+      return <Clock size={12} className="text-gray-400" />;
     case 'review_required':
       return <AlertTriangle size={12} className="text-orange-500" />;
     default:
@@ -33,12 +52,26 @@ function StatusLabel({ status }: { status: string }) {
   const labels: Record<string, string> = {
     uploaded: '已上传',
     waiting: '等待处理',
+    received: '已接收',
+    validated: '已校验',
+    accepted: '已受理',
+    transferring: '传输中',
+    registering: '注册中',
+    tracking: '跟踪中',
+    registered: '已注册',
+    queued: '排队中',
     parsing: '解析中',
     indexing: '索引中',
+    validating: '校验中',
     review_required: '待复核',
     ready: '可查询',
     failed: '失败',
+    cancelled: '已取消',
+    superseded: '已取代',
     disabled: '已停用',
+    deleted: '已删除',
+    retry_wait: '等待重试',
+    completed: '已完成',
   };
   return <span>{labels[status] ?? status}</span>;
 }

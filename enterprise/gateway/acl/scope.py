@@ -10,7 +10,12 @@ import logging
 from typing import Protocol
 
 from enterprise.gateway.acl.context import AclContext
-from enterprise.gateway.acl.schema import AclScope
+from enterprise.gateway.acl.schema import (
+    SCOPE_MODE_MATERIALIZED,
+    SCOPE_MODE_METADATA_PREDICATE,
+    AclScope,
+    has_manual_conditions,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +48,21 @@ async def compile_scope(
     except Exception:
         logger.warning("ACL scope resolution failed; returning empty scope", exc_info=True)
         return AclScope.empty(context.policy_version)
-    if scope is None:
+    if not isinstance(scope, AclScope):
+        logger.warning(
+            "ACL resolver returned %s instead of AclScope; returning empty scope",
+            type(scope).__name__,
+        )
         return AclScope.empty(context.policy_version)
-    return scope
+    if scope.is_empty:
+        return scope
+    if scope.scope_mode == SCOPE_MODE_MATERIALIZED:
+        return scope
+    if (
+        scope.scope_mode == SCOPE_MODE_METADATA_PREDICATE
+        and scope.dataset_ids
+        and has_manual_conditions(scope.metadata_filter)
+    ):
+        return scope
+    logger.warning("ACL resolver returned an unsafe scope; returning empty scope")
+    return AclScope.empty(context.policy_version)

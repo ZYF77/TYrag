@@ -3,7 +3,6 @@ from enterprise.gateway.acl.context import AclContext
 from enterprise.gateway.acl.errors import AclDeniedError, AclError
 from enterprise.gateway.acl.policy import (
     ACL_POLICY_VERSION,
-    AclPolicyConfig,
     evaluate_document_acl,
 )
 from enterprise.gateway.acl.schema import (
@@ -21,7 +20,6 @@ __all__ = [
     "AclDecision",
     "AclDeniedError",
     "AclError",
-    "AclPolicyConfig",
     "AclScope",
     "DocumentAclFacts",
     "SCOPE_MODE_MATERIALIZED",

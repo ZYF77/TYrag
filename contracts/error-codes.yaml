@@ -3,7 +3,13 @@ errors:
   - code: AUTH_TOKEN_INVALID
     http_status: 401
     retryable: false
+  - code: AUTH_TOKEN_MISSING
+    http_status: 401
+    retryable: false
   - code: AUTH_USER_MAPPING_MISSING
+    http_status: 403
+    retryable: false
+  - code: AUTH_USER_DISABLED
     http_status: 403
     retryable: false
   - code: ACL_DENIED
@@ -15,6 +21,9 @@ errors:
   - code: DOCUMENT_SOURCE_NOT_FOUND
     http_status: 422
     retryable: true
+  - code: DOCUMENT_NOT_FOUND
+    http_status: 404
+    retryable: false
   - code: DOCUMENT_HASH_MISMATCH
     http_status: 422
     retryable: false
@@ -36,6 +45,15 @@ errors:
   - code: RAGFLOW_UNAVAILABLE
     http_status: 503
     retryable: true
+  - code: VALIDATION_ERROR
+    http_status: 422
+    retryable: false
+  - code: INTERNAL_ERROR
+    http_status: 500
+    retryable: false
+  - code: REQUEST_FAILED
+    http_status: 404
+    retryable: false
   - code: BUSINESS_QUERY_NOT_SUPPORTED
     http_status: 422
     retryable: false

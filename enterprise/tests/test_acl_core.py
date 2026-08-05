@@ -11,7 +11,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from enterprise.gateway.acl.context import AclContext
-from enterprise.gateway.acl.policy import AclPolicyConfig, evaluate_document_acl
+from enterprise.gateway.acl.policy import evaluate_document_acl
 from enterprise.gateway.acl.schema import (
     SCOPE_MODE_MATERIALIZED,
     SCOPE_MODE_METADATA_PREDICATE,
@@ -153,25 +153,17 @@ def test_allow_group_missing_denied():
     assert decision.rule == "ALLOW_GROUP_MISSING"
 
 
-def test_empty_allow_groups_denied_by_default():
+def test_empty_allow_groups_unresolved():
     decision = evaluate_document_acl(_principal(), _facts(allow_group_ids=()))
     assert decision.allowed is False
-    assert decision.rule == "NO_ALLOW_RULE"
+    assert decision.rule == "UNRESOLVED"
 
 
-def test_empty_allow_groups_public_when_enabled():
-    config = AclPolicyConfig(empty_allow_groups_public=True)
-    decision = evaluate_document_acl(
-        _principal(), _facts(allow_group_ids=()), config=config
-    )
-    assert decision.allowed is True
-
-
-def test_missing_user_department_denied():
+def test_missing_user_department_unresolved():
     principal = _principal(department_ids=())
     decision = evaluate_document_acl(principal, _facts())
     assert decision.allowed is False
-    assert decision.rule == "DEPARTMENT_DENIED"
+    assert decision.rule == "UNRESOLVED"
 
 
 def test_document_department_mismatch_denied():
@@ -180,10 +172,10 @@ def test_document_department_mismatch_denied():
     assert decision.rule == "DEPARTMENT_DENIED"
 
 
-def test_missing_document_department_denied():
+def test_missing_document_department_unresolved():
     decision = evaluate_document_acl(_principal(), _facts(department_id=None))
     assert decision.allowed is False
-    assert decision.rule == "DEPARTMENT_DENIED"
+    assert decision.rule == "UNRESOLVED"
 
 
 def test_security_level_insufficient_denied():
@@ -193,47 +185,16 @@ def test_security_level_insufficient_denied():
     assert decision.rule == "SECURITY_LEVEL_DENIED"
 
 
-def test_missing_document_security_level_denied():
+def test_missing_document_security_level_unresolved():
     decision = evaluate_document_acl(_principal(), _facts(security_level=None))
     assert decision.allowed is False
-    assert decision.rule == "SECURITY_LEVEL_DENIED"
+    assert decision.rule == "UNRESOLVED"
 
 
 def test_admin_does_not_bypass_by_default():
     principal = _principal(role_codes=("system_admin",), security_level=0)
     decision = evaluate_document_acl(principal, _facts(security_level=5))
     assert decision.allowed is False
-
-
-def test_admin_bypass_still_denies_hard_rules():
-    principal = _principal(role_codes=("system_admin",), security_level=0)
-    config = AclPolicyConfig(admin_bypass_document_acl=True)
-    denied_by_tenant = evaluate_document_acl(
-        principal, _facts(tenant_id="t2"), config=config
-    )
-    denied_by_status = evaluate_document_acl(
-        principal, _facts(business_status="disabled"), config=config
-    )
-    denied_by_deny_group = evaluate_document_acl(
-        principal,
-        _facts(deny_group_ids=("maintenance",)),
-        config=config,
-    )
-    assert denied_by_tenant.rule == "TENANT_MISMATCH"
-    assert denied_by_status.rule == "DOCUMENT_STATUS_DENIED"
-    assert denied_by_deny_group.rule == "DENY_GROUP_HIT"
-
-
-def test_admin_bypass_relaxes_soft_checks_when_enabled():
-    principal = _principal(
-        role_codes=("system_admin",),
-        department_ids=(),
-        group_ids=(),
-        security_level=0,
-    )
-    config = AclPolicyConfig(admin_bypass_document_acl=True)
-    decision = evaluate_document_acl(principal, _facts(), config=config)
-    assert decision.allowed is True
 
 
 # -- M1 scope model and compile_scope interface --
@@ -251,14 +212,50 @@ def test_materialized_scope_not_empty():
     assert scope.document_ids == ("doc1",)
 
 
+def test_materialized_scope_empty_documents_is_empty():
+    scope = AclScope.materialized(["ds1"], [], policy_version="1")
+    assert scope.is_empty is True
+
+
 def test_metadata_predicate_scope_not_empty():
+    scope = AclScope.metadata_predicate(
+        ["ds1"],
+        {"method": "manual", "logic": "and", "manual": [
+            {"key": "tenant_id", "op": "=", "value": "t1"},
+        ]},
+        policy_version="1",
+    )
+    assert scope.is_empty is False
+    assert scope.scope_mode == SCOPE_MODE_METADATA_PREDICATE
+
+
+def test_metadata_predicate_empty_manual_is_empty():
     scope = AclScope.metadata_predicate(
         ["ds1"],
         {"method": "manual", "logic": "and", "manual": []},
         policy_version="1",
     )
-    assert scope.is_empty is False
-    assert scope.scope_mode == SCOPE_MODE_METADATA_PREDICATE
+    assert scope.is_empty is True
+
+
+def test_metadata_predicate_empty_condition_dict_is_empty():
+    scope = AclScope.metadata_predicate(
+        ["ds1"],
+        {"method": "manual", "logic": "and", "manual": [{}]},
+        policy_version="1",
+    )
+    assert scope.is_empty is True
+
+
+def test_metadata_predicate_incomplete_condition_is_empty():
+    scope = AclScope.metadata_predicate(
+        ["ds1"],
+        {"method": "manual", "logic": "and", "manual": [
+            {"key": "tenant_id", "op": "="},
+        ]},
+        policy_version="1",
+    )
+    assert scope.is_empty is True
 
 
 def test_scope_metadata_filter_empty_dict_is_empty():
@@ -298,3 +295,55 @@ def test_compile_scope_fails_closed_when_resolver_raises():
 
     scope = asyncio.run(compile_scope(AclContext(principal=_principal()), resolver=resolver))
     assert scope.is_empty is True
+
+
+def test_compile_scope_rejects_non_acl_scope():
+    async def resolver(context):
+        return {"dataset_ids": ["ds1"]}
+
+    scope = asyncio.run(compile_scope(AclContext(principal=_principal()), resolver=resolver))
+    assert scope.is_empty is True
+
+
+def test_compile_scope_rejects_materialized_without_documents():
+    async def resolver(context):
+        return AclScope(
+            dataset_ids=("ds1",),
+            document_ids=(),
+            scope_mode=SCOPE_MODE_MATERIALIZED,
+            policy_version=context.policy_version,
+        )
+
+    scope = asyncio.run(compile_scope(AclContext(principal=_principal()), resolver=resolver))
+    assert scope.is_empty is True
+
+
+def test_compile_scope_rejects_metadata_predicate_without_manual():
+    async def resolver(context):
+        return AclScope(
+            dataset_ids=("ds1",),
+            metadata_filter={"method": "manual", "logic": "and", "manual": []},
+            scope_mode=SCOPE_MODE_METADATA_PREDICATE,
+            policy_version=context.policy_version,
+        )
+
+    scope = asyncio.run(compile_scope(AclContext(principal=_principal()), resolver=resolver))
+    assert scope.is_empty is True
+
+
+def test_compile_scope_rejects_empty_manual_condition_dict():
+    async def resolver(context):
+        return AclScope.metadata_predicate(
+            ["ds1"],
+            {"method": "manual", "logic": "and", "manual": [{}]},
+            policy_version=context.policy_version,
+        )
+
+    scope = asyncio.run(compile_scope(AclContext(principal=_principal()), resolver=resolver))
+    assert scope.is_empty is True
+
+
+def test_unresolved_decision_is_not_allowed():
+    decision = evaluate_document_acl(_principal(), _facts(allow_group_ids=()))
+    assert decision.allowed is False
+    assert decision.rule == "UNRESOLVED"

@@ -18,6 +18,12 @@ logger = logging.getLogger(__name__)
 
 _bearer_scheme = HTTPBearer(auto_error=False)
 
+_AUTH_ERROR_MESSAGES = {
+    "AUTH_TOKEN_MISSING": "Authentication token is required",
+    "AUTH_TOKEN_EXPIRED": "Token has expired",
+    "CONFIG_ERROR": "Authentication is not configured",
+}
+
 
 class UserAuthError(Exception):
     """Authentication error returned to clients in the ErrorResponse shape."""
@@ -51,7 +57,11 @@ async def require_user_principal(
     try:
         claims = validator.validate(token)
     except TokenValidationError as e:
-        raise UserAuthError(401, e.code, str(e)) from e
+        raise UserAuthError(
+            401,
+            e.code,
+            _AUTH_ERROR_MESSAGES.get(e.code, "Authentication token is invalid"),
+        ) from e
 
     principal = UserPrincipal.from_validated_claims(
         claims,
@@ -71,7 +81,7 @@ async def require_user_principal(
         if mapping.get("status") == "disabled":
             raise UserAuthError(
                 403,
-                "AUTH_USER_MAPPING_MISSING",
+                "AUTH_USER_DISABLED",
                 "User account is disabled",
             )
 

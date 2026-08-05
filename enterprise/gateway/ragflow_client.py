@@ -87,10 +87,23 @@ class RAGFlowClient:
 
             if body.strip() == "pong":
                 return HealthStatus(live=True, ready=True, request_id=request_id)
-            return HealthStatus(live=True, ready=False, request_id=request_id, error=f"unexpected response: {body}")
-        except Exception as e:
-            logger.warning("RAGFlow health check failed: %s", e)
-            return HealthStatus(live=False, request_id=request_id, error=str(e))
+            logger.warning(
+                "RAGFlow health check returned unexpected response (length=%d)",
+                len(body),
+            )
+            return HealthStatus(
+                live=True,
+                ready=False,
+                request_id=request_id,
+                error="unexpected RAGFlow response",
+            )
+        except Exception:
+            logger.warning("RAGFlow health check failed (request_id=%s)", request_id)
+            return HealthStatus(
+                live=False,
+                request_id=request_id,
+                error="RAGFlow health check failed",
+            )
 
     def get_version(self) -> dict[str, Any]:
         """
@@ -107,8 +120,11 @@ class RAGFlowClient:
             req = urllib.request.Request(url)
             resp = urllib.request.urlopen(req, timeout=self.timeout)
             return json.loads(resp.read().decode())
-        except Exception as e:
-            raise RAGFlowError(f"Failed to get version: {e}", request_id=request_id) from e
+        except Exception:
+            logger.warning("RAGFlow version probe failed (request_id=%s)", request_id)
+            raise RAGFlowError(
+                "Failed to get RAGFlow version", request_id=request_id
+            ) from e
 
 
 class RAGFlowStub(RAGFlowClient):

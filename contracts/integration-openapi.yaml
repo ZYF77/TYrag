@@ -9,6 +9,7 @@ paths:
     get:
       summary: Return authenticated end-user principal
       operationId: getAuthMe
+      x-status: implemented
       security:
         - BearerAuth: []
       responses:
@@ -26,6 +27,9 @@ paths:
     post:
       summary: Upsert an external business document version
       operationId: upsertDocument
+      x-status: implemented
+      security:
+        - ServiceAuth: []
       requestBody:
         required: true
         content:
@@ -40,19 +44,132 @@ paths:
               schema:
                 $ref: '#/components/schemas/DocumentSyncResponse'
         '422': { $ref: '#/components/responses/Error' }
+  /documents/sync-status:
+    get:
+      summary: List synchronization status for documents
+      operationId: listSyncStatus
+      x-status: implemented
+      security:
+        - ServiceAuth: []
+      parameters:
+        - name: tenant_id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: source_system
+          in: query
+          required: false
+          schema: { type: string }
+        - name: status
+          in: query
+          required: false
+          schema: { type: string }
+        - name: batch_id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, default: 100, maximum: 500 }
+        - name: offset
+          in: query
+          required: false
+          schema: { type: integer, default: 0 }
+      responses:
+        '200':
+          description: Synchronization status items
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/FileSyncItem'
   /documents/{externalDocumentId}/disable:
     post:
       summary: Disable all active knowledge versions for an external document
+      operationId: disableDocument
+      x-status: implemented
+      security:
+        - ServiceAuth: []
       parameters:
         - $ref: '#/components/parameters/ExternalDocumentId'
+        - name: tenant_id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: source_system
+          in: query
+          required: true
+          schema: { type: string }
       responses:
         '202': { description: Accepted }
+        '404': { $ref: '#/components/responses/Error' }
+  /documents/{externalDocumentId}/restore:
+    post:
+      summary: Restore a logically disabled/deleted external document
+      operationId: restoreDocument
+      x-status: implemented
+      security:
+        - ServiceAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ExternalDocumentId'
+        - name: tenant_id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: source_system
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        '202':
+          description: Restore accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentSyncResponse'
+        '404': { $ref: '#/components/responses/Error' }
+  /documents/{externalDocumentId}:
+    delete:
+      summary: Logically delete an external document
+      operationId: deleteDocument
+      x-status: implemented
+      security:
+        - ServiceAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ExternalDocumentId'
+        - name: tenant_id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: source_system
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        '202':
+          description: Logical delete accepted
         '404': { $ref: '#/components/responses/Error' }
   /documents/{externalDocumentId}/status:
     get:
       summary: Get synchronization and RAGFlow processing status
+      operationId: getDocumentStatus
+      x-status: implemented
+      security:
+        - ServiceAuth: []
       parameters:
         - $ref: '#/components/parameters/ExternalDocumentId'
+        - name: tenant_id
+          in: query
+          required: false
+          schema: { type: string }
+          description: Tenant identifier used when looking up the document mapping
+        - name: refresh
+          in: query
+          required: false
+          schema: { type: boolean, default: false }
+          description: When true, refresh status from RAGFlow before returning
       responses:
         '200':
           description: Current status
@@ -60,9 +177,14 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/DocumentSyncResponse'
+        '404': { $ref: '#/components/responses/Error' }
   /conversations:
     post:
-      summary: Create a business conversation mapped to RAGFlow
+      summary: "Planned: Create a business conversation mapped to RAGFlow"
+      operationId: createConversation
+      x-status: planned
+      security:
+        - BearerAuth: []
       requestBody:
         required: true
         content:
@@ -76,9 +198,14 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Conversation'
+        '501': { description: Not implemented }
   /conversations/{conversationId}/messages:stream:
     post:
-      summary: Ask a question and stream evidence-grounded answer
+      summary: "Planned: Ask a question and stream evidence-grounded answer"
+      operationId: streamAsk
+      x-status: planned
+      security:
+        - BearerAuth: []
       parameters:
         - name: conversationId
           in: path
@@ -96,9 +223,14 @@ paths:
           content:
             text/event-stream:
               schema: { type: string }
+        '501': { description: Not implemented }
   /citations/{citationId}:
     get:
-      summary: Resolve an authorized citation
+      summary: "Planned: Resolve an authorized citation"
+      operationId: getCitation
+      x-status: planned
+      security:
+        - BearerAuth: []
       parameters:
         - name: citationId
           in: path
@@ -112,12 +244,17 @@ paths:
               schema:
                 $ref: '#/components/schemas/Citation'
         '403': { $ref: '#/components/responses/Error' }
+        '501': { description: Not implemented }
 components:
   securitySchemes:
     BearerAuth:
       type: http
       scheme: bearer
       bearerFormat: JWT
+    ServiceAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
   parameters:
     ExternalDocumentId:
       name: externalDocumentId
@@ -137,6 +274,7 @@ components:
       required: [eventId, sourceSystem, externalDocumentId, sourceVersionId, sha256, fileName, source, metadata]
       properties:
         eventId: { type: string }
+        eventType: { type: string, enum: [upsert, reindex], default: upsert }
         sourceSystem: { type: string }
         externalDocumentId: { type: string }
         sourceVersionId: { type: string }
@@ -152,6 +290,7 @@ components:
         metadata:
           type: object
           description: Must validate against contracts/metadata-schema.json
+        batchId: { type: [string, 'null'], maxLength: 128 }
     DocumentSyncResponse:
       type: object
       required: [externalDocumentId, sourceVersionId, status, deduplicated]
@@ -164,6 +303,24 @@ components:
         stage: { type: [string, 'null'] }
         deduplicated: { type: boolean }
         error: { anyOf: [{ $ref: '#/components/schemas/ErrorResponse' }, { type: 'null' }] }
+        businessStatus: { type: string }
+        currentVersion: { type: boolean }
+        eventStatus: { type: string }
+        updatedAt: { type: string, format: date-time }
+    FileSyncItem:
+      type: object
+      required: [externalDocumentId, fileName, status, updatedAt]
+      properties:
+        externalDocumentId: { type: string }
+        sourceVersionId: { type: [string, 'null'] }
+        fileName: { type: string }
+        status: { type: string }
+        stage: { type: [string, 'null'] }
+        error: { anyOf: [{ $ref: '#/components/schemas/ErrorResponse' }, { type: 'null' }] }
+        updatedAt: { type: string, format: date-time }
+        businessStatus: { type: string }
+        currentVersion: { type: boolean }
+        batchId: { type: [string, 'null'] }
     CreateConversationRequest:
       type: object
       properties:

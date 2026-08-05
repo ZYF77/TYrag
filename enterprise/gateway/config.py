@@ -52,6 +52,35 @@ class GatewayConfig:
     s3_bucket: str = field(
         default_factory=lambda: os.getenv("S3_BUCKET", "")
     )
+    s3_access_key: str = field(
+        default_factory=lambda: os.getenv("S3_ACCESS_KEY", "")
+    )
+    s3_secret_key: str = field(
+        default_factory=lambda: os.getenv("S3_SECRET_KEY", "")
+    )
+    s3_region: str = field(
+        default_factory=lambda: os.getenv("S3_REGION", "")
+    )
+    s3_path_style: bool = field(
+        default_factory=lambda: os.getenv("S3_PATH_STYLE", "true").lower() == "true"
+    )
+    s3_max_size_mb: int = field(
+        default_factory=lambda: int(os.getenv("S3_MAX_SIZE_MB", "512"))
+    )
+
+    # --- WP-02 outbox / worker ---
+    outbox_max_attempts: int = field(
+        default_factory=lambda: int(os.getenv("ENTERPRISE_OUTBOX_MAX_ATTEMPTS", "5"))
+    )
+    outbox_poll_seconds: float = field(
+        default_factory=lambda: float(os.getenv("ENTERPRISE_OUTBOX_POLL_SECONDS", "2.0"))
+    )
+    reconcile_seconds: float = field(
+        default_factory=lambda: float(os.getenv("ENTERPRISE_RECONCILE_SECONDS", "10.0"))
+    )
+    worker_enabled: bool = field(
+        default_factory=lambda: os.getenv("ENTERPRISE_WORKER_ENABLED", "true").lower() == "true"
+    )
 
     # --- Logging & observability ---
     log_level: str = field(

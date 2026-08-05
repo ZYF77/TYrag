@@ -174,6 +174,7 @@ export const api = {
   },
 
   async listSyncStatus(): Promise<FileSyncItem[]> {
+    // Planned endpoint in contracts/integration-openapi.yaml; not implemented by the gateway yet.
     const res = await fetch(`${BASE}/documents/sync-status`);
     return handleResponse<FileSyncItem[]>(res);
   },
