@@ -5,6 +5,7 @@ All settings are loaded from environment variables with sensible defaults.
 No real credentials, keys, or secrets belong in this file.
 """
 
+import json
 import os
 from dataclasses import dataclass, field
 
@@ -60,6 +61,29 @@ class GatewayConfig:
     # --- Feature flags ---
     auth_enabled: bool = field(
         default_factory=lambda: os.getenv("AUTH_ENABLED", "true").lower() == "true"
+    )
+
+    # --- JWT / User Auth (WP-01A) ---
+    jwt_issuer: str = field(
+        default_factory=lambda: os.getenv("JWT_ISSUER", "")
+    )
+    jwt_audience: str = field(
+        default_factory=lambda: os.getenv("JWT_AUDIENCE", "")
+    )
+    jwt_jwks_url: str = field(
+        default_factory=lambda: os.getenv("JWT_JWKS_URL", "")
+    )
+    jwt_allowed_algs: str = field(
+        default_factory=lambda: os.getenv("JWT_ALLOWED_ALGS", "RS256,ES256")
+    )
+    jwt_claim_map: dict = field(
+        default_factory=lambda: json.loads(os.getenv("JWT_CLAIM_MAP",
+            '{"sub":"sub","tenant_id":"tenant","business_user_id":"business_user_id",'
+            '"display_name":"name","department_ids":"department",'
+            '"role_codes":"roles","group_ids":"groups","security_level":"security_level"}'))
+    )
+    jwt_enable_hs: bool = field(
+        default_factory=lambda: os.getenv("JWT_ENABLE_HS", "").lower() == "true"
     )
 
     @property

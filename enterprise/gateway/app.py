@@ -21,6 +21,9 @@ from enterprise.gateway.sync.models import (
 )
 from enterprise.gateway.auth.service_auth import require_service_principal
 from enterprise.gateway.auth.service_principal import ServicePrincipal
+from enterprise.gateway.auth.middleware import UserAuthError, require_user_principal
+from enterprise.gateway.auth.user_principal import UserPrincipal
+from enterprise.gateway.models.ext_user_map import ExtUserMapRepo
 from enterprise.gateway.sync.status_mapping import enterprise_stage, map_ragflow_run_to_sync_status
 from enterprise.gateway.sync.ragflow_document_client import (
     RAGFlowDocumentClient, RAGFlowAPIError,
@@ -58,6 +61,18 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Enterprise RAGFlow Gateway", version="1.0.0", lifespan=lifespan)
+
+
+@app.exception_handler(UserAuthError)
+async def user_auth_error_handler(request: Request, exc: UserAuthError):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "code": exc.code,
+            "message": exc.message,
+            "requestId": str(uuid.uuid4()),
+        },
+    )
 
 
 # -- Pydantic models --
@@ -345,3 +360,16 @@ async def get_document_status(
 @app.get("/enterprise/api/v1/health")
 async def health():
     return {"status": "healthy", "version": "1.0.0"}
+
+
+# -- WP-01A: end-user auth --
+
+@app.get("/enterprise/api/v1/auth/me")
+async def auth_me(
+    principal: UserPrincipal = Depends(require_user_principal),
+):
+    """Return authenticated end-user principal.
+
+    Never returns raw token, RAGFlow API key, internal PKs, or credential material.
+    """
+    return JSONResponse(content=principal.to_safe_dict())

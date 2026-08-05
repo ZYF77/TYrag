@@ -5,6 +5,23 @@ info:
 servers:
   - url: /enterprise/api/v1
 paths:
+  /auth/me:
+    get:
+      summary: Return authenticated end-user principal
+      operationId: getAuthMe
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Current user principal
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserPrincipal'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
   /documents:
     post:
       summary: Upsert an external business document version
@@ -96,6 +113,11 @@ paths:
                 $ref: '#/components/schemas/Citation'
         '403': { $ref: '#/components/responses/Error' }
 components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
   parameters:
     ExternalDocumentId:
       name: externalDocumentId
@@ -186,3 +208,38 @@ components:
         requestId: { type: string }
         retryable: { type: boolean }
         details: { type: object, additionalProperties: true }
+    UserPrincipal:
+      type: object
+      required: [businessUserId, tenantId, mappingStatus]
+      properties:
+        businessUserId:
+          type: string
+          description: Business user identifier
+        displayName:
+          type: string
+          description: Human-readable display name
+        tenantId:
+          type: string
+          description: Enterprise tenant identifier
+        departmentIds:
+          type: array
+          items:
+            type: string
+          description: Department memberships
+        roles:
+          type: array
+          items:
+            type: string
+          description: Role codes
+        capabilities:
+          type: array
+          items:
+            type: string
+          description: Derived capability set
+        securityLevel:
+          type: integer
+          description: Security clearance level
+        mappingStatus:
+          type: string
+          enum: [active, disabled]
+          description: User mapping status
