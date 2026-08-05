@@ -1,10 +1,4 @@
-import { IconFontFill } from '@/components/icon-font';
 import { RAGFlowAvatar } from '@/components/ragflow-avatar';
-import { Button } from '@/components/ui/button';
-import {
-  useFetchUserInfo,
-  useListTenant,
-} from '@/hooks/use-user-setting-request';
 import { cn } from '@/lib/utils';
 import { TenantRole } from '@/pages/user-setting/constants';
 import { Routes } from '@/routes';
@@ -16,6 +10,10 @@ import { MobileMenuFooter } from './mobile-menu-footer';
 import LanguageButton from './language-button';
 import ThemeButton from './theme-button';
 import { useHeaderNavLayout } from './use-header-nav-layout';
+import {
+  useFetchUserInfo,
+  useListTenant,
+} from '@/hooks/use-user-setting-request';
 
 export function Header({
   className,
@@ -39,7 +37,7 @@ export function Header({
     expandedRightMeasureRef,
     navMeasureRef,
     isCompact,
-  } = useHeaderNavLayout(${hasNotification}-);
+  } = useHeaderNavLayout(`${hasNotification}-${language}`);
 
   return (
     <>

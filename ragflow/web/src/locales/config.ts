@@ -14,6 +14,11 @@ const languageImports: Record<string, () => Promise<{ default: any }>> = {
 const supportedLanguageCodes: Intl.UnicodeBCP47LocaleIdentifier[] =
   Object.keys(languageImports);
 
+export const supportedLanguages = supportedLanguageCodes.map((code) => ({
+  code,
+  displayName: code === LanguageAbbreviation.Zh ? '简体中文' : 'English',
+}));
+
 export const DEFAULT_LANGUAGE_CODE =
   import.meta.env.VITE_DEFAULT_LANGUAGE_CODE || LanguageAbbreviation.Zh;
 
@@ -53,7 +58,7 @@ export const loadLanguageAsync = async (lng: string): Promise<void> => {
 
   const importFn = languageImports[normalizedLng];
   if (!importFn) {
-    console.warn(Language  is not supported for lazy loading);
+    console.warn('Language ' + lng + ' is not supported for lazy loading');
     return;
   }
 
@@ -62,7 +67,7 @@ export const loadLanguageAsync = async (lng: string): Promise<void> => {
     const translationData = module.default?.translation || module.default;
     i18n.addResourceBundle(normalizedLng, 'translation', translationData);
   } catch (error) {
-    console.error(Failed to load language :, error);
+    console.error('Failed to load language ' + lng + ':', error);
   }
 };
 
