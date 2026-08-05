@@ -1,0 +1,188 @@
+openapi: 3.1.0
+info:
+  title: Enterprise RAGFlow Integration API
+  version: 1.0.0
+servers:
+  - url: /enterprise/api/v1
+paths:
+  /documents:
+    post:
+      summary: Upsert an external business document version
+      operationId: upsertDocument
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DocumentUpsertRequest'
+      responses:
+        '202':
+          description: Accepted or deduplicated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentSyncResponse'
+        '422': { $ref: '#/components/responses/Error' }
+  /documents/{externalDocumentId}/disable:
+    post:
+      summary: Disable all active knowledge versions for an external document
+      parameters:
+        - $ref: '#/components/parameters/ExternalDocumentId'
+      responses:
+        '202': { description: Accepted }
+        '404': { $ref: '#/components/responses/Error' }
+  /documents/{externalDocumentId}/status:
+    get:
+      summary: Get synchronization and RAGFlow processing status
+      parameters:
+        - $ref: '#/components/parameters/ExternalDocumentId'
+      responses:
+        '200':
+          description: Current status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentSyncResponse'
+  /conversations:
+    post:
+      summary: Create a business conversation mapped to RAGFlow
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateConversationRequest'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Conversation'
+  /conversations/{conversationId}/messages:stream:
+    post:
+      summary: Ask a question and stream evidence-grounded answer
+      parameters:
+        - name: conversationId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AskRequest'
+      responses:
+        '200':
+          description: text/event-stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+  /citations/{citationId}:
+    get:
+      summary: Resolve an authorized citation
+      parameters:
+        - name: citationId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Citation details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Citation'
+        '403': { $ref: '#/components/responses/Error' }
+components:
+  parameters:
+    ExternalDocumentId:
+      name: externalDocumentId
+      in: path
+      required: true
+      schema: { type: string, maxLength: 128 }
+  responses:
+    Error:
+      description: Stable safe error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+  schemas:
+    DocumentUpsertRequest:
+      type: object
+      required: [eventId, sourceSystem, externalDocumentId, sourceVersionId, sha256, fileName, source, metadata]
+      properties:
+        eventId: { type: string }
+        sourceSystem: { type: string }
+        externalDocumentId: { type: string }
+        sourceVersionId: { type: string }
+        sha256: { type: string, pattern: '^[0-9a-fA-F]{64}$' }
+        fileName: { type: string, maxLength: 255 }
+        mediaType: { type: string, default: application/pdf }
+        source:
+          type: object
+          required: [bucket, objectKey]
+          properties:
+            bucket: { type: string }
+            objectKey: { type: string }
+        metadata:
+          type: object
+          description: Must validate against contracts/metadata-schema.json
+    DocumentSyncResponse:
+      type: object
+      required: [externalDocumentId, sourceVersionId, status, deduplicated]
+      properties:
+        externalDocumentId: { type: string }
+        sourceVersionId: { type: string }
+        ragflowDatasetId: { type: [string, 'null'] }
+        ragflowDocumentId: { type: [string, 'null'] }
+        status: { type: string }
+        stage: { type: [string, 'null'] }
+        deduplicated: { type: boolean }
+        error: { anyOf: [{ $ref: '#/components/schemas/ErrorResponse' }, { type: 'null' }] }
+    CreateConversationRequest:
+      type: object
+      properties:
+        equipmentId: { type: [string, 'null'] }
+        fixedAssetNo: { type: [string, 'null'] }
+        faultCode: { type: [string, 'null'] }
+    Conversation:
+      type: object
+      required: [conversationId, createdAt]
+      properties:
+        conversationId: { type: string }
+        ragflowSessionId: { type: string }
+        createdAt: { type: string, format: date-time }
+    AskRequest:
+      type: object
+      required: [question]
+      properties:
+        question: { type: string, minLength: 1, maxLength: 8000 }
+        equipmentId: { type: [string, 'null'] }
+        faultCode: { type: [string, 'null'] }
+    Citation:
+      type: object
+      required: [citationId, sourceType, title]
+      properties:
+        citationId: { type: string }
+        sourceType: { enum: [document, business_record] }
+        title: { type: string }
+        documentId: { type: [string, 'null'] }
+        versionId: { type: [string, 'null'] }
+        pageNo: { type: [integer, 'null'] }
+        bbox: { type: [object, 'null'] }
+        assetId: { type: [string, 'null'] }
+        excerpt: { type: [string, 'null'] }
+        recordType: { type: [string, 'null'] }
+        recordId: { type: [string, 'null'] }
+    ErrorResponse:
+      type: object
+      required: [code, message, requestId]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        requestId: { type: string }
+        retryable: { type: boolean }
+        details: { type: object, additionalProperties: true }

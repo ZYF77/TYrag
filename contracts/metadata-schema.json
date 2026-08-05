@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.internal/schemas/ragflow-document-metadata-v1.json",
+  "title": "Enterprise RAGFlow Document Metadata v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "tenant_id",
+    "external_document_id",
+    "source_system",
+    "equipment_id",
+    "document_type",
+    "document_version",
+    "department_id",
+    "security_level",
+    "business_status"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "tenant_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "external_document_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "source_system": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "equipment_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "fixed_asset_no": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 128
+    },
+    "equipment_name": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 256
+    },
+    "document_type": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "document_version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "department_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "security_level": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9
+    },
+    "allow_group_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 64
+      },
+      "uniqueItems": true,
+      "maxItems": 100
+    },
+    "deny_group_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 64
+      },
+      "uniqueItems": true,
+      "maxItems": 100
+    },
+    "business_status": {
+      "enum": [
+        "active",
+        "superseded",
+        "disabled",
+        "deleted",
+        "review_required"
+      ]
+    },
+    "effective_date": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date"
+    },
+    "source_updated_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "manufacturer": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 128
+    },
+    "model": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 128
+    },
+    "serial_number": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 128
+    },
+    "archive_package_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 128
+    },
+    "quality_status": {
+      "enum": [
+        "unknown",
+        "passed",
+        "review_required",
+        "rejected"
+      ]
+    }
+  }
+}

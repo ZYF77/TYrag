@@ -1,0 +1,83 @@
+{
+  "version": 1,
+  "examples": [
+    {
+      "name": "department-and-security",
+      "principal": {
+        "tenant_id": "t1",
+        "user_id": "u1",
+        "department_ids": [
+          "d10"
+        ],
+        "group_ids": [
+          "maintenance"
+        ],
+        "security_level": 2
+      },
+      "resource": {
+        "tenant_id": "t1",
+        "department_id": "d10",
+        "allow_group_ids": [
+          "maintenance"
+        ],
+        "deny_group_ids": [],
+        "security_level": 2,
+        "business_status": "active"
+      },
+      "decision": "allow"
+    },
+    {
+      "name": "deny-wins",
+      "principal": {
+        "tenant_id": "t1",
+        "user_id": "u2",
+        "department_ids": [
+          "d10"
+        ],
+        "group_ids": [
+          "maintenance",
+          "contractor"
+        ],
+        "security_level": 3
+      },
+      "resource": {
+        "tenant_id": "t1",
+        "department_id": "d10",
+        "allow_group_ids": [
+          "maintenance"
+        ],
+        "deny_group_ids": [
+          "contractor"
+        ],
+        "security_level": 1,
+        "business_status": "active"
+      },
+      "decision": "deny"
+    },
+    {
+      "name": "disabled-document",
+      "principal": {
+        "tenant_id": "t1",
+        "user_id": "u1",
+        "department_ids": [
+          "d10"
+        ],
+        "group_ids": [
+          "maintenance"
+        ],
+        "security_level": 5
+      },
+      "resource": {
+        "tenant_id": "t1",
+        "department_id": "d10",
+        "allow_group_ids": [
+          "maintenance"
+        ],
+        "deny_group_ids": [],
+        "security_level": 1,
+        "business_status": "disabled"
+      },
+      "decision": "deny"
+    }
+  ]
+}
