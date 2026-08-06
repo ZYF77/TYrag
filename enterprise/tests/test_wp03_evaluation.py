@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -26,7 +27,11 @@ from enterprise.scripts.wp03.quality_gate import (  # noqa: E402
     load_thresholds,
 )
 from enterprise.scripts.wp03.report import _page_rows, write_reports  # noqa: E402
-from enterprise.scripts.wp03.run_parsing_evaluation import _run_one_sample  # noqa: E402
+from enterprise.scripts.wp03.run_parsing_evaluation import (  # noqa: E402
+    _classify_baseline,
+    _env_dict,
+    _run_one_sample,
+)
 
 
 def _manifest(samples: list[dict]) -> dict:
@@ -265,6 +270,90 @@ class TestMetrics:
         assert first["parse_duration_seconds"] != second["parse_duration_seconds"]
         assert repeatability_hash([first]) == repeatability_hash([second])
 
+    def test_repeatability_hash_ignores_runtime_resource_ids(self):
+        first = compute_document_metrics(
+            {**_good_doc(), "id": "doc-a", "dataset_id": "ds-a"},
+            _good_chunks(),
+            1,
+        )
+        second = compute_document_metrics(
+            {**_good_doc(), "id": "doc-b", "dataset_id": "ds-b"},
+            _good_chunks(),
+            1,
+        )
+        first.update(
+            {
+                "task_id": "task-a",
+                "event_id": "event-a",
+                "created_at": "2026-01-01",
+                "updated_at": "2026-01-02",
+            }
+        )
+        second.update(
+            {
+                "task_id": "task-b",
+                "event_id": "event-b",
+                "created_at": "2026-02-01",
+                "updated_at": "2026-02-02",
+            }
+        )
+        assert repeatability_hash([first], [_good_chunks()]) == repeatability_hash(
+            [second], [_good_chunks()]
+        )
+
+    def test_repeatability_hash_changes_when_chunk_content_changes(self):
+        changed = [
+            {**chunk, "content": "completely different parsed text"}
+            for chunk in _good_chunks()
+        ]
+        first = compute_document_metrics(_good_doc(), _good_chunks(), 1)
+        second = compute_document_metrics(_good_doc(), changed, 1)
+        assert repeatability_hash([first], [_good_chunks()]) != repeatability_hash(
+            [second], [changed]
+        )
+
+    def test_repeatability_hash_changes_when_page_number_changes(self):
+        chunks_a = [
+            {**chunk, "positions": [[1, 0.1, 0.2, 0.8, 0.4]]}
+            for chunk in _good_chunks()
+        ]
+        chunks_b = [
+            {**chunk, "positions": [[2, 0.1, 0.2, 0.8, 0.4]]}
+            for chunk in _good_chunks()
+        ]
+        first = compute_document_metrics(_good_doc(), chunks_a, 2)
+        second = compute_document_metrics(_good_doc(), chunks_b, 2)
+        assert repeatability_hash([first], [chunks_a]) != repeatability_hash(
+            [second], [chunks_b]
+        )
+
+    def test_out_of_range_positions_do_not_count_as_covered_pages(self):
+        chunks = [
+            {"id": "bad", "content": "ghost page", "positions": [[99, 0, 0, 1, 1]]},
+            {"id": "good", "content": "real page", "positions": [[1, 0, 0, 1, 1]]},
+        ]
+        metrics = compute_document_metrics(_good_doc(), chunks, 2)
+        assert metrics["page_count_observed"] == 1
+        assert metrics["page_coverage"] == 0.5
+        assert metrics["empty_page_ratio"] == 0.5
+        assert metrics["out_of_range_page_count"] == 1
+        assert metrics["out_of_range_pages"] == [99]
+
+    def test_out_of_range_pages_cannot_mask_empty_pages_or_exceed_one(self):
+        chunks = [
+            {"id": "bad", "content": "ghost page", "positions": [[99, 0, 0, 1, 1]]},
+            {"id": "bad2", "content": "another ghost", "positions": [[100, 0, 0, 1, 1]]},
+        ]
+        metrics = compute_document_metrics(_good_doc(), chunks, 2)
+        assert metrics["page_count_observed"] == 0
+        assert metrics["page_coverage"] == 0.0
+        assert metrics["page_coverage"] <= 1.0
+        assert metrics["empty_page_ratio"] == 1.0
+        assert metrics["out_of_range_page_count"] == 2
+        status, reasons = evaluate_document_quality(metrics)
+        assert status == "review_required"
+        assert "POSITION_PAGE_OUT_OF_RANGE" in reasons
+
 
 class TestManifestValidation:
     def test_valid_manifest(self):
@@ -368,6 +457,16 @@ class TestReportWriter:
             "passed_count": 1,
             "parse_success_rate": 1.0,
         }
+        environment = {
+            "ragflow_source_tag": "v0.26.4",
+            "ragflow_source_commit": "abc123",
+            "enterprise_commit": "def456",
+            "enterprise_worktree_dirty": False,
+            "manifest_digest": "m1",
+            "thresholds_digest": "t1",
+            "evaluation_contract_version": "1",
+            "baseline_classification": "formal",
+        }
         paths = write_reports(
             tmp_path,
             "run-test",
@@ -375,7 +474,7 @@ class TestReportWriter:
             DEFAULT_THRESHOLDS,
             results,
             summary,
-            {"ragflow_source_tag": "v0.26.4"},
+            environment,
             "python run_parsing_evaluation.py --run-id run-test",
         )
         assert paths["json"].exists()
@@ -385,6 +484,9 @@ class TestReportWriter:
         assert paths["markdown"].exists()
         report = json.loads(paths["json"].read_text(encoding="utf-8"))
         assert report["documents"][0]["parse_quality_status"] == "passed"
+        assert report["environment"]["enterprise_commit"] == "def456"
+        assert report["environment"]["enterprise_worktree_dirty"] is False
+        assert report["artifact_hash"]
 
     def test_status_does_not_mutate_sync_status(self):
         sync_status = "ready"
@@ -417,6 +519,26 @@ class TestReportWriter:
 
 
 class TestFailureAndConfig:
+    def test_env_dict_records_enterprise_commit_and_digests(self):
+        env = _env_dict(
+            "run-x",
+            Path("enterprise/scripts/wp03/sample_manifest.json"),
+            Path("enterprise/scripts/wp03/thresholds.json"),
+            Path("artifacts/wp03/samples"),
+            "tenant-x",
+        )
+        assert re.fullmatch(r"[0-9a-f]{40}", env["enterprise_commit"])
+        assert isinstance(env["enterprise_worktree_dirty"], bool)
+        assert env["manifest_digest"]
+        assert env["thresholds_digest"]
+        assert env["evaluation_contract_version"] == "1"
+
+    def test_baseline_classification_rejects_dirty_unless_allowed(self):
+        with pytest.raises(RuntimeError):
+            _classify_baseline(True, False)
+        assert _classify_baseline(True, True) == "informal_dirty_worktree"
+        assert _classify_baseline(False, False) == "formal"
+
     @pytest.mark.asyncio
     async def test_collection_failure_maps_to_failed(self):
         class FailingCollector:

@@ -31,7 +31,10 @@ failed
 3. 有效文本覆盖率：非空 Chunk 数 / Chunk 总数；无 Chunk 时为 0。
 4. 乱码或异常字符比例：`U+FFFD`、`U+25A1` 等异常字符数 / 总字符数。
 5. Chunk 数量和长度分布：数量、最小/最大/平均/P50/P95、空 Chunk 数。
-6. 页码覆盖率：Chunk Position 覆盖的页码数 / 源 PDF 页码数。
+6. 页码覆盖率：Chunk Position 覆盖的页码数 / 源 PDF 页码数；只统计
+   `1 <= pageNo <= source_page_count` 的 Position。越界 Position 不计入
+   covered pages，单独记录 `out_of_range_page_count` 和
+   `out_of_range_pages`，越界页码不得掩盖真实空页。
 7. 坐标覆盖率：含有效 Position 的 Chunk 数 / Chunk 总数。
 8. 表格识别完整性：标注表格页码中检出表格 Chunk 的召回率。
 9. 关键字段准确率：人工 ground truth 字段在 Chunk 文本中的命中率。
@@ -81,6 +84,27 @@ artifacts/wp03/reports/<run_id>/baseline.md
 ```
 
 报告必须能定位到文档和页面。
+
+每次报告的环境信息必须记录：
+
+```text
+enterprise_commit
+enterprise_worktree_dirty
+ragflow_source_tag
+ragflow_source_commit
+manifest_digest
+thresholds_digest
+evaluation_contract / evaluation_contract_version
+执行时间和执行命令
+```
+
+正式 baseline 只在工作树干净时生成；工作树不干净时必须拒绝运行，或使用
+`--allow-dirty` 显式标记为非正式、不可复现结果，不得默认生成正式 baseline。
+
+`metrics_hash` 用于完整产物一致性；`repeatability_hash` 用于比较同一样本两次
+fresh parse 的语义结果，必须排除 dataset/document/task/event/run ID、时间戳、
+解析耗时和临时路径，保留规范化 Chunk 文本、页码、坐标、表格结果、关键字段
+结果、质量指标和 reason codes。报告同时提供 `artifact_hash` 校验报告文件完整性。
 
 ## 6. 阈值
 

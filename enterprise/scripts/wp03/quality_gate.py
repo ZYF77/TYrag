@@ -67,6 +67,8 @@ def evaluate_document_quality(
         reasons.append("PAGE_COVERAGE_BELOW_MIN")
     if metrics.get("position_coverage", 0.0) < thresholds["min_position_coverage"]:
         reasons.append("POSITION_COVERAGE_BELOW_MIN")
+    if metrics.get("out_of_range_page_count", 0) > 0:
+        reasons.append("POSITION_PAGE_OUT_OF_RANGE")
     if expected_tables:
         table_recall = metrics.get("table_recall")
         if table_recall is None or table_recall < thresholds["min_table_recall"]:

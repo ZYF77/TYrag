@@ -10,11 +10,15 @@ from pathlib import Path
 from typing import Any
 
 
-def _manifest_digest(manifest: dict[str, Any]) -> str:
+def json_digest(value: Any) -> str:
     raw = json.dumps(
-        manifest, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+        value, sort_keys=True, ensure_ascii=False, separators=(",", ":")
     ).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
+
+
+def _manifest_digest(manifest: dict[str, Any]) -> str:
+    return json_digest(manifest)
 
 
 def _page_rows(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -109,6 +113,10 @@ def _document_rows(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "garbled_char_ratio": m.get("garbled_char_ratio"),
                 "position_coverage": m.get("position_coverage"),
                 "error_code": m.get("error_code"),
+                "out_of_range_page_count": m.get("out_of_range_page_count"),
+                "out_of_range_pages": ";".join(
+                    str(page) for page in (m.get("out_of_range_pages") or [])
+                ),
                 "parser_version": m.get("parser_version"),
                 "table_recall": m.get("table_recall"),
                 "key_field_accuracy": m.get("key_field_accuracy"),
@@ -137,11 +145,18 @@ def _baseline_markdown(
         f"- Run ID: `{run_id}`",
         f"- 生成时间: {datetime.now(timezone.utc).isoformat()}",
         f"- Manifest digest: `{_manifest_digest(manifest)}`",
+        f"- Thresholds digest: `{json_digest(thresholds)}`",
+        f"- Artifact hash: `{summary.get('artifact_hash', '')}`",
         f"- 样本数: {len(manifest.get('samples', []))}",
         f"- 执行样本数: {len(results)}",
         f"- Ground truth source: {_md_escape((manifest.get('ground_truth_provenance') or {}).get('source', 'unknown'))}",
         f"- Human reviewed: {_md_escape((manifest.get('ground_truth_provenance') or {}).get('human_reviewed', 'unknown'))}",
+        f"- 基线性质: {_md_escape(environment.get('baseline_classification', 'unknown'))}",
+        f"- Enterprise commit: `{_md_escape(environment.get('enterprise_commit', 'unknown'))}`",
+        f"- Enterprise worktree dirty: {_md_escape(environment.get('enterprise_worktree_dirty', 'unknown'))}",
         "- 范围说明：本基线只评测合成样本的文本质量；图片/流程图语义为 `not_evaluated`，diagram `passed` 不表示图形语义通过。",
+        "- Ground Truth 与样本生成器同源（`human_reviewed=false`），不是独立人工标注。",
+        "- 本基线为脱敏合成工程基线，不代表客户真实扫描档案的解析准确率。",
         f"- 解析成功率: {summary.get('parse_success_rate')}",
         f"- passed: {summary.get('passed_count')}",
         f"- review_required: {summary.get('review_required_count')}",
@@ -243,6 +258,7 @@ def write_reports(
         "run_id": run_id,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "manifest_digest": _manifest_digest(manifest),
+        "thresholds_digest": json_digest(thresholds),
         "ground_truth_provenance": manifest.get("ground_truth_provenance"),
         "thresholds": thresholds,
         "summary": summary,
@@ -250,6 +266,9 @@ def write_reports(
         "command": command,
         "documents": results,
     }
+    artifact_hash = json_digest(report)
+    report["artifact_hash"] = artifact_hash
+    summary["artifact_hash"] = artifact_hash
     report_path = output_dir / "evaluation-report.json"
     report_path.write_text(
         json.dumps(report, ensure_ascii=False, indent=2) + "\n",
@@ -271,6 +290,8 @@ def write_reports(
             "garbled_char_ratio",
             "position_coverage",
             "error_code",
+            "out_of_range_page_count",
+            "out_of_range_pages",
             "parser_version",
             "table_recall",
             "key_field_accuracy",

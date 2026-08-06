@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import os
+import subprocess
 import sys
 import uuid
 from pathlib import Path
@@ -26,7 +27,43 @@ from enterprise.scripts.wp03.metrics import (  # noqa: E402
     summarize_documents,
 )
 from enterprise.scripts.wp03.quality_gate import load_thresholds  # noqa: E402
-from enterprise.scripts.wp03.report import write_reports  # noqa: E402
+from enterprise.scripts.wp03.report import json_digest, write_reports  # noqa: E402
+
+
+EVALUATION_CONTRACT = "contracts/parse-quality-evaluation.md"
+EVALUATION_CONTRACT_VERSION = "1"
+
+
+def _git_state(root: Path) -> tuple[str, bool]:
+    try:
+        commit = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        ).stdout.strip()
+        status = subprocess.run(
+            ["git", "-C", str(root), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        ).stdout
+        return commit, bool(status.strip())
+    except (OSError, subprocess.SubprocessError):
+        return "unknown", False
+
+
+def _classify_baseline(worktree_dirty: bool, allow_dirty: bool) -> str:
+    if worktree_dirty and not allow_dirty:
+        raise RuntimeError(
+            "refusing to create a formal baseline from a dirty worktree; "
+            "pass --allow-dirty to mark the run informal"
+        )
+    if worktree_dirty:
+        return "informal_dirty_worktree"
+    return "formal"
 
 
 def _env_dict(
@@ -42,6 +79,7 @@ def _env_dict(
         with open(version_path, encoding="utf-8") as f:
             version_manifest = json.load(f)
     upstream = version_manifest.get("ragflow_upstream", {})
+    enterprise_commit, enterprise_worktree_dirty = _git_state(ROOT)
     return {
         "run_id": run_id,
         "gateway_url": os.environ.get("GATEWAY_URL", "http://127.0.0.1:5188"),
@@ -53,6 +91,16 @@ def _env_dict(
         "tenant_id": tenant_id or os.environ.get("WP03_TENANT", "wp03-eval"),
         "ragflow_source_tag": upstream.get("source_tag", "unknown"),
         "ragflow_source_commit": upstream.get("source_commit", "unknown"),
+        "enterprise_commit": enterprise_commit,
+        "enterprise_worktree_dirty": enterprise_worktree_dirty,
+        "manifest_digest": json_digest(
+            json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+        ),
+        "thresholds_digest": json_digest(
+            json.loads(Path(thresholds_path).read_text(encoding="utf-8"))
+        ),
+        "evaluation_contract": EVALUATION_CONTRACT,
+        "evaluation_contract_version": EVALUATION_CONTRACT_VERSION,
         "manifest": str(manifest_path),
         "thresholds": str(thresholds_path),
         "samples_dir": str(samples_dir),
@@ -76,6 +124,8 @@ def _redacted_command(run_id: str, args: argparse.Namespace) -> str:
         parts.append("--skip-citations")
     if args.fresh_parse:
         parts.append("--fresh-parse")
+    if args.allow_dirty:
+        parts.append("--allow-dirty")
     return " ".join(parts)
 
 
@@ -167,13 +217,17 @@ async def _run(args: argparse.Namespace) -> int:
     metrics_list = [result["metrics"] for result in results]
     summary = summarize_documents(metrics_list)
     summary["metrics_hash"] = metrics_hash(metrics_list)
-    summary["repeatability_hash"] = repeatability_hash(metrics_list)
+    chunk_lists = [result.get("chunks") or [] for result in results]
+    summary["repeatability_hash"] = repeatability_hash(metrics_list, chunk_lists)
     environment = _env_dict(
         run_id,
         Path(args.manifest),
         Path(args.thresholds),
         samples_dir,
         tenant_id,
+    )
+    environment["baseline_classification"] = _classify_baseline(
+        environment["enterprise_worktree_dirty"], args.allow_dirty
     )
     command = _redacted_command(run_id, args)
     paths = write_reports(
@@ -204,6 +258,7 @@ def main() -> int:
     parser.add_argument("--only", default="")
     parser.add_argument("--skip-citations", action="store_true")
     parser.add_argument("--fresh-parse", action="store_true")
+    parser.add_argument("--allow-dirty", action="store_true")
     parser.add_argument("--timeout", type=int, default=900)
     parser.add_argument("--gateway-url", default=os.environ.get("GATEWAY_URL", "http://127.0.0.1:5188"))
     parser.add_argument("--ragflow-base-url", default=os.environ.get("RAGFLOW_BASE_URL", "http://127.0.0.1:9380"))

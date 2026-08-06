@@ -51,6 +51,43 @@ def chunk_page_numbers(chunks: Iterable[dict[str, Any]]) -> set[int]:
     return pages
 
 
+def _page_from_position(pos: Any) -> int | None:
+    if not isinstance(pos, (list, tuple)) or len(pos) < 1:
+        return None
+    try:
+        return int(pos[0])
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def in_range_page_numbers(
+    chunks: Iterable[dict[str, Any]], source_page_count: int
+) -> set[int]:
+    pages: set[int] = set()
+    for chunk in chunks:
+        for pos in chunk.get("positions") or []:
+            page = _page_from_position(pos)
+            if page is not None and 1 <= page <= source_page_count:
+                pages.add(page)
+    return pages
+
+
+def out_of_range_page_positions(
+    chunks: Iterable[dict[str, Any]], source_page_count: int
+) -> tuple[int, list[int]]:
+    count = 0
+    pages: set[int] = set()
+    for chunk in chunks:
+        for pos in chunk.get("positions") or []:
+            page = _page_from_position(pos)
+            if page is None:
+                continue
+            if page < 1 or page > source_page_count:
+                count += 1
+                pages.add(page)
+    return count, sorted(pages)
+
+
 def valid_position_count(chunks: Iterable[dict[str, Any]]) -> int:
     count = 0
     for chunk in chunks:
@@ -202,7 +239,10 @@ def compute_document_metrics(
     if error_code is None and not parse_success:
         error_code = parsing_status
 
-    page_numbers = chunk_page_numbers(chunks)
+    page_numbers = in_range_page_numbers(chunks, source_page_count)
+    out_of_range_count, out_of_range_pages = out_of_range_page_positions(
+        chunks, source_page_count
+    )
     covered_pages = len(page_numbers)
     empty_page_ratio = (
         max(0.0, 1.0 - covered_pages / source_page_count)
@@ -218,7 +258,9 @@ def compute_document_metrics(
         if _is_garbled_char(ch)
     )
     lengths = [char_length(c.get("content")) for c in chunks]
-    table_pages = detected_table_pages(chunks)
+    table_pages = detected_table_pages(chunks) & set(
+        range(1, source_page_count + 1)
+    )
     expected_tables = expected_tables or []
     table_recall = (
         round(len(table_pages & set(expected_tables)) / len(set(expected_tables)), 4)
@@ -268,6 +310,8 @@ def compute_document_metrics(
         "token_count": doc_info.get("token_count"),
         "page_count_source": source_page_count,
         "page_count_observed": covered_pages,
+        "out_of_range_page_count": out_of_range_count,
+        "out_of_range_pages": out_of_range_pages,
         "empty_page_ratio": round(empty_page_ratio, 4),
         "page_coverage": (
             round(covered_pages / source_page_count, 4)
@@ -330,6 +374,13 @@ def metrics_hash(documents: list[dict[str, Any]]) -> str:
 
 
 _REPEAT_EXCLUDED = {
+    "document_id",
+    "dataset_id",
+    "task_id",
+    "event_id",
+    "run_id",
+    "created_at",
+    "updated_at",
     "parse_duration_seconds",
     "parse_duration_per_page",
     "wall_clock_duration_seconds",
@@ -338,14 +389,41 @@ _REPEAT_EXCLUDED = {
 }
 
 
-def repeatability_hash(documents: list[dict[str, Any]]) -> str:
-    """Stable hash excluding runtime durations that legitimately vary."""
+def _normalized_chunk_signature(chunk: dict[str, Any]) -> dict[str, Any]:
+    positions: list[list[float]] = []
+    for pos in chunk.get("positions") or []:
+        page = _page_from_position(pos)
+        if page is None:
+            continue
+        try:
+            coords = [round(float(v), 4) for v in pos[1:5]]
+        except (TypeError, ValueError, IndexError):
+            coords = []
+        positions.append([page, *coords])
+    return {
+        "content": normalize_text(str(chunk.get("content") or "")),
+        "positions": positions,
+        "doc_type_kwd": str(chunk.get("doc_type_kwd") or "").lower(),
+    }
+
+
+def repeatability_hash(
+    documents: list[dict[str, Any]],
+    chunks: list[list[dict[str, Any]]] | None = None,
+) -> str:
+    """Stable hash excluding runtime IDs, timestamps, and durations."""
     stable_docs = [
         {k: v for k, v in doc.items() if k not in _REPEAT_EXCLUDED}
         for doc in documents
     ]
+    payload: dict[str, Any] = {"documents": stable_docs}
+    if chunks is not None:
+        payload["chunks"] = [
+            [_normalized_chunk_signature(chunk) for chunk in chunk_list]
+            for chunk_list in chunks
+        ]
     stable = json.dumps(
-        stable_docs,
+        payload,
         sort_keys=True,
         ensure_ascii=False,
         separators=(",", ":"),
