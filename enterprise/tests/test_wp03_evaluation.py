@@ -29,7 +29,11 @@ from enterprise.scripts.wp03.quality_gate import (  # noqa: E402
     evaluate_document_quality,
     load_thresholds,
 )
-from enterprise.scripts.wp03.report import _page_rows, write_reports  # noqa: E402
+from enterprise.scripts.wp03.report import (  # noqa: E402
+    _page_rows,
+    json_digest,
+    write_reports,
+)
 from enterprise.scripts.wp03.recompute_hashes import recompute_report_hashes  # noqa: E402
 from enterprise.scripts.wp03.run_parsing_evaluation import (  # noqa: E402
     _classify_baseline,
@@ -504,6 +508,7 @@ class TestReportWriter:
             "document_count": 1,
             "passed_count": 1,
             "parse_success_rate": 1.0,
+            "artifact_hash": "stale",
         }
         environment = {
             "ragflow_source_tag": "v0.26.4",
@@ -536,6 +541,15 @@ class TestReportWriter:
         assert report["environment"]["enterprise_worktree_dirty"] is False
         assert report["thresholds_digest"] == "t1"
         assert report["artifact_hash"]
+        report_no_hash = {
+            k: v for k, v in report.items() if k != "artifact_hash"
+        }
+        report_no_hash["summary"] = {
+            k: v
+            for k, v in report_no_hash["summary"].items()
+            if k != "artifact_hash"
+        }
+        assert json_digest(report_no_hash) == report["artifact_hash"]
         assert report["recompute"]["original_parse_run_id"] == "run-test"
         md = paths["markdown"].read_text(encoding="utf-8")
         assert "Thresholds digest: `t1`" in md
@@ -604,6 +618,9 @@ class TestFailureAndConfig:
         assert report["documents"][0]["metrics"]["file_sha256"] == hashlib.sha256(
             b"pdf-bytes"
         ).hexdigest()
+        assert report["summary"]["metrics_hash"] == metrics_hash(
+            [report["documents"][0]["metrics"]]
+        )
         assert report["summary"]["recompute"]["original_parse_run_id"] == "run-x"
         assert report["summary"]["recompute"]["reparsed"] is False
         assert report["summary"]["recompute"]["recompute_commit"] == "commit123"

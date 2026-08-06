@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT))
 from enterprise.scripts.wp03.collector import load_manifest  # noqa: E402
 from enterprise.scripts.wp03.metrics import (  # noqa: E402
     e2e_repeatability_hash,
+    metrics_hash,
     parse_repeatability_hash,
 )
 from enterprise.scripts.wp03.quality_gate import load_thresholds  # noqa: E402
@@ -45,6 +46,8 @@ def recompute_report_hashes(
                 pass
         (doc.get("metrics") or {})["file_sha256"] = sha256
     summary = report["summary"]
+    metrics_list = [doc["metrics"] for doc in docs]
+    summary["metrics_hash"] = metrics_hash(metrics_list)
     summary["parse_repeatability_hash"] = parse_repeatability_hash(docs)
     summary["e2e_repeatability_hash"] = e2e_repeatability_hash(docs)
     summary["repeatability_hash"] = summary["e2e_repeatability_hash"]

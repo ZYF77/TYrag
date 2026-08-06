@@ -277,6 +277,7 @@ def write_reports(
 ) -> dict[str, Path]:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    summary.pop("artifact_hash", None)
     report = {
         "schema_version": 1,
         "run_id": run_id,
