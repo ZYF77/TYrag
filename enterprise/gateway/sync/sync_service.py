@@ -355,7 +355,10 @@ class SyncService:
         ):
             return doc
         try:
-            docs = await self.ragflow_client.list_documents(doc.ragflow_dataset_id)
+            docs = await self.ragflow_client.list_documents(
+                doc.ragflow_dataset_id,
+                document_id=doc.ragflow_document_id,
+            )
         except RAGFlowAPIError:
             return doc
         for rf_doc in docs:

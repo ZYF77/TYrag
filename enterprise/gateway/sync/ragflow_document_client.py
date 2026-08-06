@@ -157,12 +157,27 @@ class RAGFlowDocumentClient:
                                      f"/api/v1/datasets/{dataset_id}/documents",
                                      rid, files=files)
 
-    async def list_documents(self, dataset_id: str,
-                             request_id: str | None = None) -> list[dict]:
+    async def list_documents(
+        self,
+        dataset_id: str,
+        document_id: str | None = None,
+        page: int = 1,
+        page_size: int = 100,
+        request_id: str | None = None,
+    ) -> list[dict]:
         rid = request_id or self._new_request_id()
+        from urllib.parse import quote
+
+        path = (
+            f"/api/v1/datasets/{dataset_id}/documents"
+            f"?page={page}&page_size={page_size}"
+        )
+        if document_id:
+            path += f"&id={quote(document_id)}"
         result = await self._run_sync(self._sync_request, "GET",
-                                       f"/api/v1/datasets/{dataset_id}/documents", rid)
-        return result.get("data", []) if isinstance(result, dict) else result
+                                       path, rid)
+        data = result.get("data", {}) if isinstance(result, dict) else {}
+        return data.get("docs", []) if isinstance(data, dict) else []
 
     async def update_document_metadata(
         self,
@@ -258,13 +273,22 @@ class RAGFlowDocumentStub(RAGFlowDocumentClient):
         self._documents[doc_id] = doc
         return doc
 
-    async def list_documents(self, dataset_id: str,
-                             request_id: str | None = None) -> list[dict]:
-        return [
+    async def list_documents(
+        self,
+        dataset_id: str,
+        document_id: str | None = None,
+        page: int = 1,
+        page_size: int = 100,
+        request_id: str | None = None,
+    ) -> list[dict]:
+        docs = [
             doc["data"][0]
             for doc in self._documents.values()
             if doc["data"][0].get("dataset_id") == dataset_id
         ]
+        if document_id:
+            docs = [doc for doc in docs if doc.get("id") == document_id]
+        return docs
 
     async def update_document_metadata(
         self,

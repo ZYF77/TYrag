@@ -611,6 +611,16 @@ async def health():
     return {"status": "healthy", "version": "1.0.0"}
 
 
+@app.get("/")
+async def root():
+    return {
+        "status": "healthy",
+        "service": "Enterprise RAGFlow Gateway",
+        "docs": "/docs",
+        "health": "/enterprise/api/v1/health",
+    }
+
+
 # -- WP-01A: end-user auth --
 
 @app.get("/enterprise/api/v1/auth/me")
@@ -624,9 +634,9 @@ async def auth_me(
     return JSONResponse(content=principal.to_safe_dict())
 
 
-# Temporary demo closed loop (does not modify the frozen WP-02 contract)
-from enterprise.gateway.demo import router as demo_router
-app.include_router(demo_router)
+# Temporary query demo router, owned by the WP-04 retrieval scope
+from enterprise.gateway.query.router import router as query_router
+app.include_router(query_router)
 
 
 @app.api_route(
