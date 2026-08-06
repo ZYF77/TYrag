@@ -486,7 +486,11 @@ class TestReportWriter:
         assert report["documents"][0]["parse_quality_status"] == "passed"
         assert report["environment"]["enterprise_commit"] == "def456"
         assert report["environment"]["enterprise_worktree_dirty"] is False
+        assert report["thresholds_digest"] == "t1"
         assert report["artifact_hash"]
+        md = paths["markdown"].read_text(encoding="utf-8")
+        assert "Thresholds digest: `t1`" in md
+        assert "Citation 0/0" in md
 
     def test_status_does_not_mutate_sync_status(self):
         sync_status = "ready"

@@ -139,13 +139,31 @@ def _baseline_markdown(
     command: str,
 ) -> str:
     rows = _document_rows(results)
+    citation_samples = {
+        sample["sample_id"]
+        for sample in manifest.get("samples", [])
+        if sample.get("citation_questions")
+    }
+    citation_metrics = [
+        (result.get("metrics") or {})
+        for result in results
+        if result.get("sample_id") in citation_samples
+    ]
+    citation_matched = sum(
+        1
+        for metrics in citation_metrics
+        if metrics.get("citation_page_accuracy") == 1.0
+    )
+    thresholds_digest = environment.get("thresholds_digest") or json_digest(
+        thresholds
+    )
     lines = [
         "# WP-03 解析质量基线报告",
         "",
         f"- Run ID: `{run_id}`",
         f"- 生成时间: {datetime.now(timezone.utc).isoformat()}",
         f"- Manifest digest: `{_manifest_digest(manifest)}`",
-        f"- Thresholds digest: `{json_digest(thresholds)}`",
+        f"- Thresholds digest: `{thresholds_digest}`",
         f"- Artifact hash: `{summary.get('artifact_hash', '')}`",
         f"- 样本数: {len(manifest.get('samples', []))}",
         f"- 执行样本数: {len(results)}",
@@ -157,6 +175,7 @@ def _baseline_markdown(
         "- 范围说明：本基线只评测合成样本的文本质量；图片/流程图语义为 `not_evaluated`，diagram `passed` 不表示图形语义通过。",
         "- Ground Truth 与样本生成器同源（`human_reviewed=false`），不是独立人工标注。",
         "- 本基线为脱敏合成工程基线，不代表客户真实扫描档案的解析准确率。",
+        f"- Citation {citation_matched}/{len(citation_samples)} 仅代表 {len(citation_samples)} 个已标注案例，不代表 28 份文档整体准确率。",
         f"- 解析成功率: {summary.get('parse_success_rate')}",
         f"- passed: {summary.get('passed_count')}",
         f"- review_required: {summary.get('review_required_count')}",
@@ -258,7 +277,8 @@ def write_reports(
         "run_id": run_id,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "manifest_digest": _manifest_digest(manifest),
-        "thresholds_digest": json_digest(thresholds),
+        "thresholds_digest": environment.get("thresholds_digest")
+        or json_digest(thresholds),
         "ground_truth_provenance": manifest.get("ground_truth_provenance"),
         "thresholds": thresholds,
         "summary": summary,
