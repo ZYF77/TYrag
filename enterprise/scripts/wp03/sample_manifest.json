@@ -1,0 +1,715 @@
+{
+  "schema_version": 1,
+  "name": "WP-03 parsing quality samples",
+  "seed": 20260806,
+  "samples_dir": "artifacts/wp03/samples",
+  "generator": "enterprise/scripts/wp03/generate_samples.py",
+  "ground_truth_provenance": {
+    "source": "synthetic_generator",
+    "human_reviewed": false,
+    "note": "Phase 1 engineering baseline only. Ground truth values are generated from the same deterministic sample definitions as the PDF content and are not independent human annotations."
+  },
+  "samples": [
+    {
+      "sample_id": "wp03-digital_text-001",
+      "category": "digital_text",
+      "file_name": "wp03-digital_text-001.pdf",
+      "pages": 3,
+      "landscape": false,
+      "parser_profile": "default",
+      "ground_truth_fields": {
+        "equipment_id": "EQ-2026-0001",
+        "fixed_asset_no": "FA-2026-0001",
+        "model": "TYR-5001-A",
+        "document_type": "manual",
+        "fault_code": "E-101",
+        "version": "V1.1",
+        "effective_date": "2026-02-15"
+      },
+      "expected_tables": null,
+      "expected_images": null,
+      "low_quality": false,
+      "expected_quality_status": "passed",
+      "citation_questions": [
+        {
+          "question": "What equipment id is listed in this document?",
+          "expected_page": 1
+        }
+      ],
+      "notes": "synthetic, non-sensitive"
+    },
+    {
+      "sample_id": "wp03-digital_text-002",
+      "category": "digital_text",
+      "file_name": "wp03-digital_text-002.pdf",
+      "pages": 4,
+      "landscape": false,
+      "parser_profile": "default",
+      "ground_truth_fields": {
+        "equipment_id": "EQ-2026-0002",
+        "fixed_asset_no": "FA-2026-0002",
+        "model": "TYR-5002-A",
+        "document_type": "inspection",
+        "fault_code": "E-102",
+        "version": "V1.2",
+        "effective_date": "2026-03-15"
+      },
+      "expected_tables": null,
+      "expected_images": null,
+      "low_quality": false,
+      "expected_quality_status": "passed",
+      "citation_questions": [
+        {
+          "question": "What equipment id is listed in this document?",
+          "expected_page": 1
+        }
+      ],
+      "notes": "synthetic, non-sensitive"
+    },
+    {
+      "sample_id": "wp03-digital_text-003",
+      "category": "digital_text",
+      "file_name": "wp03-digital_text-003.pdf",
+      "pages": 5,
+      "landscape": false,
+      "parser_profile": "default",
+      "ground_truth_fields": {
+        "equipment_id": "EQ-2026-0003",
+        "fixed_asset_no": "FA-2026-0003",
+        "model": "TYR-5003-A",
+        "document_type": "manual",
+        "fault_code": "E-103",
+        "version": "V1.3",
+        "effective_date": "2026-04-15"
+      },
+      "expected_tables": null,
+      "expected_images": null,
+      "low_quality": false,
+      "expected_quality_status": "passed",
+      "citation_questions": null,
+      "notes": "synthetic, non-sensitive"
+    },
+    {
+      "sample_id": "wp03-digital_text-004",
+      "category": "digital_text",
+      "file_name": "wp03-digital_text-004.pdf",
+      "pages": 2,
+      "landscape": true,
+      "parser_profile": "default",
+      "ground_truth_fields": {
+        "equipment_id": "EQ-2026-0004",
+        "fixed_asset_no": "FA-2026-0004",
+        "model": "TYR-5004-A",
+        "document_type": "inspection",
+        "fault_code": "E-104",
+        "version": "V1.4",
+        "effective_date": "2026-05-15"
+      },
+      "expected_tables": null,
+      "expected_images": null,
+      "low_quality": false,
+      "expected_quality_status": "passed",
+      "citation_questions": null,
+      "notes": "synthetic, non-sensitive"
+    },
+    {
+      "sample_id": "wp03-zh_en_mixed-005",
+      "category": "zh_en_mixed",
+      "file_name": "wp03-zh_en_mixed-005.pdf",
+      "pages": 5,
+      "landscape": false,
+      "parser_profile": "default",
+      "ground_truth_fields": {
+        "equipment_id": "EQ-2026-0005",
+        "fixed_asset_no": "FA-2026-0005",
+        "model": "TYR-5005-A",
+        "document_type": "manual",
+        "fault_code": "E-105",
+        "version": "V1.0",
+        "effective_date": "2026-06-15"
+      },
+      "expected_tables": null,
+      "expected_images": null,
+      "low_quality": false,
+      "expected_quality_status": "passed",
+      "citation_questions": null,
+      "notes": "synthetic, non-sensitive"
+    },
+    {
+      "sample_id": "wp03-zh_en_mixed-006",
+      "category": "zh_en_mixed",
+      "file_name": "wp03-zh_en_mixed-006.pdf",
+      "pages": 2,
+      "landscape": false,
+      "parser_profile": "default",
+      "ground_truth_fields": {
+        "equipment_id": "EQ-2026-0006",
+        "fixed_asset_no": "FA-2026-0006",
+        "model": "TYR-5006-A",
+        "document_type": "inspection",
+        "fault_code": "E-106",
+        "version": "V1.1",
+        "effective_date": "2026-07-15"
+      },
+      "expected_tables": null,
+      "expected_images": null,
+      "low_quality": false,
+      "expected_quality_status": "passed",
+      "citation_questions": null,
+      "notes": "synthetic, non-sensitive"
+    },
+    {
+      "sample_id": "wp03-clear_scan-007",
+      "category": "clear_scan",
+      "file_name": "wp03-clear_scan-007.pdf",
+      "pages": 4,
+      "landscape": false,
+      "parser_profile": "default",
+      "ground_truth_fields": {
+        "equipment_id": "EQ-2026-0007",
+        "fixed_asset_no": "FA-2026-0007",
+        "model": "TYR-5007-A",
+        "document_type": "manual",
+        "fault_code": "E-107",
+        "version": "V1.2",
+        "effective_date": "2026-08-15"
+      },
+      "expected_tables": null,
+      "expected_images": null,
+      "low_quality": false,
+      "expected_quality_status": null,
+      "citation_questions": null,
+      "notes": "synthetic, non-sensitive"
+    },
+    {
+      "sample_id": "wp03-clear_scan-008",
+      "category": "clear_scan",
+      "file_name": "wp03-clear_scan-008.pdf",
+      "pages": 1,
+      "landscape": false,
+      "parser_profile": "default",
+      "ground_truth_fields": {
+        "equipment_id": "EQ-2026-0008",
+        "fixed_asset_no": "FA-2026-0008",
+        "model": "TYR-5008-A",
+        "document_type": "inspection",
+        "fault_code": "E-108",
+        "version": "V1.3",
+        "effective_date": "2026-09-15"
+      },
+      "expected_tables": null,
+      "expected_images": null,
+      "low_quality": false,
+      "expected_quality_status": null,
+      "citation_questions": null,
+      "notes": "synthetic, non-sensitive"
+    },
+    {
+      "sample_id": "wp03-clear_scan-009",
+      "category": "clear_scan",
+      "file_name": "wp03-clear_scan-009.pdf",
+      "pages": 2,
+      "landscape": false,
+      "parser_profile": "default",
+      "ground_truth_fields": {
+        "equipment_id": "EQ-2026-0009",
+        "fixed_asset_no": "FA-2026-0009",
+        "model": "TYR-5009-A",
+        "document_type": "manual",
+        "fault_code": "E-109",
+        "version": "V1.4",
+        "effective_date": "2026-10-15"
+      },
+      "expected_tables": null,
+      "expected_images": null,
+      "low_quality": false,
+      "expected_quality_status": null,
+      "citation_questions": null,
+      "notes": "synthetic, non-sensitive"
+    },
+    {
+      "sample_id": "wp03-clear_scan-010",
+      "category": "clear_scan",
+      "file_name": "wp03-clear_scan-010.pdf",
+      "pages": 3,
+      "landscape": false,
+      "parser_profile": "default",
+      "ground_truth_fields": {
+        "equipment_id": "EQ-2026-0010",
+        "fixed_asset_no": "FA-2026-0010",
+        "model": "TYR-5010-A",
+        "document_type": "inspection",
+        "fault_code": "E-110",
+        "version": "V1.0",
+        "effective_date": "2026-11-15"
+      },
+      "expected_tables": null,
+      "expected_images": null,
+      "low_quality": false,
+      "expected_quality_status": null,
+      "citation_questions": null,
+      "notes": "synthetic, non-sensitive"
+    },
+    {
+      "sample_id": "wp03-degraded_scan-011",
+      "category": "degraded_scan",
+      "file_name": "wp03-degraded_scan-011.pdf",
+      "pages": 2,
+      "landscape": false,
+      "parser_profile": "default",
+      "ground_truth_fields": {
+        "equipment_id": "EQ-2026-0011",
+        "fixed_asset_no": "FA-2026-0011",
+        "model": "TYR-5011-A",
+        "document_type": "manual",
+        "fault_code": "E-111",
+        "version": "V1.1",
+        "effective_date": "2026-12-15"
+      },
+      "expected_tables": null,
+      "expected_images": null,
+      "low_quality": true,
+      "expected_quality_status": null,
+      "citation_questions": null,
+      "notes": "synthetic, non-sensitive"
+    },
+    {
+      "sample_id": "wp03-degraded_scan-012",
+      "category": "degraded_scan",
+      "file_name": "wp03-degraded_scan-012.pdf",
+      "pages": 2,
+      "landscape": false,
+      "parser_profile": "default",
+      "ground_truth_fields": {
+        "equipment_id": "EQ-2026-0012",
+        "fixed_asset_no": "FA-2026-0012",
+        "model": "TYR-5012-A",
+        "document_type": "inspection",
+        "fault_code": "E-112",
+        "version": "V1.2",
+        "effective_date": "2026-01-15"
+      },
+      "expected_tables": null,
+      "expected_images": null,
+      "low_quality": true,
+      "expected_quality_status": null,
+      "citation_questions": null,
+      "notes": "synthetic, non-sensitive"
+    },
+    {
+      "sample_id": "wp03-degraded_scan-013",
+      "category": "degraded_scan",
+      "file_name": "wp03-degraded_scan-013.pdf",
+      "pages": 2,
+      "landscape": false,
+      "parser_profile": "default",
+      "ground_truth_fields": {
+        "equipment_id": "EQ-2026-0013",
+        "fixed_asset_no": "FA-2026-0013",
+        "model": "TYR-5013-A",
+        "document_type": "manual",
+        "fault_code": "E-113",
+        "version": "V1.3",
+        "effective_date": "2026-02-15"
+      },
+      "expected_tables": null,
+      "expected_images": null,
+      "low_quality": true,
+      "expected_quality_status": null,
+      "citation_questions": null,
+      "notes": "synthetic, non-sensitive"
+    },
+    {
+      "sample_id": "wp03-degraded_scan-014",
+      "category": "degraded_scan",
+      "file_name": "wp03-degraded_scan-014.pdf",
+      "pages": 2,
+      "landscape": false,
+      "parser_profile": "default",
+      "ground_truth_fields": {
+        "equipment_id": "EQ-2026-0014",
+        "fixed_asset_no": "FA-2026-0014",
+        "model": "TYR-5014-A",
+        "document_type": "inspection",
+        "fault_code": "E-114",
+        "version": "V1.4",
+        "effective_date": "2026-03-15"
+      },
+      "expected_tables": null,
+      "expected_images": null,
+      "low_quality": true,
+      "expected_quality_status": "review_required",
+      "citation_questions": null,
+      "notes": "synthetic, non-sensitive"
+    },
+    {
+      "sample_id": "wp03-mixed_manual-015",
+      "category": "mixed_manual",
+      "file_name": "wp03-mixed_manual-015.pdf",
+      "pages": 2,
+      "landscape": false,
+      "parser_profile": "default",
+      "ground_truth_fields": {
+        "equipment_id": "EQ-2026-0015",
+        "fixed_asset_no": "FA-2026-0015",
+        "model": "TYR-5015-A",
+        "document_type": "manual",
+        "fault_code": "E-115",
+        "version": "V1.0",
+        "effective_date": "2026-04-15"
+      },
+      "expected_tables": null,
+      "expected_images": [
+        1
+      ],
+      "low_quality": false,
+      "expected_quality_status": "passed",
+      "citation_questions": null,
+      "notes": "synthetic, non-sensitive"
+    },
+    {
+      "sample_id": "wp03-mixed_manual-016",
+      "category": "mixed_manual",
+      "file_name": "wp03-mixed_manual-016.pdf",
+      "pages": 4,
+      "landscape": false,
+      "parser_profile": "default",
+      "ground_truth_fields": {
+        "equipment_id": "EQ-2026-0016",
+        "fixed_asset_no": "FA-2026-0016",
+        "model": "TYR-5016-A",
+        "document_type": "inspection",
+        "fault_code": "E-116",
+        "version": "V1.1",
+        "effective_date": "2026-05-15"
+      },
+      "expected_tables": [
+        2
+      ],
+      "expected_images": [
+        2
+      ],
+      "low_quality": false,
+      "expected_quality_status": "passed",
+      "citation_questions": null,
+      "notes": "synthetic, non-sensitive"
+    },
+    {
+      "sample_id": "wp03-mixed_manual-017",
+      "category": "mixed_manual",
+      "file_name": "wp03-mixed_manual-017.pdf",
+      "pages": 3,
+      "landscape": false,
+      "parser_profile": "default",
+      "ground_truth_fields": {
+        "equipment_id": "EQ-2026-0017",
+        "fixed_asset_no": "FA-2026-0017",
+        "model": "TYR-5017-A",
+        "document_type": "manual",
+        "fault_code": "E-117",
+        "version": "V1.2",
+        "effective_date": "2026-06-15"
+      },
+      "expected_tables": [
+        2
+      ],
+      "expected_images": [
+        1
+      ],
+      "low_quality": false,
+      "expected_quality_status": "passed",
+      "citation_questions": null,
+      "notes": "synthetic, non-sensitive"
+    },
+    {
+      "sample_id": "wp03-mixed_manual-018",
+      "category": "mixed_manual",
+      "file_name": "wp03-mixed_manual-018.pdf",
+      "pages": 3,
+      "landscape": false,
+      "parser_profile": "default",
+      "ground_truth_fields": {
+        "equipment_id": "EQ-2026-0018",
+        "fixed_asset_no": "FA-2026-0018",
+        "model": "TYR-5018-A",
+        "document_type": "inspection",
+        "fault_code": "E-118",
+        "version": "V1.3",
+        "effective_date": "2026-07-15"
+      },
+      "expected_tables": null,
+      "expected_images": [
+        2
+      ],
+      "low_quality": false,
+      "expected_quality_status": "passed",
+      "citation_questions": null,
+      "notes": "synthetic, non-sensitive"
+    },
+    {
+      "sample_id": "wp03-table_dense-019",
+      "category": "table_dense",
+      "file_name": "wp03-table_dense-019.pdf",
+      "pages": 2,
+      "landscape": false,
+      "parser_profile": "default",
+      "ground_truth_fields": {
+        "equipment_id": "EQ-2026-0019",
+        "fixed_asset_no": "FA-2026-0019",
+        "model": "TYR-5019-A",
+        "document_type": "manual",
+        "fault_code": "E-119",
+        "version": "V1.4",
+        "effective_date": "2026-08-15"
+      },
+      "expected_tables": [
+        1,
+        2
+      ],
+      "expected_images": null,
+      "low_quality": false,
+      "expected_quality_status": "passed",
+      "citation_questions": [
+        {
+          "question": "What equipment id is listed in this document?",
+          "expected_page": 1
+        }
+      ],
+      "notes": "synthetic, non-sensitive"
+    },
+    {
+      "sample_id": "wp03-table_dense-020",
+      "category": "table_dense",
+      "file_name": "wp03-table_dense-020.pdf",
+      "pages": 4,
+      "landscape": false,
+      "parser_profile": "default",
+      "ground_truth_fields": {
+        "equipment_id": "EQ-2026-0020",
+        "fixed_asset_no": "FA-2026-0020",
+        "model": "TYR-5020-A",
+        "document_type": "inspection",
+        "fault_code": "E-120",
+        "version": "V1.0",
+        "effective_date": "2026-09-15"
+      },
+      "expected_tables": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "expected_images": null,
+      "low_quality": false,
+      "expected_quality_status": "passed",
+      "citation_questions": null,
+      "notes": "synthetic, non-sensitive"
+    },
+    {
+      "sample_id": "wp03-table_dense-021",
+      "category": "table_dense",
+      "file_name": "wp03-table_dense-021.pdf",
+      "pages": 2,
+      "landscape": true,
+      "parser_profile": "default",
+      "ground_truth_fields": {
+        "equipment_id": "EQ-2026-0021",
+        "fixed_asset_no": "FA-2026-0021",
+        "model": "TYR-5021-A",
+        "document_type": "manual",
+        "fault_code": "E-121",
+        "version": "V1.1",
+        "effective_date": "2026-10-15"
+      },
+      "expected_tables": [
+        1,
+        2
+      ],
+      "expected_images": null,
+      "low_quality": false,
+      "expected_quality_status": "passed",
+      "citation_questions": null,
+      "notes": "synthetic, non-sensitive"
+    },
+    {
+      "sample_id": "wp03-table_dense-022",
+      "category": "table_dense",
+      "file_name": "wp03-table_dense-022.pdf",
+      "pages": 3,
+      "landscape": false,
+      "parser_profile": "default",
+      "ground_truth_fields": {
+        "equipment_id": "EQ-2026-0022",
+        "fixed_asset_no": "FA-2026-0022",
+        "model": "TYR-5022-A",
+        "document_type": "inspection",
+        "fault_code": "E-122",
+        "version": "V1.2",
+        "effective_date": "2026-11-15"
+      },
+      "expected_tables": [
+        1,
+        2,
+        3
+      ],
+      "expected_images": null,
+      "low_quality": false,
+      "expected_quality_status": "passed",
+      "citation_questions": null,
+      "notes": "synthetic, non-sensitive"
+    },
+    {
+      "sample_id": "wp03-diagram-023",
+      "category": "diagram",
+      "file_name": "wp03-diagram-023.pdf",
+      "pages": 2,
+      "landscape": false,
+      "parser_profile": "default",
+      "ground_truth_fields": {
+        "equipment_id": "EQ-2026-0023",
+        "fixed_asset_no": "FA-2026-0023",
+        "model": "TYR-5023-A",
+        "document_type": "manual",
+        "fault_code": "E-123",
+        "version": "V1.3",
+        "effective_date": "2026-12-15"
+      },
+      "expected_tables": null,
+      "expected_images": [
+        1,
+        2
+      ],
+      "low_quality": false,
+      "expected_quality_status": "passed",
+      "citation_questions": [
+        {
+          "question": "What equipment id is listed in this document?",
+          "expected_page": 1
+        }
+      ],
+      "notes": "synthetic, non-sensitive"
+    },
+    {
+      "sample_id": "wp03-diagram-024",
+      "category": "diagram",
+      "file_name": "wp03-diagram-024.pdf",
+      "pages": 1,
+      "landscape": false,
+      "parser_profile": "default",
+      "ground_truth_fields": {
+        "equipment_id": "EQ-2026-0024",
+        "fixed_asset_no": "FA-2026-0024",
+        "model": "TYR-5024-A",
+        "document_type": "inspection",
+        "fault_code": "E-124",
+        "version": "V1.4",
+        "effective_date": "2026-01-15"
+      },
+      "expected_tables": null,
+      "expected_images": [
+        1
+      ],
+      "low_quality": false,
+      "expected_quality_status": "passed",
+      "citation_questions": null,
+      "notes": "synthetic, non-sensitive"
+    },
+    {
+      "sample_id": "wp03-diagram-025",
+      "category": "diagram",
+      "file_name": "wp03-diagram-025.pdf",
+      "pages": 2,
+      "landscape": false,
+      "parser_profile": "default",
+      "ground_truth_fields": {
+        "equipment_id": "EQ-2026-0025",
+        "fixed_asset_no": "FA-2026-0025",
+        "model": "TYR-5025-A",
+        "document_type": "manual",
+        "fault_code": "E-125",
+        "version": "V1.0",
+        "effective_date": "2026-02-15"
+      },
+      "expected_tables": null,
+      "expected_images": [
+        1,
+        2
+      ],
+      "low_quality": false,
+      "expected_quality_status": "passed",
+      "citation_questions": null,
+      "notes": "synthetic, non-sensitive"
+    },
+    {
+      "sample_id": "wp03-diagram-026",
+      "category": "diagram",
+      "file_name": "wp03-diagram-026.pdf",
+      "pages": 1,
+      "landscape": false,
+      "parser_profile": "default",
+      "ground_truth_fields": {
+        "equipment_id": "EQ-2026-0026",
+        "fixed_asset_no": "FA-2026-0026",
+        "model": "TYR-5026-A",
+        "document_type": "inspection",
+        "fault_code": "E-126",
+        "version": "V1.1",
+        "effective_date": "2026-03-15"
+      },
+      "expected_tables": null,
+      "expected_images": [
+        1
+      ],
+      "low_quality": false,
+      "expected_quality_status": "passed",
+      "citation_questions": null,
+      "notes": "synthetic, non-sensitive"
+    },
+    {
+      "sample_id": "wp03-digital_text-027",
+      "category": "digital_text",
+      "file_name": "wp03-digital_text-027.pdf",
+      "pages": 3,
+      "landscape": false,
+      "parser_profile": "default",
+      "ground_truth_fields": {
+        "equipment_id": "EQ-2026-0027",
+        "fixed_asset_no": "FA-2026-0027",
+        "model": "TYR-5027-A",
+        "document_type": "manual",
+        "fault_code": "E-127",
+        "version": "V1.2",
+        "effective_date": "2026-04-15"
+      },
+      "expected_tables": null,
+      "expected_images": null,
+      "low_quality": false,
+      "expected_quality_status": "passed",
+      "citation_questions": null,
+      "notes": "synthetic, non-sensitive"
+    },
+    {
+      "sample_id": "wp03-clear_scan-028",
+      "category": "clear_scan",
+      "file_name": "wp03-clear_scan-028.pdf",
+      "pages": 2,
+      "landscape": false,
+      "parser_profile": "default",
+      "ground_truth_fields": {
+        "equipment_id": "EQ-2026-0028",
+        "fixed_asset_no": "FA-2026-0028",
+        "model": "TYR-5028-A",
+        "document_type": "inspection",
+        "fault_code": "E-128",
+        "version": "V1.3",
+        "effective_date": "2026-05-15"
+      },
+      "expected_tables": null,
+      "expected_images": null,
+      "low_quality": false,
+      "expected_quality_status": null,
+      "citation_questions": null,
+      "notes": "synthetic, non-sensitive"
+    }
+  ]
+}

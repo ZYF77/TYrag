@@ -195,6 +195,22 @@ class RAGFlowDocumentClient:
         data = result.get("data", {}) if isinstance(result, dict) else {}
         return data.get("docs", []) if isinstance(data, dict) else []
 
+    async def list_chunks(
+        self,
+        dataset_id: str,
+        document_id: str,
+        page: int = 1,
+        page_size: int = 30,
+        request_id: str | None = None,
+    ) -> dict:
+        """List chunks for a document through the RAGFlow public API."""
+        rid = request_id or self._new_request_id()
+        path = (
+            f"/api/v1/datasets/{dataset_id}/documents/{document_id}/chunks"
+            f"?page={page}&page_size={page_size}"
+        )
+        return await self._run_sync(self._sync_request, "GET", path, rid)
+
     async def update_document_metadata(
         self,
         dataset_id: str,
@@ -323,6 +339,23 @@ class RAGFlowDocumentStub(RAGFlowDocumentClient):
         if document_id:
             docs = [doc for doc in docs if doc.get("id") == document_id]
         return docs
+
+    async def list_chunks(
+        self,
+        dataset_id: str,
+        document_id: str,
+        page: int = 1,
+        page_size: int = 30,
+        request_id: str | None = None,
+    ) -> dict:
+        return {
+            "code": 0,
+            "data": {
+                "total": 0,
+                "chunks": [],
+                "doc": {},
+            },
+        }
 
     async def update_document_metadata(
         self,
