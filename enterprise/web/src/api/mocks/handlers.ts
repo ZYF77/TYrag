@@ -121,6 +121,48 @@ const fileSyncItems: FileSyncItem[] = [
   },
 ];
 
+const demoCitation: Citation = {
+  citationId: 'chunk-1',
+  sourceType: 'document',
+  title: 'Doc1.pdf',
+  documentId: 'rag-doc-1',
+  versionId: 'v1',
+  pageNo: 3,
+  bbox: { x1: 0.1, y1: 0.2, x2: 0.8, y2: 0.4 },
+  assetId: null,
+  excerpt: '故障码 E-104 时先检查液压油位。',
+  recordType: null,
+  recordId: null,
+};
+
+interface DemoConversationRecord {
+  messages: Array<{
+    role: 'user' | 'assistant';
+    content: string;
+    citations?: Citation[];
+  }>;
+}
+
+const demoConversations = new Map<string, DemoConversationRecord>([
+  [
+    'demo-conv-existing',
+    {
+      messages: [
+        { role: 'user', content: '历史问题' },
+        {
+          role: 'assistant',
+          content: '历史回答',
+          citations: [demoCitation],
+        },
+      ],
+    },
+  ],
+]);
+
+function bearerToken(request: Request): string {
+  return request.headers.get('authorization')?.replace(/^Bearer /i, '') ?? '';
+}
+
 function makeError(
   code: string,
   message: string,
@@ -139,6 +181,139 @@ function makeError(
 }
 
 export const handlers = [
+  // GET /auth/me - demo identity probe
+  http.get(`${BASE}/auth/me`, ({ request }) => {
+    if (!bearerToken(request)) {
+      const err = makeError('AUTH_TOKEN_MISSING', 'Authentication token is required', 401);
+      return HttpResponse.json(err.body, { status: 401 });
+    }
+    return HttpResponse.json({
+      businessUserId: 'demo-user',
+      displayName: 'demo-user',
+      tenantId: 'wp04e2e2',
+      departmentIds: ['d10'],
+      roles: ['end_user'],
+      capabilities: ['read', 'ask', 'list_sessions', 'view_citations'],
+      securityLevel: 2,
+      mappingStatus: 'active',
+    });
+  }),
+
+  // GET /demo/documents/:id/status
+  http.get(
+    `${BASE}/demo/documents/:externalDocumentId/status`,
+    ({ params, request }) => {
+      if (!bearerToken(request)) {
+        const err = makeError('AUTH_TOKEN_MISSING', 'Authentication token is required', 401);
+        return HttpResponse.json(err.body, { status: 401 });
+      }
+      const id = params.externalDocumentId as string;
+      if (id === 'E2E-FORBIDDEN') {
+        const err = makeError('ACL_DENIED', 'Access denied', 403);
+        return HttpResponse.json(err.body, { status: 403 });
+      }
+      if (id === 'E2E-PARSING') {
+        return HttpResponse.json({
+          externalDocumentId: id,
+          sourceVersionId: 'v1',
+          ragflowDatasetId: 'ds-1',
+          ragflowDocumentId: 'rag-doc-1',
+          status: 'parsing',
+          stage: 'ocr_processing',
+          deduplicated: false,
+        });
+      }
+      if (!['E2E-Doc1', 'E2E-Doc2'].includes(id)) {
+        const err = makeError('DOCUMENT_NOT_FOUND', 'Document not found', 404);
+        return HttpResponse.json(err.body, { status: 404 });
+      }
+      return HttpResponse.json({
+        externalDocumentId: id,
+        sourceVersionId: 'v1',
+        ragflowDatasetId: 'ds-1',
+        ragflowDocumentId: 'rag-doc-1',
+        status: 'ready',
+        stage: 'done',
+        deduplicated: false,
+      });
+    },
+  ),
+
+  // POST /demo/ask
+  http.post(`${BASE}/demo/ask`, async ({ request }) => {
+    if (!bearerToken(request)) {
+      const err = makeError('AUTH_TOKEN_MISSING', 'Authentication token is required', 401);
+      return HttpResponse.json(err.body, { status: 401 });
+    }
+    const body = (await request.json()) as {
+      externalDocumentId: string;
+      question: string;
+      conversationId?: string | null;
+    };
+
+    if (body.externalDocumentId === 'E2E-FORBIDDEN') {
+      const err = makeError('ACL_DENIED', 'Access denied', 403);
+      return HttpResponse.json(err.body, { status: 403 });
+    }
+    if (body.question.includes('409')) {
+      const err = makeError('DOCUMENT_NOT_READY', 'Document is not ready', 409);
+      return HttpResponse.json(err.body, { status: 409 });
+    }
+    if (body.question.includes('502')) {
+      const err = makeError('RAGFLOW_SCOPE_VIOLATION', 'Retrieval scope violation', 502);
+      return HttpResponse.json(err.body, { status: 502 });
+    }
+    if (body.question.includes('503')) {
+      const err = makeError('RAGFLOW_UNAVAILABLE', 'RAGFlow unavailable', 503);
+      return HttpResponse.json(err.body, { status: 503 });
+    }
+
+    const conversationId = body.conversationId || `demo-conv-${Date.now()}`;
+    const record = demoConversations.get(conversationId) ?? {
+      messages: [] as DemoConversationRecord['messages'],
+    };
+    record.messages.push({ role: 'user', content: body.question });
+    record.messages.push({
+      role: 'assistant',
+      content: `answer for: ${body.question}`,
+      citations: [demoCitation],
+    });
+    demoConversations.set(conversationId, record);
+
+    return HttpResponse.json({
+      answer: `answer for: ${body.question}`,
+      citations: [demoCitation],
+      conversationId,
+      ragflowSessionId: 'demo-session-1',
+    });
+  }),
+
+  // GET /demo/conversations/:id
+  http.get(`${BASE}/demo/conversations/:conversationId`, ({ params, request }) => {
+    if (!bearerToken(request)) {
+      const err = makeError('AUTH_TOKEN_MISSING', 'Authentication token is required', 401);
+      return HttpResponse.json(err.body, { status: 401 });
+    }
+    const conversationId = params.conversationId as string;
+    const record = demoConversations.get(conversationId);
+    if (!record) {
+      const err = makeError('CONVERSATION_NOT_FOUND', 'Conversation not found', 404);
+      return HttpResponse.json(err.body, { status: 404 });
+    }
+    return HttpResponse.json({
+      conversationId,
+      ragflowSessionId: 'demo-session-1',
+      messages: record.messages.map((msg, index) => ({
+        messageId: `msg-${index}`,
+        role: msg.role,
+        content: msg.content,
+        citations: msg.citations ?? [],
+        status: 'completed',
+        createdAt: new Date().toISOString(),
+      })),
+    });
+  }),
+
   // POST /conversations - create conversation
   http.post(`${BASE}/conversations`, async ({ request }) => {
     await delay(300);

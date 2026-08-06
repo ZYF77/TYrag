@@ -11,7 +11,7 @@ import type {
 
 const BASE = '/enterprise/api/v1';
 
-class ApiError extends Error {
+export class ApiError extends Error {
   constructor(
     public status: number,
     public body: ErrorResponse,

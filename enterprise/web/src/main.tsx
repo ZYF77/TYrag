@@ -1,11 +1,12 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { App } from './App';
+import { isMockMode } from './api/mode';
 import './index.css';
 
 async function bootstrap() {
-  // Start MSW in development (mock mode)
-  if (import.meta.env.DEV) {
+  // MSW only runs in mock mode; demo/gateway use the real backend.
+  if (import.meta.env.DEV && isMockMode()) {
     const { worker } = await import('./api/mocks/browser');
     await worker.start({ onUnhandledRequest: 'bypass' });
   }

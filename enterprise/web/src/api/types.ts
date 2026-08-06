@@ -51,6 +51,55 @@ export interface Conversation {
   faultCode?: string | null;
 }
 
+export interface DemoDocumentStatus {
+  externalDocumentId: string;
+  sourceVersionId: string;
+  ragflowDatasetId: string | null;
+  ragflowDocumentId: string | null;
+  status: string;
+  stage: string | null;
+  deduplicated: boolean;
+}
+
+export interface DemoAskRequest {
+  externalDocumentId: string;
+  question: string;
+  conversationId?: string | null;
+}
+
+export interface DemoAskResponse {
+  answer: string;
+  citations: Citation[];
+  conversationId: string;
+  ragflowSessionId: string | null;
+}
+
+export interface DemoConversationMessage {
+  messageId: string;
+  role: 'user' | 'assistant';
+  content: string;
+  citations: Citation[];
+  status: string;
+  createdAt: string;
+}
+
+export interface DemoConversation {
+  conversationId: string;
+  ragflowSessionId: string | null;
+  messages: DemoConversationMessage[];
+}
+
+export interface UserPrincipal {
+  businessUserId: string;
+  displayName: string;
+  tenantId: string;
+  departmentIds: string[];
+  roles: string[];
+  capabilities: string[];
+  securityLevel: number;
+  mappingStatus: string;
+}
+
 export interface AskRequest {
   question: string;
   equipmentId?: string | null;

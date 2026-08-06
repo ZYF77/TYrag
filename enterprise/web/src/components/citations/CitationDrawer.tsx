@@ -5,15 +5,26 @@ import type { Citation } from '../../api/types';
 
 interface CitationDrawerProps {
   citationId: string | null;
+  citation?: Citation | null;
   onClose: () => void;
 }
 
-export function CitationDrawer({ citationId, onClose }: CitationDrawerProps) {
+export function CitationDrawer({
+  citationId,
+  citation: preloadedCitation,
+  onClose,
+}: CitationDrawerProps) {
   const [citation, setCitation] = useState<Citation | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (preloadedCitation) {
+      setCitation(preloadedCitation);
+      setLoading(false);
+      setError(null);
+      return;
+    }
     if (!citationId) {
       setCitation(null);
       return;
@@ -38,7 +49,7 @@ export function CitationDrawer({ citationId, onClose }: CitationDrawerProps) {
     return () => {
       cancelled = true;
     };
-  }, [citationId]);
+  }, [citationId, preloadedCitation]);
 
   return (
     <div className="flex flex-col h-full">

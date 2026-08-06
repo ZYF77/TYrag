@@ -7,6 +7,7 @@ interface ChatAreaProps {
   activeConversation: Conversation | null;
   messages: ChatMessage[];
   isStreaming: boolean;
+  inputDisabled?: boolean;
   onSend: (question: string) => void;
   onCancel: () => void;
   onCitationClick: (citationId: string) => void;
@@ -16,10 +17,13 @@ export function ChatArea({
   activeConversation,
   messages,
   isStreaming,
+  inputDisabled,
   onSend,
   onCancel,
   onCitationClick,
 }: ChatAreaProps) {
+  const disabled = inputDisabled ?? !activeConversation;
+
   return (
     <div className="flex flex-col h-full">
       <DeviceContextCard conversation={activeConversation} />
@@ -28,7 +32,7 @@ export function ChatArea({
         onSend={onSend}
         onCancel={onCancel}
         isStreaming={isStreaming}
-        disabled={!activeConversation}
+        disabled={disabled}
       />
     </div>
   );

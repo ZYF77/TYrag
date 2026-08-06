@@ -20,6 +20,7 @@ function errorConfig(code: string): {
 } {
   switch (code) {
     case 'AUTH_TOKEN_INVALID':
+    case 'AUTH_TOKEN_EXPIRED':
       return {
         icon: LogIn,
         bgColor: 'bg-amber-50',
@@ -27,6 +28,15 @@ function errorConfig(code: string): {
         textColor: 'text-amber-800',
         title: '登录已过期',
         suggestion: '请重新登录后继续使用。您的会话凭证已失效。',
+      };
+    case 'AUTH_TOKEN_MISSING':
+      return {
+        icon: LogIn,
+        bgColor: 'bg-amber-50',
+        borderColor: 'border-amber-200',
+        textColor: 'text-amber-800',
+        title: '未登录',
+        suggestion: '请配置有效的登录凭证后继续使用。',
       };
     case 'AUTH_USER_MAPPING_MISSING':
     case 'ACL_DENIED':
@@ -40,6 +50,15 @@ function errorConfig(code: string): {
         title: '权限不足',
         suggestion: '您没有权限访问此资源。如需访问请联系管理员。',
       };
+    case 'DOCUMENT_NOT_READY':
+      return {
+        icon: AlertTriangle,
+        bgColor: 'bg-amber-50',
+        borderColor: 'border-amber-200',
+        textColor: 'text-amber-800',
+        title: '文档未就绪',
+        suggestion: '文档仍在同步或解析中，请等待状态变为可查询后再提问。',
+      };
     case 'CONVERSATION_NOT_FOUND':
       return {
         icon: FileQuestion,
@@ -52,6 +71,8 @@ function errorConfig(code: string): {
     case 'RAGFLOW_UNAVAILABLE':
     case 'RAGFLOW_API_INCOMPATIBLE':
     case 'MODEL_TIMEOUT':
+    case 'GATEWAY_UNAVAILABLE':
+    case 'NETWORK_ERROR':
       return {
         icon: WifiOff,
         bgColor: 'bg-orange-50',
@@ -59,6 +80,15 @@ function errorConfig(code: string): {
         textColor: 'text-orange-800',
         title: '服务暂时不可用',
         suggestion: '知识库服务当前响应异常，部分功能降级。请稍后重试。',
+      };
+    case 'RAGFLOW_SCOPE_VIOLATION':
+      return {
+        icon: ShieldAlert,
+        bgColor: 'bg-red-50',
+        borderColor: 'border-red-200',
+        textColor: 'text-red-800',
+        title: '检索范围异常',
+        suggestion: '检索返回了无权访问的文档，本次回答已拦截，请联系管理员检查。',
       };
     default:
       return {
