@@ -38,7 +38,7 @@ from enterprise.gateway.sync.sync_service import (
     DocumentSyncError, DocumentNotFoundError, SyncService,
 )
 from enterprise.gateway.sync.worker import OutboxWorker, StatusReconciler
-from enterprise.gateway.config import config
+from enterprise.gateway.config import config, require_ragflow_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -61,10 +61,9 @@ def _source_adapter() -> SourceAdapter:
 
 
 def _ragflow_client() -> RAGFlowDocumentClient:
-    api_key = os.environ.get("RAGFLOW_API_KEY", "stub-key")
     if _test_mode():
         return RAGFlowDocumentStub()
-    return RAGFlowDocumentClient(api_key=api_key)
+    return RAGFlowDocumentClient(api_key=require_ragflow_api_key())
 
 
 def _sync_service(db: aiosqlite.Connection) -> SyncService:
@@ -84,6 +83,8 @@ async def get_db() -> aiosqlite.Connection:
 async def lifespan(app: FastAPI):
     global _db
     _db = await get_db()
+    if not _test_mode():
+        require_ragflow_api_key()
     started_tasks: list[asyncio.Task] = []
     if config.worker_enabled and not _test_mode():
         service = _sync_service(_db)

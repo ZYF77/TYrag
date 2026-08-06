@@ -228,6 +228,21 @@ class TestSyncService:
         await db.close()
 
     @pytest.mark.asyncio
+    async def test_upload_triggers_ragflow_parse(self):
+        db = await init_db(":memory:")
+        content = b"manual to parse"
+        client = RAGFlowDocumentStub()
+        service = SyncService(db, SourceStub(content), client)
+        event = make_event(content)
+        doc, _ = await service.process_event(event)
+        assert doc.sync_status == "parsing"
+        assert len(client._parse_calls) == 1
+        dataset_id, document_ids = client._parse_calls[0]
+        assert document_ids == [doc.ragflow_document_id]
+        assert doc.ragflow_dataset_id == dataset_id
+        await db.close()
+
+    @pytest.mark.asyncio
     async def test_new_version_supersedes_old(self):
         db = await init_db(":memory:")
         client = RAGFlowDocumentStub()

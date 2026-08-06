@@ -18,6 +18,7 @@ from enterprise.gateway.models.ext_user_map import (  # noqa: E402
     ExtUserMapRepo,
 )
 from enterprise.gateway.query import acl_store  # noqa: E402
+from enterprise.gateway.query import router as query_router  # noqa: E402
 from enterprise.gateway.sync.models import (  # noqa: E402
     ExtDocumentMap,
     init_db,
@@ -337,6 +338,94 @@ class TestAsk:
             assert resp.json()["code"] == "DOCUMENT_NOT_READY"
 
     @pytest.mark.asyncio
+    async def test_ask_passes_authorized_doc_ids_and_drops_unauthorized_chunks(
+        self, isolated_demo_db
+    ):
+        await _insert_ready_document(
+            isolated_demo_db, doc_id="DOC-SCOPE-001"
+        )
+        token = _make_token()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            first = await c.post(
+                "/enterprise/api/v1/demo/ask",
+                headers=_headers(token),
+                json={
+                    "externalDocumentId": "DOC-SCOPE-001",
+                    "question": "第一问",
+                },
+            )
+            assert first.status_code == 200
+            stub = query_router._query_stub
+            assert stub._last_completion_body["doc_ids"] == "doc-1"
+
+            stub._extra_chunks.append(
+                {
+                    "id": "chunk-2",
+                    "content": "未授权文档内容",
+                    "document_id": "doc-2",
+                    "document_name": "other.pdf",
+                    "positions": [[1, 0.1, 0.2, 0.8, 0.4]],
+                }
+            )
+            conversation_id = first.json()["conversationId"]
+            second = await c.post(
+                "/enterprise/api/v1/demo/ask",
+                headers=_headers(token),
+                json={
+                    "externalDocumentId": "DOC-SCOPE-001",
+                    "conversationId": conversation_id,
+                    "question": "第二问",
+                },
+            )
+            assert second.status_code == 200
+            assert [
+                c["documentId"] for c in second.json()["citations"]
+            ] == ["doc-1"]
+
+    @pytest.mark.asyncio
+    async def test_ask_fails_closed_when_ragflow_returns_out_of_scope_chunk(
+        self, isolated_demo_db
+    ):
+        await _insert_ready_document(
+            isolated_demo_db, doc_id="DOC-SCOPE-002"
+        )
+        token = _make_token()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            first = await c.post(
+                "/enterprise/api/v1/demo/ask",
+                headers=_headers(token),
+                json={
+                    "externalDocumentId": "DOC-SCOPE-002",
+                    "question": "hello",
+                },
+            )
+            assert first.status_code == 200
+            stub = query_router._query_stub
+            stub._ignore_doc_scope = True
+            stub._extra_chunks.append(
+                {
+                    "id": "chunk-9",
+                    "content": "越权内容",
+                    "document_id": "doc-9",
+                    "document_name": "other.pdf",
+                    "positions": [[1, 0.1, 0.2, 0.8, 0.4]],
+                }
+            )
+            resp = await c.post(
+                "/enterprise/api/v1/demo/ask",
+                headers=_headers(token),
+                json={
+                    "externalDocumentId": "DOC-SCOPE-002",
+                    "conversationId": first.json()["conversationId"],
+                    "question": "hello again",
+                },
+            )
+            assert resp.status_code == 502
+            assert resp.json()["code"] == "RAGFLOW_SCOPE_VIOLATION"
+
+    @pytest.mark.asyncio
     async def test_ask_returns_404_for_unknown_document(self):
         token = _make_token()
         transport = ASGITransport(app=app)
@@ -446,6 +535,91 @@ class TestOwnership:
             )
             assert ask.status_code == 403
             assert ask.json()["code"] == "ACL_DENIED"
+
+    @pytest.mark.asyncio
+    async def test_same_conversation_id_is_scoped_per_user(
+        self, isolated_demo_db
+    ):
+        await _insert_ready_document(
+            isolated_demo_db,
+            doc_id="DOC-OWN-004",
+            allowed_users=("biz-user-001", "biz-user-003"),
+        )
+        token_a = _make_token()
+        token_b = _make_token(user="biz-user-003")
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            created_a = await c.post(
+                "/enterprise/api/v1/demo/ask",
+                headers=_headers(token_a),
+                json={
+                    "externalDocumentId": "DOC-OWN-004",
+                    "question": "user A",
+                },
+            )
+            assert created_a.status_code == 200
+            conversation_id = created_a.json()["conversationId"]
+            session_a = created_a.json()["ragflowSessionId"]
+
+            created_b = await c.post(
+                "/enterprise/api/v1/demo/ask",
+                headers=_headers(token_b),
+                json={
+                    "externalDocumentId": "DOC-OWN-004",
+                    "conversationId": conversation_id,
+                    "question": "user B",
+                },
+            )
+            assert created_b.status_code == 404
+            assert (
+                created_b.json()["code"] == "CONVERSATION_NOT_FOUND"
+            )
+
+            history_a = await c.get(
+                f"/enterprise/api/v1/demo/conversations/{conversation_id}",
+                headers=_headers(token_a),
+            )
+            assert history_a.status_code == 200
+            assert history_a.json()["ragflowSessionId"] == session_a
+
+            async with isolated_demo_db.execute(
+                "SELECT COUNT(*) AS n FROM ext_conversation_map "
+                "WHERE business_conversation_id=?",
+                (conversation_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+            assert row["n"] == 1
+
+    @pytest.mark.asyncio
+    async def test_history_rechecks_document_acl(self, isolated_demo_db):
+        await _insert_ready_document(isolated_demo_db, doc_id="DOC-OWN-005")
+        token = _make_token()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            created = await c.post(
+                "/enterprise/api/v1/demo/ask",
+                headers=_headers(token),
+                json={
+                    "externalDocumentId": "DOC-OWN-005",
+                    "question": "hello",
+                },
+            )
+            assert created.status_code == 200
+            conversation_id = created.json()["conversationId"]
+
+            await isolated_demo_db.execute(
+                "DELETE FROM demo_document_acl "
+                "WHERE tenant_id='customer-a' "
+                "AND external_document_id='DOC-OWN-005'"
+            )
+            await isolated_demo_db.commit()
+
+            history = await c.get(
+                f"/enterprise/api/v1/demo/conversations/{conversation_id}",
+                headers=_headers(token),
+            )
+            assert history.status_code == 403
+            assert history.json()["code"] == "ACL_DENIED"
 
 
 @pytest.mark.asyncio

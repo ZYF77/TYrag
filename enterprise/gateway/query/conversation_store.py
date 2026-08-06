@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS ext_conversation_map (
     status TEXT NOT NULL DEFAULT 'active',
     created_at TEXT NOT NULL,
     last_message_at TEXT,
-    UNIQUE(tenant_id, business_conversation_id)
+    UNIQUE(tenant_id, business_user_id, business_conversation_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_ext_conversation_user
@@ -109,7 +109,8 @@ async def upsert_conversation_map(
             equipment_id, fixed_asset_no, current_fault_code,
             status, created_at, last_message_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
-           ON CONFLICT(tenant_id, business_conversation_id) DO UPDATE SET
+           ON CONFLICT(tenant_id, business_user_id, business_conversation_id)
+           DO UPDATE SET
              ragflow_chat_id=excluded.ragflow_chat_id,
              ragflow_session_id=COALESCE(
                  excluded.ragflow_session_id, ragflow_session_id

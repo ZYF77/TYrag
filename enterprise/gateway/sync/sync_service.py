@@ -283,6 +283,20 @@ class SyncService:
         except RAGFlowAPIError as e:
             raise self._ragflow_error(e) from e
 
+        run = (doc.pipeline_status or "UNSTART").upper()
+        if run not in ("DONE", "3"):
+            try:
+                await self.ragflow_client.start_parsing(
+                    dataset_id, [doc.ragflow_document_id],
+                )
+            except RAGFlowAPIError as e:
+                raise self._ragflow_error(e) from e
+            doc.pipeline_status = "RUNNING"
+            await update_mapping_status(
+                self.db, doc, doc.sync_status,
+                pipeline_status=doc.pipeline_status,
+            )
+
         try:
             docs = await self.ragflow_client.list_documents(dataset_id)
         except RAGFlowAPIError as e:

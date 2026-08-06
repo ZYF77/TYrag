@@ -2,7 +2,7 @@
 
 import os
 import pytest
-from enterprise.gateway.config import GatewayConfig
+from enterprise.gateway.config import GatewayConfig, require_ragflow_api_key
 
 
 class TestGatewayConfig:
@@ -37,3 +37,19 @@ class TestGatewayConfig:
         cfg = GatewayConfig()
         assert cfg.pg_password == ""
         assert "infini" not in cfg.ragflow_base_url.lower()
+
+    def test_ragflow_api_key_required_outside_test_mode(self, monkeypatch):
+        monkeypatch.delenv("RAGFLOW_API_KEY", raising=False)
+        monkeypatch.setenv("ENTERPRISE_TEST_MODE", "0")
+        with pytest.raises(RuntimeError):
+            require_ragflow_api_key()
+
+    def test_ragflow_api_key_allowed_in_test_mode(self, monkeypatch):
+        monkeypatch.delenv("RAGFLOW_API_KEY", raising=False)
+        monkeypatch.setenv("ENTERPRISE_TEST_MODE", "1")
+        assert require_ragflow_api_key() == "stub-key"
+
+    def test_ragflow_api_key_returns_configured_value(self, monkeypatch):
+        monkeypatch.setenv("RAGFLOW_API_KEY", "ragflow-key")
+        monkeypatch.setenv("ENTERPRISE_TEST_MODE", "0")
+        assert require_ragflow_api_key() == "ragflow-key"

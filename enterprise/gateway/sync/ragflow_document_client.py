@@ -157,6 +157,22 @@ class RAGFlowDocumentClient:
                                      f"/api/v1/datasets/{dataset_id}/documents",
                                      rid, files=files)
 
+    async def start_parsing(
+        self,
+        dataset_id: str,
+        document_ids: list[str],
+        request_id: str | None = None,
+    ) -> dict:
+        """Trigger the public RAGFlow parse API for registered documents."""
+        rid = request_id or self._new_request_id()
+        return await self._run_sync(
+            self._sync_request,
+            "POST",
+            f"/api/v1/datasets/{dataset_id}/documents/parse",
+            rid,
+            json_data={"document_ids": document_ids},
+        )
+
     async def list_documents(
         self,
         dataset_id: str,
@@ -249,6 +265,7 @@ class RAGFlowDocumentStub(RAGFlowDocumentClient):
         self.run_status = "UNSTART"
         self._status_updates: list[tuple[str, list[str], bool]] = []
         self._deleted: list[str] = []
+        self._parse_calls: list[tuple[str, list[str]]] = []
 
     async def create_dataset(self, name: str, description: str = "",
                              request_id: str | None = None) -> dict:
@@ -272,6 +289,23 @@ class RAGFlowDocumentStub(RAGFlowDocumentClient):
                          "meta_fields": {}, "enabled": 1}]}
         self._documents[doc_id] = doc
         return doc
+
+    async def start_parsing(
+        self,
+        dataset_id: str,
+        document_ids: list[str],
+        request_id: str | None = None,
+    ) -> dict:
+        if self._fail_next:
+            raise RAGFlowAPIError("Stub: simulated RAGFlow failure", 503)
+        self._parse_calls.append((dataset_id, list(document_ids)))
+        for doc_id in document_ids:
+            doc = self._documents.get(doc_id)
+            if doc and doc["data"][0].get("run") in (
+                None, "", "UNSTART", "0",
+            ):
+                doc["data"][0]["run"] = "RUNNING"
+        return {"code": 0, "data": True}
 
     async def list_documents(
         self,

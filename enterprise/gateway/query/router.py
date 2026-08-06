@@ -19,6 +19,7 @@ from enterprise.gateway.acl.schema import AclScope
 from enterprise.gateway.acl.scope import ScopeResolver, compile_scope
 from enterprise.gateway.auth.middleware import require_user_principal
 from enterprise.gateway.auth.user_principal import UserPrincipal
+from enterprise.gateway.config import require_ragflow_api_key
 from enterprise.gateway.query import acl_store
 from enterprise.gateway.query import conversation_store
 from enterprise.gateway.query.ragflow_client import (
@@ -62,9 +63,7 @@ def _query_client():
         if _query_stub is None:
             _query_stub = RAGFlowQueryStub()
         return _query_stub
-    return RAGFlowQueryClient(
-        api_key=os.environ.get("RAGFLOW_API_KEY", "stub-key")
-    )
+    return RAGFlowQueryClient(api_key=require_ragflow_api_key())
 
 
 def _error(
@@ -141,7 +140,7 @@ async def _resolve_authorized_document(
         "v1",
     )
     if not doc:
-        return None, None
+        return None, None, None
     context = AclContext(principal=principal)
     await acl_store.ensure_schema(db)
     scope = await compile_scope(
@@ -149,10 +148,10 @@ async def _resolve_authorized_document(
         DemoScopeResolver(db, external_document_id),
     )
     if scope.is_empty:
-        return None, _error(
+        return None, None, _error(
             403, "ACL_DENIED", "Access denied", request_id
         )
-    return doc, None
+    return doc, scope, None
 
 
 class DemoDocumentResponse(BaseModel):
@@ -431,7 +430,7 @@ async def get_document_status(
     principal: UserPrincipal = Depends(require_user_principal),
 ):
     request_id = str(uuid.uuid4())
-    doc, acl_error = await _resolve_authorized_document(
+    doc, _scope, acl_error = await _resolve_authorized_document(
         db, principal, external_document_id, request_id
     )
     if acl_error:
@@ -467,7 +466,7 @@ async def ask(
     principal: UserPrincipal = Depends(require_user_principal),
 ):
     request_id = str(uuid.uuid4())
-    doc, acl_error = await _resolve_authorized_document(
+    doc, scope, acl_error = await _resolve_authorized_document(
         db, principal, req.externalDocumentId, request_id
     )
     if acl_error:
@@ -527,7 +526,10 @@ async def ask(
             raise RAGFlowAPIError("Chat id missing after create", 502)
 
         completion = await client.chat_completion(
-            chat_id, req.question, session_id=session_id
+            chat_id,
+            req.question,
+            session_id=session_id,
+            doc_ids=list(scope.document_ids),
         )
     except RAGFlowAPIError as e:
         code = (
@@ -555,12 +557,30 @@ async def ask(
         if isinstance(reference, dict)
         else []
     )
-    citations = [
+    raw_citations = [
         _to_citation(c, index)
         for index, c in enumerate(raw_chunks)
         if isinstance(c, dict)
     ]
-    citations = _filter_citations(citations, acl_scope_from_doc(doc))
+    out_of_scope = [
+        c
+        for c in raw_citations
+        if c.documentId and c.documentId not in set(scope.document_ids)
+    ]
+    if out_of_scope:
+        logger.warning(
+            "Query demo RAGFlow returned out-of-scope chunks "
+            "document_ids=%s request_id=%s",
+            sorted({c.documentId for c in out_of_scope}),
+            request_id,
+        )
+        return _error(
+            502,
+            "RAGFLOW_SCOPE_VIOLATION",
+            "RAGFlow retrieval returned an out-of-scope document",
+            request_id,
+        )
+    citations = _filter_citations(raw_citations, scope)
     ragflow_session_id = (
         data.get("session_id") if isinstance(data, dict) else None
     )
@@ -598,14 +618,6 @@ async def ask(
         citations=citations,
         conversationId=conversation_id,
         ragflowSessionId=ragflow_session_id,
-    )
-
-
-def acl_scope_from_doc(doc: ExtDocumentMap) -> AclScope:
-    return AclScope.materialized(
-        (doc.ragflow_dataset_id,),
-        (doc.ragflow_document_id,),
-        policy_version="query-demo",
     )
 
 
@@ -679,14 +691,18 @@ async def get_conversation(
             request_id,
         )
 
-    doc = await get_mapping(
+    doc, scope, acl_error = await _resolve_authorized_document(
         db,
-        principal.tenant_id,
-        "DEMO",
+        principal,
         conversation["external_document_id"],
-        "v1",
+        request_id,
     )
-    scope = acl_scope_from_doc(doc) if doc else AclScope.empty("query-demo")
+    if acl_error:
+        return acl_error
+    if doc is None:
+        return _error(
+            404, "DOCUMENT_NOT_FOUND", "Document not found", request_id
+        )
 
     ragflow_chat_id = conversation.get("ragflow_chat_id")
     ragflow_session_id = conversation.get("ragflow_session_id")

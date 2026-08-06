@@ -68,6 +68,37 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
         )
         return self._require_ok(result)
 
+    async def delete_chat(
+        self,
+        chat_id: str,
+        request_id: str | None = None,
+    ) -> dict:
+        rid = request_id or self._new_request_id()
+        return self._require_ok(
+            await self._run_sync(
+                self._sync_request,
+                "DELETE",
+                f"/api/v1/chats/{chat_id}",
+                rid,
+            )
+        )
+
+    async def delete_dataset(
+        self,
+        dataset_id: str,
+        request_id: str | None = None,
+    ) -> dict:
+        rid = request_id or self._new_request_id()
+        return self._require_ok(
+            await self._run_sync(
+                self._sync_request,
+                "DELETE",
+                "/api/v1/datasets",
+                rid,
+                json_data={"ids": [dataset_id]},
+            )
+        )
+
     async def get_session(
         self,
         chat_id: str,
@@ -88,6 +119,7 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
         chat_id: str,
         question: str,
         session_id: str | None = None,
+        doc_ids: list[str] | None = None,
         request_id: str | None = None,
     ) -> dict:
         rid = request_id or self._new_request_id()
@@ -98,6 +130,10 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
         }
         if session_id:
             body["session_id"] = session_id
+        if doc_ids:
+            # RAGFlow v0.26.4 /chat/completions expects a comma-separated
+            # string for doc_ids; a JSON list breaks its attachment parser.
+            body["doc_ids"] = ",".join(doc_ids)
         result = await self._run_sync(
             self._sync_request,
             "POST",
@@ -115,6 +151,9 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         super().__init__()
         self._chats: dict[str, dict] = {}
         self._sessions: dict[str, dict] = {}
+        self._extra_chunks: list[dict] = []
+        self._last_completion_body: dict | None = None
+        self._ignore_doc_scope = False
 
     async def start_parsing(
         self,
@@ -145,17 +184,52 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         self._chats[chat["id"]] = chat
         return {"code": 0, "data": chat}
 
+    async def delete_chat(
+        self,
+        chat_id: str,
+        request_id: str | None = None,
+    ) -> dict:
+        self._chats.pop(chat_id, None)
+        return {"code": 0, "data": True}
+
+    async def delete_dataset(
+        self,
+        dataset_id: str,
+        request_id: str | None = None,
+    ) -> dict:
+        self._datasets.pop(dataset_id, None)
+        return {"code": 0, "data": True}
+
     async def chat_completion(
         self,
         chat_id: str,
         question: str,
         session_id: str | None = None,
+        doc_ids: list[str] | None = None,
         request_id: str | None = None,
     ) -> dict:
+        self._last_completion_body = {
+            "chat_id": chat_id,
+            "question": question,
+            "session_id": session_id,
+            "doc_ids": ",".join(doc_ids) if doc_ids else None,
+        }
         session_id = session_id or "stub-session"
         session = self._sessions.setdefault(
             session_id, {"messages": [], "reference": []}
         )
+        chunks = [
+            {
+                "id": "chunk-1",
+                "content": "故障码 E-104 时先检查液压油位。",
+                "document_id": "doc-1",
+                "document_name": "manual.pdf",
+                "positions": [[3, 0.1, 0.2, 0.8, 0.4]],
+            }
+        ] + list(self._extra_chunks)
+        if doc_ids and not self._ignore_doc_scope:
+            allowed = set(doc_ids)
+            chunks = [c for c in chunks if c.get("document_id") in allowed]
         session["messages"].append(
             {"role": "user", "content": question}
         )
@@ -165,25 +239,13 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
                 "content": f"stub answer for: {question}",
             }
         )
-        session["reference"].append(
-            {
-                "chunks": [
-                    {
-                        "id": "chunk-1",
-                        "content": "故障码 E-104 时先检查液压油位。",
-                        "document_id": "doc-1",
-                        "document_name": "manual.pdf",
-                        "positions": [[3, 0.1, 0.2, 0.8, 0.4]],
-                    }
-                ]
-            }
-        )
+        session["reference"].append({"chunks": chunks})
         return {
             "code": 0,
             "data": {
                 "answer": f"stub answer for: {question}",
                 "session_id": session_id,
-                "reference": {"chunks": session["reference"][-1]["chunks"]},
+                "reference": {"chunks": chunks},
             },
         }
 

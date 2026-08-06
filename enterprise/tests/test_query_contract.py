@@ -32,50 +32,64 @@ class TestRAGFlowQueryContract:
     async def test_document_parse_chat_and_citation_contract(self):
         client = RAGFlowQueryClient(api_key=API_KEY)
         dataset_name = f"contract-{uuid.uuid4().hex[:12]}"
-        created = await client.create_dataset(dataset_name)
-        dataset_id = created["data"]["id"]
-
-        pdf_path = (
-            Path(__file__).resolve().parents[2]
-            / "ragflow"
-            / "test"
-            / "benchmark"
-            / "test_docs"
-            / "Doc1.pdf"
-        )
-        uploaded = await client.upload_document(
-            dataset_id, pdf_path.name, pdf_path.read_bytes()
-        )
-        document_id = uploaded["data"][0]["id"]
-
-        parsed = await client.start_parsing(dataset_id, [document_id])
-        assert parsed.get("code") == 0
-
-        done = False
-        for _ in range(24):
-            docs = await client.list_documents(
-                dataset_id, document_id=document_id
-            )
-            assert isinstance(docs, list)
-            if docs and docs[0].get("run") == "DONE":
-                done = True
-                break
-            await asyncio.sleep(5)
-        assert done, "document did not reach DONE in time"
-
         chat_name = f"contract-chat-{uuid.uuid4().hex[:12]}"
-        chat = await client.create_chat(chat_name, [dataset_id])
-        chat_id = chat["data"]["id"]
+        dataset_id = ""
+        chat_id = ""
+        try:
+            created = await client.create_dataset(dataset_name)
+            dataset_id = created["data"]["id"]
 
-        completion = await client.chat_completion(
-            chat_id, "What is RAGFlow?"
-        )
-        data = completion["data"]
-        assert data.get("answer")
-        reference = data.get("reference") or {}
-        chunks = reference.get("chunks") or []
-        assert chunks, "chat completion returned no reference chunks"
-        assert all(
-            chunk.get("id") and chunk.get("document_id")
-            for chunk in chunks
-        )
+            pdf_path = (
+                Path(__file__).resolve().parents[2]
+                / "ragflow"
+                / "test"
+                / "benchmark"
+                / "test_docs"
+                / "Doc1.pdf"
+            )
+            uploaded = await client.upload_document(
+                dataset_id, pdf_path.name, pdf_path.read_bytes()
+            )
+            document_id = uploaded["data"][0]["id"]
+
+            parsed = await client.start_parsing(dataset_id, [document_id])
+            assert parsed.get("code") == 0
+
+            done = False
+            for _ in range(24):
+                docs = await client.list_documents(
+                    dataset_id, document_id=document_id
+                )
+                assert isinstance(docs, list)
+                if docs and docs[0].get("run") == "DONE":
+                    done = True
+                    break
+                await asyncio.sleep(5)
+            assert done, "document did not reach DONE in time"
+
+            chat = await client.create_chat(chat_name, [dataset_id])
+            chat_id = chat["data"]["id"]
+
+            completion = await client.chat_completion(
+                chat_id,
+                "What is RAGFlow?",
+                doc_ids=[document_id],
+            )
+            data = completion["data"]
+            assert data.get("answer")
+            reference = data.get("reference") or {}
+            chunks = reference.get("chunks") or []
+            assert chunks, "chat completion returned no reference chunks"
+            assert all(
+                chunk.get("id") and chunk.get("document_id")
+                for chunk in chunks
+            )
+            assert all(
+                chunk.get("document_id") == document_id
+                for chunk in chunks
+            ), "doc_ids scope leaked chunks from another document"
+        finally:
+            if chat_id:
+                await client.delete_chat(chat_id)
+            if dataset_id:
+                await client.delete_dataset(dataset_id)

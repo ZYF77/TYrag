@@ -122,3 +122,17 @@ class GatewayConfig:
 
 # Singleton instance
 config = GatewayConfig()
+
+
+def require_ragflow_api_key() -> str:
+    """Return the configured RAGFlow API key or fail fast outside test mode.
+
+    A silently empty key would make every RAGFlow call fail later with an
+    opaque 401, so non-test startup and request paths must reject it early.
+    """
+    key = os.getenv("RAGFLOW_API_KEY", "").strip()
+    if not key and os.getenv("ENTERPRISE_TEST_MODE") != "1":
+        raise RuntimeError(
+            "RAGFLOW_API_KEY is required when ENTERPRISE_TEST_MODE != 1"
+        )
+    return key or "stub-key"
