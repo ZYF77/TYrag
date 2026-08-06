@@ -558,6 +558,28 @@ class TestFailureAndConfig:
                 poll_seconds=0,
             )
 
+    @pytest.mark.asyncio
+    async def test_collect_chunks_retries_empty_page_until_declared_total(self):
+        class FakeClient:
+            def __init__(self):
+                self.calls = 0
+
+            async def list_chunks(self, dataset_id, document_id, page, page_size):
+                self.calls += 1
+                if self.calls == 1:
+                    return {"data": {"chunks": [], "total": 2}}
+                return {"data": {"chunks": [{"id": "c1"}, {"id": "c2"}], "total": 2}}
+
+        collector = ParsingEvaluationCollector(EvaluationConfig())
+        chunks = await collector._collect_chunks(
+            FakeClient(),  # type: ignore[arg-type]
+            "ds",
+            "doc",
+            timeout_seconds=30,
+            poll_seconds=0,
+        )
+        assert len(chunks) == 2
+
     def test_env_dict_records_enterprise_commit_and_digests(self):
         env = _env_dict(
             "run-x",

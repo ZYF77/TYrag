@@ -246,20 +246,9 @@ class ParsingEvaluationCollector:
         doc_info = await self._wait_ragflow_terminal(
             client, dataset_id, document_id, self.config.timeout_seconds
         )
-        chunks: list[dict[str, Any]] = []
-        page = 1
-        page_size = 100
-        while True:
-            result = await client.list_chunks(
-                dataset_id, document_id, page=page, page_size=page_size
-            )
-            data = result.get("data") or {}
-            batch = data.get("chunks") or []
-            chunks.extend(batch)
-            total = int(data.get("total") or 0)
-            if not batch or len(chunks) >= total or len(batch) < page_size:
-                break
-            page += 1
+        chunks = await self._collect_chunks(
+            client, dataset_id, document_id, self.config.timeout_seconds
+        )
         normalized = [
             {
                 "id": chunk.get("id"),
@@ -300,6 +289,36 @@ class ParsingEvaluationCollector:
             f"RAGFlow document did not reach terminal run status: "
             f"{document_id} run={last.get('run')}"
         )
+
+    async def _collect_chunks(
+        self,
+        client: RAGFlowDocumentClient,
+        dataset_id: str,
+        document_id: str,
+        timeout_seconds: int,
+        poll_seconds: float = 5.0,
+    ) -> list[dict[str, Any]]:
+        deadline = time.monotonic() + max(1, timeout_seconds)
+        page_size = 100
+        while True:
+            chunks: list[dict[str, Any]] = []
+            page = 1
+            while True:
+                result = await client.list_chunks(
+                    dataset_id, document_id, page=page, page_size=page_size
+                )
+                data = result.get("data") or {}
+                batch = data.get("chunks") or []
+                chunks.extend(batch)
+                total = int(data.get("total") or 0)
+                if not batch:
+                    break
+                if len(chunks) >= total or len(batch) < page_size:
+                    break
+                page += 1
+            if chunks or time.monotonic() >= deadline:
+                return chunks
+            await asyncio.sleep(poll_seconds)
 
     async def collect_citations(
         self,
