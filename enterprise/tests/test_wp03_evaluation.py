@@ -523,6 +523,41 @@ class TestReportWriter:
 
 
 class TestFailureAndConfig:
+    @pytest.mark.asyncio
+    async def test_wait_ragflow_terminal_polls_until_done(self):
+        class FakeClient:
+            def __init__(self):
+                self.responses = [{"run": "RUNNING"}, {"run": "DONE"}]
+
+            async def list_documents(self, dataset_id, document_id):
+                return [self.responses.pop(0)]
+
+        collector = ParsingEvaluationCollector(EvaluationConfig())
+        doc = await collector._wait_ragflow_terminal(
+            FakeClient(),  # type: ignore[arg-type]
+            "ds",
+            "doc",
+            timeout_seconds=30,
+            poll_seconds=0,
+        )
+        assert doc["run"] == "DONE"
+
+    @pytest.mark.asyncio
+    async def test_wait_ragflow_terminal_timeout_fails_closed(self):
+        class FakeClient:
+            async def list_documents(self, dataset_id, document_id):
+                return [{"run": "RUNNING"}]
+
+        collector = ParsingEvaluationCollector(EvaluationConfig())
+        with pytest.raises(TimeoutError):
+            await collector._wait_ragflow_terminal(
+                FakeClient(),  # type: ignore[arg-type]
+                "ds",
+                "doc",
+                timeout_seconds=0.01,
+                poll_seconds=0,
+            )
+
     def test_env_dict_records_enterprise_commit_and_digests(self):
         env = _env_dict(
             "run-x",

@@ -35,6 +35,8 @@ ALLOWED_CATEGORIES = {
     "zh_en_mixed",
 }
 
+_RAGFLOW_TERMINAL_RUNS = {"DONE", "3", "FAIL", "4", "CANCEL", "2"}
+
 
 @dataclass
 class EvaluationConfig:
@@ -241,10 +243,9 @@ class ParsingEvaluationCollector:
             base_url=self.config.ragflow_base_url,
             api_key=self.config.ragflow_api_key,
         )
-        docs = await client.list_documents(dataset_id, document_id=document_id)
-        if not docs:
-            raise RuntimeError(f"RAGFlow document not found: {document_id}")
-        doc_info = docs[0]
+        doc_info = await self._wait_ragflow_terminal(
+            client, dataset_id, document_id, self.config.timeout_seconds
+        )
         chunks: list[dict[str, Any]] = []
         page = 1
         page_size = 100
@@ -273,6 +274,32 @@ class ParsingEvaluationCollector:
             for chunk in chunks
         ]
         return doc_info, normalized
+
+    async def _wait_ragflow_terminal(
+        self,
+        client: RAGFlowDocumentClient,
+        dataset_id: str,
+        document_id: str,
+        timeout_seconds: int,
+        poll_seconds: float = 5.0,
+    ) -> dict[str, Any]:
+        deadline = time.monotonic() + timeout_seconds
+        last: dict[str, Any] = {}
+        while time.monotonic() < deadline:
+            docs = await client.list_documents(
+                dataset_id, document_id=document_id
+            )
+            if not docs:
+                raise RuntimeError(f"RAGFlow document not found: {document_id}")
+            last = docs[0]
+            run = str(last.get("run") or "").upper()
+            if run in _RAGFLOW_TERMINAL_RUNS:
+                return last
+            await asyncio.sleep(poll_seconds)
+        raise TimeoutError(
+            f"RAGFlow document did not reach terminal run status: "
+            f"{document_id} run={last.get('run')}"
+        )
 
     async def collect_citations(
         self,
