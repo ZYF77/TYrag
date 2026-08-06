@@ -388,6 +388,12 @@ _REPEAT_EXCLUDED = {
     "progress_msg",
 }
 
+_PARSE_EXCLUDED = _REPEAT_EXCLUDED | {
+    "quality_status",
+    "citation_match_count",
+    "citation_page_accuracy",
+}
+
 
 def _normalized_chunk_signature(chunk: dict[str, Any]) -> dict[str, Any]:
     positions: list[list[float]] = []
@@ -407,28 +413,70 @@ def _normalized_chunk_signature(chunk: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def repeatability_hash(
-    documents: list[dict[str, Any]],
-    chunks: list[list[dict[str, Any]]] | None = None,
-) -> str:
-    """Stable hash excluding runtime IDs, timestamps, and durations."""
-    stable_docs = [
-        {k: v for k, v in doc.items() if k not in _REPEAT_EXCLUDED}
-        for doc in documents
-    ]
-    payload: dict[str, Any] = {"documents": stable_docs}
-    if chunks is not None:
-        payload["chunks"] = [
-            [_normalized_chunk_signature(chunk) for chunk in chunk_list]
-            for chunk_list in chunks
-        ]
+def _stable_result_payload(
+    result: dict[str, Any], include_e2e: bool
+) -> dict[str, Any]:
+    metrics = result.get("metrics") or {}
+    excluded = _REPEAT_EXCLUDED if include_e2e else _PARSE_EXCLUDED
+    payload: dict[str, Any] = {
+        "sample_id": result.get("sample_id"),
+        "file_sha256": metrics.get("file_sha256"),
+        "metrics": {k: v for k, v in metrics.items() if k not in excluded},
+        "chunks": [
+            _normalized_chunk_signature(chunk)
+            for chunk in result.get("chunks") or []
+        ],
+    }
+    if include_e2e:
+        payload["quality_reasons"] = result.get("quality_reasons")
+        payload["sync_status"] = result.get("sync_status")
+    return payload
+
+
+def _sha256_json(value: Any) -> str:
     stable = json.dumps(
-        payload,
+        value,
         sort_keys=True,
         ensure_ascii=False,
         separators=(",", ":"),
     )
     return hashlib.sha256(stable.encode("utf-8")).hexdigest()
+
+
+def parse_repeatability_hash(results: list[dict[str, Any]]) -> str:
+    """Stable hash for parser reproducibility, excluding e2e citation/status."""
+    return _sha256_json(
+        {"documents": [_stable_result_payload(result, False) for result in results]}
+    )
+
+
+def e2e_repeatability_hash(results: list[dict[str, Any]]) -> str:
+    """Stable hash for end-to-end reproducibility, including citations/status."""
+    return _sha256_json(
+        {"documents": [_stable_result_payload(result, True) for result in results]}
+    )
+
+
+def repeatability_hash(
+    documents: list[dict[str, Any]],
+    chunks: list[list[dict[str, Any]]] | None = None,
+    *,
+    results: list[dict[str, Any]] | None = None,
+) -> str:
+    """Stable hash excluding runtime IDs, timestamps, and durations."""
+    if results is not None:
+        return e2e_repeatability_hash(results)
+    pseudo_results = [
+        {
+            "sample_id": None,
+            "metrics": doc,
+            "quality_reasons": None,
+            "sync_status": None,
+            "chunks": chunks[index] if chunks is not None and index < len(chunks) else None,
+        }
+        for index, doc in enumerate(documents)
+    ]
+    return e2e_repeatability_hash(pseudo_results)
 
 
 def summarize_documents(documents: list[dict[str, Any]]) -> dict[str, Any]:

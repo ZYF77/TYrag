@@ -393,6 +393,7 @@ class ParsingEvaluationCollector:
             )
         payload = self._payload_for(sample, pdf_path, run_id)
         content = pdf_path.read_bytes()
+        file_sha256 = hashlib.sha256(content).hexdigest()
         await asyncio.to_thread(
             self.store.put,
             payload["source"]["objectKey"],
@@ -411,6 +412,7 @@ class ParsingEvaluationCollector:
             metrics = {
                 "document_id": None,
                 "dataset_id": sync_doc.get("ragflowDatasetId"),
+                "file_sha256": file_sha256,
                 "parsing_status": "FAIL",
                 "error_code": (
                     (sync_doc.get("error") or {}).get("code")
@@ -451,6 +453,7 @@ class ParsingEvaluationCollector:
             wall_clock_duration_seconds=wall_clock,
             citation_results=citation_results,
         )
+        metrics["file_sha256"] = file_sha256
         citation_expected = bool(sample.get("citation_questions")) and (
             not self.config.skip_citations
         )

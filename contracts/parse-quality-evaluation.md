@@ -101,10 +101,16 @@ evaluation_contract / evaluation_contract_version
 正式 baseline 只在工作树干净时生成；工作树不干净时必须拒绝运行，或使用
 `--allow-dirty` 显式标记为非正式、不可复现结果，不得默认生成正式 baseline。
 
-`metrics_hash` 用于完整产物一致性；`repeatability_hash` 用于比较同一样本两次
-fresh parse 的语义结果，必须排除 dataset/document/task/event/run ID、时间戳、
-解析耗时和临时路径，保留规范化 Chunk 文本、页码、坐标、表格结果、关键字段
-结果、质量指标和 reason codes。报告同时提供 `artifact_hash` 校验报告文件完整性。
+`metrics_hash` 用于完整产物一致性；`parse_repeatability_hash` 用于比较同一样本
+两次 fresh parse 的解析语义结果（Chunk 文本、页码、坐标、表格、关键字段），
+`e2e_repeatability_hash` 进一步纳入 Citation、`quality_status`、`quality_reasons`
+和 `sync_status`。两个 hash 都必须排除 dataset/document/task/event/run ID、
+时间戳、解析耗时和临时路径，并保留 `sample_id`、`file_sha256`、规范化 Chunk
+文本、页码、坐标、表格结果、关键字段结果、质量指标和 reason codes。
+报告同时提供 `artifact_hash` 校验报告文件完整性。
+
+基于已保存 fresh-parse 结果重新计算 hash 时，报告必须记录原始解析 Run ID、
+recompute commit、是否发生重新解析（`reparsed=true/false`）。
 
 ## 6. 阈值
 

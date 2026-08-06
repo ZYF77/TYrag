@@ -182,6 +182,11 @@ def _baseline_markdown(
         f"- failed: {summary.get('failed_count')}",
         f"- Metrics hash: `{summary.get('metrics_hash', '')}`",
         f"- Repeatability hash: `{summary.get('repeatability_hash', '')}`",
+        f"- Parse repeatability hash: `{summary.get('parse_repeatability_hash', '')}`",
+        f"- E2E repeatability hash: `{summary.get('e2e_repeatability_hash', '')}`",
+        f"- 原始解析 Run ID: {_md_escape((summary.get('recompute') or {}).get('original_parse_run_id', run_id))}",
+        f"- 是否重新解析: {_md_escape((summary.get('recompute') or {}).get('reparsed', True))}",
+        f"- Recompute commit: {_md_escape((summary.get('recompute') or {}).get('recompute_commit') or environment.get('enterprise_commit', ''))}",
         "",
         "## 环境",
         "",
@@ -285,6 +290,12 @@ def write_reports(
         "environment": environment,
         "command": command,
         "documents": results,
+        "recompute": summary.get("recompute")
+        or {
+            "original_parse_run_id": run_id,
+            "reparsed": True,
+            "recomputed_from_saved_results": False,
+        },
     }
     artifact_hash = json_digest(report)
     report["artifact_hash"] = artifact_hash

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -22,8 +23,9 @@ from enterprise.scripts.wp03.collector import (  # noqa: E402
     load_manifest,
 )
 from enterprise.scripts.wp03.metrics import (  # noqa: E402
+    e2e_repeatability_hash,
     metrics_hash,
-    repeatability_hash,
+    parse_repeatability_hash,
     summarize_documents,
 )
 from enterprise.scripts.wp03.quality_gate import load_thresholds  # noqa: E402
@@ -55,12 +57,16 @@ def _git_state(root: Path) -> tuple[str, bool]:
         return "unknown", False
 
 
-def _classify_baseline(worktree_dirty: bool, allow_dirty: bool) -> str:
+def _classify_baseline(
+    worktree_dirty: bool, allow_dirty: bool, commit_unknown: bool = False
+) -> str:
     if worktree_dirty and not allow_dirty:
         raise RuntimeError(
             "refusing to create a formal baseline from a dirty worktree; "
             "pass --allow-dirty to mark the run informal"
         )
+    if commit_unknown:
+        return "informal_unknown_commit"
     if worktree_dirty:
         return "informal_dirty_worktree"
     return "formal"
@@ -139,6 +145,13 @@ async def _run_one_sample(
         return await collector.run_sample(sample, samples_dir, run_id)
     except Exception as exc:  # noqa: BLE001
         logging.exception("sample failed: %s", sample["sample_id"])
+        file_sha256 = None
+        try:
+            file_sha256 = hashlib.sha256(
+                (samples_dir / sample["file_name"]).read_bytes()
+            ).hexdigest()
+        except (OSError, KeyError, TypeError):
+            pass
         return {
             "sample_id": sample["sample_id"],
             "category": sample["category"],
@@ -148,6 +161,7 @@ async def _run_one_sample(
             "metrics": {
                 "document_id": None,
                 "dataset_id": None,
+                "file_sha256": file_sha256,
                 "parsing_status": "COLLECTION_ERROR",
                 "error_code": type(exc).__name__,
                 "parse_success": False,
@@ -217,8 +231,14 @@ async def _run(args: argparse.Namespace) -> int:
     metrics_list = [result["metrics"] for result in results]
     summary = summarize_documents(metrics_list)
     summary["metrics_hash"] = metrics_hash(metrics_list)
-    chunk_lists = [result.get("chunks") or [] for result in results]
-    summary["repeatability_hash"] = repeatability_hash(metrics_list, chunk_lists)
+    summary["parse_repeatability_hash"] = parse_repeatability_hash(results)
+    summary["e2e_repeatability_hash"] = e2e_repeatability_hash(results)
+    summary["repeatability_hash"] = summary["e2e_repeatability_hash"]
+    summary["recompute"] = {
+        "original_parse_run_id": run_id,
+        "reparsed": True,
+        "recomputed_from_saved_results": False,
+    }
     environment = _env_dict(
         run_id,
         Path(args.manifest),
@@ -227,7 +247,9 @@ async def _run(args: argparse.Namespace) -> int:
         tenant_id,
     )
     environment["baseline_classification"] = _classify_baseline(
-        environment["enterprise_worktree_dirty"], args.allow_dirty
+        environment["enterprise_worktree_dirty"],
+        args.allow_dirty,
+        environment.get("enterprise_commit") in (None, "", "unknown"),
     )
     command = _redacted_command(run_id, args)
     paths = write_reports(

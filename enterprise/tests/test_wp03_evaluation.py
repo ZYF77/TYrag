@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import sys
 from pathlib import Path
@@ -18,7 +19,9 @@ from enterprise.scripts.wp03.collector import (  # noqa: E402
 )
 from enterprise.scripts.wp03.metrics import (  # noqa: E402
     compute_document_metrics,
+    e2e_repeatability_hash,
     metrics_hash,
+    parse_repeatability_hash,
     repeatability_hash,
 )
 from enterprise.scripts.wp03.quality_gate import (  # noqa: E402
@@ -27,6 +30,7 @@ from enterprise.scripts.wp03.quality_gate import (  # noqa: E402
     load_thresholds,
 )
 from enterprise.scripts.wp03.report import _page_rows, write_reports  # noqa: E402
+from enterprise.scripts.wp03.recompute_hashes import recompute_report_hashes  # noqa: E402
 from enterprise.scripts.wp03.run_parsing_evaluation import (  # noqa: E402
     _classify_baseline,
     _env_dict,
@@ -270,6 +274,50 @@ class TestMetrics:
         assert first["parse_duration_seconds"] != second["parse_duration_seconds"]
         assert repeatability_hash([first]) == repeatability_hash([second])
 
+    def _result_dict(
+        self,
+        sample_id: str = "s1",
+        file_sha256: str = "a" * 64,
+        reasons: list[str] | None = None,
+    ) -> dict:
+        metrics = compute_document_metrics(_good_doc(), _good_chunks(), 1)
+        metrics["file_sha256"] = file_sha256
+        return {
+            "sample_id": sample_id,
+            "quality_reasons": reasons or ["PASSED"],
+            "sync_status": "ready",
+            "metrics": metrics,
+            "chunks": _good_chunks(),
+        }
+
+    def test_parse_repeatability_hash_changes_when_sample_id_changes(self):
+        first = self._result_dict(sample_id="s1")
+        second = self._result_dict(sample_id="s2")
+        assert parse_repeatability_hash([first]) != parse_repeatability_hash(
+            [second]
+        )
+
+    def test_e2e_repeatability_hash_changes_when_file_sha256_changes(self):
+        first = self._result_dict(file_sha256="a" * 64)
+        second = self._result_dict(file_sha256="b" * 64)
+        assert e2e_repeatability_hash([first]) != e2e_repeatability_hash(
+            [second]
+        )
+
+    def test_e2e_repeatability_hash_changes_when_reason_codes_change(self):
+        first = self._result_dict(reasons=["PASSED"])
+        second = self._result_dict(reasons=["PAGE_COVERAGE_BELOW_MIN"])
+        assert e2e_repeatability_hash([first]) != e2e_repeatability_hash(
+            [second]
+        )
+
+    def test_parse_repeatability_hash_ignores_reason_codes(self):
+        first = self._result_dict(reasons=["PASSED"])
+        second = self._result_dict(reasons=["PAGE_COVERAGE_BELOW_MIN"])
+        assert parse_repeatability_hash([first]) == parse_repeatability_hash(
+            [second]
+        )
+
     def test_repeatability_hash_ignores_runtime_resource_ids(self):
         first = compute_document_metrics(
             {**_good_doc(), "id": "doc-a", "dataset_id": "ds-a"},
@@ -488,6 +536,7 @@ class TestReportWriter:
         assert report["environment"]["enterprise_worktree_dirty"] is False
         assert report["thresholds_digest"] == "t1"
         assert report["artifact_hash"]
+        assert report["recompute"]["original_parse_run_id"] == "run-test"
         md = paths["markdown"].read_text(encoding="utf-8")
         assert "Thresholds digest: `t1`" in md
         assert "Citation 0/0" in md
@@ -523,6 +572,42 @@ class TestReportWriter:
 
 
 class TestFailureAndConfig:
+    def test_recompute_report_hashes_injects_file_sha256_and_metadata(self, tmp_path):
+        pdf = tmp_path / "s1.pdf"
+        pdf.write_bytes(b"pdf-bytes")
+        manifest = _manifest(
+            [
+                {
+                    "sample_id": "s1",
+                    "category": "digital_text",
+                    "file_name": "s1.pdf",
+                    "pages": 1,
+                    "ground_truth_fields": {},
+                }
+            ]
+        )
+        metrics = compute_document_metrics(_good_doc(), _good_chunks(), 1)
+        report = {
+            "run_id": "run-x",
+            "documents": [
+                {
+                    "sample_id": "s1",
+                    "quality_reasons": ["PASSED"],
+                    "sync_status": "ready",
+                    "metrics": metrics,
+                    "chunks": _good_chunks(),
+                }
+            ],
+            "summary": {},
+        }
+        recompute_report_hashes(report, manifest, tmp_path, "commit123")
+        assert report["documents"][0]["metrics"]["file_sha256"] == hashlib.sha256(
+            b"pdf-bytes"
+        ).hexdigest()
+        assert report["summary"]["recompute"]["original_parse_run_id"] == "run-x"
+        assert report["summary"]["recompute"]["reparsed"] is False
+        assert report["summary"]["recompute"]["recompute_commit"] == "commit123"
+
     @pytest.mark.asyncio
     async def test_wait_ragflow_terminal_polls_until_done(self):
         class FakeClient:
@@ -599,6 +684,10 @@ class TestFailureAndConfig:
             _classify_baseline(True, False)
         assert _classify_baseline(True, True) == "informal_dirty_worktree"
         assert _classify_baseline(False, False) == "formal"
+        assert (
+            _classify_baseline(False, False, commit_unknown=True)
+            == "informal_unknown_commit"
+        )
 
     @pytest.mark.asyncio
     async def test_collection_failure_maps_to_failed(self):

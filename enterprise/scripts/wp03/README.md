@@ -66,10 +66,21 @@ python enterprise/scripts/wp03/run_parsing_evaluation.py `
   --fresh-parse
 ```
 
-`repeatability_hash` 排除 dataset/document/task/event/run ID、时间戳、耗时等
-运行时字段，并纳入规范化 Chunk 文本、页码和坐标，因此可用于比较两次
-fresh parse 的语义结果。`metrics_hash` 与报告内的 `artifact_hash` 用于校验
-完整产物一致性。
+`parse_repeatability_hash` 排除 dataset/document/task/event/run ID、时间戳、
+耗时等运行时字段，并纳入 `sample_id`、`file_sha256`、规范化 Chunk 文本、
+页码和坐标，用于比较两次 fresh parse 的解析语义结果；
+`e2e_repeatability_hash` 额外纳入 Citation、`quality_status`、`quality_reasons`
+和 `sync_status`，用于比较端到端可复现性。`metrics_hash` 与报告内的
+`artifact_hash` 用于校验完整产物一致性。
+
+基于已保存 fresh-parse 结果重新计算 hash 而不重新解析时，使用：
+
+```powershell
+python enterprise/scripts/wp03/recompute_hashes.py
+```
+
+重算后的报告会记录原始解析 Run ID、recompute commit 和
+`reparsed=false`。
 
 正式 baseline 只在 Git 工作树干净时生成；报告会记录 `enterprise_commit` 和
 `enterprise_worktree_dirty`。工作树不干净时默认拒绝运行，使用 `--allow-dirty`
