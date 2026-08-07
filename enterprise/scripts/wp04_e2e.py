@@ -159,9 +159,15 @@ def ragflow_version(key: str) -> str:
             timeout=10,
         )
         resp.raise_for_status()
-        return str(resp.json().get("data") or "unknown")
+        version = str(resp.json().get("data") or "").strip()
+        if version:
+            return version
     except Exception:
-        return "unknown"
+        pass
+    version_path = ROOT / "ragflow" / "VERSION"
+    if version_path.exists():
+        return version_path.read_text(encoding="utf-8").strip()
+    return "unknown"
 
 
 def jwt_for(
