@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS ext_conversation_message (
     message_id TEXT NOT NULL,
     role TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'completed',
+    ragflow_message_id TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -63,6 +64,15 @@ async def ensure_schema(db) -> None:
     if "asset_id" not in columns:
         await db.execute(
             "ALTER TABLE ext_conversation_map ADD COLUMN asset_id TEXT"
+        )
+    async with db.execute(
+        "PRAGMA table_info(ext_conversation_message)"
+    ) as cursor:
+        message_columns = {row["name"] for row in await cursor.fetchall()}
+    if "ragflow_message_id" not in message_columns:
+        await db.execute(
+            "ALTER TABLE ext_conversation_message "
+            "ADD COLUMN ragflow_message_id TEXT"
         )
     await db.commit()
 
@@ -156,13 +166,14 @@ async def add_message(
     message_id: str,
     role: str,
     status: str = "completed",
+    ragflow_message_id: str | None = None,
 ) -> None:
     now = datetime.now(timezone.utc).isoformat()
     await db.execute(
         """INSERT INTO ext_conversation_message
            (conversation_id, tenant_id, business_user_id, message_id,
-            role, status, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            role, status, ragflow_message_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             conversation_id,
             tenant_id,
@@ -170,8 +181,28 @@ async def add_message(
             message_id,
             role,
             status,
+            ragflow_message_id,
             now,
             now,
         ),
     )
     await db.commit()
+
+
+async def list_message_statuses(
+    db,
+    *,
+    conversation_id: str,
+) -> dict[tuple[str, str], str]:
+    """Map RAGFlow message ids to the gateway's persisted business status."""
+    async with db.execute(
+        """SELECT ragflow_message_id, role, status
+           FROM ext_conversation_message
+           WHERE conversation_id=? AND ragflow_message_id IS NOT NULL""",
+        (conversation_id,),
+    ) as cursor:
+        rows = await cursor.fetchall()
+    return {
+        (row["ragflow_message_id"], row["role"]): row["status"]
+        for row in rows
+    }

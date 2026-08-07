@@ -213,6 +213,7 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         doc_ids: list[str] | None = None,
         request_id: str | None = None,
     ) -> dict:
+        turn_id = f"msg-{uuid.uuid4().hex[:12]}"
         base_chunk = {
             "id": "chunk-1",
             "content": "故障码 E-104 时先检查液压油位。",
@@ -222,30 +223,42 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         }
         if self._no_evidence:
             session_id = session_id or "stub-session"
+            self._append_no_evidence_turn(
+                session_id, question, turn_id
+            )
             return {
                 "code": 0,
                 "data": {
                     "answer": "",
+                    "id": turn_id,
                     "session_id": session_id,
                     "reference": {"chunks": []},
                 },
             }
         if self._empty_answer:
             session_id = session_id or "stub-session"
+            self._append_no_evidence_turn(
+                session_id, question, turn_id
+            )
             return {
                 "code": 0,
                 "data": {
                     "answer": "",
+                    "id": turn_id,
                     "session_id": session_id,
                     "reference": {"chunks": [base_chunk]},
                 },
             }
         if self._empty_chunks:
             session_id = session_id or "stub-session"
+            self._append_no_evidence_turn(
+                session_id, question, turn_id
+            )
             return {
                 "code": 0,
                 "data": {
                     "answer": "stub answer",
+                    "id": turn_id,
                     "session_id": session_id,
                     "reference": {"chunks": []},
                 },
@@ -269,12 +282,13 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
             allowed = set(doc_ids)
             chunks = [c for c in chunks if c.get("document_id") in allowed]
         session["messages"].append(
-            {"role": "user", "content": question}
+            {"role": "user", "content": question, "id": turn_id}
         )
         session["messages"].append(
             {
                 "role": "assistant",
                 "content": f"stub answer for: {question}",
+                "id": turn_id,
             }
         )
         session["reference"].append({"chunks": chunks})
@@ -282,10 +296,29 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
             "code": 0,
             "data": {
                 "answer": f"stub answer for: {question}",
+                "id": turn_id,
                 "session_id": session_id,
                 "reference": {"chunks": chunks},
             },
         }
+
+    def _append_no_evidence_turn(
+        self, session_id: str, question: str, turn_id: str
+    ) -> None:
+        session = self._sessions.setdefault(
+            session_id, {"messages": [], "reference": []}
+        )
+        session["messages"].append(
+            {"role": "user", "content": question, "id": turn_id}
+        )
+        session["messages"].append(
+            {
+                "role": "assistant",
+                "content": "未找到与问题相关的可靠依据。",
+                "id": turn_id,
+            }
+        )
+        session["reference"].append({"chunks": []})
 
     async def get_session(
         self,

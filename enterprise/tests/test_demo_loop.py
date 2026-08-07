@@ -327,6 +327,7 @@ class TestAsk:
             assert messages[0]["role"] == "user"
             assert messages[0]["content"] == "问题一"
             assert messages[1]["role"] == "assistant"
+            assert messages[1]["status"] == "completed"
             assert messages[1]["citations"][0]["citationId"] == "chunk-1"
             assert messages[1]["citations"][0]["versionId"] == "v1"
             assert messages[1]["citations"][0]["assetId"] == "FA-DEMO-001"
@@ -786,6 +787,45 @@ class TestConversationUnavailable:
 @pytest.mark.usefixtures("isolated_demo_db")
 class TestHistoryEmptyMessageFilter:
     @pytest.mark.asyncio
+    async def test_no_reliable_evidence_is_replayed_with_business_status(
+        self, isolated_demo_db
+    ):
+        await _insert_ready_document(
+            isolated_demo_db, doc_id="DOC-NO-EVIDENCE-HISTORY"
+        )
+        query_router._query_stub = query_router.RAGFlowQueryStub()
+        query_router._query_stub._no_evidence = True
+        token = _make_token()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            created = await c.post(
+                "/enterprise/api/v1/demo/ask",
+                headers=_headers(token),
+                json={
+                    "externalDocumentId": "DOC-NO-EVIDENCE-HISTORY",
+                    "question": "no evidence please",
+                },
+            )
+            assert created.status_code == 200
+            assert created.json()["code"] == "NO_RELIABLE_EVIDENCE"
+            conversation_id = created.json()["conversationId"]
+
+            history = await c.get(
+                f"/enterprise/api/v1/demo/conversations/{conversation_id}",
+                headers=_headers(token),
+            )
+            assert history.status_code == 200
+            messages = history.json()["messages"]
+            assistant = next(
+                m
+                for m in messages
+                if m["role"] == "assistant"
+                and m["status"] == "no_reliable_evidence"
+            )
+            assert assistant["content"].strip()
+            assert assistant["citations"] == []
+
+    @pytest.mark.asyncio
     async def test_empty_assistant_message_is_not_replayed(
         self, isolated_demo_db
     ):
@@ -887,6 +927,7 @@ async def test_ensure_schema_preserves_old_content_and_citations_columns(
     await db.commit()
 
     await conversation_store.ensure_schema(db)
+    await conversation_store.ensure_schema(db)
 
     async with db.execute(
         "PRAGMA table_info(ext_conversation_message)"
@@ -894,6 +935,7 @@ async def test_ensure_schema_preserves_old_content_and_citations_columns(
         columns = {row["name"] for row in await cursor.fetchall()}
     assert "content" in columns
     assert "citations_json" in columns
+    assert "ragflow_message_id" in columns
 
     async with db.execute(
         """SELECT content, citations_json

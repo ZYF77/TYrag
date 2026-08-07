@@ -560,6 +560,22 @@ def main() -> int:
     )
     assert no_evidence_body["answer"]
     assert no_evidence_body["citations"] == []
+    no_evidence_conversation_id = no_evidence_body["conversationId"]
+
+    no_evidence_history = gateway_get(
+        f"/enterprise/api/v1/demo/conversations/{no_evidence_conversation_id}",
+        user_a_headers,
+    )
+    assert no_evidence_history.status_code == 200, no_evidence_history.text
+    no_evidence_messages = no_evidence_history.json()["messages"]
+    no_evidence_assistant = next(
+        m
+        for m in no_evidence_messages
+        if m["role"] == "assistant"
+        and m["status"] == "no_reliable_evidence"
+    )
+    assert no_evidence_assistant["content"].strip()
+    assert no_evidence_assistant["citations"] == []
 
     history = gateway_get(
         f"/enterprise/api/v1/demo/conversations/{conversation_id}",
@@ -657,8 +673,16 @@ def main() -> int:
         "answerBusinessStatus": "completed",
         "noEvidenceRequestStatus": no_evidence.status_code,
         "noEvidenceCode": no_evidence_body["code"],
+        "noEvidenceConversationId": no_evidence_conversation_id,
         "noEvidenceDocumentId": doc_a_id,
         "noEvidenceTrigger": "chat_top_n=0",
+        "noEvidenceHistoryStatus": no_evidence_assistant["status"],
+        "noEvidenceHistoryCitationCount": len(
+            no_evidence_assistant["citations"]
+        ),
+        "noEvidenceHistoryContentPresent": bool(
+            no_evidence_assistant["content"].strip()
+        ),
         "userAAnswerPresent": bool(first_body["answer"]),
         "qualityAPassed": quality_a["parseQualityStatus"] == "passed",
         "qualityBPassed": quality_b["parseQualityStatus"] == "passed",

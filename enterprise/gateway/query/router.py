@@ -715,6 +715,9 @@ async def ask(
         data.get("session_id") if isinstance(data, dict) else None
     )
     answer = data.get("answer", "") if isinstance(data, dict) else ""
+    ragflow_message_id = (
+        data.get("id") if isinstance(data, dict) else None
+    ) or None
     if not answer or not citations:
         logger.info(
             "ask returned no reliable evidence document=%s request_id=%s",
@@ -731,6 +734,26 @@ async def ask(
             external_document_id=req.externalDocumentId,
             source_version_id=doc.source_version_id,
             asset_id=doc.asset_id,
+        )
+        await conversation_store.add_message(
+            db,
+            conversation_id=conversation_id,
+            tenant_id=principal.tenant_id,
+            business_user_id=principal.business_user_id,
+            message_id=str(uuid.uuid4()),
+            role="user",
+            status="completed",
+            ragflow_message_id=ragflow_message_id,
+        )
+        await conversation_store.add_message(
+            db,
+            conversation_id=conversation_id,
+            tenant_id=principal.tenant_id,
+            business_user_id=principal.business_user_id,
+            message_id=str(uuid.uuid4()),
+            role="assistant",
+            status="no_reliable_evidence",
+            ragflow_message_id=ragflow_message_id,
         )
         return JSONResponse(
             status_code=200,
@@ -765,6 +788,7 @@ async def ask(
         message_id=str(uuid.uuid4()),
         role="user",
         status="completed",
+        ragflow_message_id=ragflow_message_id,
     )
     await conversation_store.add_message(
         db,
@@ -774,6 +798,7 @@ async def ask(
         message_id=str(uuid.uuid4()),
         role="assistant",
         status="completed",
+        ragflow_message_id=ragflow_message_id,
     )
 
     return DemoAskResponse(
@@ -790,10 +815,12 @@ def _session_messages_to_payload(
     *,
     version_id: str | None = None,
     asset_id: str | None = None,
+    status_by_message: dict[tuple[str, str], str] | None = None,
 ) -> list[dict]:
     data = session_data.get("data", {}) if isinstance(session_data, dict) else {}
     raw_messages = data.get("messages", []) if isinstance(data, dict) else []
     references = data.get("reference", []) if isinstance(data, dict) else []
+    status_by_message = status_by_message or {}
     ref_index = 0
     messages = []
     for msg in raw_messages:
@@ -802,6 +829,9 @@ def _session_messages_to_payload(
         role = msg.get("role")
         if role not in ("user", "assistant"):
             continue
+        explicit_status = status_by_message.get(
+            (str(msg.get("id") or ""), role)
+        )
         citations: list[DemoCitation] = []
         if role == "assistant":
             reference = (
@@ -828,7 +858,11 @@ def _session_messages_to_payload(
                 ],
                 scope,
             )
-            if not str(msg.get("content") or "").strip() and not citations:
+            if (
+                explicit_status is None
+                and not str(msg.get("content") or "").strip()
+                and not citations
+            ):
                 continue
         messages.append(
             {
@@ -836,7 +870,7 @@ def _session_messages_to_payload(
                 "role": role,
                 "content": msg.get("content", ""),
                 "citations": [c.model_dump() for c in citations],
-                "status": "completed",
+                "status": explicit_status or "completed",
                 "createdAt": msg.get("created_at") or "",
             }
         )
@@ -885,6 +919,10 @@ async def get_conversation(
     ragflow_session_id = conversation.get("ragflow_session_id")
     if ragflow_chat_id and ragflow_session_id:
         try:
+            status_by_message = await conversation_store.list_message_statuses(
+                db,
+                conversation_id=conversation["business_conversation_id"],
+            )
             session_data = await _query_client().get_session(
                 ragflow_chat_id, ragflow_session_id
             )
@@ -899,6 +937,7 @@ async def get_conversation(
                     conversation.get("asset_id")
                     or doc.asset_id
                 ),
+                status_by_message=status_by_message,
             )
             if messages:
                 return {
