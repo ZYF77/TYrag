@@ -13,17 +13,21 @@ under artifacts/ and is intentionally not committed.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import secrets
 import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Callable
 
 import httpx
 
 ROOT = Path(__file__).resolve().parents[2]
 ARTIFACTS = ROOT / "artifacts"
+WP03_SAMPLE_DIR = ARTIFACTS / "wp03" / "samples"
+WP03_SAMPLE_IDS = ("wp03-digital_text-001", "wp03-digital_text-002")
 GATEWAY_PORT = os.environ.get("GATEWAY_PORT", "5196")
 GATEWAY_URL = os.environ.get(
     "GATEWAY_URL", f"http://127.0.0.1:{GATEWAY_PORT}"
@@ -51,6 +55,104 @@ SERVICE_TOKEN = os.environ.get(
 ) or secrets.token_hex(24)
 JWT_SECRET = os.environ.get("JWT_SHARED_SECRET", "") or secrets.token_hex(32)
 API_KEY = os.environ.get("RAGFLOW_API_KEY", "").strip()
+SAMPLE_PREPARATION_MODE = ""
+SAMPLE_SHA256_JSON = "{}"
+
+
+def _sample_paths(sample_dir: Path | None = None) -> list[Path]:
+    base = sample_dir or WP03_SAMPLE_DIR
+    return [base / f"{sample_id}.pdf" for sample_id in WP03_SAMPLE_IDS]
+
+
+def _samples_present(sample_dir: Path | None = None) -> bool:
+    return all(
+        path.exists() and path.stat().st_size > 0
+        for path in _sample_paths(sample_dir)
+    )
+
+
+def _sample_sha256(sample_dir: Path | None = None) -> dict[str, str]:
+    return {
+        path.stem: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in _sample_paths(sample_dir)
+    }
+
+
+def _assert_clean_tracked_worktree() -> None:
+    result = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=no"],
+        capture_output=True,
+        text=True,
+        cwd=str(ROOT),
+        timeout=10,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("git status failed; cannot verify clean tracked worktree")
+    if result.stdout.strip():
+        raise RuntimeError(
+            "WP-04 Phase2 formal E2E requires a clean tracked worktree.\n"
+            + result.stdout.strip()
+        )
+
+
+def _run_wp03_sample_generator() -> int:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(
+                ROOT
+                / "enterprise"
+                / "scripts"
+                / "wp03"
+                / "generate_samples.py"
+            ),
+            "--output-dir",
+            str(WP03_SAMPLE_DIR),
+            "--only",
+            ",".join(WP03_SAMPLE_IDS),
+        ],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    if result.returncode != 0:
+        _log(
+            "WP-03 sample generator failed:\n"
+            f"{result.stdout.strip()}\n{result.stderr.strip()}"
+        )
+    return result.returncode
+
+
+def prepare_wp03_samples(
+    sample_dir: Path | None = None,
+    generator: Callable[[], int] | None = None,
+) -> dict:
+    """Return the sample preparation mode and SHA-256 digest map."""
+    sample_dir = sample_dir or WP03_SAMPLE_DIR
+    if _samples_present(sample_dir):
+        return {
+            "mode": "existing",
+            "sha256": _sample_sha256(sample_dir),
+        }
+    if generator is None:
+        raise RuntimeError("WP-03 sample PDFs missing and no generator provided")
+    _log("WP-04 E2E samples missing; generating WP-03 deterministic samples...")
+    returncode = generator()
+    if returncode != 0:
+        raise RuntimeError(
+            f"WP-03 sample generator failed with exit code {returncode}"
+        )
+    if not _samples_present(sample_dir):
+        raise RuntimeError(
+            "WP-03 sample generator exited 0 but did not create required PDFs: "
+            + ", ".join(str(path) for path in _sample_paths(sample_dir))
+        )
+    _log("WP-04 E2E samples ready.")
+    return {
+        "mode": "generated",
+        "sha256": _sample_sha256(sample_dir),
+    }
 
 
 def _log(line: str) -> None:
@@ -120,6 +222,8 @@ def _e2e_env() -> dict[str, str]:
             "S3_BUCKET": os.environ.get("S3_BUCKET", ""),
             "WP04_E2E_REPORT": REPORT_PATH,
             "WP04_QUERY_TRACE": str(QUERY_TRACE),
+            "WP04_SAMPLE_PREPARATION_MODE": SAMPLE_PREPARATION_MODE,
+            "WP04_SAMPLE_SHA256": SAMPLE_SHA256_JSON,
         }
     )
     return env
@@ -141,9 +245,18 @@ def _wait_gateway() -> None:
 
 
 def main() -> int:
-    global API_KEY
+    global API_KEY, SAMPLE_PREPARATION_MODE, SAMPLE_SHA256_JSON
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
+    _assert_clean_tracked_worktree()
     _log("wp04 phase2 e2e starting")
+    import json
+
+    sample_info = prepare_wp03_samples(
+        generator=_run_wp03_sample_generator
+    )
+    SAMPLE_PREPARATION_MODE = sample_info["mode"]
+    SAMPLE_SHA256_JSON = json.dumps(sample_info["sha256"], sort_keys=True)
+    _log(f"wp04 sample preparation mode {SAMPLE_PREPARATION_MODE}")
     QUERY_TRACE.unlink(missing_ok=True)
     API_KEY = _resolve_api_key()
     _log(f"gateway port {GATEWAY_PORT}")

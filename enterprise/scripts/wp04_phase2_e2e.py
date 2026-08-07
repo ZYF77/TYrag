@@ -54,6 +54,8 @@ QUERY_TRACE = os.environ.get(
     "WP04_QUERY_TRACE",
     str(ROOT / "artifacts" / "wp04-phase2-docids-trace.log"),
 )
+SAMPLE_PREPARATION_MODE = os.environ.get("WP04_SAMPLE_PREPARATION_MODE", "")
+SAMPLE_SHA256_JSON = os.environ.get("WP04_SAMPLE_SHA256", "")
 
 S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "")
 S3_ACCESS_KEY = os.environ.get("S3_ACCESS_KEY", "")
@@ -981,11 +983,18 @@ def main() -> int:
         c.get("document_id") == ready_b["ragflowDocumentId"] for c in chunks
     ), "RAGFlow doc_ids scope leaked unauthorized chunks"
 
+    try:
+        sample_sha256 = json.loads(SAMPLE_SHA256_JSON) if SAMPLE_SHA256_JSON else {}
+    except json.JSONDecodeError:
+        sample_sha256 = {}
+
     evidence = {
         "gitCommit": commit,
         "worktreeDirty": worktree_dirty(),
         "ragflowVersion": ragflow_version_value,
         "testTime": test_time,
+        "samplePreparationMode": SAMPLE_PREPARATION_MODE,
+        "sampleSha256": sample_sha256,
         "documentA": {
             "externalDocumentId": doc_a_id,
             "eventId": event_a,
