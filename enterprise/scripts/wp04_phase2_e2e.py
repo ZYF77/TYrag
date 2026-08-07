@@ -605,7 +605,10 @@ def verify_stream_gateway_failure(
                 )
                 assert assistant["status"] == "failed", history.text
                 assert server.completion_requests == 1, (
-                    "stream fault server did not receive chat completions"
+                    "stream fault server did not receive chat completions; "
+                    f"chat_lookups={server.chat_lookups} "
+                    f"completion_requests={server.completion_requests} "
+                    f"ask={ask.text[:800]}"
                 )
                 sent_body = server.last_completion_body or {}
                 raw_doc_ids = sent_body.get("doc_ids", "")
