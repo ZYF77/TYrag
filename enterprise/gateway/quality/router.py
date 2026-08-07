@@ -154,6 +154,15 @@ async def get_document_quality(
         doc.external_document_id,
         doc.source_version_id,
     )
+    logger.info(
+        "quality status read request_id=%s tenant_id=%s external_document_id=%s "
+        "source_version_id=%s evaluation_state=%s",
+        request_id,
+        doc.tenant_id,
+        doc.external_document_id,
+        doc.source_version_id,
+        evaluation.evaluation_state if evaluation else "not_started",
+    )
     return _quality_response(evaluation)
 
 
@@ -197,6 +206,19 @@ async def reevaluate_document_quality(
         ragflow_document_id=doc.ragflow_document_id,
         routing=routing,
         evaluation_version=version,
+    )
+    logger.info(
+        "quality reevaluate requested request_id=%s tenant_id=%s "
+        "external_document_id=%s source_version_id=%s evaluation_id=%s "
+        "evaluation_version=%s parser_profile=%s routing_reasons=%s",
+        request_id,
+        doc.tenant_id,
+        doc.external_document_id,
+        doc.source_version_id,
+        evaluation.id,
+        evaluation.evaluation_version,
+        evaluation.parser_profile,
+        evaluation.routing_reasons,
     )
     return JSONResponse(
         status_code=202,

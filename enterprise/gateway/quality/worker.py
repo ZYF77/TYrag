@@ -183,9 +183,36 @@ class QualityEvaluationService:
             metrics.observe_duration(
                 "quality_evaluation_duration", time.monotonic() - started
             )
+            logger.info(
+                "quality evaluation completed evaluation_id=%s tenant_id=%s "
+                "external_document_id=%s source_version_id=%s "
+                "ragflow_document_id=%s parser_profile=%s quality_status=%s "
+                "quality_reasons=%s attempt=%s duration_seconds=%.3f",
+                evaluation.id,
+                doc.tenant_id,
+                doc.external_document_id,
+                doc.source_version_id,
+                doc.ragflow_document_id,
+                evaluation.parser_profile,
+                result["parse_quality_status"],
+                result["quality_reasons"],
+                job.attempts,
+                time.monotonic() - started,
+            )
             await mark_quality_job_done(self.db, job)
         except QualityRetryableError as exc:
             metrics.inc("quality_evaluation_retry_total")
+            logger.warning(
+                "quality evaluation retry evaluation_id=%s tenant_id=%s "
+                "external_document_id=%s source_version_id=%s attempt=%s "
+                "error_code=%s",
+                evaluation.id,
+                doc.tenant_id,
+                doc.external_document_id,
+                doc.source_version_id,
+                job.attempts,
+                exc.code,
+            )
             await fail_evaluation(
                 self.db, evaluation.id, exc.code, exc.message,
             )
