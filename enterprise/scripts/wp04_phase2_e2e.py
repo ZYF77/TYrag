@@ -50,7 +50,10 @@ API_KEY = os.environ.get("RAGFLOW_API_KEY", "").strip()
 SERVICE_TOKEN = os.environ.get("ENTERPRISE_SYNC_SERVICE_TOKEN", "")
 JWT_SECRET = os.environ.get("JWT_SHARED_SECRET", "")
 DB_PATH = os.environ.get("ENTERPRISE_SYNC_DB_PATH", "")
-QUERY_TRACE = os.environ.get("WP04_QUERY_TRACE", "")
+QUERY_TRACE = os.environ.get(
+    "WP04_QUERY_TRACE",
+    str(ROOT / "artifacts" / "wp04-phase2-docids-trace.log"),
+)
 
 S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "")
 S3_ACCESS_KEY = os.environ.get("S3_ACCESS_KEY", "")
@@ -422,7 +425,7 @@ def _wait_url(url: str, timeout_seconds: int = 90) -> None:
 
 
 def verify_transport_failure(user_headers: dict) -> dict:
-    """Prove an unreachable RAGFlow maps to run.failed, not NameError."""
+    """Prove a fully unreachable RAGFlow maps to run.failed (pre-stream)."""
     import subprocess
 
     port = os.environ.get("WP04_TRANSPORT_GATEWAY_PORT", "5197")
@@ -490,6 +493,7 @@ def verify_transport_failure(user_headers: dict) -> dict:
         assert assistant["status"] == "failed", history.text
         return {
             "transportFailureStatus": failed["code"],
+            "transportFailureStage": "pre_stream_chat_lookup",
             "transportFailureHistoryStatus": assistant["status"],
         }
     finally:
@@ -500,6 +504,134 @@ def verify_transport_failure(user_headers: dict) -> dict:
             gateway.kill()
 
 
+def verify_stream_gateway_failure(
+    user_headers: dict,
+    dataset_id: str,
+    expected_doc_ids: list[str],
+    key: str,
+) -> dict:
+    """Prove a mid-stream RAGFlow disconnect maps to run.failed via SSE.
+
+    The fault server answers /api/v1/chats so _ensure_chat succeeds, then
+    closes /api/v1/chat/completions mid-stream. The Gateway therefore reaches
+    chat_completion_stream() over a real socket.
+    """
+    import asyncio
+    import subprocess
+
+    from enterprise.scripts.wp04_stream_transport_probe import (
+        StreamFaultServer,
+        run_direct_probe,
+    )
+
+    async def _run() -> dict:
+        direct_evidence = await run_direct_probe(key)
+        async with StreamFaultServer(
+            f"enterprise-formal-{TENANT}",
+            dataset_ids=[dataset_id],
+        ) as server:
+            port = os.environ.get("WP04_STREAM_GATEWAY_PORT", "5198")
+            base = f"http://127.0.0.1:{port}"
+            env = os.environ.copy()
+            env.update(
+                {
+                    "GATEWAY_PORT": port,
+                    "RAGFLOW_BASE_URL": server.base_url,
+                    "ENTERPRISE_TEST_MODE": "",
+                    "ENTERPRISE_DEMO_ROUTES_ENABLED": "true",
+                    "ENTERPRISE_QUERY_TRACE_DOC_IDS": str(
+                        ROOT / "artifacts" / "wp04-phase2-stream-trace.log"
+                    ),
+                }
+            )
+            gateway = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(
+                        ROOT
+                        / "enterprise"
+                        / "scripts"
+                        / "wp03"
+                        / "run_gateway_e2e.py"
+                    ),
+                ],
+                cwd=str(ROOT),
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            try:
+                _wait_url(f"{base}/enterprise/api/v1/health")
+                created = httpx.post(
+                    f"{base}/enterprise/api/v1/conversations",
+                    headers=user_headers,
+                    json={},
+                    timeout=30,
+                )
+                assert created.status_code == 201, created.text
+                conversation_id = created.json()["conversationId"]
+                ask = httpx.post(
+                    f"{base}/enterprise/api/v1/conversations/"
+                    f"{conversation_id}/messages:stream",
+                    headers={**user_headers, "Accept": "text/event-stream"},
+                    params={"stream": "true"},
+                    json={"question": "stream transport probe"},
+                    timeout=60,
+                )
+                events = parse_sse(ask.text)
+                assert any(
+                    event == "run.failed" for event, _ in events
+                ), ask.text
+                assert not any(
+                    event == "answer.completed" for event, _ in events
+                ), ask.text
+                failed = next(
+                    data
+                    for event, data in events
+                    if event == "run.failed"
+                )
+                assert failed["code"] == "RAGFLOW_UNAVAILABLE", failed
+                history = httpx.get(
+                    f"{base}/enterprise/api/v1/conversations/"
+                    f"{conversation_id}",
+                    headers=user_headers,
+                    timeout=30,
+                )
+                assert history.status_code == 200, history.text
+                assistant = next(
+                    m
+                    for m in history.json()["messages"]
+                    if m["role"] == "assistant"
+                )
+                assert assistant["status"] == "failed", history.text
+                assert server.completion_requests == 1, (
+                    "stream fault server did not receive chat completions"
+                )
+                sent_body = server.last_completion_body or {}
+                raw_doc_ids = sent_body.get("doc_ids", "")
+                sent_doc_ids = sorted(
+                    str(raw_doc_ids).split(",")
+                ) if raw_doc_ids else []
+                assert sent_doc_ids == sorted(expected_doc_ids), sent_body
+                return {
+                    **direct_evidence,
+                    "streamTransportGatewayRunFailed": True,
+                    "streamTransportGatewayAnswerCompleted": False,
+                    "streamTransportGatewayHistoryStatus": (
+                        assistant["status"]
+                    ),
+                    "streamTransportDocIdsSent": sent_doc_ids,
+                }
+            finally:
+                gateway.terminate()
+                try:
+                    gateway.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    gateway.kill()
+
+    return asyncio.run(_run())
+
+
 def main() -> int:
     if not SERVICE_TOKEN or not JWT_SECRET or not DB_PATH:
         raise RuntimeError(
@@ -508,6 +640,11 @@ def main() -> int:
         )
     if not (S3_ENDPOINT and S3_ACCESS_KEY and S3_SECRET_KEY):
         raise RuntimeError("S3 endpoint/credentials are required")
+    if not QUERY_TRACE:
+        raise RuntimeError("WP04_QUERY_TRACE must resolve to a trace path")
+    trace_path = Path(QUERY_TRACE)
+    trace_path.parent.mkdir(parents=True, exist_ok=True)
+    trace_path.write_text("", encoding="utf-8")
 
     import asyncio
 
@@ -664,6 +801,13 @@ def main() -> int:
     assert authorized_ragflow_doc_ids_sent == (
         expected_authorized_ragflow_doc_ids
     ), authorized_ragflow_doc_ids_sent
+    missing_authorized_ragflow_doc_ids = sorted(
+        set(expected_authorized_ragflow_doc_ids)
+        - set(authorized_ragflow_doc_ids_sent)
+    )
+    assert missing_authorized_ragflow_doc_ids == [], (
+        missing_authorized_ragflow_doc_ids
+    )
     for c in citations:
         assert c["documentId"] and c["title"]
         assert c["versionId"] == SOURCE_VERSION
@@ -809,6 +953,12 @@ def main() -> int:
     )
 
     transport_evidence = verify_transport_failure(user_a_headers)
+    stream_transport_evidence = verify_stream_gateway_failure(
+        user_a_headers,
+        ready_a["ragflowDatasetId"],
+        expected_authorized_ragflow_doc_ids,
+        key,
+    )
 
     chats = asyncio.run(
         client.list_chats(name=f"enterprise-formal-{TENANT}")
@@ -911,15 +1061,50 @@ def main() -> int:
         "unauthorizedRagflowDocIdsSent": (
             unauthorized_ragflow_doc_ids_sent
         ),
+        "missingAuthorizedRagflowDocIds": (
+            missing_authorized_ragflow_doc_ids
+        ),
         "userBRagflowDocIdsSent": user_b_ragflow_doc_ids_sent,
         "ragflowDocIdsScopeLeakFree": (
             unauthorized_ragflow_doc_ids_sent == []
+            and missing_authorized_ragflow_doc_ids == []
         ),
         "transportFailureStatus": transport_evidence[
             "transportFailureStatus"
         ],
+        "transportFailureStage": transport_evidence[
+            "transportFailureStage"
+        ],
         "transportFailureHistoryStatus": transport_evidence[
             "transportFailureHistoryStatus"
+        ],
+        "streamTransportFailureVerified": stream_transport_evidence[
+            "streamTransportFailureVerified"
+        ],
+        "streamTransportExceptionMapped": stream_transport_evidence[
+            "streamTransportExceptionMapped"
+        ],
+        "streamTransportNameErrorObserved": stream_transport_evidence[
+            "streamTransportNameErrorObserved"
+        ],
+        "streamTransportSensitiveDataLeaked": stream_transport_evidence[
+            "streamTransportSensitiveDataLeaked"
+        ],
+        "streamTransportGatewayRunFailed": stream_transport_evidence[
+            "streamTransportGatewayRunFailed"
+        ],
+        "streamTransportGatewayAnswerCompleted": (
+            stream_transport_evidence[
+                "streamTransportGatewayAnswerCompleted"
+            ]
+        ),
+        "streamTransportGatewayHistoryStatus": (
+            stream_transport_evidence[
+                "streamTransportGatewayHistoryStatus"
+            ]
+        ),
+        "streamTransportDocIdsSent": stream_transport_evidence[
+            "streamTransportDocIdsSent"
         ],
         "s3Bucket": bucket,
         "passed": True,

@@ -912,6 +912,18 @@ class TestTransportFailure:
                 pass
         assert exc_info.value.status_code == 0
 
+    @pytest.mark.asyncio
+    async def test_real_socket_mid_stream_disconnect_maps_to_api_error(self):
+        from enterprise.scripts.wp04_stream_transport_probe import (
+            run_direct_probe,
+        )
+
+        evidence = await run_direct_probe("secret-key-9f8e7d6c")
+        assert evidence["streamTransportFailureVerified"] is True
+        assert evidence["streamTransportExceptionMapped"] is True
+        assert evidence["streamTransportNameErrorObserved"] is False
+        assert evidence["streamTransportSensitiveDataLeaked"] is False
+
 
 @pytest.mark.usefixtures("isolated_db")
 class TestSseOutcomeConsistency:
