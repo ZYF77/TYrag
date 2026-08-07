@@ -16,6 +16,7 @@ from typing import Any
 import aiosqlite
 
 from enterprise.gateway.quality.gate import quality_dimensions
+from enterprise.gateway.quality.metrics import metrics
 from enterprise.gateway.quality.models import (
     QualityJob,
     claim_quality_job,
@@ -127,6 +128,7 @@ class QualityEvaluationService:
         )
 
     async def run_job(self, job: QualityJob) -> None:
+        started = time.monotonic()
         evaluation = await get_evaluation_by_id(self.db, job.evaluation_id)
         if evaluation is None:
             await mark_quality_job_failed(
@@ -167,17 +169,30 @@ class QualityEvaluationService:
             return
 
         await start_evaluation(self.db, evaluation.id)
+        metrics.inc("quality_evaluation_running_total")
         try:
             result = await self._evaluate(doc, evaluation)
             await self._complete(doc, evaluation, result)
+            status_metric = {
+                "passed": "quality_evaluation_passed_total",
+                "review_required": "quality_evaluation_review_required_total",
+                "failed": "quality_evaluation_failed_total",
+            }.get(result["parse_quality_status"])
+            if status_metric:
+                metrics.inc(status_metric)
+            metrics.observe_duration(
+                "quality_evaluation_duration", time.monotonic() - started
+            )
             await mark_quality_job_done(self.db, job)
         except QualityRetryableError as exc:
+            metrics.inc("quality_evaluation_retry_total")
             await fail_evaluation(
                 self.db, evaluation.id, exc.code, exc.message,
             )
             if job.attempts < job.max_attempts:
                 await mark_quality_job_retry(self.db, job, exc.code, exc.message)
             else:
+                metrics.inc("quality_evaluation_failed_total")
                 await mark_quality_job_failed(self.db, job, exc.code, exc.message)
         except Exception:
             logger.exception(
@@ -188,6 +203,7 @@ class QualityEvaluationService:
             await fail_evaluation(
                 self.db, evaluation.id, "INTERNAL_ERROR", "Quality evaluation failed"
             )
+            metrics.inc("quality_evaluation_failed_total")
             await mark_quality_job_failed(
                 self.db, job, "INTERNAL_ERROR", "Quality evaluation failed"
             )

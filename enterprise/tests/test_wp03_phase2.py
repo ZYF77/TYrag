@@ -29,6 +29,7 @@ from enterprise.gateway.models.ext_user_map import (  # noqa: E402
 )
 from enterprise.gateway.quality import models as quality_models  # noqa: E402
 from enterprise.gateway.quality.gate import enforce_quality_gate  # noqa: E402
+from enterprise.gateway.quality.metrics import metrics  # noqa: E402
 from enterprise.gateway.quality.routing import route_document  # noqa: E402
 from enterprise.gateway.quality.worker import (  # noqa: E402
     QualityEvaluationService,
@@ -350,6 +351,22 @@ def test_quality_gate_fail_closed():
     )
 
 
+def test_quality_metrics_snapshot():
+    metrics.reset()
+    metrics.inc("quality_evaluation_pending_total")
+    metrics.inc("quality_evaluation_passed_total")
+    metrics.inc("quality_evaluation_review_required_total")
+    metrics.inc("quality_evaluation_failed_total")
+    metrics.observe_duration("quality_evaluation_duration", 1.25)
+    snapshot = metrics.snapshot()
+    assert snapshot["counters"]["quality_evaluation_pending_total"] == 1
+    assert snapshot["counters"]["quality_evaluation_passed_total"] == 1
+    assert snapshot["counters"]["quality_evaluation_review_required_total"] == 1
+    assert snapshot["counters"]["quality_evaluation_failed_total"] == 1
+    assert snapshot["duration_samples"] == 1
+    metrics.reset()
+
+
 class PassStub(RAGFlowDocumentStub):
     async def upload_document(self, dataset_id, file_name, file_content, request_id=None):
         result = await super().upload_document(
@@ -549,6 +566,39 @@ async def test_worker_marks_failed_document_failed():
 
 @pytest.mark.usefixtures("isolated_phase2_db")
 class TestQualityAPI:
+    @pytest.mark.asyncio
+    async def test_quality_api_requires_token(self):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get(
+                "/enterprise/api/v1/documents/DOC-NOPE/quality",
+                params={"source_system": "DEMO"},
+            )
+            assert resp.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_quality_api_missing_document_returns_404(self):
+        token = _make_token()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get(
+                "/enterprise/api/v1/documents/DOC-MISSING/quality",
+                params={"source_system": "DEMO"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert resp.status_code == 404
+            assert resp.json()["code"] == "DOCUMENT_NOT_FOUND"
+
+    @pytest.mark.asyncio
+    async def test_reevaluate_requires_params(self):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.post(
+                "/enterprise/api/v1/documents/DOC-A/quality:reevaluate",
+            )
+            assert resp.status_code == 422
+            assert resp.json()["code"] == "VALIDATION_ERROR"
+
     @pytest.mark.asyncio
     async def test_quality_api_authorized_and_reevaluate(self):
         from enterprise.gateway.quality import router as quality_router_module

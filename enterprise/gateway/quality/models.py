@@ -10,6 +10,8 @@ from typing import Any
 
 import aiosqlite
 
+from enterprise.gateway.quality.metrics import metrics
+
 EVALUATION_CONTRACT = "contracts/parse-quality-evaluation.md"
 EVALUATION_CONTRACT_VERSION = "1"
 
@@ -433,6 +435,7 @@ async def get_or_create_evaluation(
         await db.commit()
         if cursor.rowcount:
             evaluation_id = cursor.lastrowid
+            metrics.inc("quality_evaluation_pending_total")
             await db.execute(
                 """INSERT INTO quality_evaluation_job
                    (evaluation_id, tenant_id, source_system,
