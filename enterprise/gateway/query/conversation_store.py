@@ -16,6 +16,8 @@ CREATE TABLE IF NOT EXISTS ext_conversation_map (
     ragflow_chat_id TEXT,
     ragflow_session_id TEXT,
     external_document_id TEXT NOT NULL,
+    source_version_id TEXT,
+    asset_id TEXT,
     equipment_id TEXT,
     fixed_asset_no TEXT,
     current_fault_code TEXT,
@@ -51,16 +53,16 @@ async def ensure_schema(db) -> None:
     await db.executescript(CREATE_EXT_CONVERSATION_MAP)
     await db.executescript(CREATE_EXT_CONVERSATION_MESSAGE)
     async with db.execute(
-        "PRAGMA table_info(ext_conversation_message)"
+        "PRAGMA table_info(ext_conversation_map)"
     ) as cursor:
         columns = {row["name"] for row in await cursor.fetchall()}
-    if "content" in columns:
+    if "source_version_id" not in columns:
         await db.execute(
-            "ALTER TABLE ext_conversation_message DROP COLUMN content"
+            "ALTER TABLE ext_conversation_map ADD COLUMN source_version_id TEXT"
         )
-    if "citations_json" in columns:
+    if "asset_id" not in columns:
         await db.execute(
-            "ALTER TABLE ext_conversation_message DROP COLUMN citations_json"
+            "ALTER TABLE ext_conversation_map ADD COLUMN asset_id TEXT"
         )
     await db.commit()
 
@@ -75,6 +77,7 @@ async def get_conversation_map(
     async with db.execute(
         """SELECT id, tenant_id, business_conversation_id, business_user_id,
                   ragflow_chat_id, ragflow_session_id, external_document_id,
+                  source_version_id, asset_id,
                   equipment_id, fixed_asset_no, current_fault_code,
                   status, created_at, last_message_at
            FROM ext_conversation_map
@@ -97,6 +100,8 @@ async def upsert_conversation_map(
     ragflow_chat_id: str,
     ragflow_session_id: str | None,
     external_document_id: str,
+    source_version_id: str | None = None,
+    asset_id: str | None = None,
     equipment_id: str | None = None,
     fixed_asset_no: str | None = None,
     current_fault_code: str | None = None,
@@ -106,9 +111,10 @@ async def upsert_conversation_map(
         """INSERT INTO ext_conversation_map
            (tenant_id, business_conversation_id, business_user_id,
             ragflow_chat_id, ragflow_session_id, external_document_id,
+            source_version_id, asset_id,
             equipment_id, fixed_asset_no, current_fault_code,
             status, created_at, last_message_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
            ON CONFLICT(tenant_id, business_user_id, business_conversation_id)
            DO UPDATE SET
              ragflow_chat_id=excluded.ragflow_chat_id,
@@ -116,6 +122,10 @@ async def upsert_conversation_map(
                  excluded.ragflow_session_id, ragflow_session_id
              ),
              external_document_id=excluded.external_document_id,
+             source_version_id=COALESCE(
+                 excluded.source_version_id, source_version_id
+             ),
+             asset_id=COALESCE(excluded.asset_id, asset_id),
              status=excluded.status,
              last_message_at=excluded.last_message_at""",
         (
@@ -125,6 +135,8 @@ async def upsert_conversation_map(
             ragflow_chat_id,
             ragflow_session_id,
             external_document_id,
+            source_version_id,
+            asset_id,
             equipment_id,
             fixed_asset_no,
             current_fault_code,
@@ -163,16 +175,3 @@ async def add_message(
         ),
     )
     await db.commit()
-
-
-async def list_messages(db, conversation_id: str) -> list[dict]:
-    async with db.execute(
-        """SELECT id, conversation_id, tenant_id, business_user_id,
-                  message_id, role, status, created_at, updated_at
-           FROM ext_conversation_message
-           WHERE conversation_id=?
-           ORDER BY id ASC""",
-        (conversation_id,),
-    ) as cursor:
-        rows = await cursor.fetchall()
-    return [dict(row) for row in rows]

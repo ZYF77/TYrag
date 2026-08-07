@@ -94,6 +94,10 @@ class SyncService:
                 file_name=payload["fileName"],
                 media_type=payload.get("mediaType", "application/pdf"),
                 source_page_count=(payload.get("metadata") or {}).get("page_count"),
+                asset_id=(
+                    (payload.get("metadata") or {}).get("asset_id")
+                    or (payload.get("metadata") or {}).get("fixed_asset_no")
+                ),
                 bucket=payload["source"]["bucket"],
                 object_key=payload["source"]["objectKey"],
                 batch_id=event.batch_id,

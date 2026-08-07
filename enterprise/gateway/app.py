@@ -267,6 +267,8 @@ ERROR_CODES = {
     "DOCUMENT_QUALITY_PENDING": (409, False),
     "RAGFLOW_UNAVAILABLE": (503, True),
     "RAGFLOW_API_INCOMPATIBLE": (503, False),
+    "CONVERSATION_UNAVAILABLE": (503, True),
+    "NO_RELIABLE_EVIDENCE": (200, False),
     "VALIDATION_ERROR": (422, False),
     "INTERNAL_ERROR": (500, False),
     "REQUEST_FAILED": (404, False),
@@ -289,6 +291,8 @@ SAFE_ERROR_MESSAGES = {
     "DOCUMENT_QUALITY_PENDING": "Document quality evaluation is pending",
     "RAGFLOW_UNAVAILABLE": "RAGFlow service is temporarily unavailable",
     "RAGFLOW_API_INCOMPATIBLE": "RAGFlow API is not compatible with the gateway",
+    "CONVERSATION_UNAVAILABLE": "Conversation history is temporarily unavailable",
+    "NO_RELIABLE_EVIDENCE": "No reliable evidence was returned",
     "VALIDATION_ERROR": "Request validation failed",
     "INTERNAL_ERROR": "Internal service error",
     "REQUEST_FAILED": "Request could not be completed",
@@ -431,6 +435,7 @@ async def upsert_document(
         file_name=req.fileName,
         media_type=req.mediaType,
         source_page_count=req.metadata.get("page_count"),
+        asset_id=req.metadata.get("asset_id") or req.metadata.get("fixed_asset_no"),
         bucket=req.source.bucket,
         object_key=req.source.objectKey,
         batch_id=req.batchId,
@@ -668,7 +673,8 @@ async def auth_me(
 
 # Temporary query demo router, owned by the WP-04 retrieval scope
 from enterprise.gateway.query.router import router as query_router
-app.include_router(query_router)
+if config.demo_routes_enabled:
+    app.include_router(query_router)
 
 # WP-03 Phase 2 quality status APIs
 from enterprise.gateway.quality.router import router as quality_router

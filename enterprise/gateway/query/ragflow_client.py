@@ -154,6 +154,11 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         self._extra_chunks: list[dict] = []
         self._last_completion_body: dict | None = None
         self._ignore_doc_scope = False
+        self._no_evidence = False
+        self._empty_answer = False
+        self._empty_chunks = False
+        self._omit_default_chunk = False
+        self._fail_session_read = False
 
     async def start_parsing(
         self,
@@ -208,6 +213,43 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         doc_ids: list[str] | None = None,
         request_id: str | None = None,
     ) -> dict:
+        base_chunk = {
+            "id": "chunk-1",
+            "content": "故障码 E-104 时先检查液压油位。",
+            "document_id": "doc-1",
+            "document_name": "manual.pdf",
+            "positions": [[3, 0.1, 0.2, 0.8, 0.4]],
+        }
+        if self._no_evidence:
+            session_id = session_id or "stub-session"
+            return {
+                "code": 0,
+                "data": {
+                    "answer": "",
+                    "session_id": session_id,
+                    "reference": {"chunks": []},
+                },
+            }
+        if self._empty_answer:
+            session_id = session_id or "stub-session"
+            return {
+                "code": 0,
+                "data": {
+                    "answer": "",
+                    "session_id": session_id,
+                    "reference": {"chunks": [base_chunk]},
+                },
+            }
+        if self._empty_chunks:
+            session_id = session_id or "stub-session"
+            return {
+                "code": 0,
+                "data": {
+                    "answer": "stub answer",
+                    "session_id": session_id,
+                    "reference": {"chunks": []},
+                },
+            }
         self._last_completion_body = {
             "chat_id": chat_id,
             "question": question,
@@ -219,14 +261,10 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
             session_id, {"messages": [], "reference": []}
         )
         chunks = [
-            {
-                "id": "chunk-1",
-                "content": "故障码 E-104 时先检查液压油位。",
-                "document_id": "doc-1",
-                "document_name": "manual.pdf",
-                "positions": [[3, 0.1, 0.2, 0.8, 0.4]],
-            }
+            base_chunk
         ] + list(self._extra_chunks)
+        if self._omit_default_chunk:
+            chunks = list(self._extra_chunks)
         if doc_ids and not self._ignore_doc_scope:
             allowed = set(doc_ids)
             chunks = [c for c in chunks if c.get("document_id") in allowed]
@@ -255,6 +293,8 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         session_id: str,
         request_id: str | None = None,
     ) -> dict:
+        if self._fail_session_read:
+            raise RAGFlowAPIError("Stub: session read failed", 503)
         return {
             "code": 0,
             "data": self._sessions.get(

@@ -119,6 +119,17 @@ class GatewayConfig:
         )
     )
 
+    @property
+    def demo_routes_enabled(self) -> bool:
+        default = (
+            "1"
+            if os.getenv("ENTERPRISE_TEST_MODE") == "1"
+            else "0"
+        )
+        return os.getenv(
+            "ENTERPRISE_DEMO_ROUTES_ENABLED", default
+        ).lower() in ("1", "true", "yes", "on")
+
     # --- Logging & observability ---
     log_level: str = field(
         default_factory=lambda: os.getenv("LOG_LEVEL", "INFO")

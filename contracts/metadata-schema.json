@@ -47,6 +47,13 @@
       ],
       "maxLength": 128
     },
+    "asset_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 128
+    },
     "equipment_name": {
       "type": [
         "string",

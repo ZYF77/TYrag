@@ -38,6 +38,21 @@ class TestGatewayConfig:
         assert cfg.pg_password == ""
         assert "infini" not in cfg.ragflow_base_url.lower()
 
+    def test_demo_routes_default_disabled_outside_test_mode(self, monkeypatch):
+        monkeypatch.setenv("ENTERPRISE_TEST_MODE", "0")
+        monkeypatch.delenv("ENTERPRISE_DEMO_ROUTES_ENABLED", raising=False)
+        assert GatewayConfig().demo_routes_enabled is False
+
+    def test_demo_routes_enabled_in_test_mode(self, monkeypatch):
+        monkeypatch.setenv("ENTERPRISE_TEST_MODE", "1")
+        monkeypatch.delenv("ENTERPRISE_DEMO_ROUTES_ENABLED", raising=False)
+        assert GatewayConfig().demo_routes_enabled is True
+
+    def test_demo_routes_explicit_override(self, monkeypatch):
+        monkeypatch.setenv("ENTERPRISE_DEMO_ROUTES_ENABLED", "true")
+        monkeypatch.setenv("ENTERPRISE_TEST_MODE", "0")
+        assert GatewayConfig().demo_routes_enabled is True
+
     def test_ragflow_api_key_required_outside_test_mode(self, monkeypatch):
         monkeypatch.delenv("RAGFLOW_API_KEY", raising=False)
         monkeypatch.setenv("ENTERPRISE_TEST_MODE", "0")

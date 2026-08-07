@@ -11,7 +11,9 @@ sys.path.insert(0, str(ROOT))
 
 import uvicorn  # noqa: E402
 
-LOG_PATH = ROOT / "artifacts" / "wp03-phase2-gateway-5190.log"
+LOG_PATH = ROOT / "artifacts" / (
+    f"wp03-phase2-gateway-{os.environ.get('GATEWAY_PORT', '5190')}.log"
+)
 
 LOG_CONFIG = {
     "version": 1,
@@ -37,6 +39,7 @@ LOG_CONFIG = {
 
 
 if __name__ == "__main__":
+    os.environ.setdefault("ENTERPRISE_DEMO_ROUTES_ENABLED", "true")
     port = int(os.environ.get("GATEWAY_PORT", "5190"))
     uvicorn.run(
         "enterprise.gateway.app:app",

@@ -5,7 +5,7 @@ require_user_principal and require_service_principal are strictly separate.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Callable, Optional
 
 from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -103,6 +103,25 @@ async def require_user_principal(
         await repo.close()
 
     return principal
+
+
+def require_capability(*required: str) -> Callable:
+    """Return a FastAPI dependency enforcing principal capabilities."""
+
+    async def dependency(
+        principal: UserPrincipal = Depends(require_user_principal),
+    ) -> UserPrincipal:
+        missing = [cap for cap in required if cap not in principal.capabilities]
+        if missing and "admin" not in principal.capabilities:
+            raise UserAuthError(
+                403,
+                "ACL_DENIED",
+                "Access denied",
+            )
+        return principal
+
+    return dependency
+
 
 def _get_validator() -> JWTValidator:
     """Create a JWTValidator (reads env at construction)."""

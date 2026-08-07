@@ -10,16 +10,18 @@ import logging
 import os
 import uuid
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from enterprise.gateway.acl.context import AclContext
 from enterprise.gateway.acl.schema import AclScope
 from enterprise.gateway.acl.scope import ScopeResolver, compile_scope
-from enterprise.gateway.auth.middleware import require_user_principal
+from enterprise.gateway.auth.middleware import (
+    require_capability,
+)
 from enterprise.gateway.auth.user_principal import UserPrincipal
-from enterprise.gateway.config import require_ragflow_api_key
+from enterprise.gateway.config import config, require_ragflow_api_key
 from enterprise.gateway.quality.gate import enforce_quality_gate
 from enterprise.gateway.quality.models import get_latest_evaluation
 from enterprise.gateway.query import acl_store
@@ -47,6 +49,7 @@ _MAX_DEMO_PDF_BYTES = int(
     os.environ.get("ENTERPRISE_DEMO_MAX_PDF_BYTES", str(128 * 1024 * 1024))
 )
 _query_stub: RAGFlowQueryStub | None = None
+NO_RELIABLE_EVIDENCE_ANSWER = "未找到可靠依据，无法回答。"
 
 
 async def get_db():
@@ -68,10 +71,17 @@ def _query_client():
     return RAGFlowQueryClient(api_key=require_ragflow_api_key())
 
 
+async def require_demo_routes_enabled() -> None:
+    if not config.demo_routes_enabled:
+        raise HTTPException(status_code=404)
+
+
 def _error(
     status_code: int, code: str, message: str, request_id: str
 ) -> JSONResponse:
-    from enterprise.gateway.app import ErrorResponse
+    from enterprise.gateway.app import ERROR_CODES, ErrorResponse
+
+    retryable = ERROR_CODES.get(code, (500, False))[1]
 
     return JSONResponse(
         status_code=status_code,
@@ -79,6 +89,7 @@ def _error(
             code=code,
             message=message,
             requestId=request_id,
+            retryable=retryable,
         ).model_dump(),
     )
 
@@ -222,7 +233,24 @@ class DemoAskResponse(BaseModel):
     ragflowSessionId: str | None = None
 
 
-def _to_citation(chunk: dict, index: int) -> DemoCitation:
+class DemoNoEvidenceResponse(BaseModel):
+    code: str
+    message: str
+    requestId: str
+    retryable: bool = False
+    answer: str
+    citations: list[DemoCitation]
+    conversationId: str
+    ragflowSessionId: str | None = None
+
+
+def _to_citation(
+    chunk: dict,
+    index: int,
+    *,
+    version_id: str | None = None,
+    asset_id: str | None = None,
+) -> DemoCitation:
     positions = chunk.get("positions") or chunk.get("position_int") or []
     page_no: int | None = None
     bbox: dict | None = None
@@ -256,8 +284,10 @@ def _to_citation(chunk: dict, index: int) -> DemoCitation:
             or "PDF document"
         ),
         documentId=chunk.get("document_id") or chunk.get("doc_id"),
+        versionId=version_id,
         pageNo=page_no,
         bbox=bbox,
+        assetId=asset_id,
         excerpt=chunk.get("content") or chunk.get("content_with_weight"),
     )
 
@@ -272,17 +302,23 @@ def _filter_citations(
     ]
 
 
-@router.post("/documents")
+@router.post("/documents", include_in_schema=False)
 async def upload_document(
     request: Request,
     db=Depends(get_db),
-    principal: UserPrincipal = Depends(require_user_principal),
+    _: None = Depends(require_demo_routes_enabled),
+    principal: UserPrincipal = Depends(require_capability("upload")),
 ):
     request_id = str(uuid.uuid4())
     external_document_id = request.query_params.get(
         "externalDocumentId", ""
     ).strip()
     file_name = request.headers.get("X-File-Name", "").strip()
+    asset_id = (
+        request.headers.get("X-Asset-Id")
+        or request.query_params.get("asset_id")
+        or ""
+    ).strip() or None
 
     if not external_document_id or len(external_document_id) > 128:
         return _error(
@@ -328,6 +364,20 @@ async def upload_document(
         db, tenant_id, "DEMO", external_document_id, "v1"
     )
     if existing:
+        await acl_store.ensure_schema(db)
+        allowed = await acl_store.is_allowed(
+            db,
+            tenant_id=tenant_id,
+            external_document_id=external_document_id,
+            business_user_id=principal.business_user_id,
+        )
+        if not allowed:
+            return _error(
+                403,
+                "ACL_DENIED",
+                "Access denied",
+                request_id,
+            )
         return DemoDocumentResponse(
             externalDocumentId=existing.external_document_id,
             sourceVersionId=existing.source_version_id,
@@ -347,6 +397,7 @@ async def upload_document(
         sha256=sha256,
         file_name=file_name,
         media_type="application/pdf",
+        asset_id=asset_id,
         sync_status="received",
     )
     try:
@@ -412,12 +463,6 @@ async def upload_document(
         await update_mapping_status(
             db, doc, "parsing", pipeline_status="RUNNING"
         )
-        await acl_store.grant(
-            db,
-            tenant_id=tenant_id,
-            external_document_id=external_document_id,
-            business_user_id=principal.business_user_id,
-        )
     except RAGFlowAPIError as e:
         code = (
             "RAGFLOW_API_INCOMPATIBLE"
@@ -454,11 +499,12 @@ async def upload_document(
     )
 
 
-@router.get("/documents/{external_document_id}/status")
+@router.get("/documents/{external_document_id}/status", include_in_schema=False)
 async def get_document_status(
     external_document_id: str,
     db=Depends(get_db),
-    principal: UserPrincipal = Depends(require_user_principal),
+    _: None = Depends(require_demo_routes_enabled),
+    principal: UserPrincipal = Depends(require_capability("read")),
 ):
     request_id = str(uuid.uuid4())
     doc, _scope, acl_error = await _resolve_authorized_document(
@@ -490,11 +536,14 @@ async def get_document_status(
     )
 
 
-@router.post("/ask", response_model=DemoAskResponse)
+@router.post("/ask", response_model=DemoAskResponse, include_in_schema=False)
 async def ask(
     req: DemoAskRequest,
     db=Depends(get_db),
-    principal: UserPrincipal = Depends(require_user_principal),
+    _: None = Depends(require_demo_routes_enabled),
+    principal: UserPrincipal = Depends(
+        require_capability("ask", "view_citations")
+    ),
 ):
     request_id = str(uuid.uuid4())
     doc, acl_error = await _authorized_document_for_gate(
@@ -634,7 +683,12 @@ async def ask(
         else []
     )
     raw_citations = [
-        _to_citation(c, index)
+        _to_citation(
+            c,
+            index,
+            version_id=doc.source_version_id,
+            asset_id=doc.asset_id,
+        )
         for index, c in enumerate(raw_chunks)
         if isinstance(c, dict)
     ]
@@ -660,6 +714,37 @@ async def ask(
     ragflow_session_id = (
         data.get("session_id") if isinstance(data, dict) else None
     )
+    answer = data.get("answer", "") if isinstance(data, dict) else ""
+    if not answer or not citations:
+        logger.info(
+            "ask returned no reliable evidence document=%s request_id=%s",
+            req.externalDocumentId,
+            request_id,
+        )
+        await conversation_store.upsert_conversation_map(
+            db,
+            tenant_id=principal.tenant_id,
+            business_user_id=principal.business_user_id,
+            conversation_id=conversation_id,
+            ragflow_chat_id=chat_id,
+            ragflow_session_id=ragflow_session_id,
+            external_document_id=req.externalDocumentId,
+            source_version_id=doc.source_version_id,
+            asset_id=doc.asset_id,
+        )
+        return JSONResponse(
+            status_code=200,
+            content=DemoNoEvidenceResponse(
+                code="NO_RELIABLE_EVIDENCE",
+                message="No reliable evidence was returned",
+                requestId=request_id,
+                retryable=False,
+                answer=NO_RELIABLE_EVIDENCE_ANSWER,
+                citations=[],
+                conversationId=conversation_id,
+                ragflowSessionId=ragflow_session_id,
+            ).model_dump(),
+        )
 
     await conversation_store.upsert_conversation_map(
         db,
@@ -669,6 +754,8 @@ async def ask(
         ragflow_chat_id=chat_id,
         ragflow_session_id=ragflow_session_id,
         external_document_id=req.externalDocumentId,
+        source_version_id=doc.source_version_id,
+        asset_id=doc.asset_id,
     )
     await conversation_store.add_message(
         db,
@@ -690,7 +777,7 @@ async def ask(
     )
 
     return DemoAskResponse(
-        answer=data.get("answer", "") if isinstance(data, dict) else "",
+        answer=answer,
         citations=citations,
         conversationId=conversation_id,
         ragflowSessionId=ragflow_session_id,
@@ -698,7 +785,11 @@ async def ask(
 
 
 def _session_messages_to_payload(
-    session_data: dict, scope: AclScope
+    session_data: dict,
+    scope: AclScope,
+    *,
+    version_id: str | None = None,
+    asset_id: str | None = None,
 ) -> list[dict]:
     data = session_data.get("data", {}) if isinstance(session_data, dict) else {}
     raw_messages = data.get("messages", []) if isinstance(data, dict) else []
@@ -726,12 +817,19 @@ def _session_messages_to_payload(
             )
             citations = _filter_citations(
                 [
-                    _to_citation(c, index)
+                    _to_citation(
+                        c,
+                        index,
+                        version_id=version_id,
+                        asset_id=asset_id,
+                    )
                     for index, c in enumerate(chunks)
                     if isinstance(c, dict)
                 ],
                 scope,
             )
+            if not str(msg.get("content") or "").strip() and not citations:
+                continue
         messages.append(
             {
                 "messageId": msg.get("id") or "",
@@ -745,11 +843,14 @@ def _session_messages_to_payload(
     return messages
 
 
-@router.get("/conversations/{conversation_id}")
+@router.get("/conversations/{conversation_id}", include_in_schema=False)
 async def get_conversation(
     conversation_id: str,
     db=Depends(get_db),
-    principal: UserPrincipal = Depends(require_user_principal),
+    _: None = Depends(require_demo_routes_enabled),
+    principal: UserPrincipal = Depends(
+        require_capability("list_sessions", "view_citations")
+    ),
 ):
     request_id = str(uuid.uuid4())
     await conversation_store.ensure_schema(db)
@@ -787,7 +888,18 @@ async def get_conversation(
             session_data = await _query_client().get_session(
                 ragflow_chat_id, ragflow_session_id
             )
-            messages = _session_messages_to_payload(session_data, scope)
+            messages = _session_messages_to_payload(
+                session_data,
+                scope,
+                version_id=(
+                    conversation.get("source_version_id")
+                    or doc.source_version_id
+                ),
+                asset_id=(
+                    conversation.get("asset_id")
+                    or doc.asset_id
+                ),
+            )
             if messages:
                 return {
                     "conversationId": conversation[
@@ -796,25 +908,26 @@ async def get_conversation(
                     "ragflowSessionId": ragflow_session_id,
                     "messages": messages,
                 }
+            return {
+                "conversationId": conversation["business_conversation_id"],
+                "ragflowSessionId": ragflow_session_id,
+                "messages": [],
+            }
         except RAGFlowAPIError:
             logger.warning(
                 "Query demo session read failed conversation_id=%s",
                 conversation_id,
             )
+            return _error(
+                503,
+                "CONVERSATION_UNAVAILABLE",
+                "Conversation history is temporarily unavailable",
+                request_id,
+            )
 
-    messages = [
-        {
-            "messageId": row["message_id"],
-            "role": row["role"],
-            "content": "",
-            "citations": [],
-            "status": row["status"],
-            "createdAt": row["created_at"],
-        }
-        for row in await conversation_store.list_messages(db, conversation_id)
-    ]
-    return {
-        "conversationId": conversation["business_conversation_id"],
-        "ragflowSessionId": conversation["ragflow_session_id"],
-        "messages": messages,
-    }
+    return _error(
+        503,
+        "CONVERSATION_UNAVAILABLE",
+        "Conversation history is temporarily unavailable",
+        request_id,
+    )

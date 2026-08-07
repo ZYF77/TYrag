@@ -1,9 +1,15 @@
 """Shared test fixtures for enterprise layer."""
 
+import os
+
 import pytest
 import pytest_asyncio
 
 from enterprise.gateway.ragflow_client import RAGFlowStub
+
+# Route registration for the temporary demo router is read at import time, so
+# test-mode apps must opt in before `enterprise.gateway.app` is imported.
+os.environ.setdefault("ENTERPRISE_TEST_MODE", "1")
 
 
 @pytest.fixture

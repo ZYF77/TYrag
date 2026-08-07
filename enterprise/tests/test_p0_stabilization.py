@@ -151,3 +151,8 @@ class TestContractFiles:
         with open(ROOT / "contracts" / "metadata-schema.json", encoding="utf-8") as f:
             schema = json.load(f)
         assert schema["$schema"].startswith("https://json-schema.org/")
+
+    def test_metadata_schema_allows_asset_id(self):
+        with open(ROOT / "contracts" / "metadata-schema.json", encoding="utf-8") as f:
+            schema = json.load(f)
+        assert "asset_id" in schema["properties"]

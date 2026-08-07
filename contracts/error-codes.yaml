@@ -72,6 +72,9 @@ errors:
   - code: CONVERSATION_NOT_FOUND
     http_status: 404
     retryable: false
+  - code: CONVERSATION_UNAVAILABLE
+    http_status: 503
+    retryable: true
   - code: CONVERSATION_OWNER_MISMATCH
     http_status: 403
     retryable: false

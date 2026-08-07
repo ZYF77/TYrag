@@ -106,6 +106,7 @@ def metadata_for(doc_id: str, page_count: int) -> dict:
         "external_document_id": doc_id,
         "source_system": SOURCE_SYSTEM,
         "equipment_id": f"EQ-{doc_id}",
+        "fixed_asset_no": f"FA-{doc_id}",
         "document_type": "manual",
         "document_version": "v1",
         "department_id": "dept-eng",
@@ -312,6 +313,11 @@ async def main() -> int:
     ok = (
         a["quality_status"] == "passed"
         and a["ask_status"] == 200
+        and bool(a["citations"])
+        and all(
+            c.get("versionId") == "v1" and c.get("assetId") == "FA-P2-A"
+            for c in a["citations"]
+        )
         and b["quality_status"] == "review_required"
         and b["ask_status"] == 409
         and b["ask_code"] == "DOCUMENT_REVIEW_REQUIRED"
