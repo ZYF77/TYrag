@@ -562,22 +562,29 @@ def verify_stream_gateway_failure(
             )
             try:
                 _wait_url(f"{base}/enterprise/api/v1/health")
-                created = httpx.post(
-                    f"{base}/enterprise/api/v1/conversations",
-                    headers=user_headers,
-                    json={},
-                    timeout=30,
-                )
-                assert created.status_code == 201, created.text
-                conversation_id = created.json()["conversationId"]
-                ask = httpx.post(
-                    f"{base}/enterprise/api/v1/conversations/"
-                    f"{conversation_id}/messages:stream",
-                    headers={**user_headers, "Accept": "text/event-stream"},
-                    params={"stream": "true"},
-                    json={"question": "stream transport probe"},
-                    timeout=60,
-                )
+                async with httpx.AsyncClient(timeout=60) as client:
+                    created = await client.post(
+                        f"{base}/enterprise/api/v1/conversations",
+                        headers=user_headers,
+                        json={},
+                    )
+                    assert created.status_code == 201, created.text
+                    conversation_id = created.json()["conversationId"]
+                    ask = await client.post(
+                        f"{base}/enterprise/api/v1/conversations/"
+                        f"{conversation_id}/messages:stream",
+                        headers={
+                            **user_headers,
+                            "Accept": "text/event-stream",
+                        },
+                        params={"stream": "true"},
+                        json={"question": "stream transport probe"},
+                    )
+                    history = await client.get(
+                        f"{base}/enterprise/api/v1/conversations/"
+                        f"{conversation_id}",
+                        headers=user_headers,
+                    )
                 events = parse_sse(ask.text)
                 assert any(
                     event == "run.failed" for event, _ in events
@@ -591,12 +598,6 @@ def verify_stream_gateway_failure(
                     if event == "run.failed"
                 )
                 assert failed["code"] == "RAGFLOW_UNAVAILABLE", failed
-                history = httpx.get(
-                    f"{base}/enterprise/api/v1/conversations/"
-                    f"{conversation_id}",
-                    headers=user_headers,
-                    timeout=30,
-                )
                 assert history.status_code == 200, history.text
                 assistant = next(
                     m
