@@ -37,6 +37,7 @@ from enterprise.gateway.quality.worker import (  # noqa: E402
 )
 from enterprise.gateway.query import acl_store  # noqa: E402
 from enterprise.gateway.query import router as query_router  # noqa: E402
+from enterprise.gateway.query.ragflow_client import RAGFlowQueryStub  # noqa: E402
 from enterprise.gateway.sync.models import (  # noqa: E402
     ExtDocumentMap,
     OutboxEvent,
@@ -410,6 +411,18 @@ class FlakyStub(PassStub):
         )
 
 
+class FailingQueryStub(RAGFlowQueryStub):
+    async def chat_completion(
+        self,
+        chat_id: str,
+        question: str,
+        session_id: str | None = None,
+        doc_ids: list[str] | None = None,
+        request_id: str | None = None,
+    ) -> dict:
+        raise RAGFlowAPIError("Stub: RAGFlow unavailable", 503)
+
+
 async def _ready_with_client(db, client, content=b"manual"):
     service = SyncService(db, SourceStub(content), client)
     event = _make_event(content)
@@ -704,6 +717,25 @@ class TestQualityAPI:
             assert resp.json()["answer"]
 
 
+    @pytest.mark.asyncio
+    async def test_ask_ragflow_unavailable_returns_503(self):
+        from enterprise.gateway.quality import router as quality_router_module
+
+        db = app.dependency_overrides[quality_router_module.get_db]()
+        doc = await _insert_ready_document(db, doc_id="DOC-503")
+        await _create_evaluation(db, doc, quality_status="passed")
+        query_router._query_stub = FailingQueryStub()
+        token = _make_token()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.post(
+                "/enterprise/api/v1/demo/ask",
+                json={"externalDocumentId": "DOC-503", "question": "检查步骤"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert resp.status_code == 503
+            assert resp.json()["code"] == "RAGFLOW_UNAVAILABLE"
+
 
 @pytest.mark.asyncio
 async def test_backfill_dry_run_then_real(tmp_path):
@@ -732,4 +764,30 @@ async def test_backfill_dry_run_then_real(tmp_path):
     )
     assert latest is not None
     assert latest.evaluation_state == "pending"
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_backfill_skips_disabled_and_is_idempotent(tmp_path):
+    db_path = str(tmp_path / "backfill2.db")
+    db = await init_db(db_path)
+    doc = await _insert_ready_document(db, doc_id="DOC-DISABLED")
+    await update_mapping_status(
+        db, doc, "disabled", business_status="disabled",
+    )
+    args = argparse.Namespace(
+        db=db_path,
+        tenant="customer-a",
+        source_system="DEMO",
+        source_version_id="v1",
+        dry_run=False,
+        limit=100,
+        offset=0,
+        max_attempts=5,
+    )
+    await backfill_run(args)
+    latest = await quality_models.get_latest_evaluation(
+        db, "customer-a", "DEMO", "DOC-DISABLED", "v1",
+    )
+    assert latest is None
     await db.close()
