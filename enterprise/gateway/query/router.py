@@ -20,6 +20,8 @@ from enterprise.gateway.acl.scope import ScopeResolver, compile_scope
 from enterprise.gateway.auth.middleware import require_user_principal
 from enterprise.gateway.auth.user_principal import UserPrincipal
 from enterprise.gateway.config import require_ragflow_api_key
+from enterprise.gateway.quality.gate import enforce_quality_gate
+from enterprise.gateway.quality.models import get_latest_evaluation
 from enterprise.gateway.query import acl_store
 from enterprise.gateway.query import conversation_store
 from enterprise.gateway.query.ragflow_client import (
@@ -152,6 +154,35 @@ async def _resolve_authorized_document(
             403, "ACL_DENIED", "Access denied", request_id
         )
     return doc, scope, None
+
+
+async def _authorized_document_for_gate(
+    db,
+    principal: UserPrincipal,
+    external_document_id: str,
+    request_id: str,
+):
+    """Authorize a document for quality-gate checks without materializing a
+    retrieval scope (failed documents have no RAGFlow document id yet)."""
+    doc = await get_mapping(
+        db,
+        principal.tenant_id,
+        "DEMO",
+        external_document_id,
+        "v1",
+    )
+    if not doc:
+        return None, _error(404, "DOCUMENT_NOT_FOUND", "Document not found", request_id)
+    await acl_store.ensure_schema(db)
+    allowed = await acl_store.is_allowed(
+        db,
+        tenant_id=principal.tenant_id,
+        external_document_id=external_document_id,
+        business_user_id=principal.business_user_id,
+    )
+    if not allowed:
+        return None, _error(403, "ACL_DENIED", "Access denied", request_id)
+    return doc, None
 
 
 class DemoDocumentResponse(BaseModel):
@@ -466,14 +497,49 @@ async def ask(
     principal: UserPrincipal = Depends(require_user_principal),
 ):
     request_id = str(uuid.uuid4())
-    doc, scope, acl_error = await _resolve_authorized_document(
+    doc, acl_error = await _authorized_document_for_gate(
         db, principal, req.externalDocumentId, request_id
     )
     if acl_error:
         return acl_error
     if doc is None:
-        return _error(
-            404, "DOCUMENT_NOT_FOUND", "Document not found", request_id
+        return _error(404, "DOCUMENT_NOT_FOUND", "Document not found", request_id)
+    evaluation = await get_latest_evaluation(
+        db, doc.tenant_id, doc.source_system,
+        doc.external_document_id, doc.source_version_id,
+    )
+    quality_code = None
+    quality_gate_default = (
+        "false" if os.environ.get("ENTERPRISE_TEST_MODE") == "1" else "true"
+    )
+    if os.environ.get(
+        "ENTERPRISE_QUALITY_GATE_ENABLED", quality_gate_default
+    ).lower() == "true":
+        strict_mode = (
+            os.environ.get("ENTERPRISE_QUALITY_STRICT_MODE", "true").lower()
+            == "true"
+        )
+        demo_warn_mode = (
+            os.environ.get("ENTERPRISE_QUALITY_DEMO_WARN_MODE", "false").lower()
+            == "true"
+        )
+        quality_allowed, quality_code = enforce_quality_gate(
+            evaluation,
+            strict_mode=strict_mode,
+            demo_warn_mode=demo_warn_mode,
+        )
+        if not quality_allowed:
+            return _error(
+                409,
+                quality_code,
+                f"Document quality gate rejected request ({quality_code})",
+                request_id,
+            )
+    if quality_code == "DOCUMENT_QUALITY_WARN":
+        logger.warning(
+            "Quality warn mode allowed ask for document=%s request_id=%s",
+            req.externalDocumentId,
+            request_id,
         )
     if doc.sync_status != "ready":
         return _error(
@@ -481,6 +547,16 @@ async def ask(
             "DOCUMENT_NOT_READY",
             f"Document status is {doc.sync_status}, expected ready",
             request_id,
+        )
+
+    doc, scope, acl_error = await _resolve_authorized_document(
+        db, principal, req.externalDocumentId, request_id
+    )
+    if acl_error:
+        return acl_error
+    if doc is None or scope.is_empty:
+        return _error(
+            403, "ACL_DENIED", "Access denied", request_id
         )
 
     await conversation_store.ensure_schema(db)

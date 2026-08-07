@@ -82,6 +82,43 @@ class GatewayConfig:
         default_factory=lambda: os.getenv("ENTERPRISE_WORKER_ENABLED", "true").lower() == "true"
     )
 
+    # --- WP-03 Phase 2: quality evaluation ---
+    quality_worker_enabled: bool = field(
+        default_factory=lambda: os.getenv(
+            "ENTERPRISE_QUALITY_WORKER_ENABLED", "true"
+        ).lower() == "true"
+    )
+    quality_poll_seconds: float = field(
+        default_factory=lambda: float(
+            os.getenv("ENTERPRISE_QUALITY_POLL_SECONDS", "2.0")
+        )
+    )
+    quality_reconcile_seconds: float = field(
+        default_factory=lambda: float(
+            os.getenv("ENTERPRISE_QUALITY_RECONCILE_SECONDS", "10.0")
+        )
+    )
+    quality_max_attempts: int = field(
+        default_factory=lambda: int(
+            os.getenv("ENTERPRISE_QUALITY_MAX_ATTEMPTS", "5")
+        )
+    )
+    quality_strict_mode: bool = field(
+        default_factory=lambda: os.getenv(
+            "ENTERPRISE_QUALITY_STRICT_MODE", "true"
+        ).lower() == "true"
+    )
+    quality_demo_warn_mode: bool = field(
+        default_factory=lambda: os.getenv(
+            "ENTERPRISE_QUALITY_DEMO_WARN_MODE", "false"
+        ).lower() == "true"
+    )
+    quality_running_timeout_seconds: int = field(
+        default_factory=lambda: int(
+            os.getenv("ENTERPRISE_QUALITY_RUNNING_TIMEOUT_SECONDS", "1800")
+        )
+    )
+
     # --- Logging & observability ---
     log_level: str = field(
         default_factory=lambda: os.getenv("LOG_LEVEL", "INFO")

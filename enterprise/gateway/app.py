@@ -38,6 +38,11 @@ from enterprise.gateway.sync.sync_service import (
     DocumentSyncError, DocumentNotFoundError, SyncService,
 )
 from enterprise.gateway.sync.worker import OutboxWorker, StatusReconciler
+from enterprise.gateway.quality.worker import (
+    QualityEvaluationService,
+    QualityEvaluationWorker,
+    QualityReconciler,
+)
 from enterprise.gateway.config import config, require_ragflow_api_key
 
 logger = logging.getLogger(__name__)
@@ -96,6 +101,25 @@ async def lifespan(app: FastAPI):
         )
         started_tasks.extend([worker_task, reconciler_task])
         _background_tasks.extend(started_tasks)
+    if config.quality_worker_enabled and not _test_mode():
+        quality_service = QualityEvaluationService(
+            _db,
+            _ragflow_client(),
+            max_attempts=config.quality_max_attempts,
+        )
+        quality_worker_task = asyncio.create_task(
+            QualityEvaluationWorker(quality_service).run_forever(
+                config.quality_poll_seconds
+            )
+        )
+        quality_reconciler_task = asyncio.create_task(
+            QualityReconciler(
+                quality_service,
+                running_timeout_seconds=config.quality_running_timeout_seconds,
+            ).run_forever(config.quality_reconcile_seconds)
+        )
+        started_tasks.extend([quality_worker_task, quality_reconciler_task])
+        _background_tasks.extend([quality_worker_task, quality_reconciler_task])
     try:
         yield
     finally:
@@ -238,6 +262,9 @@ ERROR_CODES = {
     "DOCUMENT_SOURCE_NOT_FOUND": (422, True),
     "DOCUMENT_NOT_FOUND": (404, False),
     "DOCUMENT_SYNC_FAILED": (502, True),
+    "DOCUMENT_REVIEW_REQUIRED": (409, False),
+    "DOCUMENT_QUALITY_FAILED": (409, False),
+    "DOCUMENT_QUALITY_PENDING": (409, False),
     "RAGFLOW_UNAVAILABLE": (503, True),
     "RAGFLOW_API_INCOMPATIBLE": (503, False),
     "VALIDATION_ERROR": (422, False),
@@ -257,6 +284,9 @@ SAFE_ERROR_MESSAGES = {
     "DOCUMENT_SOURCE_NOT_FOUND": "Source file could not be retrieved",
     "DOCUMENT_NOT_FOUND": "Document not found",
     "DOCUMENT_SYNC_FAILED": "Document synchronization failed",
+    "DOCUMENT_REVIEW_REQUIRED": "Document quality review is required",
+    "DOCUMENT_QUALITY_FAILED": "Document quality check failed",
+    "DOCUMENT_QUALITY_PENDING": "Document quality evaluation is pending",
     "RAGFLOW_UNAVAILABLE": "RAGFlow service is temporarily unavailable",
     "RAGFLOW_API_INCOMPATIBLE": "RAGFlow API is not compatible with the gateway",
     "VALIDATION_ERROR": "Request validation failed",
@@ -400,6 +430,7 @@ async def upsert_document(
         sha256=req.sha256,
         file_name=req.fileName,
         media_type=req.mediaType,
+        source_page_count=req.metadata.get("page_count"),
         bucket=req.source.bucket,
         object_key=req.source.objectKey,
         batch_id=req.batchId,
@@ -638,6 +669,10 @@ async def auth_me(
 # Temporary query demo router, owned by the WP-04 retrieval scope
 from enterprise.gateway.query.router import router as query_router
 app.include_router(query_router)
+
+# WP-03 Phase 2 quality status APIs
+from enterprise.gateway.quality.router import router as quality_router
+app.include_router(quality_router)
 
 
 @app.api_route(

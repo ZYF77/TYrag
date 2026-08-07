@@ -62,6 +62,7 @@ docker/oceanbase/data
 docker/seekdb
 
 # Node
+.pnpm-store/
 logs
 *.log
 npm-debug.log*

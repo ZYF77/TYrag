@@ -178,6 +178,109 @@ paths:
               schema:
                 $ref: '#/components/schemas/DocumentSyncResponse'
         '404': { $ref: '#/components/responses/Error' }
+  /documents/quality-status:
+    get:
+      summary: List parse quality evaluation status for documents
+      operationId: listQualityStatus
+      x-status: implemented
+      security:
+        - ServiceAuth: []
+      parameters:
+        - name: tenant_id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: source_system
+          in: query
+          required: false
+          schema: { type: string }
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [passed, review_required, failed]
+        - name: parser_profile
+          in: query
+          required: false
+          schema: { type: string }
+        - name: batch_id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, default: 100, maximum: 500 }
+        - name: offset
+          in: query
+          required: false
+          schema: { type: integer, default: 0 }
+      responses:
+        '200':
+          description: Quality evaluation status items
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DocumentQualityResponse'
+        '401': { $ref: '#/components/responses/Error' }
+  /documents/{externalDocumentId}/quality:
+    get:
+      summary: Get parse quality status for an authorized document
+      operationId: getDocumentQuality
+      x-status: implemented
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ExternalDocumentId'
+        - name: source_system
+          in: query
+          required: false
+          schema: { type: string, default: DEMO }
+        - name: source_version_id
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Quality evaluation status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentQualityResponse'
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /documents/{externalDocumentId}/quality:reevaluate:
+    post:
+      summary: Request a new quality evaluation for a document version
+      operationId: reevaluateDocumentQuality
+      x-status: implemented
+      security:
+        - ServiceAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ExternalDocumentId'
+        - name: tenant_id
+          in: query
+          required: true
+          schema: { type: string }
+        - name: source_system
+          in: query
+          required: true
+          schema: { type: string }
+        - name: source_version_id
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        '202':
+          description: New evaluation accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReevaluateQualityResponse'
+        '404': { $ref: '#/components/responses/Error' }
   /conversations:
     post:
       summary: "Planned: Create a business conversation mapped to RAGFlow"
@@ -321,6 +424,42 @@ components:
         businessStatus: { type: string }
         currentVersion: { type: boolean }
         batchId: { type: [string, 'null'] }
+    DocumentQualityResponse:
+      type: object
+      required: [externalDocumentId, sourceVersionId, evaluationState]
+      properties:
+        externalDocumentId: { type: string }
+        sourceVersionId: { type: string }
+        evaluationState:
+          type: string
+          enum: [pending, running, completed, failed, not_started]
+        evaluationVersion: { type: [string, 'null'] }
+        parseQualityStatus:
+          type: [string, 'null']
+          enum: [passed, review_required, failed]
+        qualityReasons:
+          type: array
+          items: { type: string }
+        parserProfile: { type: [string, 'null'] }
+        policyVersion: { type: [string, 'null'] }
+        completedAt: { type: [string, 'null'], format: date-time }
+        metricSummary:
+          type: object
+          additionalProperties: true
+        qualityDimensions:
+          type: object
+          additionalProperties:
+            type: string
+            enum: [passed, review_required, failed, not_applicable, not_evaluated]
+    ReevaluateQualityResponse:
+      type: object
+      required: [externalDocumentId, sourceVersionId, evaluationId, evaluationVersion, requestId]
+      properties:
+        externalDocumentId: { type: string }
+        sourceVersionId: { type: string }
+        evaluationId: { type: integer }
+        evaluationVersion: { type: string }
+        requestId: { type: string }
     CreateConversationRequest:
       type: object
       properties:

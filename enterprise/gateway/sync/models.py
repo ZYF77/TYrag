@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS ext_document_map (
     sha256 TEXT NOT NULL,
     file_name TEXT NOT NULL,
     media_type TEXT DEFAULT 'application/pdf',
+    source_page_count INTEGER,
     bucket TEXT NOT NULL DEFAULT '',
     object_key TEXT NOT NULL DEFAULT '',
     ragflow_dataset_id TEXT,
@@ -88,6 +89,7 @@ CREATE INDEX IF NOT EXISTS idx_outbox_pending
 _MIGRATION_COLUMNS = {
     "event_type": "TEXT NOT NULL DEFAULT 'upsert'",
     "event_status": "TEXT NOT NULL DEFAULT 'received'",
+    "source_page_count": "INTEGER",
     "bucket": "TEXT NOT NULL DEFAULT ''",
     "object_key": "TEXT NOT NULL DEFAULT ''",
     "business_status": "TEXT NOT NULL DEFAULT 'active'",
@@ -108,6 +110,7 @@ class ExtDocumentMap:
     sha256: str
     file_name: str
     media_type: str = "application/pdf"
+    source_page_count: int | None = None
     event_type: str = "upsert"
     event_status: str = "received"
     bucket: str = ""
@@ -174,6 +177,7 @@ def _row_to_mapping(row: aiosqlite.Row) -> ExtDocumentMap:
         sha256=row["sha256"],
         file_name=row["file_name"],
         media_type=row["media_type"],
+        source_page_count=row["source_page_count"],
         bucket=row["bucket"],
         object_key=row["object_key"],
         ragflow_dataset_id=row["ragflow_dataset_id"],
@@ -242,6 +246,9 @@ async def init_db(db_path: str = "enterprise/ext_document_map.db") -> aiosqlite.
     await db.execute("PRAGMA foreign_keys=ON")
     await db.executescript(CREATE_EXT_DOCUMENT_MAP)
     await migrate_schema(db)
+    from enterprise.gateway.quality.models import ensure_quality_schema
+
+    await ensure_quality_schema(db)
     return db
 
 
@@ -252,24 +259,26 @@ async def insert_mapping(db: aiosqlite.Connection, doc: ExtDocumentMap) -> ExtDo
             """INSERT INTO ext_document_map
                (tenant_id, source_system, external_document_id, source_version_id,
                 event_id, event_type, event_status, sha256, file_name, media_type,
-                bucket, object_key, ragflow_dataset_id, ragflow_document_id,
+                source_page_count, bucket, object_key,
+                ragflow_dataset_id, ragflow_document_id,
                 ragflow_task_id, sync_status, pipeline_status, business_status,
                 current_version, attempt_count, next_retry_at, batch_id,
                 last_error_code, last_error_message, last_sync_at,
                 source_updated_at, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(tenant_id, source_system, external_document_id, source_version_id)
                DO NOTHING""",
             (
                 doc.tenant_id, doc.source_system, doc.external_document_id,
                 doc.source_version_id, doc.event_id, doc.event_type,
                 doc.event_status, doc.sha256, doc.file_name, doc.media_type,
-                doc.bucket, doc.object_key, doc.ragflow_dataset_id,
-                doc.ragflow_document_id, doc.ragflow_task_id, doc.sync_status,
-                doc.pipeline_status, doc.business_status, doc.current_version,
-                doc.attempt_count, doc.next_retry_at, doc.batch_id,
-                doc.last_error_code, doc.last_error_message, doc.last_sync_at,
-                doc.source_updated_at, now, now,
+                doc.source_page_count, doc.bucket, doc.object_key,
+                doc.ragflow_dataset_id, doc.ragflow_document_id,
+                doc.ragflow_task_id, doc.sync_status, doc.pipeline_status,
+                doc.business_status, doc.current_version, doc.attempt_count,
+                doc.next_retry_at, doc.batch_id, doc.last_error_code,
+                doc.last_error_message, doc.last_sync_at, doc.source_updated_at,
+                now, now,
             ),
         )
         await db.commit()
@@ -396,6 +405,7 @@ async def update_mapping_status(
     attempt_count: int | None = None,
     next_retry_at: str | None = None,
     event_type: str | None = None,
+    source_page_count: int | None = None,
     bucket: str | None = None,
     object_key: str | None = None,
 ) -> None:
@@ -412,6 +422,7 @@ async def update_mapping_status(
                attempt_count=COALESCE(?, attempt_count),
                next_retry_at=?,
                event_type=COALESCE(?, event_type),
+               source_page_count=COALESCE(?, source_page_count),
                bucket=COALESCE(?, bucket),
                object_key=COALESCE(?, object_key),
                ragflow_dataset_id=COALESCE(?, ragflow_dataset_id),
@@ -423,7 +434,7 @@ async def update_mapping_status(
         (
             sync_status, pipeline_status, error_code, error_message,
             event_status, business_status, current_version, attempt_count,
-            next_retry_at, event_type, bucket, object_key,
+            next_retry_at, event_type, source_page_count, bucket, object_key,
             doc.ragflow_dataset_id, doc.ragflow_document_id,
             doc.ragflow_task_id, now, now, doc.id,
         ),
@@ -446,6 +457,8 @@ async def update_mapping_status(
         doc.next_retry_at = next_retry_at
     if event_type is not None:
         doc.event_type = event_type
+    if source_page_count is not None:
+        doc.source_page_count = source_page_count
     if bucket is not None:
         doc.bucket = bucket
     if object_key is not None:

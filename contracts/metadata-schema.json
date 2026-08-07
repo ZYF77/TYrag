@@ -115,6 +115,14 @@
       ],
       "format": "date-time"
     },
+    "page_count": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 100000
+    },
     "manufacturer": {
       "type": [
         "string",

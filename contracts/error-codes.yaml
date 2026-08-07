@@ -39,6 +39,12 @@ errors:
   - code: DOCUMENT_REVIEW_REQUIRED
     http_status: 409
     retryable: false
+  - code: DOCUMENT_QUALITY_FAILED
+    http_status: 409
+    retryable: false
+  - code: DOCUMENT_QUALITY_PENDING
+    http_status: 409
+    retryable: false
   - code: RAGFLOW_API_INCOMPATIBLE
     http_status: 503
     retryable: false

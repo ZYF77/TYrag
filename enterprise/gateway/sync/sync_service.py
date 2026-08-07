@@ -93,6 +93,7 @@ class SyncService:
                 sha256=payload["sha256"],
                 file_name=payload["fileName"],
                 media_type=payload.get("mediaType", "application/pdf"),
+                source_page_count=(payload.get("metadata") or {}).get("page_count"),
                 bucket=payload["source"]["bucket"],
                 object_key=payload["source"]["objectKey"],
                 batch_id=event.batch_id,
@@ -115,6 +116,7 @@ class SyncService:
                     error_code=e.code, error_message=str(e),
                     attempt_count=event.attempts,
                 )
+                await self._ensure_quality_evaluation(doc)
             raise
         except RetryableDocumentSyncError as e:
             if doc.sync_status != "ready" and not is_terminal_document_status(doc.sync_status):
@@ -208,6 +210,8 @@ class SyncService:
                 doc, mapped, event_status="completed",
                 pipeline_status=doc.pipeline_status,
             )
+            if mapped == "failed":
+                await self._ensure_quality_evaluation(doc)
 
     async def _set_status(
         self,
@@ -360,6 +364,38 @@ class SyncService:
             business_status="active", current_version=1,
             pipeline_status=doc.pipeline_status,
         )
+        await self._ensure_quality_evaluation(doc)
+
+    async def _ensure_quality_evaluation(self, doc: ExtDocumentMap) -> None:
+        from enterprise.gateway.config import config
+        from enterprise.gateway.quality.models import get_or_create_evaluation
+        from enterprise.gateway.quality.routing import route_document
+
+        routing = route_document(
+            media_type=doc.media_type,
+            file_name=doc.file_name,
+            source_system=doc.source_system,
+        )
+        try:
+            await get_or_create_evaluation(
+                self.db,
+                tenant_id=doc.tenant_id,
+                source_system=doc.source_system,
+                external_document_id=doc.external_document_id,
+                source_version_id=doc.source_version_id,
+                ragflow_dataset_id=doc.ragflow_dataset_id,
+                ragflow_document_id=doc.ragflow_document_id,
+                routing=routing,
+                evaluation_version="1",
+                max_attempts=config.quality_max_attempts,
+            )
+        except Exception:
+            # Quality job creation must not roll back or block WP-02 ready.
+            logger.exception(
+                "Quality evaluation enqueue failed document=%s version=%s",
+                doc.external_document_id,
+                doc.source_version_id,
+            )
 
     async def refresh_status(self, doc: ExtDocumentMap) -> ExtDocumentMap:
         if (
@@ -392,6 +428,8 @@ class SyncService:
                 await self._set_status(
                     doc, mapped, event_status="completed", pipeline_status=run,
                 )
+                if mapped == "failed":
+                    await self._ensure_quality_evaluation(doc)
             break
         return await get_mapping(
             self.db, doc.tenant_id, doc.source_system,

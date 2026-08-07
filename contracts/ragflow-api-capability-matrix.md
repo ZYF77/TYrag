@@ -35,7 +35,7 @@
 | connector_api | `/api/v1/connector` | 数据源连接器 | P2 | |
 | models_api | `/api/v1/models` | 模型管理 | 内部/不暴露 | Admin 配置 |
 | provider_api | `/api/v1/provider` | LLM Provider 管理 | 内部/不暴露 | Admin 配置 |
-| file2document_api | `/api/v1/file2document` | 文件转文档 | 需封装 (WP-03) | 解析路由与复核 |
+| file2document_api | `/api/v1/file2document` | 文件转文档 | 需封装 (WP-03 Phase 2) | 解析路由与复核；企业路由当前只记录 decision，不伪造已应用 |
 | file_commit_api | `/api/v1/file_commit` | 文件版本提交 | 需封装 (WP-02) | 与业务版本同步 |
 | plugin_api | `/api/v1/plugin` | 插件管理 | P2 | |
 | openai_api | `/api/v1/openai` | OpenAI 兼容 API | P1 | 兼容现有调用方 |
@@ -58,6 +58,9 @@
 | POST /conversations/{id}/messages:stream | chat_api (completion) | planned（未实现） |
 | GET /citations/{id} | chunk_api + reference | planned（未实现） |
 | GET /documents/sync-status | task_api + document_api | enterprise/gateway/sync/ |
+| GET /documents/{id}/quality | document_api + chunk_api | enterprise/gateway/quality/ |
+| GET /documents/quality-status | document_api + chunk_api | enterprise/gateway/quality/ |
+| POST /documents/{id}/quality:reevaluate | document_api + chunk_api | enterprise/gateway/quality/ |
 
 ## Query demo 已验证接口
 
