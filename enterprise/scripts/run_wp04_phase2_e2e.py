@@ -112,6 +112,7 @@ def _e2e_env() -> dict[str, str]:
             "JWT_JWKS_URL": "",
             "JWT_ISSUER": JWT_ISSUER,
             "JWT_AUDIENCE": JWT_AUDIENCE,
+            "ENTERPRISE_DB_PATH": DB_PATH,
             "ENTERPRISE_SYNC_DB_PATH": DB_PATH,
             "S3_ENDPOINT": S3_ENDPOINT,
             "S3_ACCESS_KEY": S3_ACCESS_KEY,
