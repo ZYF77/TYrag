@@ -283,9 +283,9 @@ paths:
         '404': { $ref: '#/components/responses/Error' }
   /conversations:
     post:
-      summary: "Planned: Create a business conversation mapped to RAGFlow"
+      summary: Create a business conversation mapped to RAGFlow
       operationId: createConversation
-      x-status: planned
+      x-status: implemented
       security:
         - BearerAuth: []
       requestBody:
@@ -301,12 +301,34 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Conversation'
-        '501': { description: Not implemented }
+        '403': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /conversations/{conversationId}:
+    get:
+      summary: Get owned conversation with persisted messages and citation snapshots
+      operationId: getConversation
+      x-status: implemented
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: conversationId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Conversation detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConversationDetail'
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
   /conversations/{conversationId}/messages:stream:
     post:
-      summary: "Planned: Ask a question and stream evidence-grounded answer"
+      summary: Ask a question and stream an evidence-grounded answer
       operationId: streamAsk
-      x-status: planned
+      x-status: implemented
       security:
         - BearerAuth: []
       parameters:
@@ -322,16 +344,21 @@ paths:
               $ref: '#/components/schemas/AskRequest'
       responses:
         '200':
-          description: text/event-stream
+          description: text/event-stream when Accept is text/event-stream; JSON otherwise
           content:
             text/event-stream:
               schema: { type: string }
-        '501': { description: Not implemented }
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AskJsonResponse'
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/Error' }
   /citations/{citationId}:
     get:
-      summary: "Planned: Resolve an authorized citation"
+      summary: Resolve an authorized citation
       operationId: getCitation
-      x-status: planned
+      x-status: implemented
       security:
         - BearerAuth: []
       parameters:
@@ -347,7 +374,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Citation'
         '403': { $ref: '#/components/responses/Error' }
-        '501': { description: Not implemented }
+        '404': { $ref: '#/components/responses/Error' }
 components:
   securitySchemes:
     BearerAuth:
@@ -471,8 +498,48 @@ components:
       required: [conversationId, createdAt]
       properties:
         conversationId: { type: string }
-        ragflowSessionId: { type: string }
+        status: { type: string, default: active }
         createdAt: { type: string, format: date-time }
+    Message:
+      type: object
+      required: [messageId, role, content, status, createdAt]
+      properties:
+        messageId: { type: string }
+        role: { type: string, enum: [user, assistant] }
+        content: { type: string }
+        status:
+          type: string
+          enum: [completed, no_reliable_evidence, failed]
+        citations:
+          type: array
+          items:
+            $ref: '#/components/schemas/Citation'
+        createdAt: { type: string, format: date-time }
+    ConversationDetail:
+      type: object
+      required: [conversationId, createdAt, status]
+      properties:
+        conversationId: { type: string }
+        createdAt: { type: string, format: date-time }
+        status: { type: string }
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/Message'
+    AskJsonResponse:
+      type: object
+      required: [conversationId, messageId, answer, status]
+      properties:
+        conversationId: { type: string }
+        messageId: { type: string }
+        answer: { type: string }
+        status:
+          type: string
+          enum: [completed, no_reliable_evidence, failed]
+        citations:
+          type: array
+          items:
+            $ref: '#/components/schemas/Citation'
     AskRequest:
       type: object
       required: [question]

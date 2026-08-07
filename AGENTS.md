@@ -124,3 +124,10 @@ docker compose -f ragflow/docker/docker-compose.yml up -d --no-deps ragflow-cpu
 ### 访问地址
 - 前端：http://localhost:8080
 - API：http://localhost:9380
+
+## 9. 消息状态与证据解耦
+
+- `completed` / `no_reliable_evidence` / `failed` 是消息的业务状态，由运行结果显式决定；
+- `citations` 只是证据数据，与业务状态相互独立；
+- 禁止用 `citations` 是否为空推导消息状态，也禁止用消息状态推导 `citations`；
+- 历史回放和前端展示必须原样保留已持久化的业务状态，不得按 citation 改判或抹平状态。

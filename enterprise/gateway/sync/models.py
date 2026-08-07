@@ -23,6 +23,10 @@ CREATE TABLE IF NOT EXISTS ext_document_map (
     bucket TEXT NOT NULL DEFAULT '',
     object_key TEXT NOT NULL DEFAULT '',
     asset_id TEXT,
+    department_id TEXT,
+    security_level INTEGER,
+    allow_group_ids TEXT,
+    deny_group_ids TEXT,
     ragflow_dataset_id TEXT,
     ragflow_document_id TEXT,
     ragflow_task_id TEXT,
@@ -94,6 +98,10 @@ _MIGRATION_COLUMNS = {
     "bucket": "TEXT NOT NULL DEFAULT ''",
     "object_key": "TEXT NOT NULL DEFAULT ''",
     "asset_id": "TEXT",
+    "department_id": "TEXT",
+    "security_level": "INTEGER",
+    "allow_group_ids": "TEXT",
+    "deny_group_ids": "TEXT",
     "business_status": "TEXT NOT NULL DEFAULT 'active'",
     "current_version": "INTEGER NOT NULL DEFAULT 0",
     "attempt_count": "INTEGER NOT NULL DEFAULT 0",
@@ -118,6 +126,10 @@ class ExtDocumentMap:
     bucket: str = ""
     object_key: str = ""
     asset_id: str | None = None
+    department_id: str | None = None
+    security_level: int | None = None
+    allow_group_ids: str | None = None
+    deny_group_ids: str | None = None
     ragflow_dataset_id: str | None = None
     ragflow_document_id: str | None = None
     ragflow_task_id: str | None = None
@@ -184,6 +196,10 @@ def _row_to_mapping(row: aiosqlite.Row) -> ExtDocumentMap:
         bucket=row["bucket"],
         object_key=row["object_key"],
         asset_id=row["asset_id"],
+        department_id=row["department_id"],
+        security_level=row["security_level"],
+        allow_group_ids=row["allow_group_ids"],
+        deny_group_ids=row["deny_group_ids"],
         ragflow_dataset_id=row["ragflow_dataset_id"],
         ragflow_document_id=row["ragflow_document_id"],
         ragflow_task_id=row["ragflow_task_id"],
@@ -264,12 +280,13 @@ async def insert_mapping(db: aiosqlite.Connection, doc: ExtDocumentMap) -> ExtDo
                (tenant_id, source_system, external_document_id, source_version_id,
                 event_id, event_type, event_status, sha256, file_name, media_type,
                 source_page_count, bucket, object_key, asset_id,
+                department_id, security_level, allow_group_ids, deny_group_ids,
                 ragflow_dataset_id, ragflow_document_id,
                 ragflow_task_id, sync_status, pipeline_status, business_status,
                 current_version, attempt_count, next_retry_at, batch_id,
                 last_error_code, last_error_message, last_sync_at,
                 source_updated_at, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(tenant_id, source_system, external_document_id, source_version_id)
                DO NOTHING""",
             (
@@ -278,6 +295,8 @@ async def insert_mapping(db: aiosqlite.Connection, doc: ExtDocumentMap) -> ExtDo
                 doc.event_status, doc.sha256, doc.file_name, doc.media_type,
                 doc.source_page_count, doc.bucket, doc.object_key,
                 doc.asset_id,
+                doc.department_id, doc.security_level,
+                doc.allow_group_ids, doc.deny_group_ids,
                 doc.ragflow_dataset_id, doc.ragflow_document_id,
                 doc.ragflow_task_id, doc.sync_status, doc.pipeline_status,
                 doc.business_status, doc.current_version, doc.attempt_count,
@@ -397,6 +416,34 @@ async def list_mappings(
         return [_row_to_mapping(r) for r in rows]
 
 
+async def list_all_mappings(
+    db: aiosqlite.Connection,
+    tenant_id: str | None = None,
+    source_system: str | None = None,
+    statuses: list[str] | None = None,
+    batch_id: str | None = None,
+    page_size: int = 100,
+) -> list[ExtDocumentMap]:
+    """Read every matching mapping without the list_mappings page cap."""
+    docs: list[ExtDocumentMap] = []
+    offset = 0
+    while True:
+        batch = await list_mappings(
+            db,
+            tenant_id=tenant_id,
+            source_system=source_system,
+            statuses=statuses,
+            batch_id=batch_id,
+            limit=page_size,
+            offset=offset,
+            ascending=True,
+        )
+        docs.extend(batch)
+        if len(batch) < page_size:
+            return docs
+        offset += page_size
+
+
 async def update_mapping_status(
     db: aiosqlite.Connection,
     doc: ExtDocumentMap,
@@ -414,6 +461,10 @@ async def update_mapping_status(
     bucket: str | None = None,
     object_key: str | None = None,
     asset_id: str | None = None,
+    department_id: str | None = None,
+    security_level: int | None = None,
+    allow_group_ids: str | None = None,
+    deny_group_ids: str | None = None,
 ) -> None:
     now = utc_now()
     await db.execute(
@@ -432,6 +483,10 @@ async def update_mapping_status(
                bucket=COALESCE(?, bucket),
                object_key=COALESCE(?, object_key),
                asset_id=COALESCE(?, asset_id),
+               department_id=COALESCE(?, department_id),
+               security_level=COALESCE(?, security_level),
+               allow_group_ids=COALESCE(?, allow_group_ids),
+               deny_group_ids=COALESCE(?, deny_group_ids),
                ragflow_dataset_id=COALESCE(?, ragflow_dataset_id),
                ragflow_document_id=COALESCE(?, ragflow_document_id),
                ragflow_task_id=COALESCE(?, ragflow_task_id),
@@ -443,6 +498,7 @@ async def update_mapping_status(
             event_status, business_status, current_version, attempt_count,
             next_retry_at, event_type, source_page_count, bucket, object_key,
             asset_id,
+            department_id, security_level, allow_group_ids, deny_group_ids,
             doc.ragflow_dataset_id, doc.ragflow_document_id,
             doc.ragflow_task_id, now, now, doc.id,
         ),
@@ -473,6 +529,14 @@ async def update_mapping_status(
         doc.object_key = object_key
     if asset_id is not None:
         doc.asset_id = asset_id
+    if department_id is not None:
+        doc.department_id = department_id
+    if security_level is not None:
+        doc.security_level = security_level
+    if allow_group_ids is not None:
+        doc.allow_group_ids = allow_group_ids
+    if deny_group_ids is not None:
+        doc.deny_group_ids = deny_group_ids
     doc.last_sync_at = now
     doc.updated_at = now
 

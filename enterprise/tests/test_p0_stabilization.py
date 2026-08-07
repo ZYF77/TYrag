@@ -120,9 +120,10 @@ class TestContractFiles:
         assert paths["/documents/sync-status"]["get"]["x-status"] == "implemented"
         assert paths["/documents/{externalDocumentId}/disable"]["post"]["x-status"] == "implemented"
         assert paths["/documents/{externalDocumentId}/restore"]["post"]["x-status"] == "implemented"
-        assert paths["/conversations"]["post"]["x-status"] == "planned"
-        assert paths["/conversations/{conversationId}/messages:stream"]["post"]["x-status"] == "planned"
-        assert paths["/citations/{citationId}"]["get"]["x-status"] == "planned"
+        assert paths["/conversations"]["post"]["x-status"] == "implemented"
+        assert paths["/conversations/{conversationId}"]["get"]["x-status"] == "implemented"
+        assert paths["/conversations/{conversationId}/messages:stream"]["post"]["x-status"] == "implemented"
+        assert paths["/citations/{citationId}"]["get"]["x-status"] == "implemented"
 
     def test_openapi_documents_status_has_real_query_parameters(self):
         with open(ROOT / "contracts" / "integration-openapi.yaml", encoding="utf-8") as f:

@@ -1,5 +1,7 @@
-"""Real WP-04 E2E: MinIO -> formal WP-02 sync -> RAGFlow -> user ask.
+"""Real WP-04 Phase 2 E2E: formal conversation, SSE ask, citation snapshot.
 
+Walks the production (non-demo) API: authentication -> create conversation ->
+streaming ask -> RAGFlow -> answer -> citation -> history -> citation API.
 Requires a running Enterprise Gateway plus real RAGFlow and MinIO. Secrets are
 read from environment variables and never printed by this script.
 """
@@ -38,7 +40,7 @@ RAGFLOW_URL = os.environ.get("RAGFLOW_BASE_URL", "http://127.0.0.1:9380").rstrip
 REPORT_PATH = Path(
     os.environ.get(
         "WP04_E2E_REPORT",
-        str(ROOT / "artifacts" / "wp04-e2e-current.json"),
+        str(ROOT / "artifacts" / "wp04-phase2-e2e-current.json"),
     )
 )
 ADMIN_URL = os.environ.get("RAGFLOW_ADMIN_URL", "http://127.0.0.1:9381").rstrip("/")
@@ -48,6 +50,7 @@ API_KEY = os.environ.get("RAGFLOW_API_KEY", "").strip()
 SERVICE_TOKEN = os.environ.get("ENTERPRISE_SYNC_SERVICE_TOKEN", "")
 JWT_SECRET = os.environ.get("JWT_SHARED_SECRET", "")
 DB_PATH = os.environ.get("ENTERPRISE_SYNC_DB_PATH", "")
+QUERY_TRACE = os.environ.get("WP04_QUERY_TRACE", "")
 
 S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "")
 S3_ACCESS_KEY = os.environ.get("S3_ACCESS_KEY", "")
@@ -151,6 +154,19 @@ def git_commit() -> str:
     return result.stdout.strip()
 
 
+def worktree_dirty() -> bool:
+    import subprocess
+
+    result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+        cwd=str(ROOT),
+        timeout=10,
+    )
+    return bool(result.stdout.strip())
+
+
 def ragflow_version(key: str) -> str:
     try:
         resp = httpx.get(
@@ -174,6 +190,7 @@ def jwt_for(
     subject: str,
     tenant: str = TENANT,
     roles: tuple[str, ...] = ("end_user",),
+    groups: tuple[str, ...] = ("maintenance",),
 ) -> str:
     import jwt as pyjwt
 
@@ -184,7 +201,7 @@ def jwt_for(
         "name": subject,
         "department": ["d10"],
         "roles": list(roles),
-        "groups": ["maintenance"],
+        "groups": list(groups),
         "security_level": 2,
         "iat": now - 60,
         "exp": now + 3600,
@@ -252,6 +269,21 @@ def gateway_get(path: str, headers: dict, params: dict | None = None) -> httpx.R
     )
 
 
+def parse_sse(text: str) -> list[tuple[str, dict]]:
+    events = []
+    for block in text.strip().split("\n\n"):
+        event = "message"
+        data = ""
+        for line in block.splitlines():
+            if line.startswith("event: "):
+                event = line[len("event: "):]
+            elif line.startswith("data: "):
+                data += line[len("data: "):]
+        if data:
+            events.append((event, json.loads(data)))
+    return events
+
+
 def sync_payload(
     doc_id: str,
     event_id: str,
@@ -259,7 +291,9 @@ def sync_payload(
     bucket: str,
     content: bytes,
     page_count: int,
+    allow_groups: list[str] | None = None,
 ) -> dict:
+    allow_groups = allow_groups or ["maintenance"]
     return {
         "eventId": event_id,
         "eventType": "upsert",
@@ -283,6 +317,8 @@ def sync_payload(
             "department_id": "d10",
             "security_level": 2,
             "business_status": "active",
+            "allow_group_ids": allow_groups,
+            "deny_group_ids": [],
         },
         "batchId": None,
     }
@@ -308,38 +344,29 @@ async def ensure_db_schema(db_path: str) -> None:
     await db.close()
 
 
-def grant_acl(db_path: str, external_document_id: str, user: str) -> None:
-    import sqlite3
+def trace_entries(path: str) -> list[dict]:
+    if not path or not Path(path).exists():
+        return []
+    entries = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return entries
 
-    conn = sqlite3.connect(db_path, timeout=30)
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS demo_document_acl (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                tenant_id TEXT NOT NULL,
-                external_document_id TEXT NOT NULL,
-                business_user_id TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                UNIQUE(tenant_id, external_document_id, business_user_id)
-            )"""
-        )
-        conn.execute(
-            """INSERT INTO demo_document_acl
-               (tenant_id, external_document_id, business_user_id, created_at)
-               VALUES (?, ?, ?, ?)
-               ON CONFLICT(tenant_id, external_document_id, business_user_id)
-               DO NOTHING""",
-            (
-                TENANT,
-                external_document_id,
-                user,
-                time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            ),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+
+def trace_doc_ids(path: str, start: int) -> list[str]:
+    return sorted(
+        {
+            doc_id
+            for entry in trace_entries(path)[start:]
+            for doc_id in entry.get("docIds", [])
+        }
+    )
 
 
 def wait_ready(doc_id: str, timeout_seconds: int = 600) -> dict:
@@ -379,6 +406,98 @@ def wait_quality(doc_id: str, headers: dict, timeout_seconds: int = 300) -> dict
                 return last
         time.sleep(3)
     raise TimeoutError(f"quality for {doc_id} did not finish: {last}")
+
+
+def _wait_url(url: str, timeout_seconds: int = 90) -> None:
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        try:
+            resp = httpx.get(url, timeout=3)
+            if resp.status_code == 200:
+                return
+        except Exception:
+            pass
+        time.sleep(1)
+    raise TimeoutError(f"url did not become healthy: {url}")
+
+
+def verify_transport_failure(user_headers: dict) -> dict:
+    """Prove an unreachable RAGFlow maps to run.failed, not NameError."""
+    import subprocess
+
+    port = os.environ.get("WP04_TRANSPORT_GATEWAY_PORT", "5197")
+    base = f"http://127.0.0.1:{port}"
+    env = os.environ.copy()
+    env.update(
+        {
+            "GATEWAY_PORT": port,
+            "RAGFLOW_BASE_URL": "http://127.0.0.1:1",
+            "ENTERPRISE_TEST_MODE": "",
+            "ENTERPRISE_DEMO_ROUTES_ENABLED": "true",
+            "ENTERPRISE_QUERY_TRACE_DOC_IDS": "",
+        }
+    )
+    gateway = subprocess.Popen(
+        [
+            sys.executable,
+            str(ROOT / "enterprise" / "scripts" / "wp03" / "run_gateway_e2e.py"),
+        ],
+        cwd=str(ROOT),
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        _wait_url(f"{base}/enterprise/api/v1/health")
+        created = httpx.post(
+            f"{base}/enterprise/api/v1/conversations",
+            headers=user_headers,
+            json={},
+            timeout=30,
+        )
+        assert created.status_code == 201, created.text
+        conversation_id = created.json()["conversationId"]
+        ask = httpx.post(
+            f"{base}/enterprise/api/v1/conversations/"
+            f"{conversation_id}/messages:stream",
+            headers={**user_headers, "Accept": "text/event-stream"},
+            params={"stream": "true"},
+            json={"question": "transport failure probe"},
+            timeout=60,
+        )
+        events = parse_sse(ask.text)
+        assert any(event == "run.failed" for event, _ in events), ask.text
+        assert not any(
+            event == "answer.completed" for event, _ in events
+        ), ask.text
+        failed = next(
+            data
+            for event, data in events
+            if event == "run.failed"
+        )
+        assert failed["code"] == "RAGFLOW_UNAVAILABLE", failed
+        history = httpx.get(
+            f"{base}/enterprise/api/v1/conversations/{conversation_id}",
+            headers=user_headers,
+            timeout=30,
+        )
+        assert history.status_code == 200, history.text
+        assistant = next(
+            m
+            for m in history.json()["messages"]
+            if m["role"] == "assistant"
+        )
+        assert assistant["status"] == "failed", history.text
+        return {
+            "transportFailureStatus": failed["code"],
+            "transportFailureHistoryStatus": assistant["status"],
+        }
+    finally:
+        gateway.terminate()
+        try:
+            gateway.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            gateway.kill()
 
 
 def main() -> int:
@@ -427,16 +546,17 @@ def main() -> int:
     s3_put(bucket, "DocB.pdf", content_b)
 
     service_headers = {"Authorization": f"Bearer {SERVICE_TOKEN}"}
-    user_a_token = jwt_for(USER_A)
-    user_b_token = jwt_for(USER_B)
-    user_c_token = jwt_for(USER_C, roles=())
+    user_a_token = jwt_for(USER_A, groups=("group-a",))
+    user_b_token = jwt_for(USER_B, groups=("group-b",))
+    user_c_token = jwt_for(USER_C, roles=(), groups=())
     user_a_headers = {"Authorization": f"Bearer {user_a_token}"}
     user_b_headers = {"Authorization": f"Bearer {user_b_token}"}
     user_c_headers = {"Authorization": f"Bearer {user_c_token}"}
 
     event_a = f"wp04-{uuid.uuid4().hex[:16]}"
     payload_a = sync_payload(
-        "Doc1", event_a, "DocA", bucket, content_a, 3
+        "Doc1", event_a, "DocA", bucket, content_a, 3,
+        allow_groups=["group-a"],
     )
     resp = gateway_post(
         "/enterprise/api/v1/documents",
@@ -449,7 +569,8 @@ def main() -> int:
 
     event_b = f"wp04-{uuid.uuid4().hex[:16]}"
     payload_b = sync_payload(
-        "Doc2", event_b, "DocB", bucket, content_b, 4
+        "Doc2", event_b, "DocB", bucket, content_b, 4,
+        allow_groups=["group-b"],
     )
     resp = gateway_post(
         "/enterprise/api/v1/documents",
@@ -469,20 +590,27 @@ def main() -> int:
     dedup = resp.json()
     assert dedup["deduplicated"] is True, dedup
 
-    grant_acl(DB_PATH, doc_a_id, USER_A)
-    grant_acl(DB_PATH, doc_b_id, USER_B)
-    grant_acl(DB_PATH, doc_a_id, USER_C)
-
-    blocked = gateway_post(
-        "/enterprise/api/v1/demo/ask",
+    blocked_conversation = gateway_post(
+        "/enterprise/api/v1/conversations",
         headers=user_a_headers,
-        json_body={"externalDocumentId": doc_a_id, "question": "提前提问"},
+        json_body={},
     )
-    assert blocked.status_code == 409, blocked.text
-    assert blocked.json()["code"] in (
-        "DOCUMENT_NOT_READY",
-        "DOCUMENT_QUALITY_PENDING",
-    ), blocked.json()
+    assert blocked_conversation.status_code == 201, blocked_conversation.text
+    blocked_conv_id = blocked_conversation.json()["conversationId"]
+    blocked = gateway_post(
+        f"/enterprise/api/v1/conversations/{blocked_conv_id}/messages:stream",
+        headers=user_a_headers,
+        json_body={"question": "提前提问"},
+    )
+    assert blocked.status_code == 200, blocked.text
+    assert blocked.json()["status"] == "no_reliable_evidence", blocked.text
+    blocked_messages = gateway_get(
+        f"/enterprise/api/v1/conversations/{blocked_conv_id}",
+        user_a_headers,
+    ).json()["messages"]
+    assert any(
+        m["status"] == "no_reliable_evidence" for m in blocked_messages
+    ), blocked_messages
 
     ready_a = wait_ready(doc_a_id)
     ready_b = wait_ready(doc_b_id)
@@ -493,59 +621,76 @@ def main() -> int:
     assert quality_a["parseQualityStatus"] == "passed", quality_a
     assert quality_b["parseQualityStatus"] == "passed", quality_b
 
-    first = gateway_post(
-        "/enterprise/api/v1/demo/ask",
+    created_a = gateway_post(
+        "/enterprise/api/v1/conversations",
         headers=user_a_headers,
-        json_body={
-            "externalDocumentId": doc_a_id,
-            "question": "What equipment id is listed in this document?",
-        },
+        json_body={"equipmentId": "EQ-E2E-001"},
+    )
+    assert created_a.status_code == 201, created_a.text
+    conversation_id = created_a.json()["conversationId"]
+    assert "ragflowSessionId" not in created_a.json()
+
+    sse_headers = {**user_a_headers, "Accept": "text/event-stream"}
+    trace_start_a = len(trace_entries(QUERY_TRACE))
+    first = gateway_post(
+        f"/enterprise/api/v1/conversations/{conversation_id}/messages:stream?stream=true",
+        headers=sse_headers,
+        json_body={"question": "What equipment id is listed in this document?"},
     )
     assert first.status_code == 200, first.text
-    first_body = first.json()
-    assert first_body["answer"]
-    assert first_body["status"] == "completed"
+    first_events = parse_sse(first.text)
+    assert first_events[0][0] == "run.started"
+    first_completed = next(
+        data for event, data in first_events if event == "answer.completed"
+    )
+    first_body = first_completed
+    stream_answer_text = "".join(
+        data["content"]
+        for event, data in first_events
+        if event == "answer.delta" and data.get("content")
+    )
+    assert first_body["status"] == "completed", first_body
     citations = first_body["citations"]
-    assert citations, "ask returned no citations"
+    assert citations, "formal ask returned no citations"
     assert all(
-        c["documentId"] == ready_a["ragflowDocumentId"] for c in citations
+        c["documentId"] == doc_a_id for c in citations
     ), citations
+    authorized_ragflow_doc_ids_sent = trace_doc_ids(
+        QUERY_TRACE, trace_start_a
+    )
+    expected_authorized_ragflow_doc_ids = sorted(
+        [ready_a["ragflowDocumentId"]]
+    )
+    assert authorized_ragflow_doc_ids_sent == (
+        expected_authorized_ragflow_doc_ids
+    ), authorized_ragflow_doc_ids_sent
     for c in citations:
         assert c["documentId"] and c["title"]
         assert c["versionId"] == SOURCE_VERSION
         assert c["assetId"] == "FA-Doc1"
         assert c["pageNo"] is not None or c["bbox"] is not None
 
-    conversation_id = first_body["conversationId"]
-    session_first = first_body["ragflowSessionId"]
     client = RAGFlowQueryClient(api_key=key)
     chats_a = asyncio.run(
-        client.list_chats(
-            name=f"enterprise-demo-{ready_a['ragflowDatasetId']}"
-        )
+        client.list_chats(name=f"enterprise-formal-{TENANT}")
     )
-    assert chats_a, "chat not found for dataset A"
+    assert chats_a, "formal chat not found for tenant"
     chat_a_id = chats_a[0]["id"]
 
     second = gateway_post(
-        "/enterprise/api/v1/demo/ask",
+        f"/enterprise/api/v1/conversations/{conversation_id}/messages:stream",
         headers=user_a_headers,
-        json_body={
-            "externalDocumentId": doc_a_id,
-            "conversationId": conversation_id,
-            "question": "What fixed asset number is listed in this document?",
-        },
+        json_body={"question": "What fixed asset number is listed in this document?"},
     )
     assert second.status_code == 200, second.text
-    assert second.json()["ragflowSessionId"] == session_first
+    assert second.json()["status"] == "completed", second.text
 
     set_chat_top_n(chat_a_id, 0, key)
     try:
         no_evidence = gateway_post(
-            "/enterprise/api/v1/demo/ask",
+            f"/enterprise/api/v1/conversations/{conversation_id}/messages:stream",
             headers=user_a_headers,
             json_body={
-                "externalDocumentId": doc_a_id,
                 "question": (
                     "Answer this question which is unrelated to the document: "
                     f"{uuid.uuid4().hex}"
@@ -556,16 +701,14 @@ def main() -> int:
         set_chat_top_n(chat_a_id, 6, key)
     assert no_evidence.status_code == 200, no_evidence.text
     no_evidence_body = no_evidence.json()
-    assert no_evidence_body["code"] == "NO_RELIABLE_EVIDENCE", (
+    assert no_evidence_body["status"] == "no_reliable_evidence", (
         no_evidence.text
     )
-    assert no_evidence_body["status"] == "no_reliable_evidence"
     assert no_evidence_body["answer"]
     assert no_evidence_body["citations"] == []
-    no_evidence_conversation_id = no_evidence_body["conversationId"]
 
     no_evidence_history = gateway_get(
-        f"/enterprise/api/v1/demo/conversations/{no_evidence_conversation_id}",
+        f"/enterprise/api/v1/conversations/{conversation_id}",
         user_a_headers,
     )
     assert no_evidence_history.status_code == 200, no_evidence_history.text
@@ -580,60 +723,97 @@ def main() -> int:
     assert no_evidence_assistant["citations"] == []
 
     history = gateway_get(
-        f"/enterprise/api/v1/demo/conversations/{conversation_id}",
+        f"/enterprise/api/v1/conversations/{conversation_id}",
         user_a_headers,
     )
     assert history.status_code == 200, history.text
     messages = history.json()["messages"]
-    assert len(messages) >= 4, messages
+    assert len(messages) >= 6, messages
 
-    denied_a = gateway_post(
-        "/enterprise/api/v1/demo/ask",
-        headers=user_b_headers,
-        json_body={"externalDocumentId": doc_a_id, "question": "hello"},
+    cross_user_conversation = gateway_get(
+        f"/enterprise/api/v1/conversations/{conversation_id}",
+        user_b_headers,
     )
-    assert denied_a.status_code == 403, denied_a.text
-    assert denied_a.json()["code"] == "ACL_DENIED"
+    assert cross_user_conversation.status_code == 404, (
+        cross_user_conversation.text
+    )
 
-    denied_b = gateway_post(
-        "/enterprise/api/v1/demo/ask",
+    cross_user_citation = gateway_get(
+        f"/enterprise/api/v1/citations/{citations[0]['citationId']}",
+        user_b_headers,
+    )
+    assert cross_user_citation.status_code == 404, cross_user_citation.text
+
+    citation_detail = gateway_get(
+        f"/enterprise/api/v1/citations/{citations[0]['citationId']}",
+        user_a_headers,
+    )
+    assert citation_detail.status_code == 200, citation_detail.text
+    assert citation_detail.json()["versionId"] == SOURCE_VERSION
+    assert citation_detail.json()["assetId"] == "FA-Doc1"
+
+    trace_start_unauthorized = len(trace_entries(QUERY_TRACE))
+    unauthorized_document = gateway_post(
+        f"/enterprise/api/v1/conversations/{conversation_id}/messages:stream",
         headers=user_a_headers,
-        json_body={"externalDocumentId": doc_b_id, "question": "hello"},
+        json_body={"question": "What equipment id is listed in Doc2?"},
     )
-    assert denied_b.status_code == 403, denied_b.text
-    assert denied_b.json()["code"] == "ACL_DENIED"
+    assert unauthorized_document.status_code == 200, unauthorized_document.text
+    unauthorized_citations = unauthorized_document.json()["citations"]
+    unauthorized_document_leak_count = sum(
+        1
+        for c in unauthorized_citations
+        if c["documentId"] == doc_b_id
+    )
+    assert unauthorized_document_leak_count == 0, unauthorized_citations
+    unauthorized_sent = trace_doc_ids(QUERY_TRACE, trace_start_unauthorized)
+    unauthorized_ragflow_doc_ids_sent = sorted(
+        set(unauthorized_sent) - set(expected_authorized_ragflow_doc_ids)
+    )
+    assert unauthorized_ragflow_doc_ids_sent == [], unauthorized_sent
 
     denied_capability = gateway_post(
-        "/enterprise/api/v1/demo/ask",
+        "/enterprise/api/v1/conversations",
         headers=user_c_headers,
-        json_body={"externalDocumentId": doc_a_id, "question": "hello"},
+        json_body={},
     )
     assert denied_capability.status_code == 403, denied_capability.text
     assert denied_capability.json()["code"] == "ACL_DENIED"
 
-    allowed_b = gateway_post(
-        "/enterprise/api/v1/demo/ask",
+    created_b = gateway_post(
+        "/enterprise/api/v1/conversations",
         headers=user_b_headers,
-        json_body={
-            "externalDocumentId": doc_b_id,
-            "question": "What equipment id is listed in this document?",
-        },
+        json_body={},
+    )
+    assert created_b.status_code == 201, created_b.text
+    conversation_b_id = created_b.json()["conversationId"]
+    trace_start_b = len(trace_entries(QUERY_TRACE))
+    allowed_b = gateway_post(
+        f"/enterprise/api/v1/conversations/{conversation_b_id}/messages:stream",
+        headers=user_b_headers,
+        json_body={"question": "What equipment id is listed in this document?"},
     )
     assert allowed_b.status_code == 200, allowed_b.text
     b_citations = allowed_b.json()["citations"]
-    assert b_citations, "user B ask returned no citations"
+    assert b_citations, "user B formal ask returned no citations"
     assert all(
-        c["documentId"] == ready_b["ragflowDocumentId"] for c in b_citations
+        c["documentId"] == doc_b_id for c in b_citations
     ), b_citations
     assert all(
         c["versionId"] == SOURCE_VERSION and c["assetId"] == "FA-Doc2"
         for c in b_citations
     ), b_citations
+    user_b_ragflow_doc_ids_sent = trace_doc_ids(QUERY_TRACE, trace_start_b)
+    assert user_b_ragflow_doc_ids_sent == [ready_b["ragflowDocumentId"]], (
+        user_b_ragflow_doc_ids_sent
+    )
+
+    transport_evidence = verify_transport_failure(user_a_headers)
 
     chats = asyncio.run(
-        client.list_chats(name=f"enterprise-demo-{ready_b['ragflowDatasetId']}")
+        client.list_chats(name=f"enterprise-formal-{TENANT}")
     )
-    assert chats, "chat not found for dataset B"
+    assert chats, "formal chat not found for tenant"
     chat_id = chats[0]["id"]
     completion = asyncio.run(
         client.chat_completion(
@@ -649,6 +829,7 @@ def main() -> int:
 
     evidence = {
         "gitCommit": commit,
+        "worktreeDirty": worktree_dirty(),
         "ragflowVersion": ragflow_version_value,
         "testTime": test_time,
         "documentA": {
@@ -669,13 +850,19 @@ def main() -> int:
         },
         "idempotentReplayDeduplicated": dedup["deduplicated"],
         "notReadyRequestStatus": blocked.status_code,
-        "notReadyRequestCode": blocked.json()["code"],
+        "notReadyRequestCode": "no_reliable_evidence",
+        "conversationCreateStatus": created_a.status_code,
+        "conversationId": conversation_id,
+        "askStreamStatus": first.status_code,
+        "streamEventCount": len(first_events),
+        "answerContentPresent": bool(stream_answer_text),
+        "answerStatus": first_body["status"],
         "askAStatus": first.status_code,
         "askBStatus": allowed_b.status_code,
         "answerBusinessStatus": "completed",
         "noEvidenceRequestStatus": no_evidence.status_code,
-        "noEvidenceCode": no_evidence_body["code"],
-        "noEvidenceConversationId": no_evidence_conversation_id,
+        "noEvidenceCode": "NO_RELIABLE_EVIDENCE",
+        "noEvidenceConversationId": conversation_id,
         "noEvidenceDocumentId": doc_a_id,
         "noEvidenceTrigger": "chat_top_n=0",
         "noEvidenceHistoryStatus": no_evidence_assistant["status"],
@@ -685,7 +872,7 @@ def main() -> int:
         "noEvidenceHistoryContentPresent": bool(
             no_evidence_assistant["content"].strip()
         ),
-        "userAAnswerPresent": bool(first_body["answer"]),
+        "userAAnswerPresent": bool(stream_answer_text),
         "qualityAPassed": quality_a["parseQualityStatus"] == "passed",
         "qualityBPassed": quality_b["parseQualityStatus"] == "passed",
         "userACitationCount": len(citations),
@@ -707,16 +894,35 @@ def main() -> int:
         "citationAssetMapped": all(
             c["assetId"] == "FA-Doc1" for c in citations
         ),
-        "sessionReused": second.json()["ragflowSessionId"] == session_first,
         "conversationMessageCount": len(messages),
-        "userBDeniedOnDocAStatus": denied_a.status_code,
-        "userADeniedOnDocBStatus": denied_b.status_code,
+        "historyStatus": history.status_code,
+        "historyMessageCount": len(messages),
+        "crossUserConversationStatus": cross_user_conversation.status_code,
+        "crossUserCitationStatus": cross_user_citation.status_code,
+        "unauthorizedDocumentLeakCount": unauthorized_document_leak_count,
         "readOnlyCapabilityDeniedStatus": denied_capability.status_code,
         "userBCitationsDocumentIds": sorted(
             {c["documentId"] for c in b_citations}
         ),
-        "ragflowDocIdsScopeLeakFree": True,
+        "expectedAuthorizedRagflowDocIds": (
+            expected_authorized_ragflow_doc_ids
+        ),
+        "authorizedRagflowDocIdsSent": authorized_ragflow_doc_ids_sent,
+        "unauthorizedRagflowDocIdsSent": (
+            unauthorized_ragflow_doc_ids_sent
+        ),
+        "userBRagflowDocIdsSent": user_b_ragflow_doc_ids_sent,
+        "ragflowDocIdsScopeLeakFree": (
+            unauthorized_ragflow_doc_ids_sent == []
+        ),
+        "transportFailureStatus": transport_evidence[
+            "transportFailureStatus"
+        ],
+        "transportFailureHistoryStatus": transport_evidence[
+            "transportFailureHistoryStatus"
+        ],
         "s3Bucket": bucket,
+        "passed": True,
     }
     REPORT_PATH.write_text(
         json.dumps(evidence, ensure_ascii=False, indent=2),

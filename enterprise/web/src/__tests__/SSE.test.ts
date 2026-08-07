@@ -85,7 +85,7 @@ describe('SSE Stream - Event Structure', () => {
     expect(ct).toContain('text/event-stream');
   });
 
-  it('no evidence question returns no_evidence in the stream body', async () => {
+  it('no evidence question returns no_reliable_evidence in the stream body', async () => {
     const response = await fetch(
       '/enterprise/api/v1/conversations/conv-001/messages:stream',
       {
@@ -119,7 +119,7 @@ describe('SSE Stream - Event Structure', () => {
         ]);
 
         const fullText = chunks.join('');
-        expect(fullText).toContain('no_evidence');
+        expect(fullText).toContain('no_reliable_evidence');
       } catch {
         // ReadableStream may not be fully supported in jsdom
         // Accept this gracefully

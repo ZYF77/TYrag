@@ -82,6 +82,7 @@ class SyncService:
                 return existing, True
             doc = existing
         else:
+            metadata = payload.get("metadata") or {}
             doc = ExtDocumentMap(
                 tenant_id=event.tenant_id,
                 source_system=event.source_system,
@@ -93,10 +94,20 @@ class SyncService:
                 sha256=payload["sha256"],
                 file_name=payload["fileName"],
                 media_type=payload.get("mediaType", "application/pdf"),
-                source_page_count=(payload.get("metadata") or {}).get("page_count"),
+                source_page_count=metadata.get("page_count"),
                 asset_id=(
-                    (payload.get("metadata") or {}).get("asset_id")
-                    or (payload.get("metadata") or {}).get("fixed_asset_no")
+                    metadata.get("asset_id")
+                    or metadata.get("fixed_asset_no")
+                ),
+                department_id=metadata.get("department_id"),
+                security_level=metadata.get("security_level"),
+                allow_group_ids=json.dumps(
+                    metadata.get("allow_group_ids") or [],
+                    ensure_ascii=False,
+                ),
+                deny_group_ids=json.dumps(
+                    metadata.get("deny_group_ids") or [],
+                    ensure_ascii=False,
                 ),
                 bucket=payload["source"]["bucket"],
                 object_key=payload["source"]["objectKey"],

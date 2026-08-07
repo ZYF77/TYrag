@@ -72,6 +72,7 @@ export interface DemoAskResponse {
   citations: Citation[];
   conversationId: string;
   ragflowSessionId: string | null;
+  status: 'completed' | 'no_reliable_evidence' | 'failed';
 }
 
 export interface DemoConversationMessage {
@@ -151,6 +152,7 @@ export interface SseAnswerDeltaData {
 
 export interface SseAnswerCompletedData {
   runId: string;
+  status?: string;
 }
 
 export interface SseRunFailedData {
@@ -164,7 +166,12 @@ export interface ReplyMessage {
   role: 'assistant';
   content: string;
   citations: Citation[];
-  status: 'streaming' | 'completed' | 'failed' | 'degraded' | 'no_evidence';
+  status:
+    | 'streaming'
+    | 'completed'
+    | 'failed'
+    | 'degraded'
+    | 'no_reliable_evidence';
   error?: ErrorResponse;
   createdAt: string;
 }

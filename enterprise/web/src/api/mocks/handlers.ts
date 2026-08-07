@@ -140,6 +140,7 @@ interface DemoConversationRecord {
     role: 'user' | 'assistant';
     content: string;
     citations?: Citation[];
+    status?: string;
   }>;
 }
 
@@ -153,6 +154,7 @@ const demoConversations = new Map<string, DemoConversationRecord>([
           role: 'assistant',
           content: '历史回答',
           citations: [demoCitation],
+          status: 'completed',
         },
       ],
     },
@@ -268,6 +270,7 @@ export const handlers = [
       return HttpResponse.json(err.body, { status: 503 });
     }
 
+    const noEvidence = body.question.includes('noevidence');
     const conversationId = body.conversationId || `demo-conv-${Date.now()}`;
     const record = demoConversations.get(conversationId) ?? {
       messages: [] as DemoConversationRecord['messages'],
@@ -275,16 +278,22 @@ export const handlers = [
     record.messages.push({ role: 'user', content: body.question });
     record.messages.push({
       role: 'assistant',
-      content: `answer for: ${body.question}`,
-      citations: [demoCitation],
+      content: noEvidence
+        ? '未找到可靠依据，无法回答。'
+        : `answer for: ${body.question}`,
+      citations: noEvidence ? [] : [demoCitation],
+      status: noEvidence ? 'no_reliable_evidence' : 'completed',
     });
     demoConversations.set(conversationId, record);
 
     return HttpResponse.json({
-      answer: `answer for: ${body.question}`,
-      citations: [demoCitation],
+      answer: noEvidence
+        ? '未找到可靠依据，无法回答。'
+        : `answer for: ${body.question}`,
+      citations: noEvidence ? [] : [demoCitation],
       conversationId,
       ragflowSessionId: 'demo-session-1',
+      status: noEvidence ? 'no_reliable_evidence' : 'completed',
     });
   }),
 
@@ -308,7 +317,7 @@ export const handlers = [
         role: msg.role,
         content: msg.content,
         citations: msg.citations ?? [],
-        status: 'completed',
+        status: msg.status ?? 'completed',
         createdAt: new Date().toISOString(),
       })),
     });
@@ -407,7 +416,7 @@ export const handlers = [
           if (answerParts.length === 0) {
             send('answer.completed', JSON.stringify({
               runId: 'run-001',
-              status: 'no_evidence',
+              status: 'no_reliable_evidence',
             }));
           } else {
             for (const part of answerParts) {

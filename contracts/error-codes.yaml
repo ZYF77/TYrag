@@ -78,6 +78,15 @@ errors:
   - code: CONVERSATION_OWNER_MISMATCH
     http_status: 403
     retryable: false
+  - code: CITATION_NOT_FOUND
+    http_status: 404
+    retryable: false
+  - code: DOCUMENT_NOT_READY
+    http_status: 409
+    retryable: false
+  - code: RAGFLOW_SCOPE_VIOLATION
+    http_status: 502
+    retryable: false
   - code: MODEL_TIMEOUT
     http_status: 504
     retryable: true

@@ -38,6 +38,27 @@ describe('DemoChatPage', () => {
     });
   });
 
+  it('keeps no reliable evidence as a business status', async () => {
+    localStorage.setItem(DOC_ID_KEY, 'E2E-Doc1');
+    render(<DemoChatPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText('可查询')).toBeTruthy();
+    });
+
+    await userEvent.click(screen.getByText('新建会话'));
+
+    const input = screen.getByPlaceholderText(/输入您的问题/);
+    await userEvent.type(input, 'noevidence query');
+    const sendButton = screen.getByLabelText('发送') as HTMLButtonElement;
+    await userEvent.click(sendButton);
+
+    await waitFor(() => {
+      expect(screen.getByText('未找到可靠证据')).toBeTruthy();
+      expect(screen.getByText('未找到可靠依据，无法回答。')).toBeTruthy();
+    });
+  });
+
   it('restores persisted conversation history on load', async () => {
     localStorage.setItem(DOC_ID_KEY, 'E2E-Doc1');
     localStorage.setItem(

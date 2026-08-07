@@ -14,7 +14,7 @@ describe('Error States in MessageItem', () => {
   it('shows no evidence message', () => {
     const msg: ReplyMessage = {
       ...baseReply,
-      status: 'no_evidence',
+      status: 'no_reliable_evidence',
       content: '',
     };
 

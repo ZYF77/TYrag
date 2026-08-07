@@ -21,8 +21,19 @@ describe('demoApi', () => {
     });
     expect(result.answer).toContain('answer for:');
     expect(result.conversationId).toBeTruthy();
+    expect(result.status).toBe('completed');
     expect(result.citations[0].title).toBe('Doc1.pdf');
     expect(result.citations[0].documentId).toBe('rag-doc-1');
+  });
+
+  it('returns no reliable evidence status without deriving it from citations', async () => {
+    const result = await demoApi.ask({
+      externalDocumentId: 'E2E-Doc1',
+      question: 'noevidence query',
+    });
+    expect(result.status).toBe('no_reliable_evidence');
+    expect(result.answer).toBe('未找到可靠依据，无法回答。');
+    expect(result.citations).toEqual([]);
   });
 
   it('continues an existing conversation with the same conversation id', async () => {

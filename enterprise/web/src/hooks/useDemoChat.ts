@@ -48,12 +48,16 @@ export function useDemoChat({
           if (msg.role === 'user') {
             return { ...base, role: 'user', content: msg.content };
           }
+          const status: ReplyMessage['status'] =
+            msg.status === 'failed' || msg.status === 'no_reliable_evidence'
+              ? msg.status
+              : 'completed';
           return {
             ...base,
             role: 'assistant',
             content: msg.content,
             citations: msg.citations,
-            status: msg.status === 'failed' ? 'failed' : 'completed',
+            status,
           };
         });
         setMessages(restored);
@@ -116,7 +120,7 @@ export function useDemoChat({
             const last = { ...updated[lastIdx] } as ReplyMessage;
             last.content = data.answer;
             last.citations = data.citations;
-            last.status = 'completed';
+            last.status = data.status;
             updated[lastIdx] = last;
             return updated;
           });

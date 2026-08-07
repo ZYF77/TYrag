@@ -276,6 +276,7 @@ class TestAsk:
             assert resp.status_code == 200
             body = resp.json()
             assert "stub answer" in body["answer"]
+            assert body["status"] == "completed"
             assert body["conversationId"]
             assert len(body["citations"]) == 1
             citation = body["citations"][0]
@@ -355,6 +356,7 @@ class TestAsk:
             assert resp.status_code == 200
             body = resp.json()
             assert body["code"] == "NO_RELIABLE_EVIDENCE"
+            assert body["status"] == "no_reliable_evidence"
             assert body["retryable"] is False
             assert body["answer"] == "未找到可靠依据，无法回答。"
             assert body["citations"] == []
@@ -392,8 +394,10 @@ class TestAsk:
                 },
             )
             assert resp.status_code == 200
-            assert resp.json()["code"] == "NO_RELIABLE_EVIDENCE"
-            assert resp.json()["citations"] == []
+            body = resp.json()
+            assert body["code"] == "NO_RELIABLE_EVIDENCE"
+            assert body["status"] == "no_reliable_evidence"
+            assert len(body["citations"]) == 1
 
     @pytest.mark.asyncio
     async def test_ask_returns_no_reliable_evidence_when_chunks_empty(
@@ -416,11 +420,13 @@ class TestAsk:
                 },
             )
             assert resp.status_code == 200
-            assert resp.json()["code"] == "NO_RELIABLE_EVIDENCE"
-            assert resp.json()["citations"] == []
+            body = resp.json()
+            assert body["code"] == "NO_RELIABLE_EVIDENCE"
+            assert body["status"] == "no_reliable_evidence"
+            assert body["citations"] == []
 
     @pytest.mark.asyncio
-    async def test_ask_returns_no_reliable_evidence_when_all_chunks_filtered(
+    async def test_ask_returns_completed_with_empty_citations_when_chunks_unmapped(
         self, isolated_demo_db
     ):
         await _insert_ready_document(
@@ -428,6 +434,7 @@ class TestAsk:
         )
         query_router._query_stub = query_router.RAGFlowQueryStub()
         stub = query_router._query_stub
+        stub._ignore_doc_scope = True
         stub._omit_default_chunk = True
         stub._extra_chunks.append(
             {
@@ -449,8 +456,9 @@ class TestAsk:
                 },
             )
             assert resp.status_code == 200
-            assert resp.json()["code"] == "NO_RELIABLE_EVIDENCE"
-            assert resp.json()["citations"] == []
+            body = resp.json()
+            assert body["status"] == "completed"
+            assert body["citations"] == []
 
     @pytest.mark.asyncio
     async def test_ask_blocks_quality_review_required(
@@ -808,6 +816,7 @@ class TestHistoryEmptyMessageFilter:
             )
             assert created.status_code == 200
             assert created.json()["code"] == "NO_RELIABLE_EVIDENCE"
+            assert created.json()["status"] == "no_reliable_evidence"
             conversation_id = created.json()["conversationId"]
 
             history = await c.get(
@@ -824,6 +833,45 @@ class TestHistoryEmptyMessageFilter:
             )
             assert assistant["content"].strip()
             assert assistant["citations"] == []
+
+    @pytest.mark.asyncio
+    async def test_no_reliable_evidence_replays_with_citations_when_chunks_exist(
+        self, isolated_demo_db
+    ):
+        await _insert_ready_document(
+            isolated_demo_db, doc_id="DOC-NO-EVIDENCE-WITH-CHUNKS"
+        )
+        query_router._query_stub = query_router.RAGFlowQueryStub()
+        query_router._query_stub._empty_answer = True
+        token = _make_token()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            created = await c.post(
+                "/enterprise/api/v1/demo/ask",
+                headers=_headers(token),
+                json={
+                    "externalDocumentId": "DOC-NO-EVIDENCE-WITH-CHUNKS",
+                    "question": "empty answer please",
+                },
+            )
+            assert created.status_code == 200
+            assert created.json()["status"] == "no_reliable_evidence"
+            assert created.json()["citations"]
+            conversation_id = created.json()["conversationId"]
+
+            history = await c.get(
+                f"/enterprise/api/v1/demo/conversations/{conversation_id}",
+                headers=_headers(token),
+            )
+            assert history.status_code == 200
+            assistant = next(
+                m
+                for m in history.json()["messages"]
+                if m["role"] == "assistant"
+                and m["status"] == "no_reliable_evidence"
+            )
+            assert assistant["content"].strip()
+            assert assistant["citations"]
 
     @pytest.mark.asyncio
     async def test_empty_assistant_message_is_not_replayed(

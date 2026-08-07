@@ -32,7 +32,7 @@ export function MessageItem({ message, onCitationClick }: MessageItemProps) {
         return <AlertCircle size={14} className="text-red-500" />;
       case 'degraded':
         return <AlertTriangle size={14} className="text-yellow-500" />;
-      case 'no_evidence':
+      case 'no_reliable_evidence':
         return <AlertCircle size={14} className="text-orange-500" />;
     }
   };
@@ -52,7 +52,7 @@ export function MessageItem({ message, onCitationClick }: MessageItemProps) {
               {reply.status === 'completed' && '回答完成'}
               {reply.status === 'failed' && '回答失败'}
               {reply.status === 'degraded' && '降级回答（部分服务不可用）'}
-              {reply.status === 'no_evidence' && '未找到可靠证据'}
+              {reply.status === 'no_reliable_evidence' && '未找到可靠证据'}
             </span>
           </div>
 
@@ -83,7 +83,7 @@ export function MessageItem({ message, onCitationClick }: MessageItemProps) {
           )}
 
           {/* No evidence message */}
-          {reply.status === 'no_evidence' && (
+          {reply.status === 'no_reliable_evidence' && (
             <div className="mt-2 p-2 rounded-md bg-orange-50 border border-orange-100">
               <p className="text-xs text-orange-600">
                 当前知识库中没有足够的证据来回答此问题。您可以尝试：

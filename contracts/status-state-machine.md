@@ -45,7 +45,7 @@ started
 
 客户端断开 → client_disconnected
 模型/依赖失败 → failed 或 degraded_completed
-无证据 → completed(no_reliable_evidence)
+无可靠证据判定 → no_reliable_evidence
 ```
 
 ## 4. 状态更新规则
@@ -55,3 +55,10 @@ started
 - 终态不可被旧任务覆盖；
 - 重试创建新的 run/attempt，不覆盖历史错误；
 - 前端不根据时间自行推断状态。
+
+## 5. 状态与证据解耦
+
+- `completed` / `no_reliable_evidence` / `failed` 是消息业务状态，由运行结果显式决定；
+- `citations` 是证据数据，与业务状态相互独立；
+- 不得用 `citations` 是否为空推导消息状态，也不得用消息状态推导 `citations`；
+- 历史回放和前端展示必须原样保留已持久化的业务状态。

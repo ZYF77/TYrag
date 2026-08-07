@@ -66,8 +66,8 @@ export function useChat(conversationId: string | null) {
                   runId: string;
                   status?: string;
                 };
-                if (data.status === 'no_evidence') {
-                  last.status = 'no_evidence';
+                if (data.status === 'no_reliable_evidence') {
+                  last.status = 'no_reliable_evidence';
                   last.content = '未找到可靠的证据来回答此问题。请尝试调整您的问题，或联系知识管理员补充相关文档。';
                 } else {
                   last.status = 'completed';

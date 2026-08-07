@@ -9,6 +9,7 @@ import hashlib
 import logging
 import os
 import uuid
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -231,6 +232,7 @@ class DemoAskResponse(BaseModel):
     citations: list[DemoCitation]
     conversationId: str
     ragflowSessionId: str | None = None
+    status: Literal["completed", "no_reliable_evidence", "failed"]
 
 
 class DemoNoEvidenceResponse(BaseModel):
@@ -242,6 +244,7 @@ class DemoNoEvidenceResponse(BaseModel):
     citations: list[DemoCitation]
     conversationId: str
     ragflowSessionId: str | None = None
+    status: Literal["completed", "no_reliable_evidence", "failed"]
 
 
 def _to_citation(
@@ -300,6 +303,19 @@ def _filter_citations(
         c for c in citations
         if c.documentId and c.documentId in allowed
     ]
+
+
+def _resolve_ask_status(completion: dict) -> str:
+    """Resolve message business status from the run result, not citations."""
+    data = completion.get("data", {}) if isinstance(completion, dict) else {}
+    if isinstance(data, dict):
+        status = data.get("status")
+        if status in ("completed", "no_reliable_evidence"):
+            return status
+    answer = str(data.get("answer") or "") if isinstance(data, dict) else ""
+    reference = data.get("reference", {}) if isinstance(data, dict) else {}
+    chunks = reference.get("chunks", []) if isinstance(reference, dict) else []
+    return "no_reliable_evidence" if not answer.strip() or not chunks else "completed"
 
 
 @router.post("/documents", include_in_schema=False)
@@ -718,7 +734,8 @@ async def ask(
     ragflow_message_id = (
         data.get("id") if isinstance(data, dict) else None
     ) or None
-    if not answer or not citations:
+    business_status = _resolve_ask_status(completion)
+    if business_status == "no_reliable_evidence":
         logger.info(
             "ask returned no reliable evidence document=%s request_id=%s",
             req.externalDocumentId,
@@ -752,7 +769,7 @@ async def ask(
             business_user_id=principal.business_user_id,
             message_id=str(uuid.uuid4()),
             role="assistant",
-            status="no_reliable_evidence",
+            status=business_status,
             ragflow_message_id=ragflow_message_id,
         )
         return JSONResponse(
@@ -763,9 +780,10 @@ async def ask(
                 requestId=request_id,
                 retryable=False,
                 answer=NO_RELIABLE_EVIDENCE_ANSWER,
-                citations=[],
+                citations=citations,
                 conversationId=conversation_id,
                 ragflowSessionId=ragflow_session_id,
+                status=business_status,
             ).model_dump(),
         )
 
@@ -797,7 +815,7 @@ async def ask(
         business_user_id=principal.business_user_id,
         message_id=str(uuid.uuid4()),
         role="assistant",
-        status="completed",
+        status=business_status,
         ragflow_message_id=ragflow_message_id,
     )
 
@@ -806,6 +824,7 @@ async def ask(
         citations=citations,
         conversationId=conversation_id,
         ragflowSessionId=ragflow_session_id,
+        status=business_status,
     )
 
 

@@ -268,6 +268,9 @@ ERROR_CODES = {
     "RAGFLOW_UNAVAILABLE": (503, True),
     "RAGFLOW_API_INCOMPATIBLE": (503, False),
     "CONVERSATION_UNAVAILABLE": (503, True),
+    "CITATION_NOT_FOUND": (404, False),
+    "DOCUMENT_NOT_READY": (409, False),
+    "RAGFLOW_SCOPE_VIOLATION": (502, False),
     "NO_RELIABLE_EVIDENCE": (200, False),
     "VALIDATION_ERROR": (422, False),
     "INTERNAL_ERROR": (500, False),
@@ -292,6 +295,9 @@ SAFE_ERROR_MESSAGES = {
     "RAGFLOW_UNAVAILABLE": "RAGFlow service is temporarily unavailable",
     "RAGFLOW_API_INCOMPATIBLE": "RAGFlow API is not compatible with the gateway",
     "CONVERSATION_UNAVAILABLE": "Conversation history is temporarily unavailable",
+    "CITATION_NOT_FOUND": "Citation not found",
+    "DOCUMENT_NOT_READY": "Document is not ready",
+    "RAGFLOW_SCOPE_VIOLATION": "RAGFlow retrieval returned an out-of-scope document",
     "NO_RELIABLE_EVIDENCE": "No reliable evidence was returned",
     "VALIDATION_ERROR": "Request validation failed",
     "INTERNAL_ERROR": "Internal service error",
@@ -436,6 +442,16 @@ async def upsert_document(
         media_type=req.mediaType,
         source_page_count=req.metadata.get("page_count"),
         asset_id=req.metadata.get("asset_id") or req.metadata.get("fixed_asset_no"),
+        department_id=req.metadata.get("department_id"),
+        security_level=req.metadata.get("security_level"),
+        allow_group_ids=json.dumps(
+            req.metadata.get("allow_group_ids") or [],
+            ensure_ascii=False,
+        ),
+        deny_group_ids=json.dumps(
+            req.metadata.get("deny_group_ids") or [],
+            ensure_ascii=False,
+        ),
         bucket=req.source.bucket,
         object_key=req.source.objectKey,
         batch_id=req.batchId,
@@ -675,6 +691,10 @@ async def auth_me(
 from enterprise.gateway.query.router import router as query_router
 if config.demo_routes_enabled:
     app.include_router(query_router)
+
+# Formal WP-04 query, conversation, SSE and citation API
+from enterprise.gateway.query.formal_router import router as formal_query_router
+app.include_router(formal_query_router)
 
 # WP-03 Phase 2 quality status APIs
 from enterprise.gateway.quality.router import router as quality_router
