@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 
@@ -11,10 +12,11 @@ from fastapi.responses import JSONResponse
 from enterprise.gateway.auth.middleware import require_user_principal
 from enterprise.gateway.auth.service_auth import require_service_principal
 from enterprise.gateway.auth.user_principal import UserPrincipal
+from enterprise.gateway.acl.policy import evaluate_document_acl
+from enterprise.gateway.acl.schema import DocumentAclFacts
 from enterprise.gateway.quality import models as quality_models
 from enterprise.gateway.quality.gate import quality_dimensions, safe_metric_summary
 from enterprise.gateway.quality.routing import route_document
-from enterprise.gateway.query import acl_store
 from enterprise.gateway.sync.models import get_mapping, get_versions_for_document
 
 logger = logging.getLogger(__name__)
@@ -41,6 +43,29 @@ def _error(status_code: int, code: str, message: str, request_id: str) -> JSONRe
             message=message,
             requestId=request_id,
         ).model_dump(),
+    )
+
+
+def _string_list(raw: str | None) -> tuple[str, ...]:
+    if not raw:
+        return ()
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        return ()
+    if isinstance(value, list):
+        return tuple(str(v) for v in value)
+    return ()
+
+
+def _document_acl_facts(doc) -> DocumentAclFacts:
+    return DocumentAclFacts(
+        tenant_id=doc.tenant_id,
+        department_id=doc.department_id,
+        security_level=doc.security_level,
+        business_status=doc.business_status,
+        allow_group_ids=_string_list(doc.allow_group_ids),
+        deny_group_ids=_string_list(doc.deny_group_ids),
     )
 
 
@@ -71,14 +96,8 @@ async def _authorized_document(
         )
     if not doc:
         return None, None
-    await acl_store.ensure_schema(db)
-    allowed = await acl_store.is_allowed(
-        db,
-        tenant_id=principal.tenant_id,
-        external_document_id=external_document_id,
-        business_user_id=principal.business_user_id,
-    )
-    if not allowed:
+    decision = evaluate_document_acl(principal, _document_acl_facts(doc))
+    if not decision.allowed:
         return None, _error(403, "ACL_DENIED", "Access denied", request_id)
     return doc, None
 

@@ -192,6 +192,7 @@ async def _insert_ready_document(
     doc_id: str,
     tenant_id: str = "customer-a",
     allowed_users: tuple[str, ...] = ("biz-user-001",),
+    allow_groups: tuple[str, ...] = ("maintenance",),
     ragflow_document_id: str = "doc-1",
 ):
     doc = ExtDocumentMap(
@@ -206,6 +207,10 @@ async def _insert_ready_document(
         ragflow_document_id=ragflow_document_id,
         sync_status="ready",
         media_type="application/pdf",
+        department_id="d10",
+        security_level=2,
+        allow_group_ids=json.dumps(list(allow_groups)),
+        deny_group_ids="[]",
     )
     doc = await insert_mapping(db, doc)
     await update_mapping_status(
@@ -656,11 +661,33 @@ class TestQualityAPI:
             assert latest.evaluation_version == "2"
 
     @pytest.mark.asyncio
+    async def test_quality_api_uses_formal_document_acl(self):
+        from enterprise.gateway.quality import router as quality_router_module
+
+        db = app.dependency_overrides[quality_router_module.get_db]()
+        doc = await _insert_ready_document(
+            db, doc_id="DOC-FORMAL", allowed_users=()
+        )
+        await _create_evaluation(db, doc, quality_status="passed")
+        token = _make_token()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get(
+                "/enterprise/api/v1/documents/DOC-FORMAL/quality",
+                params={"source_system": "DEMO"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert resp.status_code == 200
+            assert resp.json()["parseQualityStatus"] == "passed"
+
+    @pytest.mark.asyncio
     async def test_unauthorized_user_gets_403(self):
         from enterprise.gateway.quality import router as quality_router_module
 
         db = app.dependency_overrides[quality_router_module.get_db]()
-        await _insert_ready_document(db, doc_id="DOC-B")
+        await _insert_ready_document(
+            db, doc_id="DOC-B", allow_groups=("other-group",)
+        )
         token_b = _make_token(user="biz-user-002")
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as c:
