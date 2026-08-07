@@ -33,6 +33,7 @@ from enterprise.gateway.quality.metrics import metrics  # noqa: E402
 from enterprise.gateway.quality.routing import route_document  # noqa: E402
 from enterprise.gateway.quality.worker import (  # noqa: E402
     QualityEvaluationService,
+    QualityReconciler,
     QualityEvaluationWorker,
 )
 from enterprise.gateway.query import acl_store  # noqa: E402
@@ -790,4 +791,76 @@ async def test_backfill_skips_disabled_and_is_idempotent(tmp_path):
         db, "customer-a", "DEMO", "DOC-DISABLED", "v1",
     )
     assert latest is None
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_backfill_resume_and_idempotent(tmp_path):
+    db_path = str(tmp_path / "backfill3.db")
+    db = await init_db(db_path)
+    for index in range(3):
+        await _insert_ready_document(db, doc_id=f"DOC-RESUME-{index}")
+    base = argparse.Namespace(
+        db=db_path,
+        tenant="customer-a",
+        source_system="DEMO",
+        source_version_id="v1",
+        dry_run=False,
+        limit=2,
+        offset=0,
+        max_attempts=5,
+    )
+    await backfill_run(base)
+    first = await quality_models.list_evaluations(
+        db, tenant_id="customer-a", source_system="DEMO",
+    )
+    assert len(first) == 2
+    base.offset = 2
+    await backfill_run(base)
+    second = await quality_models.list_evaluations(
+        db, tenant_id="customer-a", source_system="DEMO",
+    )
+    assert len(second) == 3
+    await backfill_run(base)
+    third = await quality_models.list_evaluations(
+        db, tenant_id="customer-a", source_system="DEMO",
+    )
+    assert len(third) == 3
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_quality_reconciler_fails_stuck_running():
+    from datetime import datetime, timedelta, timezone
+
+    db = await init_db(":memory:")
+    doc = await _insert_ready_document(db, doc_id="DOC-STUCK")
+    routing = route_document(media_type=doc.media_type, file_name=doc.file_name)
+    evaluation = await quality_models.get_or_create_evaluation(
+        db,
+        tenant_id=doc.tenant_id,
+        source_system=doc.source_system,
+        external_document_id=doc.external_document_id,
+        source_version_id=doc.source_version_id,
+        ragflow_dataset_id=doc.ragflow_dataset_id,
+        ragflow_document_id=doc.ragflow_document_id,
+        routing=routing,
+        evaluation_version="1",
+    )
+    locked_at = (
+        datetime.now(timezone.utc) - timedelta(hours=1)
+    ).isoformat()
+    await db.execute(
+        """UPDATE quality_evaluation_job
+           SET status='running', locked_at=?, worker_id='stuck-worker'
+           WHERE evaluation_id=?""",
+        (locked_at, evaluation.id),
+    )
+    await db.commit()
+    service = QualityEvaluationService(db, RAGFlowDocumentStub())
+    reconciler = QualityReconciler(service, running_timeout_seconds=60)
+    await reconciler.run_once()
+    evaluation = await quality_models.get_evaluation_by_id(db, evaluation.id)
+    assert evaluation.evaluation_state == "failed"
+    assert evaluation.last_error_code == "QUALITY_RUNNING_TIMEOUT"
     await db.close()
