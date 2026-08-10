@@ -121,6 +121,7 @@ async def test_same_event_and_normalized_payload_replays_result(v2_app):
     assert replay.status_code == 202
     assert replay.json()["deduplicated"] is True
     assert replay.json()["externalDocumentId"] == first.json()["externalDocumentId"]
+    assert replay.json()["operationId"] == first.json()["operationId"]
 
 
 @pytest.mark.asyncio
@@ -365,7 +366,18 @@ async def test_canonical_equipment_aliases_are_persisted(v2_app, isolated_gatewa
 
 
 @pytest.mark.asyncio
-async def test_lifecycle_routes_keep_scope_and_external_responses(v2_app):
+async def test_lifecycle_routes_keep_scope_and_external_responses(
+    v2_app, isolated_gateway_db, monkeypatch,
+):
+    db, _ = isolated_gateway_db
+    client_stub = RAGFlowDocumentStub()
+    monkeypatch.setattr(
+        v2_router,
+        "_sync_service",
+        lambda connection: SyncService(
+            connection, SourceStub(b"test pdf content"), client_stub,
+        ),
+    )
     query = {"tenantId": "tenant-a", "sourceSystem": "EAM"}
     async with AsyncClient(
         transport=ASGITransport(app=v2_app), base_url="http://test"
