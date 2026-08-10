@@ -35,6 +35,12 @@ from enterprise.gateway.sync.source_adapter import (
     S3SourceAdapter, SourceAdapter, SourceStub,
 )
 from enterprise.gateway.sync.external_source import FileShareSourceAdapter, router as external_source_router
+from enterprise.gateway.sync.transient_attachment import (
+    TransientAttachmentCleanupWorker,
+    TransientAttachmentService,
+    attachment_cleanup_interval_seconds,
+    router as transient_attachment_router,
+)
 from enterprise.gateway.sync.sync_service import (
     DocumentSyncError, DocumentNotFoundError, SyncService,
 )
@@ -105,7 +111,14 @@ async def lifespan(app: FastAPI):
         reconciler_task = asyncio.create_task(
             StatusReconciler(service).run_forever(config.reconcile_seconds)
         )
-        started_tasks.extend([worker_task, reconciler_task])
+        attachment_cleanup_task = asyncio.create_task(
+            TransientAttachmentCleanupWorker(
+                TransientAttachmentService(_db)
+            ).run_forever(attachment_cleanup_interval_seconds())
+        )
+        started_tasks.extend(
+            [worker_task, reconciler_task, attachment_cleanup_task]
+        )
         _background_tasks.extend(started_tasks)
     if config.quality_worker_enabled and not _test_mode():
         quality_service = QualityEvaluationService(
@@ -767,6 +780,7 @@ app.include_router(v2_document_router)
 from enterprise.gateway.sync.v3_router import router as v3_document_router
 app.include_router(v3_document_router)
 app.include_router(external_source_router)
+app.include_router(transient_attachment_router)
 
 # WP-03 Phase 2 quality status APIs
 from enterprise.gateway.quality.router import router as quality_router

@@ -407,6 +407,9 @@ async def migrate_schema(db: aiosqlite.Connection) -> None:
     await db.executescript(CREATE_SYNC_OUTBOX)
     await db.executescript(CREATE_DOCUMENT_EVENT_RECEIPT)
     await db.executescript(CREATE_SOURCE_TICKET)
+    from enterprise.gateway.sync.transient_attachment import ensure_attachment_schema
+
+    await ensure_attachment_schema(db)
     await db.commit()
 
 
