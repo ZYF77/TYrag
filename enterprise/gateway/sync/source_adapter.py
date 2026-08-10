@@ -23,6 +23,10 @@ class SourceAdapterUnavailable(SourceFetchError):
     """S3 client dependency or configuration is not available."""
 
 
+class SourceStorageError(SourceFetchError):
+    """An object storage write or delete operation failed."""
+
+
 @dataclass
 class SourceFile:
     content: bytes
@@ -127,6 +131,55 @@ class S3SourceAdapter(SourceAdapter):
                 f"SHA256 mismatch for {bucket}/{object_key}"
             )
         return source_file
+
+    def _put_object(
+        self,
+        bucket: str,
+        object_key: str,
+        content: bytes,
+        media_type: str,
+    ) -> None:
+        client = self._client()
+        try:
+            client.put_object(
+                Bucket=bucket,
+                Key=object_key,
+                Body=content,
+                ContentType=media_type,
+            )
+        except Exception as e:
+            raise SourceStorageError(
+                f"Failed to write object {bucket}/{object_key}"
+            ) from e
+
+    async def put_object(
+        self,
+        bucket: str,
+        object_key: str,
+        content: bytes,
+        media_type: str,
+    ) -> None:
+        """Write an object using the same credential boundary as source reads."""
+        if len(content) > self.max_size_bytes:
+            raise SourceTooLarge(
+                f"Object exceeds {self.max_size_bytes} byte size limit"
+            )
+        await asyncio.to_thread(
+            self._put_object, bucket, object_key, content, media_type
+        )
+
+    def _delete_object(self, bucket: str, object_key: str) -> None:
+        client = self._client()
+        try:
+            client.delete_object(Bucket=bucket, Key=object_key)
+        except Exception as e:
+            raise SourceStorageError(
+                f"Failed to delete object {bucket}/{object_key}"
+            ) from e
+
+    async def delete_object(self, bucket: str, object_key: str) -> None:
+        """Delete an object without exposing the storage client to callers."""
+        await asyncio.to_thread(self._delete_object, bucket, object_key)
 
 
 class SourceStub(SourceAdapter):
