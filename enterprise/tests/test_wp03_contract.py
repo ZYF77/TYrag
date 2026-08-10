@@ -44,11 +44,8 @@ class TestWP03RAGFlowContract:
             created = await client.create_dataset(dataset_name)
             dataset_id = created["data"]["id"]
             pdf_path = (
-                Path(__file__).resolve().parents[2]
-                / "ragflow"
-                / "test"
-                / "benchmark"
-                / "test_docs"
+                Path(__file__).resolve().parent
+                / "fixtures"
                 / "Doc1.pdf"
             )
             uploaded = await client.upload_document(
@@ -79,3 +76,5 @@ class TestWP03RAGFlowContract:
         finally:
             if dataset_id and document_id:
                 await client.delete_documents(dataset_id, [document_id])
+            if dataset_id:
+                await client.delete_dataset(dataset_id)

@@ -6,6 +6,7 @@
 - RAGFlow 不直接 JOIN 业务 PG；
 - LLM 不持有通用写权限或自由 SQL 权限；
 - MVP 使用白名单 Query Adapter；
+- 设备管理系统 Asset Registry 是 equipmentId/fixedAssetNo/assetId 的唯一身份权威；Gateway 只通过只读 whitelist resolver 查询，不把客户业务 PG 或 RAGFlow 官方 DB 当作 Gateway 状态库；
 - 文档证据和业务记录必须分来源展示。
 
 ## 2. P0 数据域
@@ -50,12 +51,13 @@ get_fault_history(equipment_id, fault_code, from, to)
 
 执行：
 
-1. 验证用户有权访问 AX-200；
-2. `list_recent_maintenance(AX-200, 3)`；
-3. RAGFlow 以 `equipment_id=AX-200` 和文档状态过滤检索保养周期；
-4. 业务结果和文档证据分别结构化；
-5. 回答模型明确区分“实际记录”和“手册要求”；
-6. 返回业务 record citation 与 PDF citation。
+1. 由 Asset Registry 解析 AX-200 并保存 canonical snapshot；
+2. 验证用户有权访问该 canonical equipment；
+3. `list_recent_maintenance(canonical_equipment_id, 3)`；
+4. RAGFlow 以 canonical equipment 和文档状态过滤检索保养周期；
+5. 业务结果和文档证据分别结构化；
+6. 回答模型明确区分“实际记录”和“手册要求”；
+7. 返回业务 record citation 与 PDF citation。
 
 ## 5. 数据库安全
 

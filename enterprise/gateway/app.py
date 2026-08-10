@@ -256,7 +256,9 @@ class DocumentSyncResponse(BaseModel):
 # -- error codes --
 
 ERROR_CODES = {
-    "DOCUMENT_EVENT_DUPLICATE": (200, False),
+    "DOCUMENT_EVENT_DUPLICATE": (202, False),
+    "EVENT_ID_CONFLICT": (409, False),
+    "DOCUMENT_VERSION_CONFLICT": (409, False),
     "DOCUMENT_METADATA_INVALID": (422, False),
     "DOCUMENT_HASH_MISMATCH": (422, False),
     "DOCUMENT_SOURCE_NOT_FOUND": (422, True),
@@ -267,7 +269,18 @@ ERROR_CODES = {
     "DOCUMENT_QUALITY_PENDING": (409, False),
     "RAGFLOW_UNAVAILABLE": (503, True),
     "RAGFLOW_API_INCOMPATIBLE": (503, False),
+    "AUTH_REPLAY_STORE_UNAVAILABLE": (503, True),
+    "ASSET_REGISTRY_UNAVAILABLE": (503, True),
+    "CONVERSATION_CONTEXT_REQUIRED": (422, False),
+    "CONVERSATION_CONTEXT_STALE": (409, False),
+    "RUN_INTERRUPTED": (503, False),
     "CONVERSATION_UNAVAILABLE": (503, True),
+    "CONVERSATION_CONTEXT_CONFLICT": (409, False),
+    "CONVERSATION_CONTEXT_INVALID": (422, False),
+    "CONVERSATION_ARCHIVED": (409, False),
+    "CLIENT_MESSAGE_ID_CONFLICT": (409, False),
+    "SUGGESTION_STALE": (409, False),
+    "SUGGESTION_NOT_FOUND": (404, False),
     "CITATION_NOT_FOUND": (404, False),
     "DOCUMENT_NOT_READY": (409, False),
     "RAGFLOW_SCOPE_VIOLATION": (502, False),
@@ -284,6 +297,8 @@ SAFE_ERROR_MESSAGES = {
     "AUTH_USER_MAPPING_MISSING": "User mapping not found",
     "ACL_DENIED": "Access denied",
     "DOCUMENT_EVENT_DUPLICATE": "Document event already processed",
+    "EVENT_ID_CONFLICT": "Event id was already used with a different payload",
+    "DOCUMENT_VERSION_CONFLICT": "Document version content conflicts with the accepted version",
     "DOCUMENT_METADATA_INVALID": "Metadata validation failed",
     "DOCUMENT_HASH_MISMATCH": "Invalid SHA256 format",
     "DOCUMENT_SOURCE_NOT_FOUND": "Source file could not be retrieved",
@@ -294,7 +309,17 @@ SAFE_ERROR_MESSAGES = {
     "DOCUMENT_QUALITY_PENDING": "Document quality evaluation is pending",
     "RAGFLOW_UNAVAILABLE": "RAGFlow service is temporarily unavailable",
     "RAGFLOW_API_INCOMPATIBLE": "RAGFlow API is not compatible with the gateway",
+    "AUTH_REPLAY_STORE_UNAVAILABLE": "Replay protection store is unavailable",
+    "ASSET_REGISTRY_UNAVAILABLE": "Asset Registry is temporarily unavailable",
     "CONVERSATION_UNAVAILABLE": "Conversation history is temporarily unavailable",
+    "CONVERSATION_CONTEXT_CONFLICT": "Conversation context identifiers conflict",
+    "CONVERSATION_CONTEXT_INVALID": "Conversation context is not recognized",
+    "CONVERSATION_CONTEXT_REQUIRED": "A canonical equipment context is required before sending a message",
+    "CONVERSATION_CONTEXT_STALE": "Conversation context no longer matches the Asset Registry",
+    "CONVERSATION_ARCHIVED": "Conversation is archived",
+    "CLIENT_MESSAGE_ID_CONFLICT": "Client message id conflicts with an earlier request",
+    "SUGGESTION_STALE": "Suggestion context is stale",
+    "SUGGESTION_NOT_FOUND": "Suggestion not found",
     "CITATION_NOT_FOUND": "Citation not found",
     "DOCUMENT_NOT_READY": "Document is not ready",
     "RAGFLOW_SCOPE_VIOLATION": "RAGFlow retrieval returned an out-of-scope document",
@@ -302,6 +327,7 @@ SAFE_ERROR_MESSAGES = {
     "VALIDATION_ERROR": "Request validation failed",
     "INTERNAL_ERROR": "Internal service error",
     "REQUEST_FAILED": "Request could not be completed",
+    "RUN_INTERRUPTED": "Message run lease expired before completion",
 }
 
 
@@ -325,6 +351,16 @@ def error_response(code: str, request_id: str,
 
 def accepted_response(payload: dict) -> JSONResponse:
     return JSONResponse(status_code=202, content=payload)
+
+
+def _parser_profile(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return value.get("profile") if isinstance(value, dict) else None
 
 
 # -- helpers --
@@ -355,6 +391,18 @@ def make_status_response(doc: ExtDocumentMap, deduplicated: bool = False,
         "currentVersion": bool(doc.current_version),
         "eventStatus": doc.event_status,
         "updatedAt": doc.updated_at,
+        "parserApplication": {
+            "state": doc.parser_application_status,
+            "selectedProfile": doc.parser_profile,
+            "configuredProfile": _parser_profile(doc.parser_configured_json),
+            "executedProfile": _parser_profile(doc.parser_executed_json),
+            "readbackMatch": doc.parser_application_status == "executed",
+            "reasonCode": (
+                None
+                if doc.parser_application_status == "executed"
+                else "PARSER_APPLICATION_" + doc.parser_application_status.upper()
+            ),
+        },
     }
     resp = resp.model_dump()
     resp.update(extra)
@@ -440,8 +488,15 @@ async def upsert_document(
         sha256=req.sha256,
         file_name=req.fileName,
         media_type=req.mediaType,
+        document_type=req.metadata.get("document_type"),
         source_page_count=req.metadata.get("page_count"),
-        asset_id=req.metadata.get("asset_id") or req.metadata.get("fixed_asset_no"),
+        asset_id=(
+            req.metadata.get("asset_id")
+            or req.metadata.get("fixed_asset_no")
+            or req.metadata.get("equipment_id")
+        ),
+        equipment_id=req.metadata.get("equipment_id"),
+        fixed_asset_no=req.metadata.get("fixed_asset_no"),
         department_id=req.metadata.get("department_id"),
         security_level=req.metadata.get("security_level"),
         allow_group_ids=json.dumps(
@@ -695,6 +750,14 @@ if config.demo_routes_enabled:
 # Formal WP-04 query, conversation, SSE and citation API
 from enterprise.gateway.query.formal_router import router as formal_query_router
 app.include_router(formal_query_router)
+
+# Frozen external v2 conversation API. It keeps v1 wire compatibility intact.
+from enterprise.gateway.query.v2_router import router as v2_query_router
+app.include_router(v2_query_router)
+
+# Frozen external v2 document API; v1 routes above remain wire compatible.
+from enterprise.gateway.sync.v2_router import router as v2_document_router
+app.include_router(v2_document_router)
 
 # WP-03 Phase 2 quality status APIs
 from enterprise.gateway.quality.router import router as quality_router

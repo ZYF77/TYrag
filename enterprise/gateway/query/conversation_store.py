@@ -88,6 +88,9 @@ CREATE TABLE IF NOT EXISTS ext_conversation_citation (
     asset_id TEXT,
     page_no INTEGER,
     bbox_json TEXT,
+    image_id TEXT,
+    positions_json TEXT,
+    evidence_json TEXT,
     excerpt TEXT,
     record_type TEXT,
     record_id TEXT,
@@ -141,6 +144,15 @@ async def ensure_schema(db) -> None:
             "ALTER TABLE ext_conversation_message "
             "ADD COLUMN citations_json TEXT"
         )
+    async with db.execute(
+        "PRAGMA table_info(ext_conversation_citation)"
+    ) as cursor:
+        citation_columns = {row["name"] for row in await cursor.fetchall()}
+    for column in ("image_id", "positions_json", "evidence_json"):
+        if column not in citation_columns:
+            await db.execute(
+                f"ALTER TABLE ext_conversation_citation ADD COLUMN {column} TEXT"
+            )
     await db.commit()
 
 
@@ -358,9 +370,9 @@ async def add_message(
                (citation_id, message_id, conversation_id, tenant_id,
                 business_user_id, source_type, title, document_id,
                 ragflow_document_id, chunk_id, source_version_id, asset_id,
-                page_no, bbox_json, excerpt, record_type, record_id,
-                created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                 page_no, bbox_json, image_id, positions_json, evidence_json,
+                 excerpt, record_type, record_id, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 citation.get("citationId"),
                 message_id,
@@ -377,6 +389,11 @@ async def add_message(
                 citation.get("pageNo"),
                 json.dumps(citation["bbox"], ensure_ascii=False)
                 if citation.get("bbox") is not None
+                else None,
+                citation.get("imageId"),
+                json.dumps(citation.get("positions") or [], ensure_ascii=False),
+                json.dumps(citation.get("evidence"), ensure_ascii=False)
+                if citation.get("evidence") is not None
                 else None,
                 citation.get("excerpt"),
                 citation.get("recordType"),
@@ -450,7 +467,8 @@ async def list_citations_for_message(
         """SELECT citation_id, message_id, conversation_id,
                   source_type, title, document_id, ragflow_document_id,
                   chunk_id, source_version_id, asset_id, page_no,
-                  bbox_json, excerpt, record_type, record_id, created_at
+                  bbox_json, image_id, positions_json, evidence_json,
+                  excerpt, record_type, record_id, created_at
            FROM ext_conversation_citation
            WHERE message_id=? AND conversation_id=?
            ORDER BY id ASC""",
@@ -465,6 +483,18 @@ async def list_citations_for_message(
                 bbox = json.loads(row["bbox_json"])
             except json.JSONDecodeError:
                 bbox = None
+        positions = []
+        if row["positions_json"]:
+            try:
+                positions = json.loads(row["positions_json"])
+            except json.JSONDecodeError:
+                positions = []
+        evidence = None
+        if row["evidence_json"]:
+            try:
+                evidence = json.loads(row["evidence_json"])
+            except json.JSONDecodeError:
+                evidence = None
         result.append(
             {
                 "citationId": row["citation_id"],
@@ -477,6 +507,9 @@ async def list_citations_for_message(
                 "assetId": row["asset_id"],
                 "pageNo": row["page_no"],
                 "bbox": bbox,
+                "imageId": row["image_id"],
+                "positions": positions,
+                "evidence": evidence,
                 "excerpt": row["excerpt"],
                 "recordType": row["record_type"],
                 "recordId": row["record_id"],
@@ -497,8 +530,8 @@ async def get_citation(
         """SELECT citation_id, message_id, conversation_id, tenant_id,
                   business_user_id, source_type, title, document_id,
                   ragflow_document_id, chunk_id, source_version_id, asset_id,
-                  page_no, bbox_json, excerpt, record_type, record_id,
-                  created_at
+                   page_no, bbox_json, image_id, positions_json, evidence_json,
+                   excerpt, record_type, record_id, created_at
            FROM ext_conversation_citation
            WHERE citation_id=?
              AND tenant_id=?
@@ -515,6 +548,18 @@ async def get_citation(
             bbox = json.loads(row["bbox_json"])
         except json.JSONDecodeError:
             bbox = None
+    positions = []
+    if row["positions_json"]:
+        try:
+            positions = json.loads(row["positions_json"])
+        except json.JSONDecodeError:
+            positions = []
+    evidence = None
+    if row["evidence_json"]:
+        try:
+            evidence = json.loads(row["evidence_json"])
+        except json.JSONDecodeError:
+            evidence = None
     return {
         "citationId": row["citation_id"],
         "messageId": row["message_id"],
@@ -528,6 +573,9 @@ async def get_citation(
         "assetId": row["asset_id"],
         "pageNo": row["page_no"],
         "bbox": bbox,
+        "imageId": row["image_id"],
+        "positions": positions,
+        "evidence": evidence,
         "excerpt": row["excerpt"],
         "recordType": row["record_type"],
         "recordId": row["record_id"],

@@ -1,10 +1,40 @@
-version: 1
+version: 2
 errors:
   - code: AUTH_TOKEN_INVALID
     http_status: 401
     retryable: false
   - code: AUTH_TOKEN_MISSING
     http_status: 401
+    retryable: false
+  - code: AUTH_SIGNATURE_INVALID
+    http_status: 401
+    retryable: false
+  - code: AUTH_SIGNATURE_MISSING
+    http_status: 401
+    retryable: false
+  - code: AUTH_CREDENTIAL_INACTIVE
+    http_status: 401
+    retryable: false
+  - code: AUTH_KEY_REVOKED
+    http_status: 401
+    retryable: false
+  - code: AUTH_TIMESTAMP_INVALID
+    http_status: 401
+    retryable: false
+  - code: AUTH_REPLAY_DETECTED
+    http_status: 401
+    retryable: false
+  - code: AUTH_REPLAY_STORE_UNAVAILABLE
+    http_status: 503
+    retryable: true
+  - code: AUTH_BINDING_DENIED
+    http_status: 403
+    retryable: false
+  - code: AUTH_BINDING_MISSING
+    http_status: 403
+    retryable: false
+  - code: AUTH_BINDING_CONFLICT
+    http_status: 403
     retryable: false
   - code: AUTH_USER_MAPPING_MISSING
     http_status: 403
@@ -16,7 +46,13 @@ errors:
     http_status: 403
     retryable: false
   - code: DOCUMENT_EVENT_DUPLICATE
-    http_status: 200
+    http_status: 202
+    retryable: false
+  - code: EVENT_ID_CONFLICT
+    http_status: 409
+    retryable: false
+  - code: DOCUMENT_VERSION_CONFLICT
+    http_status: 409
     retryable: false
   - code: DOCUMENT_SOURCE_NOT_FOUND
     http_status: 422
@@ -78,8 +114,38 @@ errors:
   - code: CONVERSATION_OWNER_MISMATCH
     http_status: 403
     retryable: false
+  - code: CONVERSATION_CONTEXT_CONFLICT
+    http_status: 409
+    retryable: false
+  - code: CONVERSATION_CONTEXT_INVALID
+    http_status: 422
+    retryable: false
+  - code: CONVERSATION_CONTEXT_REQUIRED
+    http_status: 422
+    retryable: false
+  - code: CONVERSATION_CONTEXT_STALE
+    http_status: 409
+    retryable: false
+  - code: CONVERSATION_ARCHIVED
+    http_status: 409
+    retryable: false
+  - code: CLIENT_MESSAGE_ID_CONFLICT
+    http_status: 409
+    retryable: false
+  - code: SUGGESTION_STALE
+    http_status: 409
+    retryable: false
+  - code: SUGGESTION_NOT_FOUND
+    http_status: 404
+    retryable: false
   - code: CITATION_NOT_FOUND
     http_status: 404
+    retryable: false
+  - code: ASSET_REGISTRY_UNAVAILABLE
+    http_status: 503
+    retryable: true
+  - code: RUN_INTERRUPTED
+    http_status: 503
     retryable: false
   - code: DOCUMENT_NOT_READY
     http_status: 409

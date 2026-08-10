@@ -45,6 +45,7 @@ from enterprise.gateway.sync.models import (  # noqa: E402
     init_db,
     insert_mapping,
     update_mapping_status,
+    update_parser_application,
 )
 from enterprise.gateway.sync.ragflow_document_client import (  # noqa: E402
     RAGFlowAPIError,
@@ -274,6 +275,12 @@ async def _create_evaluation(
                 "citation_page_accuracy": None,
                 "image_chunk_count": 0,
                 "out_of_range_page_count": 0,
+                "required_capabilities": ["text", "position"],
+                "quality_expectations": {"declarations_complete": True},
+                "parserApplication": {
+                    "state": "executed",
+                    "readbackMatch": True,
+                },
             },
             parse_repeatability_hash="p",
             e2e_repeatability_hash="e",
@@ -299,12 +306,19 @@ def test_routing_is_deterministic_and_auditable():
     )
     assert first == second
     assert first["category"] == "scanned_document"
-    assert first["routing_policy_version"] == "1"
-    assert first["api_application_status"] == "recorded_only"
+    assert first["routing_policy_version"] == "2"
+    assert first["selected_parser_profile"] == "pdf_deepdoc_v1"
+    assert first["api_application_status"] == "selected"
     override = route_document(
-        media_type="application/pdf", file_name="manual.pdf", manual_profile="table",
+        media_type="application/pdf", file_name="manual.pdf",
+        manual_profile="pdf_deepdoc_v1",
     )
     assert override["whether_manual_override"] is True
+    with pytest.raises(ValueError, match="PDF documents must use"):
+        route_document(
+            media_type="application/pdf", file_name="manual.pdf",
+            manual_profile="tabular_table_v1",
+        )
 
 
 @pytest.mark.asyncio
@@ -348,10 +362,45 @@ def test_quality_gate_fail_closed():
         evaluation_state="completed", parse_quality_status="failed"
     )
     assert enforce_quality_gate(failed) == (False, "DOCUMENT_QUALITY_FAILED")
-    passed = SimpleNamespace(
+    passed_without_evidence = SimpleNamespace(
         evaluation_state="completed", parse_quality_status="passed"
     )
+    assert enforce_quality_gate(passed_without_evidence) == (
+        False,
+        "DOCUMENT_REVIEW_REQUIRED",
+    )
+    passed = SimpleNamespace(
+        evaluation_state="completed", parse_quality_status="passed",
+        metrics_json={
+            "parse_success": True,
+            "chunk_count": 1,
+            "effective_text_coverage": 1.0,
+            "garbled_char_ratio": 0.0,
+            "position_coverage": 1.0,
+            "required_capabilities": ["text", "position"],
+            "quality_expectations": {"declarations_complete": True},
+            "parserApplication": {
+                "state": "executed",
+                "readbackMatch": True,
+            },
+        },
+    )
     assert enforce_quality_gate(passed) == (True, None)
+    parser_mismatch = SimpleNamespace(
+        evaluation_state="completed",
+        parse_quality_status="passed",
+        metrics_json={
+            **passed.metrics_json,
+            "parserApplication": {
+                "state": "mismatch",
+                "readbackMatch": False,
+            },
+        },
+    )
+    assert enforce_quality_gate(parser_mismatch) == (
+        False,
+        "DOCUMENT_REVIEW_REQUIRED",
+    )
     assert enforce_quality_gate(review, strict_mode=False, demo_warn_mode=True) == (
         True,
         "DOCUMENT_QUALITY_WARN",
@@ -392,7 +441,7 @@ class PassStub(RAGFlowDocumentStub):
                 "chunks": [
                     {
                         "id": "chunk-1",
-                        "content": "故障码 E-104 时先检查液压油位。",
+                        "content": "设备 EQ-001：故障码 E-104 时先检查液压油位。",
                         "document_id": document_id,
                         "positions": [[1, 0.1, 0.1, 0.9, 0.9]],
                     }
@@ -405,13 +454,16 @@ class FlakyStub(PassStub):
     def __init__(self, fail_remaining: int = 1) -> None:
         super().__init__()
         self.fail_remaining = fail_remaining
+        self._post_parse_reads = 0
 
     async def list_documents(
         self, dataset_id, document_id=None, page=1, page_size=100, request_id=None,
     ):
-        if document_id and self.fail_remaining:
-            self.fail_remaining -= 1
-            raise RAGFlowAPIError("Stub: RAGFlow unavailable", 503)
+        if document_id and self._parse_calls:
+            self._post_parse_reads += 1
+            if self._post_parse_reads > 1 and self.fail_remaining:
+                self.fail_remaining -= 1
+                raise RAGFlowAPIError("Stub: RAGFlow unavailable", 503)
         return await super().list_documents(
             dataset_id, document_id, page, page_size, request_id
         )
@@ -451,8 +503,27 @@ async def test_worker_completes_passed_with_chunks():
     )
     assert evaluation.evaluation_state == "completed"
     assert evaluation.parse_quality_status == "passed"
+    assert evaluation.metrics_json["parserApplication"]["state"] == "executed"
     assert evaluation.parse_repeatability_hash
     assert evaluation.e2e_repeatability_hash
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_worker_parser_mismatch_cannot_pass():
+    db = await init_db(":memory:")
+    client = PassStub()
+    client.run_status = "DONE"
+    doc = await _ready_with_client(db, client)
+    await update_parser_application(db, doc, status="mismatch")
+    quality = QualityEvaluationService(db, client)
+    await QualityEvaluationWorker(quality).run_once()
+    evaluation = await quality_models.get_latest_evaluation(
+        db, doc.tenant_id, doc.source_system,
+        doc.external_document_id, doc.source_version_id,
+    )
+    assert evaluation.parse_quality_status == "review_required"
+    assert "PARSER_APPLICATION_NOT_EXECUTED" in evaluation.quality_reasons
     await db.close()
 
 
@@ -476,9 +547,10 @@ async def test_worker_empty_chunks_is_not_passed():
 @pytest.mark.asyncio
 async def test_worker_retries_then_recovers():
     db = await init_db(":memory:")
-    client = FlakyStub(fail_remaining=1)
+    client = FlakyStub(fail_remaining=0)
     client.run_status = "DONE"
     doc = await _ready_with_client(db, client)
+    client.fail_remaining = 1
     evaluation = await quality_models.get_latest_evaluation(
         db, doc.tenant_id, doc.source_system,
         doc.external_document_id, doc.source_version_id,
@@ -510,9 +582,10 @@ async def test_worker_retries_then_recovers():
 @pytest.mark.asyncio
 async def test_worker_dead_letter_never_passes():
     db = await init_db(":memory:")
-    client = FlakyStub(fail_remaining=99)
+    client = FlakyStub(fail_remaining=0)
     client.run_status = "DONE"
     doc = await _ready_with_client(db, client)
+    client.fail_remaining = 99
     evaluation = await quality_models.get_latest_evaluation(
         db, doc.tenant_id, doc.source_system,
         doc.external_document_id, doc.source_version_id,

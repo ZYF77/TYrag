@@ -1,0 +1,35 @@
+{
+  "contract": "contracts/integration-openapi-v2.yaml",
+  "serverPathSuffix": "/enterprise/api/v2",
+  "allowedStatuses": [
+    "implemented",
+    "planned",
+    "deprecated",
+    "experimental"
+  ],
+  "forbiddenIdentifiers": [
+    "ragflowDatasetId",
+    "ragflowDocumentId",
+    "ragflowSessionId",
+    "ragflowMessageId",
+    "ragflowTaskId",
+    "chunkId"
+  ],
+  "requiredOperations": [
+    ["/documents", "post"],
+    ["/documents/sync-status", "get"],
+    ["/documents/{externalDocumentId}/status", "get"],
+    ["/documents/{externalDocumentId}/disable", "post"],
+    ["/documents/{externalDocumentId}/restore", "post"],
+    ["/documents/{externalDocumentId}", "delete"],
+    ["/conversations", "get"],
+    ["/conversations", "post"],
+    ["/conversations/{conversationId}", "get"],
+    ["/conversations/{conversationId}/context", "patch"],
+    ["/conversations/{conversationId}/archive", "post"],
+    ["/conversations/{conversationId}/messages", "get"],
+    ["/conversations/{conversationId}/messages", "post"],
+    ["/conversations/{conversationId}/suggestions", "get"],
+    ["/citations/{citationId}", "get"]
+  ]
+}

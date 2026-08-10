@@ -146,6 +146,11 @@ def put_object(doc_id: str, content: bytes, content_type: str = "application/pdf
     )
 
 
+def delete_object(doc_id: str) -> None:
+    """Remove only the exact temporary object created by this run."""
+    s3_client().delete_object(Bucket=S3_BUCKET, Key=f"phase2/{doc_id}.pdf")
+
+
 def gateway_post(path: str, json_body: dict) -> httpx.Response:
     with httpx.Client(timeout=30) as c:
         return c.post(
@@ -281,24 +286,46 @@ async def main() -> int:
     b_pdf = samples / "wp03-degraded_scan-014.pdf"
     if not a_pdf.exists() or not b_pdf.exists():
         raise RuntimeError("sample PDFs missing; run generate_samples.py first")
-    review_fixture = b"%PDF-1.7\n% review required fixture for phase2 e2e\n" + b"0" * 1024
-    corrupt = b"this is not a pdf fixture for phase2 e2e\n" * 64
-    results = {
-        "A": await run_one(f"{DOC_PREFIX}-A", "p2-a.pdf", a_pdf.read_bytes(), 3),
-        "B": await run_one(f"{DOC_PREFIX}-B", "p2-b.pdf", review_fixture, 1),
-        "C": await run_one(
-            f"{DOC_PREFIX}-C",
-            "p2-c.xyz",
-            corrupt,
-            1,
-            media_type="application/octet-stream",
-        ),
-    }
+    a_content = a_pdf.read_bytes()
+    b_content = b_pdf.read_bytes()
+    intentional_invalid_control = b"this is not a pdf fixture for phase2 e2e\n" * 64
+    document_ids = [f"{DOC_PREFIX}-{label}" for label in ("A", "B", "C")]
+    try:
+        results = {
+            "A": await run_one(document_ids[0], "p2-a.pdf", a_content, 3),
+            "B": await run_one(document_ids[1], "p2-b.pdf", b_content, 2),
+            "C": await run_one(
+                document_ids[2],
+                "p2-c.xyz",
+                intentional_invalid_control,
+                1,
+                media_type="application/octet-stream",
+            ),
+        }
+    finally:
+        for document_id in document_ids:
+            try:
+                delete_object(document_id)
+            except Exception as exc:  # noqa: BLE001 - best-effort exact cleanup
+                logger.warning("temporary object cleanup failed for %s: %s", document_id, type(exc).__name__)
     report = {
         "gateway": GATEWAY,
         "ragflow": RAGFLOW_URL,
         "tenant": TENANT,
         "source_system": SOURCE_SYSTEM,
+        "sample_evidence": {
+            "A": {"file": a_pdf.name, "sha256": hashlib.sha256(a_content).hexdigest()},
+            "B": {"file": b_pdf.name, "sha256": hashlib.sha256(b_content).hexdigest()},
+            "C": {
+                "fixture": "intentional_invalid_control",
+                "sha256": hashlib.sha256(intentional_invalid_control).hexdigest(),
+            },
+        },
+        "persistence": {
+            "backend": "sqlite",
+            "postgres_integration": "not_applicable",
+            "reason": "no enterprise PostgreSQL runtime call path",
+        },
         "documents": results,
     }
     REPORT_PATH.write_text(

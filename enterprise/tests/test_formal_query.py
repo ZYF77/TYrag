@@ -188,7 +188,14 @@ async def _insert_document(
             evaluation.id,
             parse_quality_status=quality,
             quality_reasons=[],
-            metrics_json={"parse_success": True, "chunk_count": 5},
+            metrics_json={
+                "parse_success": True,
+                "chunk_count": 5,
+                "parserApplication": {
+                    "state": "executed",
+                    "readbackMatch": True,
+                },
+            },
             parse_repeatability_hash="hash",
             e2e_repeatability_hash="hash",
             artifact_hash="hash",

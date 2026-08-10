@@ -225,6 +225,10 @@ class DemoCitation(BaseModel):
     excerpt: str | None = None
     recordType: str | None = None
     recordId: str | None = None
+    chunkId: str | None = None
+    imageId: str | None = None
+    positions: list[dict] = Field(default_factory=list)
+    evidence: dict | None = None
 
 
 class DemoAskResponse(BaseModel):
@@ -255,43 +259,66 @@ def _to_citation(
     asset_id: str | None = None,
 ) -> DemoCitation:
     positions = chunk.get("positions") or chunk.get("position_int") or []
-    page_no: int | None = None
-    bbox: dict | None = None
+    regions: list[dict] = []
     if isinstance(positions, list):
         for pos in positions:
-            if not isinstance(pos, list) or not pos:
+            if not isinstance(pos, (list, tuple)) or len(pos) < 5:
                 continue
             try:
                 page_no = int(pos[0])
+                left = float(pos[1])
+                right = float(pos[2])
+                top = float(pos[3])
+                bottom = float(pos[4])
             except (TypeError, ValueError):
-                page_no = None
-            if len(pos) >= 5:
-                try:
-                    bbox = {
-                        "x1": float(pos[1]),
-                        "y1": float(pos[2]),
-                        "x2": float(pos[3]),
-                        "y2": float(pos[4]),
-                    }
-                except (TypeError, ValueError):
-                    bbox = None
-            break
+                continue
+            if page_no < 1 or left > right or top > bottom:
+                continue
+            regions.append(
+                {
+                    "pageNo": page_no,
+                    "bbox": {
+                        "x1": left,
+                        "y1": top,
+                        "x2": right,
+                        "y2": bottom,
+                    },
+                }
+            )
+    page_no = regions[0]["pageNo"] if regions else None
+    bbox = dict(regions[0]["bbox"]) if regions else None
+    if bbox is not None:
+        bbox["regions"] = regions
+    chunk_id = str(
+        chunk.get("id") or chunk.get("chunk_id") or f"chunk-{index}"
+    )
+    image_id = str(chunk.get("image_id") or chunk.get("img_id") or "") or None
+    document_id = chunk.get("document_id") or chunk.get("doc_id")
     return DemoCitation(
-        citationId=str(
-            chunk.get("id") or chunk.get("chunk_id") or f"chunk-{index}"
-        ),
+        citationId=chunk_id,
         sourceType="document",
         title=str(
             chunk.get("document_name")
             or chunk.get("docnm_kwd")
             or "PDF document"
         ),
-        documentId=chunk.get("document_id") or chunk.get("doc_id"),
+        documentId=document_id,
         versionId=version_id,
         pageNo=page_no,
         bbox=bbox,
         assetId=asset_id,
         excerpt=chunk.get("content") or chunk.get("content_with_weight"),
+        chunkId=chunk_id,
+        imageId=image_id,
+        positions=regions,
+        evidence={
+            "kind": "document_chunk",
+            "documentId": document_id,
+            "versionId": version_id,
+            "chunkId": chunk_id,
+            "imageId": image_id,
+            "positions": regions,
+        },
     )
 
 

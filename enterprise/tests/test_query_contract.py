@@ -40,11 +40,8 @@ class TestRAGFlowQueryContract:
             dataset_id = created["data"]["id"]
 
             pdf_path = (
-                Path(__file__).resolve().parents[2]
-                / "ragflow"
-                / "test"
-                / "benchmark"
-                / "test_docs"
+                Path(__file__).resolve().parent
+                / "fixtures"
                 / "Doc1.pdf"
             )
             uploaded = await client.upload_document(

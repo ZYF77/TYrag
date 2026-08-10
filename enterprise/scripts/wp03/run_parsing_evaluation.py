@@ -141,8 +141,9 @@ async def _run_one_sample(
     samples_dir: Path,
     run_id: str,
 ) -> dict[str, Any]:
+    result: dict[str, Any]
     try:
-        return await collector.run_sample(sample, samples_dir, run_id)
+        result = await collector.run_sample(sample, samples_dir, run_id)
     except Exception as exc:  # noqa: BLE001
         logging.exception("sample failed: %s", sample["sample_id"])
         file_sha256 = None
@@ -152,7 +153,7 @@ async def _run_one_sample(
             ).hexdigest()
         except (OSError, KeyError, TypeError):
             pass
-        return {
+        result = {
             "sample_id": sample["sample_id"],
             "category": sample["category"],
             "sync_status": "failed",
@@ -173,6 +174,16 @@ async def _run_one_sample(
             "chunks": [],
             "error": str(exc),
         }
+    try:
+        await asyncio.to_thread(collector.cleanup_source, sample, run_id)
+        result["source_cleanup"] = "passed"
+    except Exception as exc:  # noqa: BLE001
+        logging.warning("temporary source cleanup failed for %s: %s", sample["sample_id"], type(exc).__name__)
+        result["source_cleanup"] = "failed"
+        result.setdefault("quality_reasons", []).append("TEMP_RESOURCE_CLEANUP_FAILED")
+        result["parse_quality_status"] = "failed"
+        result.setdefault("metrics", {})["quality_status"] = "failed"
+    return result
 
 
 async def _run(args: argparse.Namespace) -> int:

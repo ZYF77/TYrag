@@ -148,6 +148,19 @@ class RAGFlowDocumentClient:
         result = await self._run_sync(self._sync_request, "GET", "/api/v1/datasets", rid)
         return result.get("data", []) if isinstance(result, dict) else result
 
+    async def delete_dataset(
+        self, dataset_id: str, request_id: str | None = None
+    ) -> dict:
+        """Delete a temporary dataset through the public API."""
+        rid = request_id or self._new_request_id()
+        return await self._run_sync(
+            self._sync_request,
+            "DELETE",
+            "/api/v1/datasets",
+            rid,
+            json_data={"ids": [dataset_id]},
+        )
+
     async def upload_document(self, dataset_id: str, file_name: str,
                               file_content: bytes, request_id: str | None = None) -> dict:
         rid = request_id or self._new_request_id()
@@ -211,6 +224,33 @@ class RAGFlowDocumentClient:
         )
         return await self._run_sync(self._sync_request, "GET", path, rid)
 
+    async def update_document(
+        self,
+        dataset_id: str,
+        document_id: str,
+        *,
+        meta_fields: dict | None = None,
+        enabled: bool | None = None,
+        chunk_method: str | None = None,
+        parser_config: dict | None = None,
+        request_id: str | None = None,
+    ) -> dict:
+        rid = request_id or self._new_request_id()
+        body: dict = {}
+        if meta_fields is not None:
+            body["meta_fields"] = meta_fields
+        if enabled is not None:
+            body["enabled"] = 1 if enabled else 0
+        if chunk_method is not None:
+            body["chunk_method"] = chunk_method
+        if parser_config is not None:
+            body["parser_config"] = parser_config
+        return await self._run_sync(
+            self._sync_request, "PATCH",
+            f"/api/v1/datasets/{dataset_id}/documents/{document_id}",
+            rid, json_data=body,
+        )
+
     async def update_document_metadata(
         self,
         dataset_id: str,
@@ -219,14 +259,12 @@ class RAGFlowDocumentClient:
         enabled: bool | None = None,
         request_id: str | None = None,
     ) -> dict:
-        rid = request_id or self._new_request_id()
-        body: dict = {"meta_fields": meta_fields}
-        if enabled is not None:
-            body["enabled"] = 1 if enabled else 0
-        return await self._run_sync(
-            self._sync_request, "PATCH",
-            f"/api/v1/datasets/{dataset_id}/documents/{document_id}",
-            rid, json_data=body,
+        return await self.update_document(
+            dataset_id,
+            document_id,
+            meta_fields=meta_fields,
+            enabled=enabled,
+            request_id=request_id,
         )
 
     async def delete_documents(
@@ -282,6 +320,7 @@ class RAGFlowDocumentStub(RAGFlowDocumentClient):
         self._status_updates: list[tuple[str, list[str], bool]] = []
         self._deleted: list[str] = []
         self._parse_calls: list[tuple[str, list[str]]] = []
+        self._operation_log: list[str] = []
 
     async def create_dataset(self, name: str, description: str = "",
                              request_id: str | None = None) -> dict:
@@ -295,15 +334,29 @@ class RAGFlowDocumentStub(RAGFlowDocumentClient):
     async def list_datasets(self, request_id: str | None = None) -> list[dict]:
         return [v["data"] for v in self._datasets.values()]
 
+    async def delete_dataset(
+        self, dataset_id: str, request_id: str | None = None
+    ) -> dict:
+        self._datasets.pop(dataset_id, None)
+        return {"code": 0, "data": True}
+
     async def upload_document(self, dataset_id: str, file_name: str,
                               file_content: bytes, request_id: str | None = None) -> dict:
         if self._fail_next:
             raise RAGFlowAPIError("Stub: simulated RAGFlow failure", 503)
         doc_id = f"doc-{self._next_id}"; self._next_id += 1
         doc = {"data": [{"id": doc_id, "name": file_name, "dataset_id": dataset_id,
-                         "run": self.run_status, "chunk_method": "naive",
-                         "meta_fields": {}, "enabled": 1}]}
+                          "run": "UNSTART", "chunk_method": "naive",
+                          "parser_config": {}, "meta_fields": {
+                              "enterprise_quality_expected_tables": [],
+                              "enterprise_quality_ground_truth_fields": {},
+                              "enterprise_quality_citation_expected": False,
+                              "enterprise_quality_required_capabilities": [
+                                  "text", "position",
+                              ],
+                          }, "enabled": 1}]}
         self._documents[doc_id] = doc
+        self._operation_log.append("upload")
         return doc
 
     async def start_parsing(
@@ -315,12 +368,16 @@ class RAGFlowDocumentStub(RAGFlowDocumentClient):
         if self._fail_next:
             raise RAGFlowAPIError("Stub: simulated RAGFlow failure", 503)
         self._parse_calls.append((dataset_id, list(document_ids)))
+        self._operation_log.append("parse")
         for doc_id in document_ids:
             doc = self._documents.get(doc_id)
             if doc and doc["data"][0].get("run") in (
                 None, "", "UNSTART", "0",
             ):
-                doc["data"][0]["run"] = "RUNNING"
+                desired = str(self.run_status or "UNSTART").upper()
+                doc["data"][0]["run"] = (
+                    desired if desired in ("DONE", "3", "FAIL", "4") else "RUNNING"
+                )
         return {"code": 0, "data": True}
 
     async def list_documents(
@@ -331,6 +388,7 @@ class RAGFlowDocumentStub(RAGFlowDocumentClient):
         page_size: int = 100,
         request_id: str | None = None,
     ) -> list[dict]:
+        self._operation_log.append("get")
         docs = [
             doc["data"][0]
             for doc in self._documents.values()
@@ -357,12 +415,15 @@ class RAGFlowDocumentStub(RAGFlowDocumentClient):
             },
         }
 
-    async def update_document_metadata(
+    async def update_document(
         self,
         dataset_id: str,
         document_id: str,
-        meta_fields: dict,
+        *,
+        meta_fields: dict | None = None,
         enabled: bool | None = None,
+        chunk_method: str | None = None,
+        parser_config: dict | None = None,
         request_id: str | None = None,
     ) -> dict:
         if self._fail_next or self._fail_metadata_next:
@@ -373,13 +434,38 @@ class RAGFlowDocumentStub(RAGFlowDocumentClient):
             raise RAGFlowAPIError("Stub: document not found", 404)
         if doc["data"][0].get("dataset_id") != dataset_id:
             raise RAGFlowAPIError("Stub: document not in dataset", 400)
-        doc["data"][0]["meta_fields"] = {
-            **doc["data"][0].get("meta_fields", {}),
-            **meta_fields,
-        }
+        if meta_fields is not None:
+            doc["data"][0]["meta_fields"] = {
+                **doc["data"][0].get("meta_fields", {}),
+                **meta_fields,
+            }
         if enabled is not None:
             doc["data"][0]["enabled"] = 1 if enabled else 0
+        if chunk_method is not None:
+            doc["data"][0]["chunk_method"] = chunk_method
+        if parser_config is not None:
+            doc["data"][0]["parser_config"] = {
+                **doc["data"][0].get("parser_config", {}),
+                **parser_config,
+            }
+        self._operation_log.append("patch")
         return doc
+
+    async def update_document_metadata(
+        self,
+        dataset_id: str,
+        document_id: str,
+        meta_fields: dict,
+        enabled: bool | None = None,
+        request_id: str | None = None,
+    ) -> dict:
+        return await self.update_document(
+            dataset_id,
+            document_id,
+            meta_fields=meta_fields,
+            enabled=enabled,
+            request_id=request_id,
+        )
 
     async def delete_documents(
         self,

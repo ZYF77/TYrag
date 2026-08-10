@@ -1,4 +1,5 @@
 """Enterprise sync database models, outbox, and schema migration."""
+import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -7,6 +8,14 @@ import aiosqlite
 
 
 CREATE_EXT_DOCUMENT_MAP = """
+CREATE TABLE IF NOT EXISTS ext_asset_registry (
+    tenant_id TEXT NOT NULL,
+    equipment_id TEXT NOT NULL,
+    fixed_asset_no TEXT,
+    asset_id TEXT,
+    PRIMARY KEY (tenant_id, equipment_id)
+);
+
 CREATE TABLE IF NOT EXISTS ext_document_map (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     tenant_id TEXT NOT NULL,
@@ -19,10 +28,13 @@ CREATE TABLE IF NOT EXISTS ext_document_map (
     sha256 TEXT NOT NULL,
     file_name TEXT NOT NULL,
     media_type TEXT DEFAULT 'application/pdf',
+    document_type TEXT,
     source_page_count INTEGER,
     bucket TEXT NOT NULL DEFAULT '',
     object_key TEXT NOT NULL DEFAULT '',
     asset_id TEXT,
+    equipment_id TEXT,
+    fixed_asset_no TEXT,
     department_id TEXT,
     security_level INTEGER,
     allow_group_ids TEXT,
@@ -34,6 +46,12 @@ CREATE TABLE IF NOT EXISTS ext_document_map (
     pipeline_status TEXT,
     business_status TEXT NOT NULL DEFAULT 'active',
     current_version INTEGER NOT NULL DEFAULT 0,
+    parser_profile TEXT,
+    parser_profile_version TEXT,
+    parser_expected_json TEXT,
+    parser_configured_json TEXT,
+    parser_executed_json TEXT,
+    parser_application_status TEXT NOT NULL DEFAULT 'legacy_unverified',
     attempt_count INTEGER NOT NULL DEFAULT 0,
     next_retry_at TEXT,
     batch_id TEXT,
@@ -91,19 +109,47 @@ CREATE INDEX IF NOT EXISTS idx_outbox_pending
 """
 
 
+CREATE_DOCUMENT_EVENT_RECEIPT = """
+CREATE TABLE IF NOT EXISTS ext_document_event_receipt (
+    event_id TEXT PRIMARY KEY,
+    payload_hash TEXT NOT NULL,
+    tenant_id TEXT NOT NULL,
+    source_system TEXT NOT NULL,
+    external_document_id TEXT NOT NULL,
+    source_version_id TEXT NOT NULL,
+    outcome_code TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_document_event_receipt_document
+    ON ext_document_event_receipt(
+        tenant_id, source_system, external_document_id, source_version_id
+    );
+"""
+
+
 _MIGRATION_COLUMNS = {
     "event_type": "TEXT NOT NULL DEFAULT 'upsert'",
     "event_status": "TEXT NOT NULL DEFAULT 'received'",
+    "document_type": "TEXT",
     "source_page_count": "INTEGER",
     "bucket": "TEXT NOT NULL DEFAULT ''",
     "object_key": "TEXT NOT NULL DEFAULT ''",
     "asset_id": "TEXT",
+    "equipment_id": "TEXT",
+    "fixed_asset_no": "TEXT",
     "department_id": "TEXT",
     "security_level": "INTEGER",
     "allow_group_ids": "TEXT",
     "deny_group_ids": "TEXT",
     "business_status": "TEXT NOT NULL DEFAULT 'active'",
     "current_version": "INTEGER NOT NULL DEFAULT 0",
+    "parser_profile": "TEXT",
+    "parser_profile_version": "TEXT",
+    "parser_expected_json": "TEXT",
+    "parser_configured_json": "TEXT",
+    "parser_executed_json": "TEXT",
+    "parser_application_status": "TEXT NOT NULL DEFAULT 'legacy_unverified'",
     "attempt_count": "INTEGER NOT NULL DEFAULT 0",
     "next_retry_at": "TEXT",
     "batch_id": "TEXT",
@@ -120,12 +166,15 @@ class ExtDocumentMap:
     sha256: str
     file_name: str
     media_type: str = "application/pdf"
+    document_type: str | None = None
     source_page_count: int | None = None
     event_type: str = "upsert"
     event_status: str = "received"
     bucket: str = ""
     object_key: str = ""
     asset_id: str | None = None
+    equipment_id: str | None = None
+    fixed_asset_no: str | None = None
     department_id: str | None = None
     security_level: int | None = None
     allow_group_ids: str | None = None
@@ -137,6 +186,12 @@ class ExtDocumentMap:
     pipeline_status: str | None = None
     business_status: str = "active"
     current_version: int = 0
+    parser_profile: str | None = None
+    parser_profile_version: str | None = None
+    parser_expected_json: str | None = None
+    parser_configured_json: str | None = None
+    parser_executed_json: str | None = None
+    parser_application_status: str = "legacy_unverified"
     attempt_count: int = 0
     next_retry_at: str | None = None
     batch_id: str | None = None
@@ -175,6 +230,18 @@ class OutboxEvent:
     id: int | None = None
 
 
+@dataclass(frozen=True)
+class DocumentEventReceipt:
+    event_id: str
+    payload_hash: str
+    tenant_id: str
+    source_system: str
+    external_document_id: str
+    source_version_id: str
+    outcome_code: str
+    created_at: str = ""
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -192,10 +259,13 @@ def _row_to_mapping(row: aiosqlite.Row) -> ExtDocumentMap:
         sha256=row["sha256"],
         file_name=row["file_name"],
         media_type=row["media_type"],
+        document_type=row["document_type"],
         source_page_count=row["source_page_count"],
         bucket=row["bucket"],
         object_key=row["object_key"],
         asset_id=row["asset_id"],
+        equipment_id=row["equipment_id"],
+        fixed_asset_no=row["fixed_asset_no"],
         department_id=row["department_id"],
         security_level=row["security_level"],
         allow_group_ids=row["allow_group_ids"],
@@ -207,6 +277,14 @@ def _row_to_mapping(row: aiosqlite.Row) -> ExtDocumentMap:
         pipeline_status=row["pipeline_status"],
         business_status=row["business_status"],
         current_version=row["current_version"],
+        parser_profile=row["parser_profile"],
+        parser_profile_version=row["parser_profile_version"],
+        parser_expected_json=row["parser_expected_json"],
+        parser_configured_json=row["parser_configured_json"],
+        parser_executed_json=row["parser_executed_json"],
+        parser_application_status=(
+            row["parser_application_status"] or "legacy_unverified"
+        ),
         attempt_count=row["attempt_count"],
         next_retry_at=row["next_retry_at"],
         batch_id=row["batch_id"],
@@ -256,6 +334,7 @@ async def migrate_schema(db: aiosqlite.Connection) -> None:
         if column not in existing:
             await db.execute(f"ALTER TABLE ext_document_map ADD COLUMN {column} {ddl}")
     await db.executescript(CREATE_SYNC_OUTBOX)
+    await db.executescript(CREATE_DOCUMENT_EVENT_RECEIPT)
     await db.commit()
 
 
@@ -279,27 +358,38 @@ async def insert_mapping(db: aiosqlite.Connection, doc: ExtDocumentMap) -> ExtDo
             """INSERT INTO ext_document_map
                (tenant_id, source_system, external_document_id, source_version_id,
                 event_id, event_type, event_status, sha256, file_name, media_type,
+                document_type,
                 source_page_count, bucket, object_key, asset_id,
+                equipment_id, fixed_asset_no,
                 department_id, security_level, allow_group_ids, deny_group_ids,
                 ragflow_dataset_id, ragflow_document_id,
                 ragflow_task_id, sync_status, pipeline_status, business_status,
-                current_version, attempt_count, next_retry_at, batch_id,
+                current_version, parser_profile, parser_profile_version,
+                parser_expected_json, parser_configured_json,
+                parser_executed_json, parser_application_status,
+                attempt_count, next_retry_at, batch_id,
                 last_error_code, last_error_message, last_sync_at,
                 source_updated_at, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(tenant_id, source_system, external_document_id, source_version_id)
                DO NOTHING""",
             (
                 doc.tenant_id, doc.source_system, doc.external_document_id,
                 doc.source_version_id, doc.event_id, doc.event_type,
                 doc.event_status, doc.sha256, doc.file_name, doc.media_type,
+                doc.document_type,
                 doc.source_page_count, doc.bucket, doc.object_key,
                 doc.asset_id,
+                doc.equipment_id, doc.fixed_asset_no,
                 doc.department_id, doc.security_level,
                 doc.allow_group_ids, doc.deny_group_ids,
                 doc.ragflow_dataset_id, doc.ragflow_document_id,
                 doc.ragflow_task_id, doc.sync_status, doc.pipeline_status,
-                doc.business_status, doc.current_version, doc.attempt_count,
+                doc.business_status, doc.current_version,
+                doc.parser_profile, doc.parser_profile_version,
+                doc.parser_expected_json, doc.parser_configured_json,
+                doc.parser_executed_json, doc.parser_application_status,
+                doc.attempt_count,
                 doc.next_retry_at, doc.batch_id, doc.last_error_code,
                 doc.last_error_message, doc.last_sync_at, doc.source_updated_at,
                 now, now,
@@ -310,6 +400,24 @@ async def insert_mapping(db: aiosqlite.Connection, doc: ExtDocumentMap) -> ExtDo
             doc.id = cursor.lastrowid
             doc.created_at = now
             doc.updated_at = now
+            # The SQLite registry is an explicit offline fixture only.  It is
+            # never populated from document metadata in production mode.
+            if os.environ.get("ENTERPRISE_TEST_MODE") == "1":
+                await db.execute(
+                    """INSERT INTO ext_asset_registry
+                       (tenant_id, equipment_id, fixed_asset_no, asset_id)
+                       VALUES (?, ?, ?, ?)
+                       ON CONFLICT(tenant_id, equipment_id) DO UPDATE SET
+                         fixed_asset_no=excluded.fixed_asset_no,
+                         asset_id=excluded.asset_id""",
+                    (
+                        doc.tenant_id,
+                        doc.equipment_id or doc.fixed_asset_no or doc.asset_id,
+                        doc.fixed_asset_no,
+                        doc.asset_id or doc.fixed_asset_no or doc.equipment_id,
+                    ),
+                )
+                await db.commit()
             return doc
     except sqlite3.IntegrityError:
         # Unique event_id conflict with a different composite key: replay wins.
@@ -344,6 +452,56 @@ async def get_mapping_by_event_id(db: aiosqlite.Connection, event_id: str) -> Ex
     ) as cursor:
         row = await cursor.fetchone()
         return _row_to_mapping(row) if row else None
+
+
+async def get_document_event_receipt(
+    db: aiosqlite.Connection, event_id: str,
+) -> DocumentEventReceipt | None:
+    async with db.execute(
+        "SELECT * FROM ext_document_event_receipt WHERE event_id=?",
+        (event_id,),
+    ) as cursor:
+        row = await cursor.fetchone()
+    if not row:
+        return None
+    return DocumentEventReceipt(
+        event_id=row["event_id"],
+        payload_hash=row["payload_hash"],
+        tenant_id=row["tenant_id"],
+        source_system=row["source_system"],
+        external_document_id=row["external_document_id"],
+        source_version_id=row["source_version_id"],
+        outcome_code=row["outcome_code"],
+        created_at=row["created_at"],
+    )
+
+
+async def insert_document_event_receipt(
+    db: aiosqlite.Connection,
+    receipt: DocumentEventReceipt,
+) -> DocumentEventReceipt:
+    await db.execute(
+        """INSERT INTO ext_document_event_receipt
+           (event_id, payload_hash, tenant_id, source_system,
+            external_document_id, source_version_id, outcome_code, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(event_id) DO NOTHING""",
+        (
+            receipt.event_id,
+            receipt.payload_hash,
+            receipt.tenant_id,
+            receipt.source_system,
+            receipt.external_document_id,
+            receipt.source_version_id,
+            receipt.outcome_code,
+            receipt.created_at or utc_now(),
+        ),
+    )
+    await db.commit()
+    existing = await get_document_event_receipt(db, receipt.event_id)
+    if existing is None:
+        raise RuntimeError("Document event receipt insert failed")
+    return existing
 
 
 async def get_mapping_by_sha(
@@ -457,6 +615,7 @@ async def update_mapping_status(
     attempt_count: int | None = None,
     next_retry_at: str | None = None,
     event_type: str | None = None,
+    document_type: str | None = None,
     source_page_count: int | None = None,
     bucket: str | None = None,
     object_key: str | None = None,
@@ -478,8 +637,9 @@ async def update_mapping_status(
                current_version=COALESCE(?, current_version),
                attempt_count=COALESCE(?, attempt_count),
                next_retry_at=?,
-               event_type=COALESCE(?, event_type),
-               source_page_count=COALESCE(?, source_page_count),
+                event_type=COALESCE(?, event_type),
+                document_type=COALESCE(?, document_type),
+                source_page_count=COALESCE(?, source_page_count),
                bucket=COALESCE(?, bucket),
                object_key=COALESCE(?, object_key),
                asset_id=COALESCE(?, asset_id),
@@ -496,7 +656,8 @@ async def update_mapping_status(
         (
             sync_status, pipeline_status, error_code, error_message,
             event_status, business_status, current_version, attempt_count,
-            next_retry_at, event_type, source_page_count, bucket, object_key,
+            next_retry_at, event_type, document_type, source_page_count,
+            bucket, object_key,
             asset_id,
             department_id, security_level, allow_group_ids, deny_group_ids,
             doc.ragflow_dataset_id, doc.ragflow_document_id,
@@ -521,6 +682,8 @@ async def update_mapping_status(
         doc.next_retry_at = next_retry_at
     if event_type is not None:
         doc.event_type = event_type
+    if document_type is not None:
+        doc.document_type = document_type
     if source_page_count is not None:
         doc.source_page_count = source_page_count
     if bucket is not None:
@@ -539,6 +702,95 @@ async def update_mapping_status(
         doc.deny_group_ids = deny_group_ids
     doc.last_sync_at = now
     doc.updated_at = now
+
+
+async def update_parser_application(
+    db: aiosqlite.Connection,
+    doc: ExtDocumentMap,
+    *,
+    status: str,
+    profile: str | None = None,
+    profile_version: str | None = None,
+    expected_json: str | None = None,
+    configured_json: str | None = None,
+    executed_json: str | None = None,
+) -> None:
+    now = utc_now()
+    await db.execute(
+        """UPDATE ext_document_map
+           SET parser_profile=COALESCE(?, parser_profile),
+               parser_profile_version=COALESCE(?, parser_profile_version),
+               parser_expected_json=COALESCE(?, parser_expected_json),
+               parser_configured_json=COALESCE(?, parser_configured_json),
+               parser_executed_json=COALESCE(?, parser_executed_json),
+               parser_application_status=?, updated_at=?
+           WHERE id=?""",
+        (
+            profile, profile_version, expected_json, configured_json,
+            executed_json, status, now, doc.id,
+        ),
+    )
+    await db.commit()
+    if profile is not None:
+        doc.parser_profile = profile
+    if profile_version is not None:
+        doc.parser_profile_version = profile_version
+    if expected_json is not None:
+        doc.parser_expected_json = expected_json
+    if configured_json is not None:
+        doc.parser_configured_json = configured_json
+    if executed_json is not None:
+        doc.parser_executed_json = executed_json
+    doc.parser_application_status = status
+    doc.updated_at = now
+
+
+async def promote_version_if_latest(
+    db: aiosqlite.Connection, doc: ExtDocumentMap,
+) -> bool:
+    """Atomically promote the latest eligible version; safe to call repeatedly."""
+    now = utc_now()
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        async with db.execute(
+            """SELECT id FROM ext_document_map
+               WHERE tenant_id=? AND source_system=? AND external_document_id=?
+                 AND business_status NOT IN ('disabled', 'deleted')
+               ORDER BY id DESC LIMIT 1""",
+            (doc.tenant_id, doc.source_system, doc.external_document_id),
+        ) as cursor:
+            latest = await cursor.fetchone()
+        if latest is None or latest["id"] != doc.id:
+            await db.rollback()
+            return False
+        await db.execute(
+            """UPDATE ext_document_map
+               SET sync_status='superseded', business_status='superseded',
+                   current_version=0, updated_at=?
+               WHERE tenant_id=? AND source_system=? AND external_document_id=?
+                 AND id<>? AND business_status IN ('active', 'review_required')""",
+            (
+                now, doc.tenant_id, doc.source_system,
+                doc.external_document_id, doc.id,
+            ),
+        )
+        await db.execute(
+            """UPDATE ext_document_map
+               SET sync_status='ready', business_status='active',
+                   current_version=1, event_status='completed', updated_at=?
+               WHERE id=?""",
+            (now, doc.id),
+        )
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+    doc.sync_status = "ready"
+    doc.business_status = "active"
+    doc.current_version = 1
+    doc.event_status = "completed"
+    doc.updated_at = now
+    return True
 
 
 async def supersede_other_versions(

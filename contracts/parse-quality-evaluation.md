@@ -118,3 +118,42 @@ recompute commit、是否发生重新解析（`reparsed=true/false`）。
 临时降低以通过验收；本阶段只建议基线，最终阈值由客户样本和风险确认。
 阈值文件必须声明 `threshold_version`、`phase` 和
 `temporary_conservative`；当前 1.0 阈值仅用于 Phase 1 合成样本工程基线。
+
+## 7. WP-03 有效解析执行契约
+
+质量报告只有在能证明“选了什么、配置了什么、实际执行了什么、读回是否一致”时
+才可用于版本晋级。每个文档必须持久化以下状态之一：
+
+```text
+selected -> configured -> executed
+                     \-> mismatch
+legacy_unverified
+```
+
+- `selected`：Gateway 根据受控 profile 选择了 parser profile；PDF 的安全默认是
+  `naive` + `layout_recognize=DeepDOC`，不得按业务类别把 PDF 直接路由为
+  `picture` 或 `table`。
+- `configured`：仅在 RAGFlow 文档仍为 `UNSTART` 时，通过 public API 写入配置，
+  然后 GET 回读并比较 Gateway 所拥有的字段子集；缺字段、值不一致或 PATCH 被拒绝
+  均为 `mismatch`。
+- `executed`：解析启动后，必须 GET 到终态（`DONE`/失败终态）并保存终态、执行
+  profile、配置摘要和 API 请求关联信息。仅有 `DONE` 不等于质量通过。
+- `legacy_unverified`：历史文档没有上述证据，必须可查询并在 enforce 模式阻断
+  晋级，不得用默认值补写成已验证。
+
+质量评估必须带 `required_capabilities`。适用维度的值为 `null`、
+`not_evaluated` 或证据缺失时，enforce 模式只能产生 `review_required`/`failed`，
+不能产生 `passed`。仅不适用的维度允许为 `not_applicable`。
+
+## 8. 版本激活和引用证据不变量
+
+新版本在解析和质量门禁通过前 `current_version=0`，旧 current 版本保持 enabled。
+晋级顺序固定为：确认新文档 enabled → SQLite `BEGIN IMMEDIATE` 事务内把唯一
+ current 指向新版本 → 事务成功后再禁用旧 RAGFlow 文档。任一步失败都必须可重试，
+ 且不能留下“无 current”或新旧版本都被查询的状态；旧版本保留为可审计的
+ `superseded`/`legacy_unverified` 记录。
+
+RAGFlow chunk position 的原始格式是 `[page, left, right, top, bottom]`。Gateway
+ 必须保留所有 positions，并按 `pageNo=page`、`bbox={left,right,top,bottom}`
+ 映射；不得只取第一个或把坐标顺序改成 y1/y2。citation 的页码、版本和授权检查
+ 独立于消息业务状态；引用缺失不能把 `completed` 改判为其他状态。

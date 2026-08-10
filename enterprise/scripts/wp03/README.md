@@ -99,3 +99,32 @@ failed
 RAGFlow `DONE` 不自动等于 `passed`。默认阈值见 `thresholds.json`，可在 CLI
 通过 `--thresholds` 覆盖。当前阈值标记为 Phase 1 临时保守阈值
 （`temporary_conservative=true`），不作为客户验收阈值。
+
+## 正式 S1-S8 验收
+
+合成样本只能作为工程回归，不能替代正式验收。统一入口为：
+
+```powershell
+pwsh -File enterprise/scripts/run_enterprise_tests.ps1 -Profile WP03
+```
+
+正式样本默认从 `artifacts/wp03/real-acceptance/` 读取，也可通过
+`WP03_ACCEPTANCE_MANIFEST` 和 `WP03_ACCEPTANCE_FIXTURE_DIR` 指定。Manifest
+必须至少包含 16 份真实脱敏样本：S1-S6、S8 各至少 2 份，S7a/S7b 各至少
+1 份，并提供至少 50 道查询（至少 5 道为人工标注的无答案问题）。每个正向
+引用问题必须声明 `expected_answer_contains`、页码和合法 `expected_bbox`；
+每个样本至少声明一个负向问题。每个样本声明 `scenario_id`、`file_sha256`、
+`acceptance_dimensions`、人工标注字段、引用问题和期望质量状态；
+`ground_truth_provenance.human_reviewed` 必须为 `true`，且不能来自
+`synthetic_generator`。
+
+S1-S8 分别覆盖扫描文本、扫描表格、操作截图、设备图、流程图、混合 PDF、
+旋转/退化扫描和多页手册。真实脱敏样本或在线环境缺失时，runner 生成
+BLOCKED JUnit 和 evidence，退出码为 2；不得以 skip 或自动生成合成 PDF
+形成正式绿色报告。
+
+每次执行的 evidence、能力矩阵、JUnit 和解析报告写入
+`artifacts/enterprise-tests/<run-id>/`。报告只记录端点的脱敏地址和凭据是否
+存在，不记录 Token、密钥或客户正文。Enterprise 当前持久化调用链为
+SQLite，因此报告明确记录 PostgreSQL 为 `not_applicable`，不运行无意义的
+裸 PostgreSQL smoke test。

@@ -1,4 +1,4 @@
-# RAGFlow API 能力矩阵 (v1)
+# RAGFlow API 能力矩阵（Enterprise v1/v2）
 
 基线: RAGFlow v0.26.4 | 文档引擎: elasticsearch | 日期: 2026-08-05
 
@@ -22,7 +22,7 @@
 | document_api | `/api/v1/document` | 文档上传/解析/状态 | upsert/status/disable/restore/delete/sync-status 已实现 | integration-openapi.yaml：文档同步与生命周期端点已实现；`POST /api/v1/datasets/{id}/documents/parse` 已在 query demo 验证 |
 | chunk_api | `/api/v1/chunk` | 切片管理 | 内部/不暴露 | 由 RAGFlow 自动管理 |
 | file_api | `/api/v1/file` | 文件上传/管理 | 需封装 (WP-02) | 与对象存储桥接 |
-| chat_api | `/api/v1/chat` | 对话/补全 | 验证可用（query demo） | `POST /api/v1/chat/completions` 已在 query demo 验证；conversations + messages:stream 仍仅契约 |
+| chat_api | `/api/v1/chat` | 对话/补全 | 已封装（v1/v2） | v1 formal 与 v2 conversation/message/SSE/JSON 均已实现；RAGFlow session 仅作上下文执行引擎，Enterprise store 是外部历史事实源 |
 | search_api | `/api/v1/search` | 检索 | 需封装 (WP-04) | 带 ACL 过滤的检索 |
 | agent_api | `/api/v1/agent` | Agent 画布 | P2 | MVP 不开放 |
 | bot_api | `/api/v1/bot` | 对话机器人 | 需封装 (WP-04) | 嵌入式问答组件 |
@@ -49,14 +49,17 @@
 
 以下契约端点对应 RAGFlow 上游能力:
 
-| 企业端点 (contracts/integration-openapi.yaml) | 上游能力 | 封装模块 |
+| 企业端点（v1/v2 OpenAPI） | 上游能力 | 封装模块 |
 |---|---|---|
 | POST /documents (upsert) | dataset_api + document_api | enterprise/gateway/sync/ |
 | POST /documents/{id}/disable | document_api (status) | enterprise/gateway/sync/ |
 | GET /documents/{id}/status | task_api + document_api | enterprise/gateway/sync/ |
-| POST /conversations | chat_api (session) | planned（未实现） |
-| POST /conversations/{id}/messages:stream | chat_api (completion) | planned（未实现） |
-| GET /citations/{id} | chunk_api + reference | planned（未实现） |
+| POST/GET /conversations | chat_api (session) | v1 create、v2 create/list 已实现 |
+| PATCH /conversations/{id}/context | Asset Registry resolver + Enterprise snapshot | v2 5 分钟 TTL、immutable equipment、retrieval scope 已实现 |
+| POST/GET /conversations/{id}/messages | chat_api completion/stream + Enterprise durable run | v2 cursor、clientMessageId、真 SSE/JSON、pending 202 已实现 |
+| POST /conversations/{id}/archive | Enterprise store | v2 已实现 |
+| GET /conversations/{id}/suggestions | server-side rule profile | v2 已实现 |
+| GET /citations/{id} | chunk_api + persisted reference snapshot | v1/v2 已实现；外部响应不暴露内部 ID |
 | GET /documents/sync-status | task_api + document_api | enterprise/gateway/sync/ |
 | GET /documents/{id}/quality | document_api + chunk_api | enterprise/gateway/quality/ |
 | GET /documents/quality-status | document_api + chunk_api | enterprise/gateway/quality/ |

@@ -15,7 +15,10 @@ from typing import Any
 
 import aiosqlite
 
-from enterprise.gateway.quality.gate import quality_dimensions
+from enterprise.gateway.quality.gate import (
+    quality_dimensions,
+    required_quality_dimensions,
+)
 from enterprise.gateway.quality.metrics import metrics
 from enterprise.gateway.quality.models import (
     QualityJob,
@@ -34,6 +37,7 @@ from enterprise.gateway.quality.models import (
 from enterprise.gateway.quality.routing import route_document
 from enterprise.gateway.sync.models import get_mapping, list_mappings
 from enterprise.gateway.sync.ragflow_document_client import RAGFlowAPIError
+from enterprise.gateway.sync.sync_service import promote_quality_passed_version
 from enterprise.scripts.wp03.metrics import (
     compute_document_metrics,
     e2e_repeatability_hash,
@@ -78,6 +82,157 @@ def _version_manifest() -> dict[str, Any]:
         return {}
 
 
+def _decoded_json(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        return value
+
+
+def _quality_meta(doc_info: dict[str, Any]) -> dict[str, Any]:
+    value = _decoded_json(doc_info.get("meta_fields") or {})
+    return value if isinstance(value, dict) else {}
+
+
+def _parser_application_snapshot(doc: Any) -> dict[str, Any]:
+    def profile(raw: Any) -> str | None:
+        value = _decoded_json(raw)
+        return value.get("profile") if isinstance(value, dict) else None
+
+    state = getattr(doc, "parser_application_status", None) or "legacy_unverified"
+    return {
+        "state": state,
+        "selectedProfile": getattr(doc, "parser_profile", None),
+        "configuredProfile": profile(getattr(doc, "parser_configured_json", None)),
+        "executedProfile": profile(getattr(doc, "parser_executed_json", None)),
+        "readbackMatch": state == "executed",
+        "reasonCode": None if state == "executed" else f"PARSER_APPLICATION_{state.upper()}",
+    }
+
+
+def _meta_entry(meta: dict[str, Any], name: str) -> tuple[Any, bool]:
+    for key in (f"enterprise_quality_{name}", f"quality_{name}"):
+        if key in meta:
+            return meta[key], True
+    return None, False
+
+
+def _quality_expectations(
+    doc: Any,
+    doc_info: dict[str, Any],
+) -> tuple[
+    list[int],
+    dict[str, str],
+    bool,
+    list[dict[str, Any]],
+    list[str],
+    dict[str, Any],
+]:
+    """Read fail-closed quality expectations from persisted/public metadata.
+
+    Business identifiers already persisted by the enterprise mapping are safe
+    to use as parse ground truth.  Acceptance-only table/citation annotations
+    can be supplied through namespaced RAGFlow ``meta_fields`` without reading
+    RAGFlow's internal database.
+    """
+    meta = _quality_meta(doc_info)
+
+    expected_tables_value, expected_tables_declared = _meta_entry(
+        meta, "expected_tables"
+    )
+    expected_tables_raw = _decoded_json(expected_tables_value)
+    expected_tables: list[int] = []
+    if isinstance(expected_tables_raw, list):
+        for value in expected_tables_raw:
+            try:
+                page = int(value)
+            except (TypeError, ValueError):
+                continue
+            if page >= 1 and page not in expected_tables:
+                expected_tables.append(page)
+
+    ground_truth_fields: dict[str, str] = {}
+    for field in ("equipment_id", "fixed_asset_no"):
+        value = getattr(doc, field, None)
+        if value is not None and str(value).strip():
+            ground_truth_fields[field] = str(value)
+    metadata_fields_value, metadata_fields_declared = _meta_entry(
+        meta, "ground_truth_fields"
+    )
+    metadata_fields = _decoded_json(metadata_fields_value)
+    if isinstance(metadata_fields, dict):
+        for field, value in metadata_fields.items():
+            if value is not None and str(value).strip():
+                ground_truth_fields[str(field)] = str(value)
+
+    citation_expected_value, citation_expected_declared = _meta_entry(
+        meta, "citation_expected"
+    )
+    citation_expected_raw = _decoded_json(citation_expected_value)
+    citation_expected = (
+        citation_expected_raw is True
+        or str(citation_expected_raw or "").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+    citation_results_value, _ = _meta_entry(meta, "citation_results")
+    citation_results_raw = _decoded_json(citation_results_value)
+    citation_results = (
+        [item for item in citation_results_raw if isinstance(item, dict)]
+        if isinstance(citation_results_raw, list)
+        else []
+    )
+
+    required_value, required_declared = _meta_entry(
+        meta, "required_capabilities"
+    )
+    required_raw = _decoded_json(required_value)
+    required = ["text", "position"]
+    if isinstance(required_raw, list):
+        for value in required_raw:
+            name = str(value or "").strip().lower()
+            if name and name not in required:
+                required.append(name)
+    if expected_tables and "table" not in required:
+        required.append("table")
+    if ground_truth_fields and "key_field" not in required:
+        required.append("key_field")
+    if citation_expected and "citation" not in required:
+        required.append("citation")
+
+    ground_truth_declared = metadata_fields_declared or bool(
+        ground_truth_fields
+    )
+    declaration_status = {
+        "expected_tables": expected_tables_declared,
+        "ground_truth_fields": ground_truth_declared,
+        "citation_expected": citation_expected_declared,
+        "required_capabilities": required_declared
+        and isinstance(required_raw, list)
+        and bool(required_raw),
+    }
+    missing_declarations = sorted(
+        name for name, declared in declaration_status.items() if not declared
+    )
+    expectation_summary = {
+        "expected_table_pages": expected_tables,
+        "ground_truth_fields": sorted(ground_truth_fields),
+        "citation_expected": citation_expected,
+        "declarations": declaration_status,
+        "missing_declarations": missing_declarations,
+        "declarations_complete": not missing_declarations,
+    }
+    return (
+        expected_tables,
+        ground_truth_fields,
+        citation_expected,
+        citation_results,
+        required,
+        expectation_summary,
+    )
+
+
 class QualityRetryableError(Exception):
     def __init__(self, code: str, message: str):
         super().__init__(message)
@@ -112,6 +267,7 @@ class QualityEvaluationService:
         routing = route_document(
             media_type=doc.media_type,
             file_name=doc.file_name,
+            document_type=doc.document_type,
             source_system=doc.source_system,
         )
         return await get_or_create_evaluation(
@@ -173,6 +329,19 @@ class QualityEvaluationService:
         try:
             result = await self._evaluate(doc, evaluation)
             await self._complete(doc, evaluation, result)
+            if result["parse_quality_status"] == "passed":
+                try:
+                    await promote_quality_passed_version(
+                        self.db,
+                        self.ragflow_client,
+                        doc,
+                        result["parse_quality_status"],
+                    )
+                except RAGFlowAPIError as exc:
+                    raise QualityRetryableError(
+                        "RAGFLOW_UNAVAILABLE",
+                        "Quality passed but version promotion could not complete",
+                    ) from exc
             status_metric = {
                 "passed": "quality_evaluation_passed_total",
                 "review_required": "quality_evaluation_review_required_total",
@@ -305,17 +474,64 @@ class QualityEvaluationService:
         except (TypeError, ValueError):
             source_page_count = 0
 
+        (
+            expected_tables,
+            ground_truth_fields,
+            citation_expected,
+            citation_results,
+            required_capabilities,
+            expectation_summary,
+        ) = _quality_expectations(doc, doc_info)
+
         metrics = compute_document_metrics(
             doc_info,
             normalized,
             source_page_count,
+            ground_truth_fields=ground_truth_fields or None,
+            expected_tables=expected_tables or None,
             wall_clock_duration_seconds=round(time.monotonic() - started, 3),
+            citation_results=citation_results or None,
         )
         metrics["file_sha256"] = doc.sha256
+        metrics["required_capabilities"] = required_capabilities
+        metrics["quality_expectations"] = expectation_summary
         thresholds = load_thresholds(self.thresholds_path)
-        quality_status, reasons = evaluate_document_quality(metrics, thresholds)
+        quality_status, reasons = evaluate_document_quality(
+            metrics,
+            thresholds,
+            expected_tables=expected_tables or None,
+            ground_truth_fields=ground_truth_fields or None,
+            citation_expected=citation_expected,
+        )
+        dimensions = quality_dimensions(metrics)
+        metrics["quality_dimensions"] = dimensions
+        parser_application = _parser_application_snapshot(doc)
+        metrics["parserApplication"] = parser_application
+        if quality_status == "passed" and not (
+            parser_application["state"] == "executed"
+            and parser_application["readbackMatch"] is True
+        ):
+            quality_status = "review_required"
+            if "PARSER_APPLICATION_NOT_EXECUTED" not in reasons:
+                reasons.append("PARSER_APPLICATION_NOT_EXECUTED")
+        required_dimensions, declaration_valid = required_quality_dimensions(metrics)
+        if not declaration_valid:
+            if quality_status == "passed":
+                quality_status = "review_required"
+            if "REQUIRED_CAPABILITY_INVALID" not in reasons:
+                reasons.append("REQUIRED_CAPABILITY_INVALID")
+        missing_required = [
+            name for name in required_dimensions
+            if dimensions.get(name) != "passed"
+        ]
+        if missing_required:
+            if quality_status == "passed":
+                quality_status = "review_required"
+            if "REQUIRED_CAPABILITY_NOT_PASSED" not in reasons:
+                reasons.append("REQUIRED_CAPABILITY_NOT_PASSED")
+        metrics["required_quality_dimensions"] = list(required_dimensions)
+        metrics["missing_required_quality_dimensions"] = missing_required
         metrics["quality_status"] = quality_status
-        metrics["quality_dimensions"] = quality_dimensions(metrics)
         return {
             "sample_id": f"{doc.external_document_id}:{doc.source_version_id}",
             "sync_status": doc.sync_status,

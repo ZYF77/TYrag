@@ -1,5 +1,7 @@
 # 11 实施阶段与并行 Agent 方案
 
+正式 UI/用户体验由设备管理系统负责。`enterprise/web` 仅作为 Integration Test Harness、Demo UI 和 Diagnostics UI 参与以下阶段和验收，不作为生产客户前端交付。
+
 ## 1. 阶段 0：事实验证与基线冻结
 
 Lead 单独完成，其他 Agent 不得并行修改共享文件。
@@ -27,7 +29,7 @@ Lead 单独完成，其他 Agent 不得并行修改共享文件。
 | WP-02 | File Sync | 事件、幂等、版本、停用、状态回写 |
 | WP-03 | Parsing | parser profile、真实样本、质量门禁 |
 | WP-04 | Retrieval | Chat/Session、业务 PG、综合回答、SSE |
-| WP-05 | Frontend | 普通用户、引用抽屉、维护页面 |
+| WP-05 | Frontend Integration | 设备管理系统 UI 集成验收；Integration Test Harness、Demo UI、Diagnostics UI |
 | WP-06 | Platform | Compose overlay、安全、审计、备份基础 |
 
 Lead 负责跨模块模型、迁移、配置和 RAGFlow 核心补丁。
@@ -38,7 +40,7 @@ Lead 负责跨模块模型、迁移、配置和 RAGFlow 核心补丁。
 - 批量历史导入；
 - 人工复核；
 - 删除和版本一致性；
-- 评测 UI；
+- 设备管理系统评测能力集成及 Diagnostics UI；
 - 监控、备份和大文件测试；
 - 真实模型限流和降级。
 
@@ -55,7 +57,7 @@ Lead 负责跨模块模型、迁移、配置和 RAGFlow 核心补丁。
 
 - 同一共享契约只能由 Lead 修改；
 - 每个 Agent 有独占目录；
-- 前端基于冻结 OpenAPI 和 Mock 开发；
+- 设备管理系统按冻结 OpenAPI 集成；`enterprise/web` 基于同一契约和 Mock 做测试、演示与诊断；
 - 上游核心修改必须串行合并；
 - QA 不接受“实现已完成”声明，必须以自动化证据判断；
 - 每波结束运行全量契约和 E2E，再进入下一波。
@@ -64,7 +66,7 @@ Lead 负责跨模块模型、迁移、配置和 RAGFlow 核心补丁。
 
 ### M0 基线
 - 一条命令启动固定版本；
-- 官方 UI 和 API 可用；
+- RAGFlow 受限管理 UI 和官方 API 可用；该项不代表 TYrag 正式客户 UI；
 - 三类 PDF POC；
 - 版本清单完整。
 

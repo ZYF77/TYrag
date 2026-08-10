@@ -1,5 +1,5 @@
 """Service principal — represents the calling system identity."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -10,3 +10,6 @@ class ServicePrincipal:
     """
     source_system: str
     authenticated: bool = True
+    credential_id: str | None = None
+    key_id: str | None = None
+    allowed_bindings: frozenset[tuple[str, str]] = field(default_factory=frozenset)

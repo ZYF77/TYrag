@@ -218,6 +218,9 @@ class TestSyncService:
         event = make_event(content)
         doc, dedup = await service.process_event(event)
         assert doc.sync_status == "ready"
+        assert doc.current_version == 0
+        assert doc.parser_application_status == "executed"
+        assert await service.promote_quality_passed_version(doc, "passed")
         assert doc.current_version == 1
         assert not dedup
         for _ in range(10):
@@ -243,20 +246,32 @@ class TestSyncService:
         await db.close()
 
     @pytest.mark.asyncio
-    async def test_new_version_supersedes_old(self):
+    async def test_new_version_waits_for_quality_before_superseding_old(self):
         db = await init_db(":memory:")
         client = RAGFlowDocumentStub()
         client.run_status = "DONE"
         service = SyncService(db, SourceStub(b"v1"), client)
         old_event = make_event(b"v1", event_id="evt-v1", version="v1")
-        await service.process_event(old_event)
+        old_doc, _ = await service.process_event(old_event)
+        assert await service.promote_quality_passed_version(old_doc, "passed")
         service = SyncService(db, SourceStub(b"v2"), client)
         new_event = make_event(b"v2", event_id="evt-v2", version="v2")
         new_doc, _ = await service.process_event(new_event)
         assert new_doc.sync_status == "ready"
-        assert new_doc.current_version == 1
+        assert new_doc.current_version == 0
         versions = await list_mappings(db)
         old = next(v for v in versions if v.source_version_id == "v1")
+        assert old.sync_status == "ready"
+        assert old.business_status == "active"
+        assert old.current_version == 1
+
+        assert await service.promote_quality_passed_version(new_doc, "passed")
+        versions = await list_mappings(db)
+        old = next(v for v in versions if v.source_version_id == "v1")
+        new = next(v for v in versions if v.source_version_id == "v2")
+        assert new.sync_status == "ready"
+        assert new.business_status == "active"
+        assert new.current_version == 1
         assert old.sync_status == "superseded"
         assert old.business_status == "superseded"
         assert old.current_version == 0
@@ -350,6 +365,7 @@ class TestLifecycle:
         service = SyncService(db, SourceStub(content), client)
         event = make_event(content)
         doc, _ = await service.process_event(event)
+        assert await service.promote_quality_passed_version(doc, "passed")
         return service, doc
 
     @pytest.mark.asyncio

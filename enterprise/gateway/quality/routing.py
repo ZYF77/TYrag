@@ -1,24 +1,30 @@
-"""Deterministic parser routing policy for enterprise documents.
-
-The route is recorded for auditability. RAGFlow v0.26.4's public upload API
-does not accept a document-level ``chunk_method``, so the adapter reports
-``api_application_status="recorded_only"`` instead of claiming the profile was
-applied.
-"""
+"""Deterministic, document-scoped parser profiles for enterprise ingestion."""
 
 from __future__ import annotations
 
 from typing import Any
 
-ROUTING_POLICY_VERSION = "1"
+ROUTING_POLICY_VERSION = "2"
 
-CATEGORY_PROFILES: dict[str, str] = {
-    "digital_text": "naive",
-    "scanned_document": "picture",
-    "mixed_document": "naive",
-    "table_dense": "table",
-    "image_or_diagram_dense": "picture",
+PARSER_PROFILES: dict[str, dict[str, Any]] = {
+    "pdf_deepdoc_v1": {
+        "parser_version": "1",
+        "chunk_method": "naive",
+        "parser_config": {"layout_recognize": "DeepDOC"},
+    },
+    "image_picture_v1": {
+        "parser_version": "1",
+        "chunk_method": "picture",
+        "parser_config": {},
+    },
+    "tabular_table_v1": {
+        "parser_version": "1",
+        "chunk_method": "table",
+        "parser_config": {},
+    },
 }
+
+_TABULAR_SUFFIXES = (".csv", ".xls", ".xlsx")
 
 
 def route_document(
@@ -31,19 +37,34 @@ def route_document(
 ) -> dict[str, Any]:
     """Return a reproducible parser routing decision with audit reasons."""
     reasons: list[str] = []
+    lower_name = (file_name or "").lower()
+    lower_media = (media_type or "").lower()
+    is_pdf = lower_media == "application/pdf" or lower_name.endswith(".pdf")
+    is_image = lower_media.startswith("image/")
+    is_tabular = lower_media in (
+        "text/csv",
+        "application/vnd.ms-excel",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ) or lower_name.endswith(_TABULAR_SUFFIXES)
+
     if manual_profile:
+        if manual_profile not in PARSER_PROFILES:
+            raise ValueError(f"Unknown parser profile: {manual_profile}")
+        if is_pdf and manual_profile != "pdf_deepdoc_v1":
+            raise ValueError("PDF documents must use pdf_deepdoc_v1")
         category = "manual_override"
         reasons.append("MANUAL_OVERRIDE")
+        profile = PARSER_PROFILES[manual_profile]
         return {
             "selected_parser_profile": manual_profile,
+            **profile,
             "routing_policy_version": ROUTING_POLICY_VERSION,
             "routing_reasons": reasons,
             "category": category,
             "whether_manual_override": True,
-            "api_application_status": "recorded_only",
+            "api_application_status": "selected",
         }
 
-    lower_name = (file_name or "").lower()
     lower_type = (document_type or "").lower()
     reasons.append(f"media_type={media_type or 'unknown'}")
     if source_system:
@@ -71,11 +92,26 @@ def route_document(
         category = "digital_text"
         reasons.append("default_digital_text")
 
+    if is_image:
+        category = "image_or_diagram_dense"
+        profile_name = "image_picture_v1"
+        reasons.append("image_media_type")
+    elif is_tabular and not is_pdf:
+        category = "table_dense"
+        profile_name = "tabular_table_v1"
+        reasons.append("tabular_file_type")
+    else:
+        # DeepDOC is the safe PDF route for digital, scanned, mixed, table and
+        # diagram pages. RAGFlow's picture/table chunk methods are not PDF parsers.
+        profile_name = "pdf_deepdoc_v1"
+        reasons.append("pdf_deepdoc_profile")
+    profile = PARSER_PROFILES[profile_name]
     return {
-        "selected_parser_profile": CATEGORY_PROFILES[category],
+        "selected_parser_profile": profile_name,
+        **profile,
         "routing_policy_version": ROUTING_POLICY_VERSION,
         "routing_reasons": reasons,
         "category": category,
         "whether_manual_override": False,
-        "api_application_status": "recorded_only",
+        "api_application_status": "selected",
     }

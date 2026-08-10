@@ -3,7 +3,7 @@
 > 基线日期：2026-08-05
 > 推荐上游基线：RAGFlow `v0.26.4`，正式实施时必须再次核对官方 release、source tag、Docker image digest 与迁移脚本一致性。  
 > 官方上游 commit：`cb93883f3f8c975eecb2fed81210effeb3bdb06f`（`v0.26.4` tag）。
-> 项目定位：在 RAGFlow 通用 RAG 能力之上建设客户专属的身份、权限、文件同步、业务数据联邦查询和业务化前端，不重新实现完整 RAG 平台。
+> 项目定位：在 RAGFlow 通用 RAG 能力之上建设客户专属的身份、权限、文件同步和业务数据联邦查询能力，不重新实现完整 RAG 平台。正式 UI/用户体验由设备管理系统负责；`enterprise/web` 仅作为 Integration Test Harness、Demo UI 和 Diagnostics UI。
 
 ## 1. 交接包用途
 
@@ -40,7 +40,11 @@
 | 结构化业务数据 | 保留在业务 PostgreSQL，通过受控查询服务联邦查询 |
 | Agent/深度研究/联网 | MVP 不开放，不作为主业务链路 |
 | Text-to-SQL | MVP 不做；结构化查询使用白名单 Query Adapter |
-| 前端 | 普通用户使用业务化界面，不直接暴露完整 RAGFlow 控制台 |
+| 正式 UI/UX | 由设备管理系统负责并通过 Enterprise Gateway 集成；普通用户不直接使用 RAGFlow 控制台 |
+| `enterprise/web` | 仅 Integration Test Harness + Demo UI + Diagnostics UI，不是正式客户前端 |
+| External v2 | `2.0.0` integrated candidate；Asset Registry 是 equipmentId 唯一权威，真 SSE 和 durable run 已纳入 P0 |
+| Gateway 状态 | 当前候选使用 Enterprise 自有 SQLite，面向单 Gateway/多 worker；生产多副本 PostgreSQL repository 另立任务 |
+| replay protection | 生产使用独立 Redis/Valkey `SET NX EX 600`；仅显式测试模式允许内存实现，Redis 不可用时 fail closed |
 
 ## 4. 推荐仓库布局
 
@@ -49,7 +53,7 @@ repo-root/
 ├─ <RAGFlow upstream source>
 ├─ enterprise/
 │  ├─ gateway/                 # 身份、ACL、文件同步、查询聚合、审计
-│  ├─ web/                     # 客户业务化前端或前端覆盖层
+│  ├─ web/                     # Integration Test Harness、Demo UI、Diagnostics UI
 │  ├─ adapters/                # 业务 PG、对象存储、RAGFlow API 适配器
 │  └─ tests/
 ├─ deploy/
@@ -75,7 +79,7 @@ repo-root/
 - `06`：OCR、图片、表格、解析路由和人工复核。
 - `07`：检索、问答、引用、会话和多轮上下文。
 - `08`：业务 PostgreSQL 联邦查询与综合回答。
-- `09`：前端业务化、角色菜单和功能隐藏。
+- `09`：设备管理系统 UI 集成要求，以及测试/演示/诊断界面边界。
 - `10`：部署、安全、审计、备份、可观测性和升级。
 - `11`：MVP/Beta/Production 阶段和并行 Agent 工作包。
 - `12`：测试、离线评测、性能和验收门禁。
@@ -85,6 +89,8 @@ repo-root/
 ## 6. 契约文件
 
 - `contracts/integration-openapi.yaml`：企业集成 API 初始契约。
+- `contracts/integration-openapi-v2.yaml`：设备管理系统使用的 v2.0.0 wire 契约；当前仓库实现为 integrated candidate，v1 保持兼容。
+- `contracts/external-integration-contract-freeze-v2.md`：P0 决策、优先级与验收门禁。
 - `contracts/metadata-schema.json`：文档 metadata 规范。
 - `contracts/error-codes.yaml`：稳定错误码。
 - `contracts/status-state-machine.md`：同步、文档和问答状态机。

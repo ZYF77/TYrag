@@ -1,0 +1,817 @@
+openapi: 3.1.0
+info:
+  title: TYrag External Integration API
+  version: 2.0.0
+  description: >-
+    Frozen P0 contract for the Equipment Management System. Version 1 remains
+    wire compatible; new consumers use this API and never receive integration
+    engine internal identifiers.
+servers:
+  - url: /enterprise/api/v2
+tags:
+  - name: documents
+  - name: conversations
+  - name: citations
+paths:
+  /documents:
+    post:
+      tags: [documents]
+      summary: Accept an external document upsert or reindex command
+      operationId: v2UpsertDocument
+      x-status: implemented
+      security:
+        - HmacSignature: []
+      parameters:
+        - $ref: '#/components/parameters/TimestampHeader'
+        - $ref: '#/components/parameters/KeyIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DocumentCommand'
+      responses:
+        '202':
+          description: First acceptance or idempotent replay
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentOperation'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /documents/sync-status:
+    get:
+      tags: [documents]
+      summary: List document operations within an authorized binding
+      operationId: v2ListDocumentStatus
+      x-status: implemented
+      security:
+        - HmacSignature: []
+      parameters:
+        - $ref: '#/components/parameters/TimestampHeader'
+        - $ref: '#/components/parameters/KeyIdHeader'
+        - $ref: '#/components/parameters/TenantIdQuery'
+        - $ref: '#/components/parameters/SourceSystemQuery'
+        - $ref: '#/components/parameters/LimitQuery'
+        - $ref: '#/components/parameters/CursorQuery'
+      responses:
+        '200':
+          description: Page of document operations
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentOperationPage'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+  /documents/{externalDocumentId}/status:
+    get:
+      tags: [documents]
+      summary: Read a document version processing status
+      operationId: v2GetDocumentStatus
+      x-status: implemented
+      security:
+        - HmacSignature: []
+      parameters:
+        - $ref: '#/components/parameters/TimestampHeader'
+        - $ref: '#/components/parameters/KeyIdHeader'
+        - $ref: '#/components/parameters/ExternalDocumentIdPath'
+        - $ref: '#/components/parameters/TenantIdQuery'
+        - $ref: '#/components/parameters/SourceSystemQuery'
+        - name: sourceVersionId
+          in: query
+          required: false
+          schema: { type: string, minLength: 1, maxLength: 64 }
+      responses:
+        '200':
+          description: Current external status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentOperation'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /documents/{externalDocumentId}/disable:
+    post:
+      tags: [documents]
+      summary: Disable all active versions of an external document
+      operationId: v2DisableDocument
+      x-status: implemented
+      security:
+        - HmacSignature: []
+      parameters:
+        - $ref: '#/components/parameters/TimestampHeader'
+        - $ref: '#/components/parameters/KeyIdHeader'
+        - $ref: '#/components/parameters/ExternalDocumentIdPath'
+        - $ref: '#/components/parameters/TenantIdQuery'
+        - $ref: '#/components/parameters/SourceSystemQuery'
+      responses:
+        '202': { $ref: '#/components/responses/LifecycleAccepted' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /documents/{externalDocumentId}/restore:
+    post:
+      tags: [documents]
+      summary: Restore the most recent external document version
+      operationId: v2RestoreDocument
+      x-status: implemented
+      security:
+        - HmacSignature: []
+      parameters:
+        - $ref: '#/components/parameters/TimestampHeader'
+        - $ref: '#/components/parameters/KeyIdHeader'
+        - $ref: '#/components/parameters/ExternalDocumentIdPath'
+        - $ref: '#/components/parameters/TenantIdQuery'
+        - $ref: '#/components/parameters/SourceSystemQuery'
+      responses:
+        '202': { $ref: '#/components/responses/LifecycleAccepted' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /documents/{externalDocumentId}:
+    delete:
+      tags: [documents]
+      summary: Logically delete an external document
+      operationId: v2DeleteDocument
+      x-status: implemented
+      security:
+        - HmacSignature: []
+      parameters:
+        - $ref: '#/components/parameters/TimestampHeader'
+        - $ref: '#/components/parameters/KeyIdHeader'
+        - $ref: '#/components/parameters/ExternalDocumentIdPath'
+        - $ref: '#/components/parameters/TenantIdQuery'
+        - $ref: '#/components/parameters/SourceSystemQuery'
+      responses:
+        '202': { $ref: '#/components/responses/LifecycleAccepted' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /conversations:
+    post:
+      tags: [conversations]
+      summary: Create an owned conversation
+      operationId: v2CreateConversation
+      x-status: implemented
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateConversationRequest'
+      responses:
+        '201':
+          description: Conversation created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConversationDetail'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+    get:
+      tags: [conversations]
+      summary: List owned conversations using a stable cursor
+      operationId: v2ListConversations
+      x-status: implemented
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/LimitQuery'
+        - $ref: '#/components/parameters/CursorQuery'
+      responses:
+        '200':
+          description: Conversation page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConversationPage'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+  /conversations/{conversationId}:
+    get:
+      tags: [conversations]
+      summary: Read conversation summary and context without messages
+      operationId: v2GetConversation
+      x-status: implemented
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ConversationIdPath'
+      responses:
+        '200':
+          description: Conversation detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConversationDetail'
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /conversations/{conversationId}/context:
+    patch:
+      tags: [conversations]
+      summary: Mutate persistent retrieval context
+      operationId: v2PatchConversationContext
+      x-status: implemented
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ConversationIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchConversationContextRequest'
+      responses:
+        '200':
+          description: Updated conversation context
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConversationDetail'
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /conversations/{conversationId}/archive:
+    post:
+      tags: [conversations]
+      summary: Archive a conversation; history remains readable
+      operationId: v2ArchiveConversation
+      x-status: implemented
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ConversationIdPath'
+      responses:
+        '200':
+          description: Archived conversation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConversationDetail'
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /conversations/{conversationId}/messages:
+    get:
+      tags: [conversations]
+      summary: List persisted message and citation snapshots
+      operationId: v2ListConversationMessages
+      x-status: implemented
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ConversationIdPath'
+        - $ref: '#/components/parameters/LimitQuery'
+        - $ref: '#/components/parameters/CursorQuery'
+      responses:
+        '200':
+          description: Message page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessagePage'
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    post:
+      tags: [conversations]
+      summary: Execute a question or a server-defined suggestion
+      description: >-
+        Accept text/event-stream for true upstream SSE; all other Accept values
+        receive JSON. A duplicate request while its durable run is active returns
+        the same runId with 202 and never starts a second execution. Message-level
+        context overrides and client-controlled prompts are forbidden.
+      operationId: v2CreateConversationMessage
+      x-status: implemented
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ConversationIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateMessageRequest'
+      responses:
+        '200':
+          description: JSON result or idempotent replay
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageRunResult'
+            text/event-stream:
+              schema: { type: string }
+        '202':
+          description: Existing durable run is still executing; no second run is started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageRunPending'
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /conversations/{conversationId}/suggestions:
+    get:
+      tags: [conversations]
+      summary: List server-defined rule suggestions for current context
+      operationId: v2ListConversationSuggestions
+      x-status: implemented
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ConversationIdPath'
+      responses:
+        '200':
+          description: Current suggestions
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items, contextVersion]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Suggestion' }
+                  contextVersion: { type: integer, minimum: 0 }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /conversations/{conversationId}/attachments:
+    post:
+      tags: [conversations]
+      summary: Add a transient conversation-scoped attachment
+      description: P1 only; indexPolicy is always never and no persistent embedding is created.
+      operationId: v2CreateConversationAttachment
+      x-status: planned
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ConversationIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [fileName, mediaType, content]
+              properties:
+                fileName: { type: string, minLength: 1, maxLength: 255 }
+                mediaType: { type: string, minLength: 1, maxLength: 128 }
+                content: { type: string, contentEncoding: base64 }
+      responses:
+        '501': { $ref: '#/components/responses/Error' }
+  /citations/{citationId}:
+    get:
+      tags: [citations]
+      summary: Read an authorized persisted citation snapshot
+      operationId: v2GetCitation
+      x-status: implemented
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: citationId
+          in: path
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 256 }
+      responses:
+        '200':
+          description: Citation snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Citation'
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    HmacSignature:
+      type: apiKey
+      in: header
+      name: X-TY-Signature
+      description: >-
+        v1=<lowercase hex HMAC-SHA256>. Verification also requires
+        X-TY-Timestamp and X-TY-Key-Id and an allowed tenant/source binding.
+  parameters:
+    TimestampHeader:
+      name: X-TY-Timestamp
+      in: header
+      required: true
+      schema: { type: string, pattern: '^[0-9]{10}$' }
+    KeyIdHeader:
+      name: X-TY-Key-Id
+      in: header
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 128 }
+    ExternalDocumentIdPath:
+      name: externalDocumentId
+      in: path
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 128 }
+    ConversationIdPath:
+      name: conversationId
+      in: path
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 128 }
+    TenantIdQuery:
+      name: tenantId
+      in: query
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 64 }
+    SourceSystemQuery:
+      name: sourceSystem
+      in: query
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 64 }
+    LimitQuery:
+      name: limit
+      in: query
+      required: false
+      schema: { type: integer, default: 20, minimum: 1, maximum: 100 }
+    CursorQuery:
+      name: cursor
+      in: query
+      required: false
+      schema: { type: string, minLength: 1, maxLength: 2048 }
+  responses:
+    Error:
+      description: Stable external error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    LifecycleAccepted:
+      description: Lifecycle command accepted
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LifecycleOperation'
+  schemas:
+    SourceObject:
+      type: object
+      additionalProperties: false
+      required: [bucket, objectKey]
+      properties:
+        bucket: { type: string, minLength: 1, maxLength: 128 }
+        objectKey: { type: string, minLength: 1, maxLength: 1024 }
+    DocumentMetadata:
+      type: object
+      description: >-
+         Metadata is a reference and ACL/quality input. equipment_id is not an
+         identity authority; ingestion must resolve it through the Asset Registry
+         and persist the returned canonical snapshot.
+      additionalProperties: false
+      required:
+        - schema_version
+        - tenant_id
+        - source_system
+        - external_document_id
+        - equipment_id
+        - document_type
+        - document_version
+        - department_id
+        - security_level
+        - business_status
+      properties:
+        schema_version: { type: integer, const: 1 }
+        tenant_id: { type: string, minLength: 1, maxLength: 64 }
+        source_system: { type: string, minLength: 1, maxLength: 64 }
+        external_document_id: { type: string, minLength: 1, maxLength: 128 }
+        equipment_id: { type: string, minLength: 1, maxLength: 128 }
+        fixed_asset_no: { type: [string, 'null'], maxLength: 128 }
+        asset_id: { type: [string, 'null'], maxLength: 128 }
+        document_type: { type: string, minLength: 1, maxLength: 64 }
+        document_version: { type: string, minLength: 1, maxLength: 64 }
+        department_id: { type: string, minLength: 1, maxLength: 64 }
+        security_level: { type: integer, minimum: 0, maximum: 9 }
+        allow_group_ids:
+          type: array
+          maxItems: 100
+          uniqueItems: true
+          items: { type: string, maxLength: 64 }
+        deny_group_ids:
+          type: array
+          maxItems: 100
+          uniqueItems: true
+          items: { type: string, maxLength: 64 }
+        business_status:
+          type: string
+          enum: [active, superseded, disabled, deleted, review_required]
+    DocumentCommand:
+      type: object
+      additionalProperties: false
+      required:
+        - eventId
+        - eventType
+        - tenantId
+        - sourceSystem
+        - externalDocumentId
+        - sourceVersionId
+        - sha256
+        - fileName
+        - mediaType
+        - source
+        - metadata
+      properties:
+        eventId: { type: string, minLength: 1, maxLength: 128 }
+        eventType: { type: string, enum: [upsert, reindex] }
+        tenantId: { type: string, minLength: 1, maxLength: 64 }
+        sourceSystem: { type: string, minLength: 1, maxLength: 64 }
+        externalDocumentId: { type: string, minLength: 1, maxLength: 128 }
+        sourceVersionId: { type: string, minLength: 1, maxLength: 64 }
+        sha256: { type: string, pattern: '^[0-9a-fA-F]{64}$' }
+        fileName: { type: string, minLength: 1, maxLength: 255 }
+        mediaType: { type: string, minLength: 1, maxLength: 128 }
+        source: { $ref: '#/components/schemas/SourceObject' }
+        metadata: { $ref: '#/components/schemas/DocumentMetadata' }
+        batchId: { type: [string, 'null'], maxLength: 128 }
+    DocumentOperation:
+      type: object
+      additionalProperties: false
+      required:
+        - operationId
+        - externalDocumentId
+        - sourceVersionId
+        - status
+        - stage
+        - deduplicated
+        - businessStatus
+        - currentVersion
+        - eventStatus
+        - updatedAt
+      properties:
+        operationId: { type: string }
+        externalDocumentId: { type: string }
+        sourceVersionId: { type: string }
+        status: { type: string }
+        stage: { type: string }
+        deduplicated: { type: boolean }
+        businessStatus: { type: string }
+        currentVersion: { type: boolean }
+        eventStatus: { type: string }
+        updatedAt: { type: string, format: date-time }
+    DocumentOperationPage:
+      type: object
+      additionalProperties: false
+      required: [items, nextCursor, hasMore]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/DocumentOperation' }
+        nextCursor: { type: [string, 'null'] }
+        hasMore: { type: boolean }
+    LifecycleOperation:
+      type: object
+      additionalProperties: false
+      required: [externalDocumentId, status]
+      properties:
+        externalDocumentId: { type: string }
+        status: { type: string, enum: [accepted] }
+    ConversationContext:
+      type: object
+      additionalProperties: false
+      required: [equipmentId, fixedAssetNo, faultCode, contextVersion, registryVersion]
+      properties:
+        equipmentId: { type: [string, 'null'], maxLength: 128 }
+        fixedAssetNo: { type: [string, 'null'], maxLength: 128 }
+        faultCode: { type: [string, 'null'], maxLength: 128 }
+        contextVersion: { type: integer, minimum: 0 }
+        registryVersion: { type: [string, 'null'] }
+    CreateConversationRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        equipmentId: { type: [string, 'null'], maxLength: 128 }
+        fixedAssetNo: { type: [string, 'null'], maxLength: 128 }
+        faultCode: { type: [string, 'null'], maxLength: 128 }
+    PatchConversationContextRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        equipmentId: { type: [string, 'null'], maxLength: 128 }
+        fixedAssetNo: { type: [string, 'null'], maxLength: 128 }
+        faultCode: { type: [string, 'null'], maxLength: 128 }
+    ConversationSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - conversationId
+        - title
+        - status
+        - equipmentId
+        - fixedAssetNo
+        - faultCode
+        - contextVersion
+        - lastMessageAt
+        - createdAt
+      properties:
+        conversationId: { type: string }
+        title: { type: string, maxLength: 80 }
+        status: { type: string, enum: [active, archived] }
+        equipmentId: { type: [string, 'null'] }
+        fixedAssetNo: { type: [string, 'null'] }
+        faultCode: { type: [string, 'null'] }
+        contextVersion: { type: integer, minimum: 0 }
+        lastMessageAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+    ConversationDetail:
+      type: object
+      additionalProperties: false
+      required:
+        - conversationId
+        - title
+        - status
+        - equipmentId
+        - fixedAssetNo
+        - faultCode
+        - contextVersion
+        - lastMessageAt
+        - createdAt
+        - context
+      properties:
+        conversationId: { type: string }
+        title: { type: string, maxLength: 80 }
+        status: { type: string, enum: [active, archived] }
+        equipmentId: { type: [string, 'null'] }
+        fixedAssetNo: { type: [string, 'null'] }
+        faultCode: { type: [string, 'null'] }
+        contextVersion: { type: integer, minimum: 0 }
+        lastMessageAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+        context: { $ref: '#/components/schemas/ConversationContext' }
+    ConversationPage:
+      type: object
+      additionalProperties: false
+      required: [items, nextCursor, hasMore]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/ConversationSummary' }
+        nextCursor: { type: [string, 'null'] }
+        hasMore: { type: boolean }
+    QuestionMessageRequest:
+      type: object
+      additionalProperties: false
+      required: [clientMessageId, question]
+      properties:
+        clientMessageId: { type: string, minLength: 1, maxLength: 128 }
+        question: { type: string, minLength: 1, maxLength: 8000 }
+    SuggestionMessageRequest:
+      type: object
+      additionalProperties: false
+      required: [clientMessageId, suggestionId, contextVersion]
+      properties:
+        clientMessageId: { type: string, minLength: 1, maxLength: 128 }
+        suggestionId: { type: string, minLength: 1, maxLength: 128 }
+        contextVersion: { type: integer, minimum: 0 }
+    CreateMessageRequest:
+      oneOf:
+        - $ref: '#/components/schemas/QuestionMessageRequest'
+        - $ref: '#/components/schemas/SuggestionMessageRequest'
+    Citation:
+      type: object
+      additionalProperties: false
+      required:
+        - citationId
+        - sourceType
+        - title
+        - externalDocumentId
+        - sourceVersionId
+      properties:
+        citationId: { type: string }
+        sourceType: { type: string, enum: [document, business_record, timeseries] }
+        title: { type: string }
+        externalDocumentId: { type: [string, 'null'] }
+        sourceVersionId: { type: [string, 'null'] }
+        pageNo: { type: [integer, 'null'], minimum: 1 }
+        bbox: { type: [object, 'null'] }
+        assetId: { type: [string, 'null'] }
+        excerpt: { type: [string, 'null'] }
+        recordType: { type: [string, 'null'] }
+        recordId: { type: [string, 'null'] }
+    Message:
+      type: object
+      additionalProperties: false
+      required: [messageId, role, content, status, citations, createdAt]
+      properties:
+        messageId: { type: string }
+        role: { type: string, enum: [user, assistant] }
+        content: { type: string }
+        status: { type: string, enum: [completed, no_reliable_evidence, failed] }
+        citations:
+          type: array
+          items: { $ref: '#/components/schemas/Citation' }
+        createdAt: { type: string, format: date-time }
+    MessagePage:
+      type: object
+      additionalProperties: false
+      required: [items, nextCursor, hasMore]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Message' }
+        nextCursor: { type: [string, 'null'] }
+        hasMore: { type: boolean }
+    MessageRunResult:
+      type: object
+      additionalProperties: false
+      required: [conversationId, clientMessageId, runId, messageId, answer, status, citations, replayed]
+      properties:
+        conversationId: { type: string }
+        clientMessageId: { type: string }
+        runId: { type: string }
+        messageId: { type: string }
+        answer: { type: string }
+        status: { type: string, enum: [completed, no_reliable_evidence, failed] }
+        citations:
+          type: array
+          items: { $ref: '#/components/schemas/Citation' }
+        replayed: { type: boolean }
+    MessageRunPending:
+      type: object
+      additionalProperties: false
+      required: [conversationId, clientMessageId, runId, status, replayed]
+      properties:
+        conversationId: { type: string }
+        clientMessageId: { type: string }
+        runId: { type: string }
+        status: { type: string, enum: [running] }
+        replayed: { type: boolean, const: true }
+    Suggestion:
+      type: object
+      additionalProperties: false
+      required: [suggestionId, label, displayPrompt, contextVersion]
+      properties:
+        suggestionId: { type: string }
+        label: { type: string }
+        displayPrompt: { type: string }
+        contextVersion: { type: integer, minimum: 0 }
+        expiresAt: { type: [string, 'null'], format: date-time }
+    CredentialBinding:
+      type: object
+      additionalProperties: false
+      required: [tenantId, sourceSystem]
+      properties:
+        tenantId: { type: string }
+        sourceSystem: { type: string }
+    CredentialIdentity:
+      type: object
+      additionalProperties: false
+      required: [credentialId, keyId, allowedBindings, status, validFrom, validUntil]
+      properties:
+        credentialId: { type: string }
+        keyId: { type: string }
+        allowedBindings:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/CredentialBinding' }
+        status: { type: string, enum: [active, previous, revoked] }
+        validFrom: { type: [string, 'null'], format: date-time }
+        validUntil: { type: [string, 'null'], format: date-time }
+    CallbackEvent:
+      type: object
+      x-status: planned
+      additionalProperties: false
+      required:
+        - deliveryId
+        - eventType
+        - originatingEventId
+        - externalDocumentId
+        - sourceVersionId
+        - status
+        - timestamp
+        - payloadVersion
+      properties:
+        deliveryId: { type: string }
+        eventType: { type: string }
+        originatingEventId: { type: string }
+        externalDocumentId: { type: string }
+        sourceVersionId: { type: string }
+        status: { type: string }
+        timestamp: { type: string, format: date-time }
+        payloadVersion: { type: string, const: '1' }
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [code, message, requestId, retryable]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        requestId: { type: string }
+        retryable: { type: boolean }
+        details: { type: [object, 'null'] }

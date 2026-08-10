@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import time
 import uuid
@@ -36,6 +37,46 @@ ALLOWED_CATEGORIES = {
 }
 
 _RAGFLOW_TERMINAL_RUNS = {"DONE", "3", "FAIL", "4", "CANCEL", "2"}
+
+
+def _coerce_bbox(value: Any) -> tuple[float, float, float, float] | None:
+    if isinstance(value, dict):
+        values = (
+            value.get("x1", value.get("left")),
+            value.get("x2", value.get("right")),
+            value.get("y1", value.get("top")),
+            value.get("y2", value.get("bottom")),
+        )
+    elif isinstance(value, (list, tuple)) and len(value) >= 4:
+        values = tuple(value[:4])
+    else:
+        return None
+    try:
+        left, right, top, bottom = (float(item) for item in values)
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(item) for item in (left, right, top, bottom)):
+        return None
+    if left > right or top > bottom:
+        return None
+    return left, right, top, bottom
+
+
+def _bbox_iou(
+    actual: tuple[float, float, float, float],
+    expected: tuple[float, float, float, float] | None,
+) -> float:
+    if expected is None:
+        return 0.0
+    left = max(actual[0], expected[0])
+    right = min(actual[1], expected[1])
+    top = max(actual[2], expected[2])
+    bottom = min(actual[3], expected[3])
+    intersection = max(0.0, right - left) * max(0.0, bottom - top)
+    actual_area = max(0.0, actual[1] - actual[0]) * max(0.0, actual[3] - actual[2])
+    expected_area = max(0.0, expected[1] - expected[0]) * max(0.0, expected[3] - expected[2])
+    union = actual_area + expected_area - intersection
+    return round(intersection / union, 4) if union > 0 else 0.0
 
 
 @dataclass
@@ -146,11 +187,21 @@ class S3Store:
             ExtraArgs={"ContentType": "application/pdf"},
         )
 
+    def delete(self, object_key: str) -> None:
+        """Delete only the exact temporary object created by the evaluation."""
+        self._client().delete_object(
+            Bucket=self.config.s3_bucket,
+            Key=object_key,
+        )
+
 
 class ParsingEvaluationCollector:
     def __init__(self, config: EvaluationConfig) -> None:
         self.config = config
         self.store = S3Store(config)
+
+    def cleanup_source(self, sample: dict[str, Any], run_id: str) -> None:
+        self.store.delete(f"wp03/{run_id}/{sample['file_name']}")
 
     def _gateway_headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
@@ -325,9 +376,11 @@ class ParsingEvaluationCollector:
         dataset_id: str,
         document_id: str,
         citation_questions: list[dict[str, Any]] | None,
+        negative_questions: list[dict[str, Any]] | None = None,
+        source_version_id: str | None = None,
     ) -> list[dict[str, Any]] | None:
         if (
-            not citation_questions
+            not citation_questions and not negative_questions
             or not self.config.ragflow_api_key
             or self.config.skip_citations
         ):
@@ -346,9 +399,30 @@ class ParsingEvaluationCollector:
             created = await client.create_chat(chat_name, [dataset_id])
             chat_id = created["data"]["id"]
         results: list[dict[str, Any]] = []
-        for item in citation_questions:
-            expected_page = int(item["expected_page"])
+        queries = [
+            {**item, "expected_no_answer": False}
+            for item in (citation_questions or [])
+        ] + [
+            {**item, "expected_no_answer": True}
+            for item in (negative_questions or [])
+        ]
+        for item in queries:
+            expected_no_answer = bool(item.get("expected_no_answer"))
+            expected_page = (
+                int(item["expected_page"])
+                if not expected_no_answer and item.get("expected_page") is not None
+                else None
+            )
             matched = False
+            position_valid = False
+            scope_document_match = False
+            answer_matched = False
+            no_answer_refused = False
+            version_match = False
+            bbox_iou = None
+            answer_sha256 = None
+            answer_length = 0
+            reference_chunk_count = 0
             error = None
             try:
                 completion = await client.chat_completion(
@@ -356,17 +430,68 @@ class ParsingEvaluationCollector:
                     item["question"],
                     doc_ids=[document_id],
                 )
-                reference = (completion.get("data") or {}).get("reference") or {}
-                for chunk in reference.get("chunks") or []:
+                completion_data = completion.get("data") or {}
+                answer = str(completion_data.get("answer") or "")
+                answer_length = len(answer)
+                answer_sha256 = hashlib.sha256(answer.encode("utf-8")).hexdigest()
+                explicit_status = str(completion_data.get("status") or "")
+                expected_answer = [
+                    str(value).casefold()
+                    for value in item.get("expected_answer_contains") or []
+                ]
+                answer_matched = (not expected_no_answer) and bool(expected_answer) and all(
+                    value in answer.casefold() for value in expected_answer
+                )
+                reference = completion_data.get("reference") or {}
+                reference_chunks = reference.get("chunks") or []
+                reference_chunk_count = len(reference_chunks)
+                top8_chunks = reference_chunks[:8]
+                scope_document_match = bool(top8_chunks) and all(
+                    (chunk.get("document_id") or chunk.get("doc_id")) == document_id
+                    for chunk in top8_chunks
+                )
+                no_answer_refused = expected_no_answer and (
+                    explicit_status == "no_reliable_evidence"
+                    or (not answer.strip() and not reference_chunks)
+                )
+                # The document id is the public RAGFlow handle for the
+                # source-version row created by the sync service.  Require
+                # both that scoped citation evidence and the source-version
+                # mapping; a configured value alone is not proof.
+                version_match = bool(source_version_id) and scope_document_match
+                expected_bbox = item.get("expected_bbox")
+                best_iou = 0.0
+                for chunk in top8_chunks:
                     for pos in chunk.get("positions") or []:
                         try:
                             page = int(pos[0])
+                            left, right, top, bottom = (
+                                float(pos[1]),
+                                float(pos[2]),
+                                float(pos[3]),
+                                float(pos[4]),
+                            )
                         except (TypeError, ValueError, IndexError):
                             continue
-                        if page == expected_page:
+                        if left <= right and top <= bottom:
+                            position_valid = True
+                        if expected_page is not None and page == expected_page:
                             matched = True
+                        if (
+                            expected_page is not None
+                            and page == expected_page
+                            and expected_bbox is not None
+                        ):
+                            best_iou = max(
+                                best_iou,
+                                _bbox_iou(
+                                    (left, right, top, bottom),
+                                    _coerce_bbox(expected_bbox),
+                                ),
+                            )
+                        if matched and position_valid and expected_bbox is None:
                             break
-                    if matched:
+                    if matched and position_valid and expected_bbox is None:
                         break
             except (RAGFlowAPIError, Exception) as exc:  # noqa: BLE001
                 error = type(exc).__name__
@@ -374,7 +499,17 @@ class ParsingEvaluationCollector:
                 {
                     "question": item["question"],
                     "expected_page": expected_page,
+                    "expected_no_answer": expected_no_answer,
                     "matched": matched,
+                    "position_valid": position_valid,
+                    "scope_document_match": scope_document_match,
+                    "answer_matched": answer_matched,
+                    "no_answer_refused": no_answer_refused,
+                    "version_match": version_match,
+                    "bbox_iou": round(best_iou, 4) if expected_bbox is not None else None,
+                    "answer_sha256": answer_sha256,
+                    "answer_length": answer_length,
+                    "reference_chunk_count": reference_chunk_count,
                     "error": error,
                 }
             )
@@ -429,11 +564,13 @@ class ParsingEvaluationCollector:
             metrics["quality_status"] = quality_status
             return {
                 "sample_id": sample["sample_id"],
+                "external_document_id": payload["externalDocumentId"],
                 "category": sample["category"],
                 "sync_status": sync_status,
                 "parse_quality_status": quality_status,
                 "quality_reasons": reasons,
                 "metrics": metrics,
+                "parser_application": sync_doc.get("parserApplication"),
                 "chunks": [],
                 "error": sync_doc.get("error"),
             }
@@ -443,6 +580,8 @@ class ParsingEvaluationCollector:
             sync_doc.get("ragflowDatasetId"),
             sync_doc.get("ragflowDocumentId"),
             sample.get("citation_questions"),
+            sample.get("negative_questions"),
+            source_version_id=self.config.source_version_id,
         )
         metrics = compute_document_metrics(
             doc_info,
@@ -454,7 +593,61 @@ class ParsingEvaluationCollector:
             citation_results=citation_results,
         )
         metrics["file_sha256"] = file_sha256
-        citation_expected = bool(sample.get("citation_questions")) and (
+        metrics["required_capabilities"] = list(
+            sample.get("required_capabilities") or []
+        )
+        metrics["quality_expectations"] = {
+            "declarations_complete": True,
+            "expected_table_pages": list(sample.get("expected_tables") or []),
+            "ground_truth_fields": sorted(sample.get("ground_truth_fields") or {}),
+            "citation_expected": bool(
+                sample.get("citation_questions") or sample.get("negative_questions")
+            ),
+            "source": "formal_manifest",
+        }
+        metrics["parserApplication"] = sync_doc.get("parserApplication")
+        positive_citations = [
+            item for item in (citation_results or [])
+            if not item.get("expected_no_answer")
+        ]
+        negative_citations = [
+            item for item in (citation_results or [])
+            if item.get("expected_no_answer")
+        ]
+        if positive_citations:
+            metrics["retrieval_recall_at_8"] = round(
+                sum(bool(item.get("matched")) for item in positive_citations)
+                / len(positive_citations),
+                4,
+            )
+            bbox_values = [
+                item["bbox_iou"]
+                for item in positive_citations
+                if item.get("bbox_iou") is not None
+            ]
+            metrics["citation_bbox_iou"] = round(
+                sum(bbox_values) / len(bbox_values), 4
+            ) if bbox_values else None
+            metrics["citation_version_accuracy"] = round(
+                sum(bool(item.get("version_match")) for item in positive_citations)
+                / len(positive_citations),
+                4,
+            )
+        else:
+            metrics["retrieval_recall_at_8"] = None
+            metrics["citation_bbox_iou"] = None
+            metrics["citation_version_accuracy"] = None
+        metrics["no_answer_refusal_accuracy"] = (
+            round(
+                sum(bool(item.get("no_answer_refused")) for item in negative_citations)
+                / len(negative_citations),
+                4,
+            )
+            if negative_citations else None
+        )
+        citation_expected = bool(
+            sample.get("citation_questions") or sample.get("negative_questions")
+        ) and (
             not self.config.skip_citations
         )
         quality_status, reasons = evaluate_document_quality(
@@ -466,6 +659,7 @@ class ParsingEvaluationCollector:
         metrics["quality_status"] = quality_status
         return {
             "sample_id": sample["sample_id"],
+            "external_document_id": payload["externalDocumentId"],
             "category": sample["category"],
             "sync_status": sync_status,
             "ragflow_dataset_id": sync_doc.get("ragflowDatasetId"),
@@ -473,6 +667,7 @@ class ParsingEvaluationCollector:
             "parse_quality_status": quality_status,
             "quality_reasons": reasons,
             "metrics": metrics,
+            "parser_application": sync_doc.get("parserApplication"),
             "chunks": chunks,
             "citation_results": citation_results,
             "error": None,

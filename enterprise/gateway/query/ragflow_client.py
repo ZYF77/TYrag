@@ -5,6 +5,7 @@ import logging
 import os
 from typing import Any
 import uuid
+from urllib.parse import quote
 
 from enterprise.gateway.sync.ragflow_document_client import (
     RAGFlowAPIError,
@@ -61,6 +62,39 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
             json_data={"document_ids": document_ids},
         )
         return self._require_ok(result)
+
+    async def get_chunk_evidence(
+        self,
+        dataset_id: str,
+        document_id: str,
+        chunk_id: str,
+        request_id: str | None = None,
+    ) -> dict:
+        """Read a single citation chunk through the RAGFlow public API."""
+        rid = request_id or self._new_request_id()
+        result = await self._run_sync(
+            self._sync_request,
+            "GET",
+            "/api/v1/datasets/{}/documents/{}/chunks/{}".format(
+                quote(dataset_id, safe=""),
+                quote(document_id, safe=""),
+                quote(chunk_id, safe=""),
+            ),
+            rid,
+        )
+        data = self._require_ok(result).get("data") or {}
+        if not isinstance(data, dict):
+            return {}
+        return {
+            "id": data.get("id") or data.get("chunk_id") or chunk_id,
+            "document_id": data.get("doc_id")
+            or data.get("document_id")
+            or document_id,
+            "content": data.get("content") or data.get("content_with_weight"),
+            "positions": data.get("positions") or data.get("position_int") or [],
+            "image_id": data.get("image_id") or data.get("img_id") or None,
+            "doc_type_kwd": data.get("doc_type_kwd"),
+        }
 
     async def list_chats(
         self, name: str | None = None, request_id: str | None = None
@@ -288,6 +322,7 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         self._stream_delay = 0.0
         self._stream_fail_after = 0
         self._omit_stream_id = False
+        self._chunks_by_id: dict[str, dict] = {}
 
     async def start_parsing(
         self,
@@ -296,6 +331,18 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         request_id: str | None = None,
     ) -> dict:
         return {"code": 0, "data": True}
+
+    async def get_chunk_evidence(
+        self,
+        dataset_id: str,
+        document_id: str,
+        chunk_id: str,
+        request_id: str | None = None,
+    ) -> dict:
+        chunk = self._chunks_by_id.get(chunk_id)
+        if not chunk or chunk.get("document_id") != document_id:
+            return {}
+        return dict(chunk)
 
     async def list_chats(
         self, name: str | None = None, request_id: str | None = None
@@ -361,7 +408,7 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
             "content": "故障码 E-104 时先检查液压油位。",
             "document_id": "doc-1",
             "document_name": "manual.pdf",
-            "positions": [[3, 0.1, 0.2, 0.8, 0.4]],
+            "positions": [[3, 0.1, 0.8, 0.2, 0.4]],
         }
         if self._no_evidence:
             session_id = session_id or "stub-session"
@@ -423,6 +470,13 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         if doc_ids and not self._ignore_doc_scope:
             allowed = set(doc_ids)
             chunks = [c for c in chunks if c.get("document_id") in allowed]
+        self._chunks_by_id.update(
+            {
+                str(chunk.get("id") or chunk.get("chunk_id")): dict(chunk)
+                for chunk in chunks
+                if chunk.get("id") or chunk.get("chunk_id")
+            }
+        )
         session["messages"].append(
             {"role": "user", "content": question, "id": turn_id}
         )

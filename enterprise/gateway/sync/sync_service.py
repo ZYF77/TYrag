@@ -1,4 +1,5 @@
 """Document sync orchestration: idempotent ingestion, retry, and lifecycle."""
+import hashlib
 import json
 import logging
 from typing import Any
@@ -12,9 +13,9 @@ from enterprise.gateway.sync.models import (
     get_mapping_by_event_id,
     get_versions_for_document,
     insert_mapping,
-    set_current_version,
-    supersede_other_versions,
+    promote_version_if_latest,
     update_mapping_status,
+    update_parser_application,
 )
 from enterprise.gateway.sync.ragflow_document_client import (
     RAGFlowAPIError,
@@ -36,6 +37,97 @@ from enterprise.gateway.sync.status_mapping import map_ragflow_run_to_sync_statu
 logger = logging.getLogger(__name__)
 
 TERMINAL_DONE = frozenset({"ready", "superseded", "disabled", "deleted", "failed", "cancelled"})
+RAGFLOW_UNSTARTED = frozenset({"", "0", "UNSTART"})
+RAGFLOW_TERMINAL = frozenset({"3", "4", "DONE", "FAIL"})
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(
+        value, sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+    )
+
+
+def _expected_parser_json(routing: dict[str, Any]) -> str:
+    return _canonical_json({
+        "profile": routing["selected_parser_profile"],
+        "profile_version": routing["parser_version"],
+        "policy_version": routing["routing_policy_version"],
+        "chunk_method": routing["chunk_method"],
+        "owned_parser_config": routing["parser_config"],
+    })
+
+
+def _actual_parser_json(
+    routing: dict[str, Any], ragflow_doc: dict[str, Any],
+) -> str:
+    parser_config = ragflow_doc.get("parser_config") or {}
+    full = _canonical_json(parser_config)
+    owned = {
+        key: parser_config.get(key)
+        for key in routing["parser_config"]
+    }
+    return _canonical_json({
+        "profile": routing["selected_parser_profile"],
+        "profile_version": routing["parser_version"],
+        "policy_version": routing["routing_policy_version"],
+        "chunk_method": ragflow_doc.get("chunk_method"),
+        "owned_parser_config": owned,
+        "parser_config_digest": hashlib.sha256(full.encode("utf-8")).hexdigest(),
+    })
+
+
+def _parser_matches(
+    routing: dict[str, Any], ragflow_doc: dict[str, Any],
+) -> bool:
+    if str(ragflow_doc.get("chunk_method") or "").lower() != str(
+        routing["chunk_method"]
+    ).lower():
+        return False
+    parser_config = ragflow_doc.get("parser_config") or {}
+    return all(
+        parser_config.get(key) == value
+        for key, value in routing["parser_config"].items()
+    )
+
+
+async def promote_quality_passed_version(
+    db: aiosqlite.Connection,
+    ragflow_client: RAGFlowDocumentClient,
+    doc: ExtDocumentMap,
+    parse_quality_status: str,
+) -> bool:
+    """Promote only a verified, quality-passed version without an outage."""
+    if (
+        parse_quality_status != "passed"
+        or doc.parser_application_status != "executed"
+        or not doc.ragflow_dataset_id
+        or not doc.ragflow_document_id
+    ):
+        return False
+    await ragflow_client.batch_update_status(
+        doc.ragflow_dataset_id, [doc.ragflow_document_id], enabled=True,
+    )
+    if not await promote_version_if_latest(db, doc):
+        return False
+    versions = await get_versions_for_document(
+        db, doc.tenant_id, doc.source_system, doc.external_document_id,
+    )
+    old_docs: dict[str, list[str]] = {}
+    for version in versions:
+        if (
+            version.id != doc.id
+            and version.ragflow_document_id
+            and version.ragflow_dataset_id
+            and version.business_status == "superseded"
+        ):
+            old_docs.setdefault(version.ragflow_dataset_id, []).append(
+                version.ragflow_document_id
+            )
+    for dataset_id, document_ids in old_docs.items():
+        await ragflow_client.batch_update_status(
+            dataset_id, document_ids, enabled=False,
+        )
+    return True
 
 
 class DocumentSyncError(Exception):
@@ -75,14 +167,21 @@ class SyncService:
         self, event: OutboxEvent,
     ) -> tuple[ExtDocumentMap, bool]:
         payload = json.loads(event.payload)
+        metadata = payload.get("metadata") or {}
         existing = await get_mapping_by_event_id(self.db, event.event_id)
         deduplicated = False
         if existing:
             if existing.event_status == "completed" and existing.sync_status in TERMINAL_DONE:
                 return existing, True
             doc = existing
+            if not doc.document_type and metadata.get("document_type"):
+                await update_mapping_status(
+                    self.db,
+                    doc,
+                    doc.sync_status,
+                    document_type=metadata["document_type"],
+                )
         else:
-            metadata = payload.get("metadata") or {}
             doc = ExtDocumentMap(
                 tenant_id=event.tenant_id,
                 source_system=event.source_system,
@@ -94,11 +193,15 @@ class SyncService:
                 sha256=payload["sha256"],
                 file_name=payload["fileName"],
                 media_type=payload.get("mediaType", "application/pdf"),
+                document_type=metadata.get("document_type"),
                 source_page_count=metadata.get("page_count"),
                 asset_id=(
                     metadata.get("asset_id")
                     or metadata.get("fixed_asset_no")
+                    or metadata.get("equipment_id")
                 ),
+                equipment_id=metadata.get("equipment_id"),
+                fixed_asset_no=metadata.get("fixed_asset_no"),
                 department_id=metadata.get("department_id"),
                 security_level=metadata.get("security_level"),
                 allow_group_ids=json.dumps(
@@ -154,7 +257,7 @@ class SyncService:
         event: OutboxEvent,
     ) -> None:
         if doc.sync_status == "ready" and doc.event_status == "tracking":
-            await self._activate_version(doc)
+            await self._ensure_quality_evaluation(doc)
             return
 
         if doc.sync_status in ("received", "validated"):
@@ -215,11 +318,12 @@ class SyncService:
         )
         mapped = map_ragflow_run_to_sync_status(doc.pipeline_status)
         if mapped == "ready":
+            await self._record_terminal_parser_evidence(doc)
             await self._set_status(
-                doc, "ready", event_status="tracking",
+                doc, "ready", event_status="completed",
                 pipeline_status=doc.pipeline_status,
             )
-            await self._activate_version(doc)
+            await self._ensure_quality_evaluation(doc)
         else:
             await self._set_status(
                 doc, mapped, event_status="completed",
@@ -263,6 +367,7 @@ class SyncService:
             if existing_doc:
                 doc.ragflow_document_id = existing_doc["id"]
                 doc.ragflow_dataset_id = dataset_id
+                doc.pipeline_status = existing_doc.get("run") or "UNSTART"
             else:
                 try:
                     result = await self.ragflow_client.upload_document(
@@ -289,21 +394,13 @@ class SyncService:
             pipeline_status=doc.pipeline_status,
         )
 
-        meta_fields = {
-            "enterprise_event_id": event.event_id,
-            "enterprise_external_document_id": doc.external_document_id,
-            "enterprise_source_version_id": doc.source_version_id,
-            "enterprise_sha256": doc.sha256,
-        }
-        try:
-            await self.ragflow_client.update_document_metadata(
-                dataset_id, doc.ragflow_document_id, meta_fields,
-            )
-        except RAGFlowAPIError as e:
-            raise self._ragflow_error(e) from e
+        ragflow_doc = await self._ensure_parser_configured(
+            doc, dataset_id, event,
+        )
+        doc.pipeline_status = ragflow_doc.get("run") or doc.pipeline_status or "UNSTART"
 
         run = (doc.pipeline_status or "UNSTART").upper()
-        if run not in ("DONE", "3"):
+        if run in RAGFLOW_UNSTARTED:
             try:
                 await self.ragflow_client.start_parsing(
                     dataset_id, [doc.ragflow_document_id],
@@ -317,12 +414,16 @@ class SyncService:
             )
 
         try:
-            docs = await self.ragflow_client.list_documents(dataset_id)
+            docs = await self.ragflow_client.list_documents(
+                dataset_id, document_id=doc.ragflow_document_id,
+            )
         except RAGFlowAPIError as e:
             raise self._ragflow_error(e) from e
         for rf_doc in docs:
             if rf_doc.get("id") == doc.ragflow_document_id:
                 doc.pipeline_status = rf_doc.get("run") or doc.pipeline_status or "UNSTART"
+                if str(doc.pipeline_status).upper() in RAGFLOW_TERMINAL:
+                    await self._record_terminal_parser_evidence(doc, rf_doc)
                 break
 
         await update_mapping_status(
@@ -330,6 +431,135 @@ class SyncService:
             pipeline_status=doc.pipeline_status,
         )
         return doc
+
+    async def _ensure_parser_configured(
+        self,
+        doc: ExtDocumentMap,
+        dataset_id: str,
+        event: OutboxEvent,
+    ) -> dict[str, Any]:
+        from enterprise.gateway.quality.routing import route_document
+
+        routing = route_document(
+            media_type=doc.media_type,
+            file_name=doc.file_name,
+            document_type=doc.document_type,
+            source_system=doc.source_system,
+        )
+        expected = _expected_parser_json(routing)
+        await update_parser_application(
+            self.db,
+            doc,
+            status=(
+                doc.parser_application_status
+                if doc.parser_application_status in ("configured", "executed")
+                else "selected"
+            ),
+            profile=routing["selected_parser_profile"],
+            profile_version=routing["parser_version"],
+            expected_json=expected,
+        )
+        try:
+            docs = await self.ragflow_client.list_documents(
+                dataset_id, document_id=doc.ragflow_document_id,
+            )
+        except RAGFlowAPIError as exc:
+            raise self._ragflow_error(exc) from exc
+        if not docs:
+            raise RetryableDocumentSyncError(
+                "RAGFLOW_UNAVAILABLE", "RAGFlow document readback is empty",
+            )
+        current = docs[0]
+        run = str(current.get("run") or "UNSTART").upper()
+
+        if doc.parser_application_status not in ("configured", "executed"):
+            if run not in RAGFLOW_UNSTARTED:
+                await update_parser_application(
+                    self.db,
+                    doc,
+                    status="legacy_unverified",
+                    executed_json=_actual_parser_json(routing, current),
+                )
+                raise TerminalDocumentSyncError(
+                    "PARSER_APPLICATION_UNVERIFIABLE",
+                    "Parser configuration was not verified before parsing started",
+                )
+            meta_fields = {
+                "enterprise_event_id": event.event_id,
+                "enterprise_external_document_id": doc.external_document_id,
+                "enterprise_source_version_id": doc.source_version_id,
+                "enterprise_sha256": doc.sha256,
+            }
+            try:
+                await self.ragflow_client.update_document(
+                    dataset_id,
+                    doc.ragflow_document_id,
+                    meta_fields=meta_fields,
+                    chunk_method=routing["chunk_method"],
+                    parser_config=routing["parser_config"],
+                )
+                docs = await self.ragflow_client.list_documents(
+                    dataset_id, document_id=doc.ragflow_document_id,
+                )
+            except RAGFlowAPIError as exc:
+                raise self._ragflow_error(exc) from exc
+            if not docs:
+                raise RetryableDocumentSyncError(
+                    "RAGFLOW_UNAVAILABLE", "RAGFlow parser readback is empty",
+                )
+            current = docs[0]
+
+        configured = _actual_parser_json(routing, current)
+        if not _parser_matches(routing, current):
+            await update_parser_application(
+                self.db, doc, status="mismatch", configured_json=configured,
+            )
+            raise TerminalDocumentSyncError(
+                "PARSER_APPLICATION_MISMATCH",
+                "RAGFlow parser configuration does not match selected profile",
+            )
+        if doc.parser_application_status != "executed":
+            await update_parser_application(
+                self.db, doc, status="configured", configured_json=configured,
+            )
+        return current
+
+    async def _record_terminal_parser_evidence(
+        self,
+        doc: ExtDocumentMap,
+        ragflow_doc: dict[str, Any] | None = None,
+    ) -> None:
+        from enterprise.gateway.quality.routing import route_document
+
+        if not doc.ragflow_dataset_id or not doc.ragflow_document_id:
+            return
+        if ragflow_doc is None:
+            try:
+                docs = await self.ragflow_client.list_documents(
+                    doc.ragflow_dataset_id, document_id=doc.ragflow_document_id,
+                )
+            except RAGFlowAPIError as exc:
+                raise self._ragflow_error(exc) from exc
+            if not docs:
+                raise RetryableDocumentSyncError(
+                    "RAGFLOW_UNAVAILABLE", "RAGFlow terminal readback is empty",
+                )
+            ragflow_doc = docs[0]
+        if str(ragflow_doc.get("run") or "").upper() not in RAGFLOW_TERMINAL:
+            return
+        routing = route_document(
+            media_type=doc.media_type,
+            file_name=doc.file_name,
+            document_type=doc.document_type,
+            source_system=doc.source_system,
+        )
+        executed = _actual_parser_json(routing, ragflow_doc)
+        await update_parser_application(
+            self.db,
+            doc,
+            status="executed" if _parser_matches(routing, ragflow_doc) else "mismatch",
+            executed_json=executed,
+        )
 
     async def _find_document_by_event(
         self, dataset_id: str, event_id: str,
@@ -344,42 +574,15 @@ class SyncService:
                 return rf_doc
         return None
 
-    async def _activate_version(self, doc: ExtDocumentMap) -> None:
-        await supersede_other_versions(
-            self.db, doc.tenant_id, doc.source_system,
-            doc.external_document_id, doc.source_version_id,
-        )
-        await set_current_version(
-            self.db, doc.tenant_id, doc.source_system,
-            doc.external_document_id, doc.source_version_id,
-        )
-        versions = await get_versions_for_document(
-            self.db, doc.tenant_id, doc.source_system, doc.external_document_id,
-        )
-        old_docs: dict[str, list[str]] = {}
-        for version in versions:
-            if (
-                version.id != doc.id
-                and version.ragflow_document_id
-                and version.ragflow_dataset_id
-                and version.business_status == "superseded"
-            ):
-                old_docs.setdefault(version.ragflow_dataset_id, []).append(
-                    version.ragflow_document_id
-                )
-        for dataset_id, document_ids in old_docs.items():
-            try:
-                await self.ragflow_client.batch_update_status(
-                    dataset_id, document_ids, enabled=False,
-                )
-            except RAGFlowAPIError as e:
-                raise self._ragflow_error(e) from e
-        await self._set_status(
-            doc, "ready", event_status="completed",
-            business_status="active", current_version=1,
-            pipeline_status=doc.pipeline_status,
-        )
-        await self._ensure_quality_evaluation(doc)
+    async def promote_quality_passed_version(
+        self, doc: ExtDocumentMap, parse_quality_status: str,
+    ) -> bool:
+        try:
+            return await promote_quality_passed_version(
+                self.db, self.ragflow_client, doc, parse_quality_status,
+            )
+        except RAGFlowAPIError as exc:
+            raise self._ragflow_error(exc) from exc
 
     async def _ensure_quality_evaluation(self, doc: ExtDocumentMap) -> None:
         from enterprise.gateway.config import config
@@ -389,6 +592,7 @@ class SyncService:
         routing = route_document(
             media_type=doc.media_type,
             file_name=doc.file_name,
+            document_type=doc.document_type,
             source_system=doc.source_system,
         )
         try:
@@ -405,12 +609,16 @@ class SyncService:
                 max_attempts=config.quality_max_attempts,
             )
         except Exception:
-            # Quality job creation must not roll back or block WP-02 ready.
             logger.exception(
                 "Quality evaluation enqueue failed document=%s version=%s",
                 doc.external_document_id,
                 doc.source_version_id,
             )
+            if doc.sync_status == "ready":
+                raise RetryableDocumentSyncError(
+                    "QUALITY_EVALUATION_ENQUEUE_FAILED",
+                    "Quality evaluation could not be queued",
+                )
 
     async def refresh_status(self, doc: ExtDocumentMap) -> ExtDocumentMap:
         if (
@@ -432,10 +640,11 @@ class SyncService:
             run = rf_doc.get("run") or "UNSTART"
             mapped = map_ragflow_run_to_sync_status(run)
             if mapped == "ready" and doc.sync_status != "ready":
+                await self._record_terminal_parser_evidence(doc, rf_doc)
                 await self._set_status(
                     doc, "ready", event_status="completed", pipeline_status=run,
                 )
-                await self._activate_version(doc)
+                await self._ensure_quality_evaluation(doc)
             elif (
                 doc.sync_status != mapped
                 and transition_allowed(doc.sync_status, mapped, "document")
@@ -466,6 +675,41 @@ class SyncService:
                 business_status="disabled", event_status="completed",
             )
         return versions
+
+    async def reindex_document(
+        self,
+        tenant_id: str,
+        source_system: str,
+        external_document_id: str,
+        source_version_id: str,
+    ) -> ExtDocumentMap:
+        doc = await get_mapping(
+            self.db,
+            tenant_id,
+            source_system,
+            external_document_id,
+            source_version_id,
+        )
+        if not doc:
+            raise DocumentNotFoundError()
+        if not doc.ragflow_dataset_id or not doc.ragflow_document_id:
+            raise TerminalDocumentSyncError(
+                "DOCUMENT_NOT_READY", "Document is not registered in RAGFlow"
+            )
+        try:
+            await self.ragflow_client.start_parsing(
+                doc.ragflow_dataset_id, [doc.ragflow_document_id]
+            )
+        except RAGFlowAPIError as e:
+            raise self._ragflow_error(e) from e
+        await self._set_status(
+            doc,
+            doc.sync_status,
+            event_status="tracking",
+            pipeline_status="RUNNING",
+            event_type="reindex",
+        )
+        return doc
 
     async def restore_document(
         self, tenant_id: str, source_system: str, external_document_id: str,
@@ -532,7 +776,15 @@ class SyncService:
                 doc, payload, source_file, dataset_id, event,
             )
         if map_ragflow_run_to_sync_status(doc.pipeline_status) == "ready":
-            await self._activate_version(doc)
+            await self._record_terminal_parser_evidence(doc)
+            await self._set_status(
+                doc,
+                "ready",
+                event_status="completed",
+                pipeline_status=doc.pipeline_status,
+                business_status="active",
+            )
+            await self._ensure_quality_evaluation(doc)
         else:
             await update_mapping_status(
                 self.db, doc, doc.sync_status, event_status="completed",

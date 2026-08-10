@@ -102,7 +102,30 @@ async def _authorized_document(
     return doc, None
 
 
-def _quality_response(evaluation) -> dict:
+def _parser_application(doc, metrics: dict) -> dict | None:
+    if doc is None:
+        return metrics.get("parserApplication")
+    def _profile(raw: str | None) -> str | None:
+        if not raw:
+            return None
+        try:
+            value = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+        return value.get("profile") if isinstance(value, dict) else None
+
+    state = doc.parser_application_status or "legacy_unverified"
+    return {
+        "state": state,
+        "selectedProfile": doc.parser_profile,
+        "configuredProfile": _profile(doc.parser_configured_json),
+        "executedProfile": _profile(doc.parser_executed_json),
+        "readbackMatch": state == "executed",
+        "reasonCode": None if state == "executed" else "PARSER_APPLICATION_" + state.upper(),
+    }
+
+
+def _quality_response(evaluation, doc=None) -> dict:
     metrics = evaluation.metrics_json if evaluation else {}
     return {
         "externalDocumentId": evaluation.external_document_id if evaluation else None,
@@ -116,6 +139,8 @@ def _quality_response(evaluation) -> dict:
         "completedAt": evaluation.completed_at if evaluation else None,
         "metricSummary": safe_metric_summary(metrics),
         "qualityDimensions": quality_dimensions(metrics),
+        "requiredCapabilities": metrics.get("required_capabilities") or [],
+        "parserApplication": _parser_application(doc, metrics),
     }
 
 
@@ -182,7 +207,7 @@ async def get_document_quality(
         doc.source_version_id,
         evaluation.evaluation_state if evaluation else "not_started",
     )
-    return _quality_response(evaluation)
+    return _quality_response(evaluation, doc)
 
 
 @router.post("/{external_document_id}/quality:reevaluate")
@@ -209,6 +234,7 @@ async def reevaluate_document_quality(
     routing = route_document(
         media_type=doc.media_type,
         file_name=doc.file_name,
+        document_type=doc.document_type,
         source_system=doc.source_system,
     )
     version = await quality_models.next_evaluation_version(

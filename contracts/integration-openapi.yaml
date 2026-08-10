@@ -437,6 +437,18 @@ components:
         currentVersion: { type: boolean }
         eventStatus: { type: string }
         updatedAt: { type: string, format: date-time }
+        parserApplication:
+          type: [object, 'null']
+          properties:
+            state:
+              type: string
+              enum: [selected, configured, executed, mismatch, legacy_unverified]
+            selectedProfile: { type: [string, 'null'] }
+            configuredProfile: { type: [string, 'null'] }
+            executedProfile: { type: [string, 'null'] }
+            readbackMatch: { type: [boolean, 'null'] }
+            reasonCode: { type: [string, 'null'] }
+          additionalProperties: false
     FileSyncItem:
       type: object
       required: [externalDocumentId, fileName, status, updatedAt]
@@ -468,6 +480,19 @@ components:
           type: array
           items: { type: string }
         parserProfile: { type: [string, 'null'] }
+        parserApplication:
+          type: [object, 'null']
+          description: Evidence that the selected profile was configured, read back, and executed.
+          properties:
+            state:
+              type: string
+              enum: [selected, configured, executed, mismatch, legacy_unverified]
+            selectedProfile: { type: [string, 'null'] }
+            configuredProfile: { type: [string, 'null'] }
+            executedProfile: { type: [string, 'null'] }
+            readbackMatch: { type: [boolean, 'null'] }
+            reasonCode: { type: [string, 'null'] }
+          additionalProperties: false
         policyVersion: { type: [string, 'null'] }
         completedAt: { type: [string, 'null'], format: date-time }
         metricSummary:
@@ -558,7 +583,31 @@ components:
         versionId: { type: [string, 'null'] }
         pageNo: { type: [integer, 'null'] }
         bbox: { type: [object, 'null'] }
+        positions:
+          type: array
+          description: All source positions, preserving RAGFlow [page,left,right,top,bottom] semantics.
+          items:
+            type: object
+            required: [pageNo, bbox]
+            properties:
+              pageNo: { type: integer, minimum: 1 }
+              bbox:
+                type: object
+                required: [x1, y1, x2, y2]
+                properties:
+                  x1: { type: number, description: left }
+                  y1: { type: number, description: top }
+                  x2: { type: number, description: right }
+                  y2: { type: number, description: bottom }
+                additionalProperties: false
+            additionalProperties: false
         assetId: { type: [string, 'null'] }
+        imageId: { type: [string, 'null'] }
+        sourceUrl: { type: [string, 'null'], format: uri }
+        evidenceUrl: { type: [string, 'null'], format: uri }
+        evidence:
+          type: [object, 'null']
+          additionalProperties: true
         excerpt: { type: [string, 'null'] }
         recordType: { type: [string, 'null'] }
         recordId: { type: [string, 'null'] }

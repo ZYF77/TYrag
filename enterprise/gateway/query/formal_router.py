@@ -24,6 +24,7 @@ from enterprise.gateway.acl.scope import ScopeResolver, compile_scope
 from enterprise.gateway.auth.middleware import require_capability
 from enterprise.gateway.auth.user_principal import UserPrincipal
 from enterprise.gateway.config import require_ragflow_api_key
+from enterprise.gateway.quality.gate import enforce_quality_gate
 from enterprise.gateway.quality.models import get_latest_evaluation
 from enterprise.gateway.query import conversation_store
 from enterprise.gateway.query.ragflow_client import (
@@ -113,6 +114,10 @@ class CitationOut(BaseModel):
     excerpt: str | None = None
     recordType: str | None = None
     recordId: str | None = None
+    chunkId: str | None = None
+    imageId: str | None = None
+    positions: list[dict] = Field(default_factory=list)
+    evidence: dict | None = None
 
 
 class MessageOut(BaseModel):
@@ -163,30 +168,83 @@ def _json_list(raw: str | None) -> tuple[str, ...]:
     return ()
 
 
-def _chunk_positions(chunk: dict) -> tuple[int | None, dict | None]:
+def _chunk_regions(chunk: dict) -> list[dict]:
     positions = chunk.get("positions") or chunk.get("position_int") or []
-    page_no: int | None = None
-    bbox: dict | None = None
+    regions: list[dict] = []
     if isinstance(positions, list):
         for pos in positions:
-            if not isinstance(pos, list) or not pos:
+            if not isinstance(pos, (list, tuple)) or len(pos) < 5:
                 continue
             try:
                 page_no = int(pos[0])
+                left = float(pos[1])
+                right = float(pos[2])
+                top = float(pos[3])
+                bottom = float(pos[4])
             except (TypeError, ValueError):
-                page_no = None
-            if len(pos) >= 5:
-                try:
-                    bbox = {
-                        "x1": float(pos[1]),
-                        "y1": float(pos[2]),
-                        "x2": float(pos[3]),
-                        "y2": float(pos[4]),
-                    }
-                except (TypeError, ValueError):
-                    bbox = None
-            break
+                continue
+            if page_no < 1 or left > right or top > bottom:
+                continue
+            regions.append(
+                {
+                    "pageNo": page_no,
+                    "bbox": {
+                        "x1": left,
+                        "y1": top,
+                        "x2": right,
+                        "y2": bottom,
+                    },
+                }
+            )
+    return regions
+
+
+def _chunk_positions(chunk: dict) -> tuple[int | None, dict | None]:
+    regions = _chunk_regions(chunk)
+    if not regions:
+        return None, None
+    bbox = dict(regions[0]["bbox"])
+    # ``bbox_json`` already persists arbitrary JSON, so nesting all source
+    # regions here keeps old snapshots traceable without a schema migration.
+    bbox["regions"] = regions
+    page_no = regions[0]["pageNo"]
     return page_no, bbox
+
+
+def _snapshot_regions(citation: dict) -> list[dict]:
+    bbox = citation.get("bbox")
+    if not isinstance(bbox, dict):
+        return []
+    regions = bbox.get("regions")
+    if isinstance(regions, list):
+        return [region for region in regions if isinstance(region, dict)]
+    page_no = citation.get("pageNo")
+    if page_no is None or not all(
+        key in bbox for key in ("x1", "y1", "x2", "y2")
+    ):
+        return []
+    return [
+        {
+            "pageNo": page_no,
+            "bbox": {key: bbox[key] for key in ("x1", "y1", "x2", "y2")},
+        }
+    ]
+
+
+def _citation_snapshot_out(citation: dict) -> dict:
+    result = dict(citation)
+    positions = citation.get("positions") or _snapshot_regions(citation)
+    chunk_id = citation.get("chunkId")
+    result["positions"] = positions
+    result["evidence"] = citation.get("evidence") or {
+        "kind": "document_chunk",
+        "documentId": citation.get("documentId"),
+        "versionId": citation.get("versionId"),
+        "chunkId": chunk_id,
+        "imageId": citation.get("imageId"),
+        "positions": positions,
+    }
+    return result
 
 
 def _chunk_to_citation(
@@ -196,7 +254,9 @@ def _chunk_to_citation(
     message_id: str | None = None,
 ) -> dict:
     page_no, bbox = _chunk_positions(chunk)
+    regions = _chunk_regions(chunk)
     chunk_id = str(chunk.get("id") or chunk.get("chunk_id") or "")
+    image_id = str(chunk.get("image_id") or chunk.get("img_id") or "") or None
     citation_id = chunk_id or f"chunk-{index}"
     if message_id:
         citation_id = f"{citation_id}-{message_id[:8]}"
@@ -217,6 +277,16 @@ def _chunk_to_citation(
         "pageNo": page_no,
         "bbox": bbox,
         "excerpt": chunk.get("content") or chunk.get("content_with_weight"),
+        "imageId": image_id,
+        "positions": regions,
+        "evidence": {
+            "kind": "document_chunk",
+            "documentId": doc.external_document_id,
+            "versionId": doc.source_version_id,
+            "chunkId": chunk_id or None,
+            "imageId": image_id,
+            "positions": regions,
+        },
     }
 
 
@@ -282,11 +352,8 @@ class FormalScopeResolver(ScopeResolver):
                     doc.external_document_id,
                     doc.source_version_id,
                 )
-                if (
-                    evaluation is None
-                    or evaluation.evaluation_state != "completed"
-                    or evaluation.parse_quality_status != "passed"
-                ):
+                quality_allowed, _ = enforce_quality_gate(evaluation)
+                if not quality_allowed:
                     continue
             facts = DocumentAclFacts(
                 tenant_id=doc.tenant_id,
@@ -964,7 +1031,18 @@ async def get_conversation(
         conversationId=conversation["conversation_id"],
         createdAt=conversation["created_at"],
         status=conversation["status"],
-        messages=[MessageOut(**m) for m in messages],
+        messages=[
+            MessageOut(
+                **{
+                    **message,
+                    "citations": [
+                        _citation_snapshot_out(citation)
+                        for citation in message.get("citations", [])
+                    ],
+                }
+            )
+            for message in messages
+        ],
     )
 
 
@@ -972,6 +1050,7 @@ async def get_conversation(
 async def get_citation(
     citation_id: str,
     db=Depends(get_db),
+    client=Depends(_query_client),
     principal: UserPrincipal = Depends(
         require_capability("view_citations", "list_sessions")
     ),
@@ -988,9 +1067,38 @@ async def get_citation(
         return _error(
             404, "CITATION_NOT_FOUND", "Citation not found", request_id
         )
-    allowed = await _citation_document_allowed(db, principal, citation)
-    if not allowed:
+    doc = await _citation_document_for_principal(db, principal, citation)
+    if doc is None:
         return _error(403, "ACL_DENIED", "Access denied", request_id)
+    chunk_evidence: dict = {}
+    chunk_id = citation.get("chunkId")
+    if (
+        chunk_id
+        and doc.ragflow_dataset_id
+        and doc.ragflow_document_id
+    ):
+        try:
+            chunk_evidence = await client.get_chunk_evidence(
+                doc.ragflow_dataset_id,
+                doc.ragflow_document_id,
+                chunk_id,
+                request_id=request_id,
+            )
+        except RAGFlowAPIError:
+            # The immutable citation snapshot remains readable even when the
+            # upstream evidence service is temporarily unavailable.
+            logger.warning(
+                "Citation evidence refresh unavailable citation_id=%s",
+                citation_id,
+            )
+    positions = (
+        _chunk_regions(chunk_evidence)
+        or citation.get("positions")
+        or _snapshot_regions(citation)
+    )
+    image_id = str(
+        chunk_evidence.get("image_id") or citation.get("imageId") or ""
+    ) or None
     return CitationOut(
         citationId=citation["citationId"],
         sourceType=citation["sourceType"],
@@ -1003,14 +1111,25 @@ async def get_citation(
         excerpt=citation["excerpt"],
         recordType=citation["recordType"],
         recordId=citation["recordId"],
+        chunkId=chunk_id,
+        imageId=image_id,
+        positions=positions,
+        evidence=citation.get("evidence") or {
+            "kind": "document_chunk",
+            "documentId": citation.get("documentId"),
+            "versionId": citation.get("versionId"),
+            "chunkId": chunk_id,
+            "imageId": image_id,
+            "positions": positions,
+        },
     )
 
 
-async def _citation_document_allowed(
+async def _citation_document_for_principal(
     db,
     principal: UserPrincipal,
     citation: dict,
-) -> bool:
+) -> ExtDocumentMap | None:
     ragflow_document_id = citation.get("ragflowDocumentId")
     external_document_id = citation.get("documentId")
     doc = None
@@ -1051,7 +1170,7 @@ async def _citation_document_allowed(
                 doc = candidate
                 break
     if doc is None:
-        return False
+        return None
     facts = DocumentAclFacts(
         tenant_id=doc.tenant_id,
         department_id=doc.department_id,
@@ -1060,4 +1179,14 @@ async def _citation_document_allowed(
         allow_group_ids=_json_list(doc.allow_group_ids),
         deny_group_ids=_json_list(doc.deny_group_ids),
     )
-    return evaluate_document_acl(principal, facts).allowed
+    return doc if evaluate_document_acl(principal, facts).allowed else None
+
+
+async def _citation_document_allowed(
+    db,
+    principal: UserPrincipal,
+    citation: dict,
+) -> bool:
+    return (
+        await _citation_document_for_principal(db, principal, citation)
+    ) is not None
