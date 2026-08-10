@@ -16,7 +16,7 @@ from enterprise.gateway.auth.middleware import require_user_principal
 from enterprise.gateway.auth.user_principal import UserPrincipal
 from enterprise.gateway.asset_registry import ResolvedAsset
 from enterprise.gateway.query import formal_router, v2_router, v2_store
-from enterprise.gateway.query.ragflow_client import RAGFlowQueryStub
+from enterprise.gateway.query.ragflow_client import RAGFlowAPIError, RAGFlowQueryStub
 from enterprise.gateway.sync.models import (
     ExtDocumentMap,
     insert_mapping,
@@ -25,6 +25,7 @@ from enterprise.gateway.sync.models import (
 
 
 BASE = "/enterprise/api/v2"
+_DEFAULT_ASSET_ID = object()
 
 
 def test_message_one_of_rejects_explicit_null_opposite_fields():
@@ -93,7 +94,8 @@ async def _insert_document(
     external_id: str,
     ragflow_id: str,
     equipment_id: str,
-    fixed_asset_no: str,
+    fixed_asset_no: str | None,
+    asset_id: str | None | object = _DEFAULT_ASSET_ID,
     dataset_id: str = "ds-v2",
     version_id: str = "v1",
 ) -> ExtDocumentMap:
@@ -107,7 +109,7 @@ async def _insert_document(
             event_id=str(uuid.uuid4()),
             sha256=hashlib.sha256(external_id.encode()).hexdigest(),
             file_name=f"{external_id}.pdf",
-            asset_id=fixed_asset_no,
+            asset_id=fixed_asset_no if asset_id is _DEFAULT_ASSET_ID else asset_id,
             equipment_id=equipment_id,
             fixed_asset_no=fixed_asset_no,
             department_id="d10",
@@ -361,6 +363,65 @@ async def test_asset_registry_failure_is_retryable_and_fail_closed(runtime, monk
 
 
 @pytest.mark.asyncio
+async def test_canonical_snapshot_persists_asset_registry_identity(runtime):
+    await runtime.db.execute(
+        "INSERT INTO ext_asset_registry "
+        "(tenant_id, equipment_id, fixed_asset_no, asset_id) "
+        "VALUES ('customer-a', 'EQ-SNAPSHOT', 'FA-SNAPSHOT', 'ASSET-SNAPSHOT')"
+    )
+    await runtime.db.commit()
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(
+            client, equipmentId="EQ-SNAPSHOT"
+        )
+
+    async with runtime.db.execute(
+        "SELECT equipment_id, fixed_asset_no, asset_id, registry_version, "
+        "context_resolved_at FROM ext_v2_conversation WHERE conversation_id=?",
+        (conversation["conversationId"],),
+    ) as cursor:
+        snapshot = await cursor.fetchone()
+
+    assert snapshot["equipment_id"] == "EQ-SNAPSHOT"
+    assert snapshot["fixed_asset_no"] == "FA-SNAPSHOT"
+    assert snapshot["asset_id"] == "ASSET-SNAPSHOT"
+    assert snapshot["registry_version"] == "sqlite-fixture"
+    assert snapshot["context_resolved_at"]
+
+
+@pytest.mark.asyncio
+async def test_context_version_write_conflict_is_stable_409(runtime, monkeypatch):
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(client)
+
+    stale_write = await v2_store.update_context(
+        runtime.db,
+        conversation_id=conversation["conversationId"],
+        tenant_id="customer-a",
+        business_user_id="biz-user-001",
+        equipment_id=None,
+        fixed_asset_no=None,
+        fault_code="E-STale",
+        context_version=1,
+        expected_context_version=99,
+    )
+    assert stale_write is None
+
+    async def conflict(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(v2_store, "update_context", conflict)
+    async with _client(runtime) as client:
+        response = await client.patch(
+            f"{BASE}/conversations/{conversation['conversationId']}/context",
+            json={"faultCode": "E-CONFLICT"},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "CONVERSATION_CONTEXT_CONFLICT"
+
+
+@pytest.mark.asyncio
 async def test_context_filters_actual_ragflow_doc_ids(runtime):
     await _insert_document(
         runtime.db,
@@ -385,6 +446,120 @@ async def test_context_filters_actual_ragflow_doc_ids(runtime):
 
     assert response.status_code == 200, response.text
     assert runtime.stub._last_completion_body["doc_ids"] == "doc-1"
+
+
+@pytest.mark.asyncio
+async def test_context_scope_does_not_match_equipment_alias_fields(runtime):
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-CANONICAL",
+        ragflow_id="doc-canonical",
+        equipment_id="EQ-CANONICAL",
+        fixed_asset_no="FA-CANONICAL",
+    )
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-ALIAS-MISMATCH",
+        ragflow_id="doc-alias-mismatch",
+        equipment_id="EQ-OTHER",
+        fixed_asset_no="EQ-CANONICAL",
+    )
+    # Keep the document mapping to exercise retrieval filtering, but do not
+    # let the deliberately inconsistent metadata become a registry fixture.
+    await runtime.db.execute(
+        "DELETE FROM ext_asset_registry WHERE equipment_id='EQ-OTHER'"
+    )
+    await runtime.db.commit()
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(
+            client, equipmentId="EQ-CANONICAL"
+        )
+        response = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={"clientMessageId": "canonical-scope", "question": "检查"},
+        )
+
+    assert response.status_code == 200
+    assert runtime.stub._last_completion_body["doc_ids"] == "doc-canonical"
+
+
+@pytest.mark.asyncio
+async def test_context_scope_fails_closed_on_missing_asset_fields(runtime):
+    await runtime.db.execute(
+        "INSERT INTO ext_asset_registry "
+        "(tenant_id, equipment_id, fixed_asset_no, asset_id) "
+        "VALUES ('customer-a', 'EQ-STRICT', 'FA-STRICT', 'ASSET-STRICT')"
+    )
+    await runtime.db.commit()
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-MISSING-FIXED",
+        ragflow_id="doc-missing-fixed",
+        equipment_id="EQ-STRICT",
+        fixed_asset_no=None,
+        asset_id="ASSET-STRICT",
+    )
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-MISSING-ASSET",
+        ragflow_id="doc-missing-asset",
+        equipment_id="EQ-STRICT",
+        fixed_asset_no="FA-STRICT",
+        asset_id=None,
+    )
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(
+            client,
+            equipmentId="EQ-STRICT",
+            fixedAssetNo="FA-STRICT",
+        )
+        response = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={"clientMessageId": "strict-context", "question": "检查"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "no_reliable_evidence"
+    assert runtime.stub._last_completion_body is None
+
+
+@pytest.mark.asyncio
+async def test_failed_quality_evaluation_is_not_sent_to_ragflow(runtime):
+    document = await _insert_document(
+        runtime.db,
+        external_id="DOC-QUALITY-FAILED",
+        ragflow_id="doc-quality-failed",
+        equipment_id="EQ-QUALITY-FAILED",
+        fixed_asset_no="FA-QUALITY-FAILED",
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    await runtime.db.execute(
+        """INSERT INTO parse_quality_evaluation
+           (tenant_id, source_system, external_document_id, source_version_id,
+            evaluation_state, parse_quality_status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 'completed', 'failed', ?, ?)""",
+        (
+            document.tenant_id,
+            document.source_system,
+            document.external_document_id,
+            document.source_version_id,
+            now,
+            now,
+        ),
+    )
+    await runtime.db.commit()
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(
+            client, equipmentId="EQ-QUALITY-FAILED"
+        )
+        response = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={"clientMessageId": "quality-filter", "question": "检查"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "no_reliable_evidence"
+    assert runtime.stub._last_completion_body is None
 
 
 @pytest.mark.asyncio
@@ -626,6 +801,59 @@ class _MultiDeltaStub(RAGFlowQueryStub):
         yield {"code": 0, "data": True}
 
 
+class _TransportFailureStub(RAGFlowQueryStub):
+    async def chat_completion_stream(
+        self,
+        chat_id: str,
+        question: str,
+        session_id: str | None = None,
+        doc_ids: list[str] | None = None,
+        request_id: str | None = None,
+    ):
+        del chat_id, question, session_id, doc_ids, request_id
+        if False:
+            yield {}
+        raise RAGFlowAPIError("stream transport failed", 0)
+
+
+class _ExplicitStreamOutcomeStub(RAGFlowQueryStub):
+    async def chat_completion_stream(
+        self,
+        chat_id: str,
+        question: str,
+        session_id: str | None = None,
+        doc_ids: list[str] | None = None,
+        request_id: str | None = None,
+    ):
+        del chat_id, question, session_id, doc_ids, request_id
+        yield {
+            "code": 0,
+            "data": {
+                "answer": "explicit stream answer",
+                "status": "no_reliable_evidence",
+                "final": False,
+            },
+        }
+        yield {
+            "code": 0,
+            "data": {
+                "answer": "",
+                "status": "no_reliable_evidence",
+                "final": True,
+                "reference": {
+                    "chunks": [
+                        {
+                            "id": "stream-chunk",
+                            "document_id": "doc-stream-state",
+                            "content": "evidence",
+                        }
+                    ]
+                },
+            },
+        }
+        yield {"code": 0, "data": True}
+
+
 @pytest.mark.asyncio
 async def test_v2_sse_forwards_upstream_deltas(runtime):
     await _insert_document(
@@ -666,6 +894,64 @@ async def test_v2_sse_forwards_upstream_deltas(runtime):
     assert '"content": "first second"' not in replay.text
     assert json_replay.status_code == 200
     assert "_streamDeltas" not in json_replay.json()
+
+
+@pytest.mark.asyncio
+async def test_v2_sse_transport_failure_is_stable_and_replayable(runtime):
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-STREAM-FAIL",
+        ragflow_id="doc-stream-fail",
+        equipment_id="EQ-STREAM-FAIL",
+        fixed_asset_no="FA-STREAM-FAIL",
+    )
+    formal_router._query_stub = _TransportFailureStub()
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(
+            client, equipmentId="EQ-STREAM-FAIL"
+        )
+        url = f"{BASE}/conversations/{conversation['conversationId']}/messages"
+        response = await client.post(
+            url,
+            headers={"Accept": "text/event-stream"},
+            json={"clientMessageId": "stream-failure", "question": "stream"},
+        )
+        replay = await client.post(
+            url,
+            headers={"Accept": "application/json"},
+            json={"clientMessageId": "stream-failure", "question": "stream"},
+        )
+
+    assert response.status_code == 200
+    assert "event: run.failed" in response.text
+    assert '"code": "RAGFLOW_UNAVAILABLE"' in response.text
+    assert replay.status_code == 503
+    assert replay.json()["code"] == "RAGFLOW_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_v2_stream_keeps_business_state_independent_of_citations(runtime):
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-STREAM-STATE",
+        ragflow_id="doc-stream-state",
+        equipment_id="EQ-STREAM-STATE",
+        fixed_asset_no="FA-STREAM-STATE",
+    )
+    formal_router._query_stub = _ExplicitStreamOutcomeStub()
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(
+            client, equipmentId="EQ-STREAM-STATE"
+        )
+        response = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            headers={"Accept": "text/event-stream"},
+            json={"clientMessageId": "stream-state", "question": "stream"},
+        )
+
+    assert response.status_code == 200
+    assert '"status": "no_reliable_evidence"' in response.text
+    assert "event: citation" in response.text
 
 
 @pytest.mark.asyncio
@@ -821,7 +1107,13 @@ async def test_ttl_refresh_increments_context_version_when_alias_changes(
             json={"clientMessageId": "ttl-refresh", "question": "question"},
         )
         detail = await client.get(f"{BASE}/conversations/{conversation_id}")
+    async with runtime.db.execute(
+        "SELECT asset_id FROM ext_v2_conversation WHERE conversation_id=?",
+        (conversation_id,),
+    ) as cursor:
+        snapshot = await cursor.fetchone()
 
     assert response.status_code == 200
     assert detail.json()["contextVersion"] == 2
     assert detail.json()["fixedAssetNo"] == "FA-NEW"
+    assert snapshot["asset_id"] == "FA-NEW"
