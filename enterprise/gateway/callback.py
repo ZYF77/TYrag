@@ -10,7 +10,7 @@ import hashlib
 import hmac
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -46,7 +46,9 @@ class CallbackEnvelope:
     event_type: str
     tenant_id: str
     payload: dict[str, Any]
-    occurred_at: str = ""
+    occurred_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
     schema_version: str = "m3.callback.v1"
 
     def __post_init__(self) -> None:
@@ -68,7 +70,7 @@ class CallbackEnvelope:
                 "eventId": self.event_id,
                 "eventType": self.event_type,
                 "tenantId": self.tenant_id,
-                "occurredAt": self.occurred_at or datetime.now(timezone.utc).isoformat(),
+                "occurredAt": self.occurred_at,
                 "payload": self.payload,
             }
         )

@@ -32,6 +32,17 @@ def test_envelope_is_stable_and_keeps_business_payload_separate():
     }
 
 
+def test_envelope_without_explicit_time_is_stable_across_serialization():
+    envelope = CallbackEnvelope(
+        event_id="evt-2",
+        event_type="message.failed",
+        tenant_id="tenant-a",
+        payload={"status": "failed"},
+    )
+
+    assert envelope.body == envelope.body
+
+
 def test_signature_accepts_current_payload_and_rejects_replay_or_tampering():
     payload = b'{"eventId":"evt-1"}'
     signature = sign_payload(payload, "callback-secret", 100)
