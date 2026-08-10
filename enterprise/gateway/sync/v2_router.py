@@ -168,6 +168,10 @@ def _error(status_code: int, code: str, request_id: str) -> JSONResponse:
         "DOCUMENT_METADATA_INVALID": "Metadata validation failed",
         "DOCUMENT_NOT_FOUND": "Document not found",
         "DOCUMENT_NOT_READY": "Document is not ready",
+        "DOCUMENT_REVIEW_REQUIRED": "Document quality review is required",
+        "DOCUMENT_SOURCE_NOT_FOUND": "Source file could not be retrieved",
+        "DOCUMENT_SYNC_FAILED": "Document synchronization failed",
+        "DOCUMENT_PARSE_FAILED": "Document parsing failed",
         "DOCUMENT_VERSION_CONFLICT": "Document version already has different content",
         "RAGFLOW_API_INCOMPATIBLE": "RAGFlow API is not compatible with the gateway",
         "RAGFLOW_UNAVAILABLE": "RAGFlow service is temporarily unavailable",
@@ -182,21 +186,35 @@ def _error(status_code: int, code: str, request_id: str) -> JSONResponse:
             "code": code,
             "message": messages.get(code, "Request failed"),
             "requestId": request_id,
-            "retryable": code in {"RAGFLOW_UNAVAILABLE", "ASSET_REGISTRY_UNAVAILABLE"},
+            "retryable": code in {
+                "RAGFLOW_UNAVAILABLE",
+                "ASSET_REGISTRY_UNAVAILABLE",
+                "DOCUMENT_SOURCE_NOT_FOUND",
+                "DOCUMENT_SYNC_FAILED",
+                "DOCUMENT_PARSE_FAILED",
+            },
         },
     )
 
 
 def _sync_error(exc: DocumentSyncError, request_id: str) -> JSONResponse:
+    external_code = {
+        "PARSER_APPLICATION_MISMATCH": "DOCUMENT_REVIEW_REQUIRED",
+        "PARSER_APPLICATION_UNVERIFIABLE": "DOCUMENT_REVIEW_REQUIRED",
+        "QUALITY_EVALUATION_ENQUEUE_FAILED": "RAGFLOW_UNAVAILABLE",
+    }.get(exc.code, exc.code)
     statuses = {
         "DOCUMENT_NOT_FOUND": 404,
         "DOCUMENT_NOT_READY": 409,
+        "DOCUMENT_REVIEW_REQUIRED": 409,
         "DOCUMENT_SOURCE_NOT_FOUND": 422,
         "DOCUMENT_HASH_MISMATCH": 422,
+        "DOCUMENT_SYNC_FAILED": 502,
+        "DOCUMENT_PARSE_FAILED": 422,
         "RAGFLOW_UNAVAILABLE": 503,
         "RAGFLOW_API_INCOMPATIBLE": 503,
     }
-    return _error(statuses.get(exc.code, 500), exc.code, request_id)
+    return _error(statuses.get(external_code, 500), external_code, request_id)
 
 
 def _status_payload(
