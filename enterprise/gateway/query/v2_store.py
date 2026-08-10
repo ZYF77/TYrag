@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS ext_v2_conversation (
     title TEXT NOT NULL DEFAULT 'New conversation',
     equipment_id TEXT,
     fixed_asset_no TEXT,
+    asset_id TEXT,
     fault_code TEXT,
     context_version INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'active',
@@ -109,6 +110,7 @@ async def ensure_schema(db) -> None:
     await db.executescript(SCHEMA)
     migrations = {
         "ext_v2_conversation": {
+            "asset_id": "TEXT",
             "registry_version": "TEXT",
             "context_resolved_at": "TEXT",
             "first_message_at": "TEXT",
@@ -161,6 +163,7 @@ async def create_conversation(
     equipment_id: str | None,
     fixed_asset_no: str | None,
     fault_code: str | None,
+    asset_id: str | None = None,
     registry_version: str | None = None,
     context_resolved_at: str | None = None,
 ) -> dict:
@@ -171,10 +174,10 @@ async def create_conversation(
     await db.execute(
         """INSERT INTO ext_v2_conversation
            (conversation_id, tenant_id, business_user_id, title,
-            equipment_id, fixed_asset_no, fault_code, context_version,
+            equipment_id, fixed_asset_no, asset_id, fault_code, context_version,
             status, ragflow_chat_id, ragflow_session_id, registry_version,
             context_resolved_at, first_message_at, created_at, last_message_at)
-           VALUES (?, ?, ?, 'New conversation', ?, ?, ?, ?, 'active',
+           VALUES (?, ?, ?, 'New conversation', ?, ?, ?, ?, ?, 'active',
                    NULL, NULL, ?, ?, NULL, ?, ?)""",
         (
             conversation_id,
@@ -182,6 +185,7 @@ async def create_conversation(
             business_user_id,
             equipment_id,
             fixed_asset_no,
+            asset_id,
             fault_code,
             context_version,
             registry_version,
@@ -254,27 +258,34 @@ async def update_context(
     fixed_asset_no: str | None,
     fault_code: str | None,
     context_version: int,
+    asset_id: str | None = None,
     registry_version: str | None = None,
     context_resolved_at: str | None = None,
-) -> dict:
-    await db.execute(
-        """UPDATE ext_v2_conversation
-           SET equipment_id=?, fixed_asset_no=?, fault_code=?, context_version=?,
-               registry_version=?, context_resolved_at=?
-           WHERE conversation_id=? AND tenant_id=? AND business_user_id=?""",
-        (
-            equipment_id,
-            fixed_asset_no,
-            fault_code,
-            context_version,
-            registry_version,
-            context_resolved_at,
-            conversation_id,
-            tenant_id,
-            business_user_id,
-        ),
-    )
+    expected_context_version: int | None = None,
+) -> dict | None:
+    query = """UPDATE ext_v2_conversation
+               SET equipment_id=?, fixed_asset_no=?, asset_id=?, fault_code=?,
+                   context_version=?, registry_version=?, context_resolved_at=?
+               WHERE conversation_id=? AND tenant_id=? AND business_user_id=?"""
+    params: list[object] = [
+        equipment_id,
+        fixed_asset_no,
+        asset_id,
+        fault_code,
+        context_version,
+        registry_version,
+        context_resolved_at,
+        conversation_id,
+        tenant_id,
+        business_user_id,
+    ]
+    if expected_context_version is not None:
+        query += " AND context_version=?"
+        params.append(expected_context_version)
+    cursor = await db.execute(query, tuple(params))
     await db.commit()
+    if cursor.rowcount != 1:
+        return None
     return await get_conversation(
         db,
         conversation_id=conversation_id,

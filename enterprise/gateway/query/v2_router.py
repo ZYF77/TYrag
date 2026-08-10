@@ -4,12 +4,14 @@ from __future__ import annotations
 import hashlib
 import json
 import asyncio
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import AsyncIterator
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+import httpx
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from enterprise.gateway.acl.schema import AclScope
@@ -37,6 +39,8 @@ from enterprise.gateway.query.formal_router import (
     _query_client,
     _sse,
 )
+from enterprise.gateway.quality.gate import enforce_quality_gate
+from enterprise.gateway.quality.models import get_latest_evaluation
 from enterprise.gateway.query.ragflow_client import RAGFlowAPIError
 from enterprise.gateway.query.source_access import source_response
 from enterprise.gateway.sync.models import ExtDocumentMap
@@ -147,13 +151,34 @@ async def _validate_context_response(
     if not any((equipment_id, fixed_asset_no, asset_id)):
         return None, None
     try:
-        return await resolve_asset(
+        resolved = await resolve_asset(
             db,
             tenant_id=tenant_id,
             equipment_id=equipment_id,
             fixed_asset_no=fixed_asset_no,
             asset_id=asset_id,
-        ), None
+        )
+        if resolved.tenant_id != tenant_id:
+            raise AssetRegistryConflict("Asset Registry tenant mismatch")
+        if not isinstance(resolved.equipment_id, str) or not resolved.equipment_id:
+            raise AssetRegistryInvalid("Asset Registry omitted equipmentId")
+        for supplied, canonical in (
+            (equipment_id, resolved.equipment_id),
+            (fixed_asset_no, resolved.fixed_asset_no),
+            (asset_id, resolved.asset_id),
+        ):
+            if supplied is not None and supplied != canonical:
+                raise AssetRegistryConflict("Asset identifiers do not agree")
+        for value in (
+            resolved.fixed_asset_no,
+            resolved.asset_id,
+            resolved.registry_version,
+        ):
+            if value is not None and not isinstance(value, str):
+                raise AssetRegistryInvalid("Asset Registry returned an invalid identity")
+        if not isinstance(resolved.resolved_at, str) or not resolved.resolved_at:
+            raise AssetRegistryUnavailable("Asset Registry omitted resolvedAt")
+        return resolved, None
     except AssetRegistryConflict:
         return None, _error(409, "CONVERSATION_CONTEXT_CONFLICT", "Equipment identifiers do not resolve to the same Asset Registry identity")
     except AssetRegistryInvalid:
@@ -161,6 +186,8 @@ async def _validate_context_response(
     except AssetRegistryUnavailable:
         return None, _error(503, "ASSET_REGISTRY_UNAVAILABLE", "Asset Registry is temporarily unavailable")
     except AssetRegistryError:
+        return None, _error(503, "ASSET_REGISTRY_UNAVAILABLE", "Asset Registry is temporarily unavailable")
+    except Exception:
         return None, _error(503, "ASSET_REGISTRY_UNAVAILABLE", "Asset Registry is temporarily unavailable")
 
 
@@ -187,6 +214,7 @@ async def create_conversation(
         business_user_id=principal.business_user_id,
         equipment_id=resolved.equipment_id if resolved else None,
         fixed_asset_no=resolved.fixed_asset_no if resolved else None,
+        asset_id=resolved.asset_id if resolved else None,
         fault_code=req.faultCode,
         registry_version=resolved.registry_version if resolved else None,
         context_resolved_at=resolved.resolved_at if resolved else None,
@@ -280,19 +308,26 @@ async def patch_context(
         if error:
             return error
         if canonical:
-            equipment_id, fixed_asset_no = (
+            equipment_id, fixed_asset_no, asset_id = (
                 canonical.equipment_id,
                 canonical.fixed_asset_no,
+                canonical.asset_id,
             )
             registry_version = canonical.registry_version
             context_resolved_at = canonical.resolved_at
         else:
-            equipment_id = fixed_asset_no = registry_version = context_resolved_at = None
+            equipment_id = fixed_asset_no = asset_id = registry_version = context_resolved_at = None
         changed = (
             equipment_id,
             fixed_asset_no,
+            asset_id,
             values["faultCode"],
-        ) != (row["equipment_id"], row["fixed_asset_no"], row["fault_code"])
+        ) != (
+            row["equipment_id"],
+            row["fixed_asset_no"],
+            row.get("asset_id"),
+            row["fault_code"],
+        )
         updated = await v2_store.update_context(
             db,
             conversation_id=conversation_id,
@@ -302,9 +337,17 @@ async def patch_context(
             fixed_asset_no=fixed_asset_no,
             fault_code=values["faultCode"],
             context_version=row["context_version"] + int(changed),
+            asset_id=asset_id,
             registry_version=registry_version,
             context_resolved_at=context_resolved_at,
+            expected_context_version=row["context_version"],
         )
+        if updated is None:
+            return _error(
+                409,
+                "CONVERSATION_CONTEXT_CONFLICT",
+                "Conversation context version changed",
+            )
     return _conversation_detail(updated)
 
 
@@ -414,27 +457,49 @@ async def _context_scope(
         return acl_scope, {}
     equipment = conversation["equipment_id"]
     fixed = conversation["fixed_asset_no"]
+    asset_id = conversation.get("asset_id")
     # A draft conversation is intentionally not a global query.  It can be
     # displayed and edited, but the first message must establish a canonical
     # Asset Registry identity.
     if not equipment:
         return AclScope.empty(acl_scope.policy_version), {}
     filtered: dict[str, ExtDocumentMap] = {}
+    quality_required = os.environ.get("ENTERPRISE_QUERY_QUALITY_REQUIRED", "true").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if os.environ.get("ENTERPRISE_TEST_MODE") == "1" and "ENTERPRISE_QUERY_QUALITY_REQUIRED" not in os.environ:
+        quality_required = False
     for internal_id, doc in resolver._docs.items():
-        aliases = {
-            value
-            for value in (
-                getattr(doc, "equipment_id", None),
-                getattr(doc, "fixed_asset_no", None),
-                doc.asset_id,
-            )
-            if value
-        }
-        if equipment not in aliases:
+        # Asset Registry canonical equipment is the identity boundary.  Do
+        # not treat a fixed-asset or asset alias as an equipment id: that can
+        # turn a metadata field mismatch into an unauthorized retrieval.
+        if doc.equipment_id != equipment:
             continue
-        if fixed and fixed not in aliases:
+        if fixed and doc.fixed_asset_no != fixed:
+            continue
+        if asset_id and doc.asset_id != asset_id:
+            continue
+        if doc.business_status != "active":
             continue
         if not doc.current_version:
+            continue
+        if not doc.ragflow_dataset_id or not doc.ragflow_document_id:
+            continue
+        evaluation = await get_latest_evaluation(
+            db,
+            doc.tenant_id,
+            doc.source_system,
+            doc.external_document_id,
+            doc.source_version_id,
+        )
+        if evaluation is not None:
+            quality_allowed, _ = enforce_quality_gate(evaluation)
+            if not quality_allowed:
+                continue
+        elif quality_required:
             continue
         filtered[internal_id] = doc
     if not filtered:
@@ -467,8 +532,8 @@ async def _refresh_context_snapshot(
                 datetime.now(timezone.utc)
                 - datetime.fromisoformat(resolved_at)
             ).total_seconds()
-            stale = age > ASSET_REGISTRY_TTL_SECONDS
-        except ValueError:
+            stale = age >= ASSET_REGISTRY_TTL_SECONDS
+        except (TypeError, ValueError):
             stale = True
     if not stale:
         return conversation
@@ -477,8 +542,13 @@ async def _refresh_context_snapshot(
             db,
             tenant_id=principal.tenant_id,
             equipment_id=conversation["equipment_id"],
-            fixed_asset_no=conversation.get("fixed_asset_no"),
         )
+        if resolved.tenant_id != principal.tenant_id:
+            raise AssetRegistryConflict("Asset Registry tenant mismatch")
+        if not isinstance(resolved.equipment_id, str) or not resolved.equipment_id:
+            raise AssetRegistryInvalid("Asset Registry omitted equipmentId")
+        if not isinstance(resolved.resolved_at, str) or not resolved.resolved_at:
+            raise AssetRegistryUnavailable("Asset Registry omitted resolvedAt")
     except AssetRegistryConflict:
         raise _FormalQueryError(
             "CONVERSATION_CONTEXT_STALE",
@@ -497,6 +567,18 @@ async def _refresh_context_snapshot(
             503,
             "Asset Registry is temporarily unavailable",
         ) from None
+    except AssetRegistryError:
+        raise _FormalQueryError(
+            "ASSET_REGISTRY_UNAVAILABLE",
+            503,
+            "Asset Registry is temporarily unavailable",
+        ) from None
+    except Exception:
+        raise _FormalQueryError(
+            "ASSET_REGISTRY_UNAVAILABLE",
+            503,
+            "Asset Registry is temporarily unavailable",
+        ) from None
     if resolved.equipment_id != conversation["equipment_id"]:
         raise _FormalQueryError(
             "CONVERSATION_CONTEXT_STALE",
@@ -505,6 +587,7 @@ async def _refresh_context_snapshot(
         )
     if (
         resolved.fixed_asset_no != conversation.get("fixed_asset_no")
+        or resolved.asset_id != conversation.get("asset_id")
         or resolved.registry_version != conversation.get("registry_version")
     ):
         conversation = await v2_store.update_context(
@@ -516,9 +599,17 @@ async def _refresh_context_snapshot(
             fixed_asset_no=resolved.fixed_asset_no,
             fault_code=conversation.get("fault_code"),
             context_version=conversation["context_version"] + 1,
+            asset_id=resolved.asset_id,
             registry_version=resolved.registry_version,
             context_resolved_at=resolved.resolved_at,
+            expected_context_version=conversation["context_version"],
         )
+        if conversation is None:
+            raise _FormalQueryError(
+                "CONVERSATION_CONTEXT_CONFLICT",
+                409,
+                "Conversation context version changed",
+            )
     return conversation
 
 
@@ -805,6 +896,7 @@ async def _stream_run_events(
     deltas: list[str] = []
     chunks: list[dict] = []
     citations: list[dict] = []
+    upstream_status: str | None = None
     status = "no_reliable_evidence"
     answer = NO_RELIABLE_EVIDENCE_ANSWER
     try:
@@ -822,6 +914,9 @@ async def _stream_run_events(
                     break
                 if not isinstance(data, dict):
                     continue
+                explicit_status = data.get("status")
+                if explicit_status in {"completed", "no_reliable_evidence", "failed"}:
+                    upstream_status = explicit_status
                 ragflow_session_id = data.get("session_id") or ragflow_session_id
                 reference = data.get("reference") or {}
                 raw_chunks = reference.get("chunks", []) if isinstance(reference, dict) else []
@@ -840,9 +935,13 @@ async def _stream_run_events(
                     (chat_id, ragflow_session_id, conversation_id, principal.tenant_id, principal.business_user_id),
                 )
                 await db.commit()
-            status = "completed" if accumulated.strip() else "no_reliable_evidence"
+            status = upstream_status or (
+                "completed" if accumulated.strip() else "no_reliable_evidence"
+            )
             citations = _external_citations(chunks, docs_by_internal_id, assistant_message_id)
-            answer = accumulated if status == "completed" else NO_RELIABLE_EVIDENCE_ANSWER
+            answer = accumulated
+            if status == "no_reliable_evidence" and not answer:
+                answer = NO_RELIABLE_EVIDENCE_ANSWER
         await v2_store.add_message(
             db,
             message_id=assistant_message_id,
@@ -891,12 +990,27 @@ async def _stream_run_events(
         else:
             code = "RAGFLOW_API_INCOMPATIBLE" if exc.status_code and 400 <= exc.status_code < 500 else "RAGFLOW_UNAVAILABLE"
             message = "Query engine unavailable"
-        status_code = 503 if code.endswith("INCOMPATIBLE") else (503 if code != "CONVERSATION_CONTEXT_STALE" else 409)
+        status_code = exc.status_code if isinstance(exc, _FormalQueryError) else 503
         await _save_failed_run(
             db, principal, conversation, req, run, assistant_message_id,
             code=code, status_code=status_code, message=message, content=accumulated,
         )
         yield _sse("run.failed", {"conversationId": conversation_id, "runId": run["run_id"], "code": code, "message": message})
+    except (httpx.HTTPError, asyncio.TimeoutError, ConnectionError, OSError):
+        await _save_failed_run(
+            db, principal, conversation, req, run, assistant_message_id,
+            code="RAGFLOW_UNAVAILABLE", status_code=503,
+            message="Query engine unavailable", content=accumulated,
+        )
+        yield _sse(
+            "run.failed",
+            {
+                "conversationId": conversation_id,
+                "runId": run["run_id"],
+                "code": "RAGFLOW_UNAVAILABLE",
+                "message": "Query engine unavailable",
+            },
+        )
     except Exception:
         await _save_failed_run(
             db, principal, conversation, req, run, assistant_message_id,
@@ -1025,5 +1139,5 @@ async def get_citation_source(
     )
     doc = await _citation_document_for_principal(db, principal, citation) if citation else None
     if doc is None:
-        return JSONResponse(status_code=404, content={"code": "CITATION_NOT_FOUND"})
+        return _error(404, "CITATION_NOT_FOUND", "Citation not found")
     return await source_response(request, doc)
