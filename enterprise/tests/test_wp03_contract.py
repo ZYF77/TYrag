@@ -22,17 +22,11 @@ from enterprise.gateway.sync.ragflow_document_client import (  # noqa: E402
 
 BASE_URL = os.environ.get("ENTERPRISE_RAGFLOW_BASE_URL", "")
 API_KEY = os.environ.get("ENTERPRISE_RAGFLOW_API_KEY", "")
-SKIP_REASON = (
-    "ENTERPRISE_RAGFLOW_BASE_URL/API_KEY not configured"
-    if not BASE_URL or not API_KEY
-    else ""
-)
-
-
-@pytest.mark.skipif(bool(SKIP_REASON), reason=SKIP_REASON)
 class TestWP03RAGFlowContract:
     @pytest.mark.asyncio
     async def test_list_chunks_returns_public_shape(self):
+        if not BASE_URL or not API_KEY:
+            pytest.fail("ENTERPRISE_RAGFLOW_BASE_URL/API_KEY are required for Integration")
         client = RAGFlowDocumentClient(
             base_url=BASE_URL,
             api_key=API_KEY,

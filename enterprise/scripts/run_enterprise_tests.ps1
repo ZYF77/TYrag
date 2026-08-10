@@ -1,6 +1,5 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('Contract', 'P0', 'Integration', 'WP03', 'All')]
     [string]$Profile = 'P0',
     [string]$PythonPath,
     [string]$NodePath,
@@ -17,6 +16,13 @@ class DependencyException : System.Exception {
 class ExternalEnvironmentException : System.Exception {
     ExternalEnvironmentException([string]$message) : base($message) {}
 }
+
+$AllowedProfiles = @('Contract', 'P0', 'Integration', 'WP03', 'All')
+if ($AllowedProfiles -notcontains $Profile) {
+    [Console]::Error.WriteLine("Invalid profile '$Profile'. Allowed profiles: $($AllowedProfiles -join ', ')")
+    exit 4
+}
+$Profile = @($AllowedProfiles | Where-Object { $_ -ieq $Profile })[0]
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $WebRoot = Join-Path $RepoRoot 'enterprise\web'
@@ -49,11 +55,83 @@ $DesiredExitCode = 0
 $PythonRuntime = $null
 $NodeRuntime = $null
 $RagflowBefore = @()
+$TrackedBefore = @()
+$GitCommit = $null
+$WorktreeDirty = $false
+$RagflowAfter = @()
+$RagflowGuardUnchanged = $false
 $LocationPushed = $false
+
+function Redact-SensitiveText {
+    param([AllowNull()][string]$Text)
+    if ($null -eq $Text) { return '' }
+    $redacted = $Text
+    foreach ($name in @(
+        'ENTERPRISE_RAGFLOW_API_KEY',
+        'ENTERPRISE_ASSET_REGISTRY_TOKEN',
+        'ENTERPRISE_SYNC_SERVICE_TOKEN',
+        'WP03_UNAUTHORIZED_USER_TOKEN',
+        'ENTERPRISE_REDIS_URL',
+        'RAGFLOW_API_KEY',
+        'JWT_SHARED_SECRET',
+        'S3_ACCESS_KEY',
+        'S3_SECRET_KEY',
+        'RAGFLOW_ADMIN_PASSWORD',
+        'Authorization',
+        'Cookie'
+    )) {
+        $secret = [Environment]::GetEnvironmentVariable($name)
+        if (-not [string]::IsNullOrWhiteSpace($secret)) {
+            $redacted = $redacted.Replace($secret, '<redacted>')
+        }
+    }
+    $redacted = [regex]::Replace(
+        $redacted,
+        '(?i)(Authorization\s*:\s*(?:Bearer|Basic)\s+)[^\s,;]+',
+        '$1<redacted>'
+    )
+    $redacted = [regex]::Replace(
+        $redacted,
+        '(?i)(["'']?(?:token|password|secret|api[_-]?key|accessToken|refreshToken|cookie|authorization)["'']?\s*[:=]\s*["'']?)[^"''&\s,}]+',
+        '$1<redacted>'
+    )
+    return $redacted
+}
+
+function Get-GitCommit {
+    $previousErrorAction = $ErrorActionPreference
+    $code = 0
+    try {
+        $ErrorActionPreference = 'SilentlyContinue'
+        $commitLines = @(& git -c core.excludesFile= -C $RepoRoot rev-parse HEAD 2>$null)
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorAction
+    }
+    if ($code -ne 0 -or $commitLines.Count -eq 0) {
+        throw 'unable to resolve current git commit'
+    }
+    return $commitLines[0].ToString().Trim()
+}
+
+function Get-WorktreeState {
+    $previousErrorAction = $ErrorActionPreference
+    $code = 0
+    try {
+        $ErrorActionPreference = 'SilentlyContinue'
+        $status = @(& git -c core.excludesFile= -C $RepoRoot status --porcelain=v1 --untracked-files=all 2>$null)
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorAction
+    }
+    if ($code -ne 0) { throw 'unable to read worktree status' }
+    return $status
+}
 
 function Write-Log {
     param([string]$Message)
-    $line = "{0} {1}" -f [DateTime]::UtcNow.ToString('o'), $Message
+    $safeMessage = Redact-SensitiveText -Text $Message
+    $line = "{0} {1}" -f [DateTime]::UtcNow.ToString('o'), $safeMessage
     Write-Host $line
     Add-Content -LiteralPath $LogPath -Value $line -Encoding utf8
 }
@@ -79,7 +157,7 @@ function Add-Step {
         name = $Name
         status = $Status
         exitCode = $ExitCode
-        detail = $Detail
+        detail = Redact-SensitiveText -Text $Detail
         junit = $JUnit
     })
 }
@@ -127,6 +205,16 @@ function Get-CodexResourceRoots {
             }
         } catch {
             # Some Codex helper processes do not expose their executable path.
+        }
+    }
+    foreach ($candidate in @(
+        [Environment]::GetEnvironmentVariable('CODEX_RUNTIME_ROOT'),
+        [Environment]::GetEnvironmentVariable('CODEX_DEPENDENCY_ROOT'),
+        (Join-Path ([Environment]::GetFolderPath('UserProfile')) '.cache\codex-runtimes\codex-primary-runtime\dependencies'),
+        (Join-Path $RepoRoot '..\..\..\..\.cache\codex-runtimes\codex-primary-runtime\dependencies')
+    )) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate) -and (Test-Path -LiteralPath $candidate -PathType Container)) {
+            $roots.Add((Resolve-Path -LiteralPath $candidate).Path)
         }
     }
     return @($roots | Select-Object -Unique)
@@ -177,7 +265,7 @@ function Invoke-Logged {
     )
     Write-Log "START $Label"
     & $FilePath @Arguments 2>&1 | ForEach-Object {
-        $line = $_.ToString()
+        $line = Redact-SensitiveText -Text $_.ToString()
         Write-Host $line
         Add-Content -LiteralPath $LogPath -Value $line -Encoding utf8
     }
@@ -228,17 +316,18 @@ function Invoke-PytestStep {
     $code = Invoke-Logged -FilePath $PythonRuntime.path -Arguments $arguments -Label $Name
     $counts = Read-JUnitCounts -Path $junit
     if ($null -eq $counts) {
-        Add-Step -Name $Name -Status failed -ExitCode $code -Detail 'JUnit report was not produced' -JUnit $junit
-        Set-ExitCode 1
+        Add-Step -Name $Name -Status failed -ExitCode 4 -Detail 'JUnit report was not produced' -JUnit $junit
+        Set-ExitCode 4
         return
     }
     $detail = "tests=$($counts.tests) failures=$($counts.failures) errors=$($counts.errors) skipped=$($counts.skipped)"
     if ($code -ne 0 -or $counts.tests -eq 0 -or $counts.failures -gt 0 -or $counts.errors -gt 0 -or $counts.skipped -gt 0) {
-        Add-Step -Name $Name -Status failed -ExitCode $code -Detail $detail -JUnit $junit
-        Set-ExitCode 1
-    } else {
-        Add-Step -Name $Name -Status passed -ExitCode 0 -Detail $detail -JUnit $junit
+        $stepCode = if ($code -in @(3, 4, 5)) { 4 } else { 1 }
+        Add-Step -Name $Name -Status failed -ExitCode $stepCode -Detail $detail -JUnit $junit
+        Set-ExitCode $stepCode
+        return
     }
+    Add-Step -Name $Name -Status passed -ExitCode 0 -Detail $detail -JUnit $junit
 }
 
 function Invoke-CommandStep {
@@ -307,8 +396,8 @@ function Invoke-VitestStep {
     $code = Invoke-Logged -FilePath $NodeRuntime.path -Arguments $arguments -Label 'vitest'
     $counts = Read-JUnitCounts -Path $junit
     if ($null -eq $counts) {
-        Add-Step -Name vitest -Status failed -ExitCode $code -Detail 'JUnit report was not produced' -JUnit $junit
-        Set-ExitCode 1
+        Add-Step -Name vitest -Status failed -ExitCode 4 -Detail 'JUnit report was not produced' -JUnit $junit
+        Set-ExitCode 4
         return
     }
     $detail = "tests=$($counts.tests) failures=$($counts.failures) errors=$($counts.errors) skipped=$($counts.skipped)"
@@ -322,6 +411,7 @@ function Invoke-VitestStep {
 
 function Get-RagflowState {
     $previousErrorAction = $ErrorActionPreference
+    $code = 0
     try {
         $ErrorActionPreference = 'Continue'
         $output = @(& git -c core.excludesFile= -C $RepoRoot status --porcelain=v1 --untracked-files=all -- ragflow 2>$null)
@@ -331,6 +421,144 @@ function Get-RagflowState {
     }
     if ($code -ne 0) { throw 'unable to read ragflow git status' }
     return $output
+}
+
+function Get-EnvironmentValue {
+    param([string]$Name)
+    return [Environment]::GetEnvironmentVariable($Name)
+}
+
+function Test-UrlWithScheme {
+    param(
+        [string]$Value,
+        [string[]]$Schemes
+    )
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $false }
+    $uri = $null
+    if (-not [Uri]::TryCreate($Value, [UriKind]::Absolute, [ref]$uri)) { return $false }
+    return $uri.Scheme -in $Schemes -and -not [string]::IsNullOrWhiteSpace($uri.Host)
+}
+
+function Assert-IntegrationEnvironment {
+    $required = @(
+        'ENTERPRISE_RAGFLOW_BASE_URL',
+        'ENTERPRISE_RAGFLOW_API_KEY',
+        'ENTERPRISE_ASSET_REGISTRY_BASE_URL',
+        'ENTERPRISE_REDIS_URL',
+        'GATEWAY_URL',
+        'S3_ENDPOINT',
+        'S3_ACCESS_KEY',
+        'S3_SECRET_KEY',
+        'S3_BUCKET',
+        'ENTERPRISE_SYNC_SERVICE_TOKEN',
+        'JWT_SHARED_SECRET'
+    )
+    $missing = @($required | Where-Object { [string]::IsNullOrWhiteSpace((Get-EnvironmentValue -Name $_)) })
+    if ($missing.Count -gt 0) {
+        throw [ExternalEnvironmentException]::new(
+            "Integration environment is missing required variables: $($missing -join ', ')"
+        )
+    }
+    $invalidUrls = @()
+    if (-not (Test-UrlWithScheme -Value (Get-EnvironmentValue 'ENTERPRISE_RAGFLOW_BASE_URL') -Schemes @('http', 'https'))) {
+        $invalidUrls += 'ENTERPRISE_RAGFLOW_BASE_URL'
+    }
+    if (-not (Test-UrlWithScheme -Value (Get-EnvironmentValue 'ENTERPRISE_ASSET_REGISTRY_BASE_URL') -Schemes @('http', 'https'))) {
+        $invalidUrls += 'ENTERPRISE_ASSET_REGISTRY_BASE_URL'
+    }
+    if (-not (Test-UrlWithScheme -Value (Get-EnvironmentValue 'ENTERPRISE_REDIS_URL') -Schemes @('redis', 'rediss'))) {
+        $invalidUrls += 'ENTERPRISE_REDIS_URL'
+    }
+    if (-not (Test-UrlWithScheme -Value (Get-EnvironmentValue 'GATEWAY_URL') -Schemes @('http', 'https'))) {
+        $invalidUrls += 'GATEWAY_URL'
+    }
+    if (-not (Test-UrlWithScheme -Value (Get-EnvironmentValue 'S3_ENDPOINT') -Schemes @('http', 'https'))) {
+        $invalidUrls += 'S3_ENDPOINT'
+    }
+    if ($invalidUrls.Count -gt 0) {
+        throw [ExternalEnvironmentException]::new(
+            "Integration environment contains invalid URL variables: $($invalidUrls -join ', ')"
+        )
+    }
+
+    # The WP-04 script uses these names. The values remain process-local and are
+    # never written to runner output or artifacts.
+    [Environment]::SetEnvironmentVariable(
+        'RAGFLOW_BASE_URL',
+        (Get-EnvironmentValue 'ENTERPRISE_RAGFLOW_BASE_URL'),
+        'Process'
+    )
+    [Environment]::SetEnvironmentVariable(
+        'RAGFLOW_API_KEY',
+        (Get-EnvironmentValue 'ENTERPRISE_RAGFLOW_API_KEY'),
+        'Process'
+    )
+}
+
+function Invoke-IntegrationProbeStep {
+    $probe = Join-Path $RepoRoot 'enterprise\scripts\probe_integration_environment.py'
+    if (-not (Test-Path -LiteralPath $probe -PathType Leaf)) {
+        throw [DependencyException]::new('integration environment probe script is missing')
+    }
+    $code = Invoke-Logged -FilePath $PythonRuntime.path -Arguments @($probe) -Label 'integration-environment-probe'
+    if ($code -eq 0) {
+        Add-Step -Name integration-environment-probe -Status passed -ExitCode 0 `
+            -Detail 'RAGFlow, Asset Registry resolver, and Redis/Valkey cross-instance probe passed'
+    } elseif ($code -eq 3) {
+        Add-Step -Name integration-environment-probe -Status blocked -ExitCode 3 `
+            -Detail 'RAGFlow, Asset Registry, or Redis/Valkey integration environment is unavailable'
+        Set-ExitCode 3
+        throw [ExternalEnvironmentException]::new(
+            'RAGFlow, Asset Registry, or Redis/Valkey integration environment is unavailable'
+        )
+    } elseif ($code -eq 4) {
+        Add-Step -Name integration-environment-probe -Status failed -ExitCode 4 `
+            -Detail 'integration environment probe tool failed'
+        Set-ExitCode 4
+    } else {
+        Add-Step -Name integration-environment-probe -Status failed -ExitCode 1 `
+            -Detail 'integration environment probe failed'
+        Set-ExitCode 1
+    }
+}
+
+function Assert-NoIntegrationBypassTests {
+    $liveTests = @(
+        'enterprise/tests/test_query_contract.py',
+        'enterprise/tests/test_wp03_contract.py',
+        'enterprise/tests/test_v2_redis_integration.py'
+    )
+    $bypassPattern = '(?im)pytest\.(?:skip|xfail)|pytest\.mark\.(?:skip|xfail)|unittest\.mock|from\s+unittest\s+import\s+mock|(?:MagicMock|AsyncMock|Mock)\('
+    foreach ($relativePath in $liveTests) {
+        $path = Join-Path $RepoRoot $relativePath
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw [DependencyException]::new("required Integration test is missing: $relativePath")
+        }
+        $source = Get-Content -LiteralPath $path -Raw -Encoding utf8
+        if ($source -match $bypassPattern) {
+            throw [DependencyException]::new("Integration test contains skip/xfail/mock bypass: $relativePath")
+        }
+    }
+}
+
+function Invoke-WP04E2EStep {
+    $script = Join-Path $RepoRoot 'enterprise\scripts\run_wp04_phase2_e2e.py'
+    if (-not (Test-Path -LiteralPath $script -PathType Leaf)) {
+        throw [DependencyException]::new('WP-04 E2E runner script is missing')
+    }
+    $code = Invoke-Logged -FilePath $PythonRuntime.path -Arguments @($script) -Label 'wp04-e2e'
+    if ($code -eq 0) {
+        Add-Step -Name wp04-e2e -Status passed -ExitCode 0 -Detail 'real WP-04 phase2 E2E passed'
+    } elseif ($code -eq 2) {
+        Add-Step -Name wp04-e2e -Status blocked -ExitCode 2 -Detail 'WP-04 E2E formal prerequisite is blocked'
+        Set-ExitCode 2
+    } elseif ($code -eq 3) {
+        Add-Step -Name wp04-e2e -Status blocked -ExitCode 3 -Detail 'WP-04 E2E integration environment is unavailable'
+        Set-ExitCode 3
+    } else {
+        Add-Step -Name wp04-e2e -Status failed -ExitCode 1 -Detail 'real WP-04 phase2 E2E failed'
+        Set-ExitCode 1
+    }
 }
 
 function Write-AggregateJUnit {
@@ -357,8 +585,14 @@ function Write-AggregateJUnit {
 
 function Write-Reports {
     $finishedUtc = [DateTime]::UtcNow
+    $evidenceSummary = @($Steps | ForEach-Object {
+        "{0}:{1}({2})" -f $_.name, $_.status, $_.exitCode
+    }) -join '; '
     $summary = [ordered]@{
         profile = $Profile
+        gitCommit = $GitCommit
+        worktreeDirty = [bool]$WorktreeDirty
+        passed = ($DesiredExitCode -eq 0)
         startedAt = $StartedUtc.ToString('o')
         finishedAt = $finishedUtc.ToString('o')
         success = ($DesiredExitCode -eq 0)
@@ -374,22 +608,27 @@ function Write-Reports {
             python = if ($null -eq $PythonRuntime) { $null } else { $PythonRuntime.source }
             node = if ($null -eq $NodeRuntime) { $null } else { $NodeRuntime.source }
         }
-        liveTestsIncluded = ($Profile -in @('Integration', 'WP03', 'All'))
+        liveTestsIncluded = ($Profile -in @('Integration', 'All'))
         persistence = [ordered]@{
             backend = 'sqlite'
             postgresIntegration = 'not_applicable'
             reason = 'no enterprise PostgreSQL runtime call path'
         }
-        p1TestsRequested = ($Profile -eq 'All')
-        p1ExpectedTests = @(
-            'enterprise/tests/test_v2_callback_contract.py',
-            'enterprise/tests/test_v2_attachment_contract.py'
-        )
+        p1TestsRequested = $false
+        p1Status = 'planned'
+        evidenceSummary = $evidenceSummary
+        evidence = [ordered]@{
+            stepCount = $Steps.Count
+            worktreeChangeCountBefore = $TrackedBefore.Count
+            ragflowGuardUnchanged = [bool]$RagflowGuardUnchanged
+            summary = $evidenceSummary
+        }
         steps = @($Steps)
         artifacts = [ordered]@{
             log = $LogPath
             aggregateJunit = $AggregateJUnitPath
             acceptance = $AcceptancePath
+            summary = $SummaryPath
         }
     }
     $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $SummaryPath -Encoding utf8
@@ -398,15 +637,17 @@ function Write-Reports {
     $lines.Add('# Enterprise Test Acceptance')
     $lines.Add('')
     $lines.Add("- Profile: $Profile")
+    $lines.Add("- Git commit: $GitCommit")
+    $lines.Add("- Worktree dirty (tracked or untracked): $WorktreeDirty")
     $lines.Add("- Started UTC: $($StartedUtc.ToString('o'))")
     $lines.Add("- Finished UTC: $($finishedUtc.ToString('o'))")
     $lines.Add("- Exit code: $DesiredExitCode")
     $lines.Add('- Exit codes: 0 accepted; 1 test/acceptance; 2 formal samples/local dependency blocked; 3 external environment; 4 runner/report/ragflow guard')
     $lines.Add("- Result: $(if ($DesiredExitCode -eq 0) { 'ACCEPTED' } else { 'NOT ACCEPTED' })")
-    $lines.Add("- Live tests included: $($Profile -in @('Integration', 'WP03', 'All'))")
+    $lines.Add("- Live tests included: $($Profile -in @('Integration', 'All'))")
     $lines.Add('- Persistence backend: sqlite')
     $lines.Add('- PostgreSQL integration: N/A (no enterprise PostgreSQL runtime call path)')
-    $lines.Add("- P1 callback/attachment tests requested: $($Profile -eq 'All')")
+    $lines.Add('- P1 status: planned (no P1 implementation tests executed)')
     $lines.Add('')
     $lines.Add('| Step | Status | Exit | Detail |')
     $lines.Add('|---|---:|---:|---|')
@@ -420,6 +661,11 @@ function Write-Reports {
 
 try {
     Write-Log "enterprise acceptance profile=$Profile"
+    $GitCommit = Get-GitCommit
+    $TrackedBefore = @(Get-WorktreeState)
+    $WorktreeDirty = $TrackedBefore.Count -gt 0
+    Add-Step -Name git-state -Status passed -ExitCode 0 `
+        -Detail "commit captured; trackedWorktreeDirty=$WorktreeDirty"
     $RagflowBefore = @(Get-RagflowState)
     Add-Step -Name ragflow-guard-before -Status passed -ExitCode 0 -Detail "captured $($RagflowBefore.Count) pre-existing path changes"
 
@@ -435,7 +681,13 @@ try {
         }
     Write-Log "Python runtime source=$($PythonRuntime.source)"
 
-    $needsNode = $Profile -in @('P0', 'Integration', 'All')
+    if ($Profile -in @('Integration', 'All')) {
+        Assert-IntegrationEnvironment
+        Add-Step -Name live-environment -Status passed -ExitCode 0 `
+            -Detail 'required RAGFlow, Asset Registry, Redis/Valkey, and WP-04 environment is configured'
+    }
+
+    $needsNode = $Profile -in @('P0', 'Integration', 'WP03', 'All')
     if ($needsNode) {
         $NodeRuntime = Resolve-Runtime -Explicit $NodePath -RuntimeName 'Node.js' `
             -PathNames @('node', 'node.exe') `
@@ -458,38 +710,14 @@ try {
     [Environment]::SetEnvironmentVariable('TMPDIR', $RunTempDir, 'Process')
 
     $importCheck = 'import aiosqlite, fastapi, httpx, jsonschema, jwt, pydantic, pytest, pytest_asyncio, yaml'
+    if ($Profile -in @('Integration', 'All')) {
+        $importCheck += ', boto3, Cryptodome'
+    }
     $dependencyCode = Invoke-Logged -FilePath $PythonRuntime.path -Arguments @('-c', $importCheck) -Label 'python-dependencies'
     if ($dependencyCode -ne 0) {
         throw [DependencyException]::new('Python test dependencies are missing; use enterprise/requirements-test.txt explicitly')
     }
     Add-Step -Name python-dependencies -Status passed -ExitCode 0 -Detail 'required modules import successfully'
-
-    if ($Profile -in @('Integration', 'All')) {
-        $liveBase = [Environment]::GetEnvironmentVariable('ENTERPRISE_RAGFLOW_BASE_URL')
-        $assetRegistryBase = [Environment]::GetEnvironmentVariable('ENTERPRISE_ASSET_REGISTRY_BASE_URL')
-        $redisUrl = [Environment]::GetEnvironmentVariable('ENTERPRISE_REDIS_URL')
-        $liveKeyPresent = -not [string]::IsNullOrWhiteSpace(
-            [Environment]::GetEnvironmentVariable('ENTERPRISE_RAGFLOW_API_KEY')
-        )
-        $liveUri = $null
-        $liveBaseValid = -not [string]::IsNullOrWhiteSpace($liveBase) -and
-            [Uri]::TryCreate($liveBase, [UriKind]::Absolute, [ref]$liveUri) -and
-            $liveUri.Scheme -in @('http', 'https')
-        $assetRegistryUri = $null
-        $assetRegistryValid = -not [string]::IsNullOrWhiteSpace($assetRegistryBase) -and
-            [Uri]::TryCreate($assetRegistryBase, [UriKind]::Absolute, [ref]$assetRegistryUri) -and
-            $assetRegistryUri.Scheme -in @('http', 'https')
-        $redisUri = $null
-        $redisValid = -not [string]::IsNullOrWhiteSpace($redisUrl) -and
-            [Uri]::TryCreate($redisUrl, [UriKind]::Absolute, [ref]$redisUri) -and
-            $redisUri.Scheme -in @('redis', 'rediss')
-        if (-not $liveBaseValid -or -not $liveKeyPresent -or -not $assetRegistryValid -or -not $redisValid) {
-            throw [ExternalEnvironmentException]::new(
-                'Integration requires valid ENTERPRISE_RAGFLOW_BASE_URL/API_KEY, ENTERPRISE_ASSET_REGISTRY_BASE_URL, and ENTERPRISE_REDIS_URL'
-            )
-        }
-        Add-Step -Name live-environment -Status passed -ExitCode 0 -Detail 'RAGFlow, Asset Registry, and Redis configuration is present'
-    }
 
     if ($needsNode) {
         $tsc = Join-Path $WebRoot 'node_modules\typescript\bin\tsc'
@@ -502,19 +730,25 @@ try {
         Add-Step -Name node-runtime -Status passed -ExitCode 0 -Detail "runtime source=$($NodeRuntime.source)"
     }
 
+    if ($Profile -in @('Integration', 'All')) {
+        Assert-NoIntegrationBypassTests
+        Invoke-IntegrationProbeStep
+    }
+
     if ($Profile -eq 'Contract') {
         Invoke-PytestStep -Name contract-static `
             -TestArguments @('enterprise/tests/test_v2_contract_static.py', '-q') `
             -JUnitName 'contract-static.xml'
     }
 
-    if ($Profile -in @('P0', 'Integration', 'All')) {
+    if ($Profile -in @('P0', 'Integration', 'WP03', 'All')) {
         $offlineTests = @(
             'enterprise/tests', '-q',
             '--ignore=enterprise/tests/test_query_contract.py',
             '--ignore=enterprise/tests/test_wp03_contract.py',
             '--ignore=enterprise/tests/validate_mapping_strategies.py',
-            '--ignore=enterprise/tests/test_v2_redis_integration.py'
+            '--ignore=enterprise/tests/test_v2_redis_integration.py',
+            '--ignore=enterprise/tests/test_enterprise_runner.py'
         )
         Invoke-PytestStep -Name pytest-offline -TestArguments $offlineTests -JUnitName 'pytest-offline.xml'
 
@@ -529,53 +763,42 @@ try {
         $liveTests = @(
             'enterprise/tests/test_query_contract.py',
             'enterprise/tests/test_wp03_contract.py',
-            'enterprise/tests/validate_mapping_strategies.py',
             'enterprise/tests/test_v2_redis_integration.py',
             '-q'
         )
         Invoke-PytestStep -Name pytest-live-integration -TestArguments $liveTests -JUnitName 'pytest-live.xml'
+        Invoke-WP04E2EStep
     }
 
-    if ($Profile -eq 'WP03') {
-        Invoke-PytestStep -Name wp03-offline `
-            -TestArguments @(
-                'enterprise/tests/test_wp03_evaluation.py',
-                'enterprise/tests/test_wp03_phase2.py',
-                'enterprise/tests/test_wp03_acceptance.py',
-                '-q'
-            ) `
-            -JUnitName 'wp03-offline.xml'
-    }
-
-    if ($Profile -in @('WP03', 'All')) {
+    if ($Profile -eq 'WP03' -or $Profile -eq 'All') {
+        if ($Profile -eq 'WP03') {
+            Invoke-PytestStep -Name wp03-offline `
+                -TestArguments @(
+                    'enterprise/tests/test_wp03_evaluation.py',
+                    'enterprise/tests/test_wp03_phase2.py',
+                    'enterprise/tests/test_wp03_acceptance.py',
+                    '-q'
+                ) `
+                -JUnitName 'wp03-offline.xml'
+        }
         Invoke-WP03AcceptanceStep
     }
     if ($Profile -eq 'All') {
-        $p1Tests = @(
-            'enterprise/tests/test_v2_callback_contract.py',
-            'enterprise/tests/test_v2_attachment_contract.py'
-        )
-        $missingP1 = @($p1Tests | Where-Object { -not (Test-Path -LiteralPath (Join-Path $RepoRoot $_) -PathType Leaf) })
-        if ($missingP1.Count -gt 0) {
-            Add-Step -Name pytest-p1-callback-attachment -Status failed -ExitCode 1 `
-                -Detail "required P1 test files are missing: $($missingP1 -join ', ')"
-            Set-ExitCode 1
-        } else {
-            Invoke-PytestStep -Name pytest-p1-callback-attachment `
-                -TestArguments @($p1Tests + '-q') -JUnitName 'pytest-p1.xml'
-        }
+        Add-Step -Name p1-status -Status blocked -ExitCode 2 `
+            -Detail 'P1 callback and attachment capabilities remain planned; no implementation tests executed'
+        Set-ExitCode 2
     }
 } catch [DependencyException] {
     Write-Log "DEPENDENCY ERROR: $($_.Exception.Message)"
-    Add-Step -Name dependency-check -Status blocked -ExitCode 2 -Detail $_.Exception.Message
-    Set-ExitCode 2
+    Add-Step -Name dependency-check -Status failed -ExitCode 4 -Detail $_.Exception.Message
+    Set-ExitCode 4
 } catch [ExternalEnvironmentException] {
     Write-Log "EXTERNAL ENVIRONMENT ERROR: $($_.Exception.Message)"
     Add-Step -Name live-environment -Status blocked -ExitCode 3 -Detail $_.Exception.Message
     Set-ExitCode 3
 } catch {
     Write-Log "RUNNER ERROR: $($_.Exception.Message)"
-    Add-Step -Name runner -Status blocked -ExitCode 4 -Detail $_.Exception.Message
+    Add-Step -Name runner -Status failed -ExitCode 4 -Detail $_.Exception.Message
     Set-ExitCode 4
 } finally {
     if ($LocationPushed) { Pop-Location }
@@ -583,13 +806,16 @@ try {
         $ragflowAfter = @(Get-RagflowState)
         $guardDiff = @(Compare-Object -ReferenceObject $RagflowBefore -DifferenceObject $ragflowAfter)
         if ($guardDiff.Count -gt 0) {
+            $RagflowGuardUnchanged = $false
             Write-Log 'RAGFLOW GUARD VIOLATION: git status changed under ragflow/'
             Add-Step -Name ragflow-guard-after -Status failed -ExitCode 4 -Detail 'git status changed under ragflow/'
             Set-ExitCode 4
         } else {
+            $RagflowGuardUnchanged = $true
             Add-Step -Name ragflow-guard-after -Status passed -ExitCode 0 -Detail 'git status under ragflow/ is unchanged'
         }
     } catch {
+        $RagflowGuardUnchanged = $false
         Write-Log "RAGFLOW GUARD ERROR: $($_.Exception.Message)"
         Add-Step -Name ragflow-guard-after -Status failed -ExitCode 4 -Detail 'unable to verify ragflow git status'
         Set-ExitCode 4

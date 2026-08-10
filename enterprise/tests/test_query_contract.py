@@ -21,15 +21,11 @@ from enterprise.gateway.query.ragflow_client import (  # noqa: E402
 BASE_URL = os.environ.get("ENTERPRISE_RAGFLOW_BASE_URL", "")
 API_KEY = os.environ.get("ENTERPRISE_RAGFLOW_API_KEY", "")
 
-SKIP_REASON = ""
-if not BASE_URL or not API_KEY:
-    SKIP_REASON = "ENTERPRISE_RAGFLOW_BASE_URL/API_KEY not configured"
-
-
-@pytest.mark.skipif(bool(SKIP_REASON), reason=SKIP_REASON)
 class TestRAGFlowQueryContract:
     @pytest.mark.asyncio
     async def test_document_parse_chat_and_citation_contract(self):
+        if not BASE_URL or not API_KEY:
+            pytest.fail("ENTERPRISE_RAGFLOW_BASE_URL/API_KEY are required for Integration")
         client = RAGFlowQueryClient(api_key=API_KEY)
         dataset_name = f"contract-{uuid.uuid4().hex[:12]}"
         chat_name = f"contract-chat-{uuid.uuid4().hex[:12]}"

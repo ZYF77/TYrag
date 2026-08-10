@@ -667,7 +667,7 @@ def main() -> int:
             )
         token = admin_token()
         key = fetch_api_key(token, ADMIN_EMAIL)
-    print(f"ragflow api key: {key[:14]}... (masked)")
+    print("ragflow api key resolved (value omitted)")
     commit = git_commit()
     ragflow_version_value = ragflow_version(key)
     test_time = datetime.now(timezone.utc).isoformat()

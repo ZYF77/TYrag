@@ -16,6 +16,7 @@ from jsonschema.validators import validator_for
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = Path(__file__).parent / "fixtures" / "v2_contract_expectations.json"
 HTTP_METHODS = {"get", "put", "post", "delete", "patch", "options", "head", "trace"}
+OPERATION_CONTRACT_NAMES = {"integration-openapi.yaml", "integration-openapi-v2.yaml"}
 
 
 def _expectations() -> dict[str, Any]:
@@ -95,6 +96,23 @@ def _schema_nodes(
             yield from _schema_nodes(schema[keyword], base_path, f"{location}.{keyword}", seen_refs)
 
 
+def _is_camel_case(name: str) -> bool:
+    return re.fullmatch(r"[a-z][A-Za-z0-9]*", name) is not None
+
+
+def _is_snake_case(name: str) -> bool:
+    return re.fullmatch(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*", name) is not None
+
+
+def _openapi_contracts() -> Iterator[tuple[Path, dict[str, Any]]]:
+    for path in sorted((ROOT / "contracts").glob("*.y*ml")):
+        if path.name not in OPERATION_CONTRACT_NAMES:
+            continue
+        document = _load_document(path)
+        if isinstance(document.get("openapi"), str):
+            yield path, document
+
+
 def _request_schemas(
     spec_path: Path, spec: dict[str, Any]
 ) -> Iterator[tuple[Any, Path, str]]:
@@ -159,6 +177,45 @@ def test_v2_operation_ids_are_present_unique_and_statuses_are_valid():
     assert not invalid, f"missing or invalid x-status: {invalid}"
 
 
+def test_all_openapi_documents_have_unique_operation_ids_and_valid_statuses():
+    allowed = set(_expectations()["allowedStatuses"])
+    checked = 0
+    for path, spec in _openapi_contracts():
+        operations = list(_operations(spec))
+        if not operations:
+            continue
+        checked += 1
+        operation_ids = [operation.get("operationId") for _, _, operation in operations]
+        assert all(isinstance(value, str) and value.strip() for value in operation_ids), path
+        assert len(operation_ids) == len(set(operation_ids)), path
+        invalid = [
+            f"{method.upper()} {route}: {operation.get('x-status')!r}"
+            for route, method, operation in operations
+            if operation.get("x-status") not in allowed
+        ]
+        assert not invalid, f"{path.relative_to(ROOT)} has invalid x-status: {invalid}"
+    assert checked, "no OpenAPI contract documents were found"
+
+
+def test_v2_all_x_status_values_are_allowed():
+    _, spec = _contract()
+    allowed = set(_expectations()["allowedStatuses"])
+    invalid: list[str] = []
+
+    def visit(value: Any, location: str) -> None:
+        if isinstance(value, dict):
+            if "x-status" in value and value["x-status"] not in allowed:
+                invalid.append(f"{location}.x-status={value['x-status']!r}")
+            for key, child in value.items():
+                visit(child, f"{location}.{key}")
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                visit(child, f"{location}[{index}]")
+
+    visit(spec, "openapi")
+    assert not invalid, f"v2 contract has invalid x-status values: {invalid}"
+
+
 def test_v2_wire_identifiers_do_not_expose_ragflow_internals():
     spec_path, spec = _contract()
     forbidden = {
@@ -182,13 +239,17 @@ def test_v2_wire_identifiers_do_not_expose_ragflow_internals():
             if isinstance(properties, dict):
                 for name in properties:
                     normalized = re.sub(r"[^a-z0-9]", "", name.lower())
-                    if normalized in forbidden:
+                    if normalized in forbidden or (
+                        normalized.startswith("ragflow") and normalized.endswith("id")
+                    ):
                         violations.append(f"{location}.properties.{name}")
             if value.get("in") in {"path", "query", "header", "cookie"}:
                 name = value.get("name")
                 if isinstance(name, str):
                     normalized = re.sub(r"[^a-z0-9]", "", name.lower())
-                    if normalized in forbidden:
+                    if normalized in forbidden or (
+                        normalized.startswith("ragflow") and normalized.endswith("id")
+                    ):
                         violations.append(f"{location}.name={name}")
             for key, child in value.items():
                 visit(child, f"{location}.{key}", base_path)
@@ -214,6 +275,52 @@ def test_v2_json_request_objects_are_strict():
     assert not violations, (
         "every object in a v2 request schema must set additionalProperties: false; "
         f"violations: {violations}"
+    )
+
+
+def test_v2_public_object_dtos_are_strict():
+    spec_path, spec = _contract()
+    violations: list[str] = []
+    for name, schema in spec.get("components", {}).get("schemas", {}).items():
+        for node, _, location in _schema_nodes(
+            schema, spec_path, f"components.schemas.{name}"
+        ):
+            is_object = node.get("type") == "object" or "properties" in node
+            if is_object and node.get("additionalProperties") is not False:
+                violations.append(location)
+    assert not violations, (
+        "every public v2 object DTO must set additionalProperties: false; "
+        f"violations: {violations}"
+    )
+
+
+def test_v2_wire_names_are_camel_case_except_metadata():
+    spec_path, spec = _contract()
+    violations: list[str] = []
+    for name, schema in spec.get("components", {}).get("schemas", {}).items():
+        for node, _, location in _schema_nodes(
+            schema, spec_path, f"components.schemas.{name}"
+        ):
+            properties = node.get("properties", {})
+            if not isinstance(properties, dict):
+                continue
+            metadata_context = name == "DocumentMetadata" or "DocumentMetadata" in location
+            for property_name in properties:
+                valid = (
+                    _is_snake_case(property_name)
+                    if metadata_context
+                    else _is_camel_case(property_name)
+                )
+                if not valid:
+                    violations.append(f"{location}.properties.{property_name}")
+
+    metadata_schema = _load_document(ROOT / "contracts" / "metadata-schema.json")
+    for property_name in metadata_schema.get("properties", {}):
+        if not _is_snake_case(property_name):
+            violations.append(f"metadata-schema.json.properties.{property_name}")
+    assert not violations, (
+        "v2 envelope properties must be camelCase and metadata properties must be "
+        f"canonical snake_case: {violations}"
     )
 
 

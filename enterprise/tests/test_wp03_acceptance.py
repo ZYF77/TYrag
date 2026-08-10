@@ -296,7 +296,9 @@ def test_formal_sample_hard_gates_cover_metrics_and_negative_refusal(tmp_path):
 
 def test_unified_runner_profiles_and_strict_junit_contract():
     source = (ROOT / "enterprise/scripts/run_enterprise_tests.ps1").read_text(encoding="utf-8")
-    assert "'Contract', 'P0', 'Integration', 'WP03', 'All'" in source
+    assert "$AllowedProfiles = @('Contract', 'P0', 'Integration', 'WP03', 'All')" in source
+    assert "-Profile WP03" in (ROOT / "enterprise/scripts/wp03/README.md").read_text(encoding="utf-8")
+    assert "Invoke-WP03AcceptanceStep" in source
     assert "$counts.tests -eq 0" in source
     assert "$counts.skipped -gt 0" in source
     assert "Get-RagflowState" in source
