@@ -7,6 +7,7 @@ import hmac
 import asyncio
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -41,7 +42,7 @@ class MemoryReplayStore:
         self._values: dict[str, float] = {}
         self._lock = threading.Lock()
 
-    async def remember(self, key: str, now: float) -> bool:
+    async def reserve(self, key: str, now: float) -> bool:
         with self._lock:
             expired = [item for item, expiry in self._values.items() if expiry <= now]
             for item in expired:
@@ -50,6 +51,10 @@ class MemoryReplayStore:
                 return False
             self._values[key] = now + REPLAY_RETENTION_SECONDS
             return True
+
+    async def remember(self, key: str, now: float) -> bool:
+        """Backward-compatible alias for the replay reservation operation."""
+        return await self.reserve(key, now)
 
 
 def _resp_command(*parts: str) -> bytes:
@@ -104,7 +109,7 @@ class RedisReplayStore:
         self.prefix = prefix
         self.timeout = timeout
 
-    async def remember(self, key: str, now: float) -> bool:
+    async def reserve(self, key: str, now: float) -> bool:
         del now
         try:
             reader, writer = await asyncio.wait_for(
@@ -146,6 +151,10 @@ class RedisReplayStore:
         except Exception as exc:
             raise ReplayStoreUnavailable("Shared replay store unavailable") from exc
 
+    async def remember(self, key: str, now: float) -> bool:
+        """Backward-compatible alias for the replay reservation operation."""
+        return await self.reserve(key, now)
+
 
 def _default_replay_store():
     configured = os.environ.get("ENTERPRISE_SERVICE_REPLAY_STORE", "").strip().lower()
@@ -176,18 +185,28 @@ def _epoch(value: object | None) -> float | None:
     if isinstance(value, datetime):
         dt = value
     elif isinstance(value, (int, float)):
-        return float(value)
+        result = float(value)
+        if not math.isfinite(result):
+            raise ValueError("credential time must be finite")
+        return result
     elif isinstance(value, str):
         text = value.strip()
         try:
-            return float(text)
+            result = float(text)
         except ValueError:
             dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        else:
+            if not math.isfinite(result):
+                raise ValueError("credential time must be finite")
+            return result
     else:
         raise ValueError("credential time must be epoch seconds or RFC3339")
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt.timestamp()
+    result = dt.timestamp()
+    if not math.isfinite(result):
+        raise ValueError("credential time must be finite")
+    return result
 
 
 @dataclass(frozen=True, order=True)
@@ -198,6 +217,10 @@ class CredentialBinding:
     source_system: str
 
     def __post_init__(self) -> None:
+        if not isinstance(self.tenant_id, str) or not isinstance(
+            self.source_system, str
+        ):
+            raise ValueError("credential binding values must be strings")
         tenant_id = self.tenant_id.strip()
         source_system = self.source_system.strip()
         if not tenant_id or not source_system:
@@ -223,8 +246,14 @@ class CredentialIdentity:
     valid_until: float | datetime | str | None = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.credential_id, str) or not isinstance(
+            self.key_id, str
+        ) or not isinstance(self.secret, str):
+            raise ValueError("credential_id, key_id and secret must be strings")
         credential_id = self.credential_id.strip()
         key_id = self.key_id.strip()
+        if not isinstance(self.status, str):
+            raise ValueError("credential status must be a string")
         status = self.status.strip().lower()
         if not credential_id or not key_id or not self.secret:
             raise ValueError("credential_id, key_id and secret are required")
@@ -248,11 +277,11 @@ class CredentialIdentity:
         object.__setattr__(self, "valid_until", valid_until)
 
     def is_usable_at(self, now: float) -> bool:
-        if self.status == "revoked":
+        if not math.isfinite(now) or self.status == "revoked":
             return False
         if self.valid_from is not None and now < self.valid_from:
             return False
-        if self.valid_until is not None and now > self.valid_until:
+        if self.valid_until is not None and now >= self.valid_until:
             return False
         return self.status in {"active", "previous"}
 
@@ -330,18 +359,14 @@ def _credential_from_dict(value: object) -> CredentialIdentity:
             raise ValueError("allowedBindings entry must be an object")
         bindings.add(
             CredentialBinding(
-                tenant_id=str(raw.get("tenantId", raw.get("tenant_id", ""))),
-                source_system=str(
-                    raw.get("sourceSystem", raw.get("source_system", ""))
-                ),
+                tenant_id=raw.get("tenantId", raw.get("tenant_id")),
+                source_system=raw.get("sourceSystem", raw.get("source_system")),
             )
         )
     return CredentialIdentity(
-        credential_id=str(
-            value.get("credentialId", value.get("credential_id", ""))
-        ),
-        key_id=str(value.get("keyId", value.get("key_id", ""))),
-        secret=str(value.get("secret", "")),
+        credential_id=value.get("credentialId", value.get("credential_id")),
+        key_id=value.get("keyId", value.get("key_id")),
+        secret=value.get("secret"),
         allowed_bindings=frozenset(bindings),
         status=str(value.get("status", "active")),
         valid_from=value.get("validFrom", value.get("valid_from")),
@@ -353,6 +378,8 @@ def _validate_identities(
     identities: Iterable[CredentialIdentity],
 ) -> tuple[CredentialIdentity, ...]:
     validated = tuple(identities)
+    if not all(isinstance(identity, CredentialIdentity) for identity in validated):
+        raise ValueError("credential entries must be CredentialIdentity instances")
     key_ids = [identity.key_id for identity in validated]
     if len(key_ids) != len(set(key_ids)):
         raise ValueError("keyId values must be unique")
@@ -387,6 +414,7 @@ class ServiceAuthenticator:
         self._replay_cache: dict[str, float] = {}
         self._replay_lock = threading.Lock()
         self._replay_store = replay_store
+        self._replay_store_explicit = replay_store is not None
 
     @property
     def _enabled(self) -> bool:
@@ -472,9 +500,21 @@ class ServiceAuthenticator:
             store = _default_replay_store()
             self._replay_store = store
         if isinstance(store, MemoryReplayStore):
-            return self._remember_signature(replay_key, now)
+            if (
+                not self._replay_store_explicit
+                and os.environ.get("ENTERPRISE_TEST_MODE") != "1"
+            ):
+                raise ReplayStoreUnavailable(
+                    "Memory replay protection is only allowed in explicit test mode"
+                )
+            if not self._remember_signature(replay_key, now):
+                return False
+            return await store.reserve(replay_key, now)
         try:
-            return await store.remember(replay_key, now)
+            reserve = getattr(store, "reserve", None)
+            if reserve is None:
+                reserve = store.remember
+            return await reserve(replay_key, now)
         except ReplayStoreUnavailable:
             raise
         except Exception as exc:
@@ -541,21 +581,28 @@ class ServiceAuthenticator:
 
         timestamp = request.headers.get("X-TY-Timestamp", "").strip()
         key_id = request.headers.get("X-TY-Key-Id", "").strip()
-        signature = request.headers.get("X-TY-Signature", "").strip().lower()
+        signature = request.headers.get("X-TY-Signature", "").strip()
         if not timestamp and not key_id and not signature:
             return self.authenticate(None)
         if not timestamp or not key_id or not signature:
             raise _http_error(
                 401, "AUTH_SIGNATURE_MISSING", "HMAC signature headers required"
             )
-        try:
-            request_time = int(timestamp)
-        except ValueError:
+        if (
+            len(signature) != 67
+            or not signature.startswith("v1=")
+            or any(char not in "0123456789abcdef" for char in signature[3:])
+        ):
+            raise _http_error(
+                401, "AUTH_SIGNATURE_INVALID", "Invalid request signature"
+            )
+        if len(timestamp) != 10 or any(char < "0" or char > "9" for char in timestamp):
             raise _http_error(
                 401, "AUTH_TIMESTAMP_INVALID", "Invalid request timestamp"
-            ) from None
+            )
+        request_time = int(timestamp)
         current_time = time.time() if now is None else float(now)
-        if abs(current_time - request_time) > TIMESTAMP_WINDOW_SECONDS:
+        if not math.isfinite(current_time) or abs(current_time - request_time) > TIMESTAMP_WINDOW_SECONDS:
             raise _http_error(
                 401, "AUTH_TIMESTAMP_INVALID", "Invalid request timestamp"
             )
@@ -566,8 +613,13 @@ class ServiceAuthenticator:
                 401, "AUTH_SIGNATURE_INVALID", "Invalid request signature"
             )
         if not identity.is_usable_at(current_time):
+            code = (
+                "AUTH_KEY_REVOKED"
+                if identity.status == "revoked"
+                else "AUTH_CREDENTIAL_INACTIVE"
+            )
             raise _http_error(
-                401, "AUTH_CREDENTIAL_INACTIVE", "Credential is not active"
+                401, code, "Credential is not active"
             )
 
         body = await request.body()
@@ -584,6 +636,12 @@ class ServiceAuthenticator:
         if not hmac.compare_digest(expected.encode("ascii"), signature.encode("ascii")):
             raise _http_error(
                 401, "AUTH_SIGNATURE_INVALID", "Invalid request signature"
+            )
+
+        binding = await self._request_binding(request, body)
+        if binding not in identity.allowed_bindings:
+            raise _http_error(
+                403, "AUTH_BINDING_DENIED", "Credential binding is not allowed"
             )
 
         replay_key = hashlib.sha256(
@@ -605,11 +663,6 @@ class ServiceAuthenticator:
                 401, "AUTH_REPLAY_DETECTED", "Request replay detected"
             )
 
-        binding = await self._request_binding(request, body)
-        if binding not in identity.allowed_bindings:
-            raise _http_error(
-                403, "AUTH_BINDING_DENIED", "Credential binding is not allowed"
-            )
         return ServicePrincipal(
             source_system=binding.source_system,
             credential_id=identity.credential_id,

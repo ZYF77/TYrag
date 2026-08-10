@@ -17,6 +17,8 @@ from starlette.requests import Request
 from enterprise.gateway.auth.service_auth import (
     CredentialBinding,
     CredentialIdentity,
+    MemoryReplayStore,
+    RedisReplayStore,
     ServiceAuthenticator,
     canonical_request,
     sign_request,
@@ -257,6 +259,20 @@ async def test_timestamp_window_and_ten_minute_replay_cache():
 
 
 @pytest.mark.asyncio
+async def test_explicit_memory_fixture_reserves_across_auth_instances():
+    store = MemoryReplayStore()
+    first = ServiceAuthenticator(identities=[_identity()], replay_store=store)
+    second = ServiceAuthenticator(identities=[_identity()], replay_store=store)
+
+    await first.authenticate_request(_request(body=_body()), credentials=None, now=NOW)
+    with pytest.raises(HTTPException) as exc:
+        await second.authenticate_request(
+            _request(body=_body()), credentials=None, now=NOW
+        )
+    assert exc.value.detail["code"] == "AUTH_REPLAY_DETECTED"
+
+
+@pytest.mark.asyncio
 async def test_production_replay_store_failure_fails_closed(monkeypatch):
     monkeypatch.setenv("ENTERPRISE_TEST_MODE", "0")
     monkeypatch.setenv("ENTERPRISE_SERVICE_REPLAY_STORE", "redis")
@@ -316,7 +332,50 @@ async def test_previous_key_grace_and_revocation():
         await revoked_auth.authenticate_request(
             _request(body=_body()), credentials=None, now=NOW
         )
+    assert exc.value.detail["code"] == "AUTH_KEY_REVOKED"
+
+
+@pytest.mark.asyncio
+async def test_credential_expiry_is_exclusive_and_old_key_id_is_rejected():
+    expired = _identity(valid_until=NOW)
+    with pytest.raises(HTTPException) as exc:
+        await ServiceAuthenticator(identities=[expired]).authenticate_request(
+            _request(body=_body()), credentials=None, now=NOW
+        )
     assert exc.value.detail["code"] == "AUTH_CREDENTIAL_INACTIVE"
+
+    auth = ServiceAuthenticator(identities=[_identity()])
+    with pytest.raises(HTTPException) as exc:
+        await auth.authenticate_request(
+            _request(body=_body(), key_id="key-old"), credentials=None, now=NOW
+        )
+    assert exc.value.detail["code"] == "AUTH_SIGNATURE_INVALID"
+
+
+@pytest.mark.asyncio
+async def test_invalid_timestamp_and_signature_wire_values_are_rejected():
+    request = _request(body=_body())
+
+    async def receive():
+        return {"type": "http.request", "body": _body(), "more_body": False}
+
+    invalid = Request(
+        {
+            **request.scope,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"x-ty-timestamp", b"+1800000000"),
+                (b"x-ty-key-id", b"key-active"),
+                (b"x-ty-signature", b"v1=" + b"0" * 64),
+            ],
+        },
+        receive,
+    )
+    with pytest.raises(HTTPException) as exc:
+        await ServiceAuthenticator(identities=[_identity()]).authenticate_request(
+            invalid, credentials=None, now=NOW
+        )
+    assert exc.value.detail["code"] == "AUTH_TIMESTAMP_INVALID"
 
 
 def test_existing_bearer_authentication_remains_compatible(monkeypatch):
@@ -366,6 +425,16 @@ def test_credential_identity_parses_server_side_json(monkeypatch):
         {CredentialBinding("tenant-a", "EAM")}
     )
     assert "secret" not in repr(identities[0]).lower()
+
+
+def test_production_default_replay_store_is_never_memory(monkeypatch):
+    monkeypatch.setenv("ENTERPRISE_TEST_MODE", "0")
+    monkeypatch.delenv("ENTERPRISE_SERVICE_REPLAY_STORE", raising=False)
+    monkeypatch.delenv("ENTERPRISE_REDIS_URL", raising=False)
+
+    store = service_auth_module._default_replay_store()
+
+    assert isinstance(store, RedisReplayStore)
 
 
 @pytest.mark.asyncio

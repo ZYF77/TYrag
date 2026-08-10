@@ -24,7 +24,7 @@ async def test_redis_replay_reservation_is_shared_between_instances():
     second = RedisReplayStore(url, prefix=prefix)
     key = uuid.uuid4().hex
     try:
-        assert await first.remember(key, 0) is True
-        assert await second.remember(key, 0) is False
+        assert await first.reserve(key, 0) is True
+        assert await second.reserve(key, 0) is False
     except ReplayStoreUnavailable as exc:
         pytest.fail(f"Redis/Valkey replay integration unavailable: {exc}")
