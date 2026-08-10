@@ -5,6 +5,13 @@ import type {
   FileSyncItem,
   ErrorResponse,
 } from '../types';
+import type {
+  ConversationDetail,
+  ConversationSummary,
+  DocumentOperation,
+  Message,
+  Citation as V2Citation,
+} from '../v2Types';
 
 const BASE = '/enterprise/api/v1';
 
@@ -490,3 +497,338 @@ export const handlers = [
     return HttpResponse.json(fileSyncItems);
   }),
 ];
+
+// ---- v2 Harness fixtures -------------------------------------------------
+// These handlers are deliberately separate from the v1 compatibility fixtures.
+// They only expose the frozen v2 external response shape.
+
+const V2_BASE = '/enterprise/api/v2';
+const v2Documents = new Map<string, DocumentOperation>();
+const v2DocumentPolls = new Map<string, number>();
+const v2DocumentPayloadHashes = new Map<string, string>();
+const v2Conversations = new Map<string, { detail: ConversationDetail; messages: Message[] }>();
+const v2Runs = new Map<string, { result: V2MessageRunResult; messages: Message[]; question: string; pending: boolean }>();
+
+const canonicalJson = (value: unknown): string => {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    return `{${Object.keys(value as Record<string, unknown>)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+};
+
+interface V2MessageRunResult {
+  conversationId: string;
+  clientMessageId: string;
+  runId: string;
+  messageId: string;
+  answer: string;
+  status: 'completed' | 'no_reliable_evidence' | 'failed';
+  citations: V2Citation[];
+  replayed: boolean;
+}
+
+const v2Citation: V2Citation = {
+  citationId: 'v2-cit-001',
+  sourceType: 'document',
+  title: 'Harness maintenance manual',
+  externalDocumentId: 'HARNESS-DOC-001',
+  sourceVersionId: 'v1',
+  pageNo: 3,
+  bbox: { x1: 0.1, y1: 0.2, x2: 0.8, y2: 0.4 },
+  assetId: null,
+  excerpt: '检查液压油位并确认维护步骤。',
+  recordType: null,
+  recordId: null,
+};
+
+function v2Now(): string {
+  return new Date().toISOString();
+}
+
+function v2Error(code: string, message: string, status: number, retryable = false): Response {
+  return HttpResponse.json(
+    {
+      code,
+      message,
+      requestId: `v2-${code.toLowerCase()}-${Date.now()}`,
+      retryable,
+    },
+    { status },
+  );
+}
+
+function v2AuthError(request: Request): Response | null {
+  const token = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '') ?? '';
+  if (token.toLowerCase().includes('401') || token.toLowerCase().includes('invalid')) {
+    return v2Error('AUTH_TOKEN_INVALID', '登录已过期，请重新注入运行期 Bearer。', 401);
+  }
+  return null;
+}
+
+function v2ConversationDetail(id: string, body: { equipmentId?: string | null; fixedAssetNo?: string | null; faultCode?: string | null }): ConversationDetail {
+  const now = v2Now();
+  const hasContext = Boolean(body.equipmentId || body.fixedAssetNo || body.faultCode);
+  return {
+    conversationId: id,
+    title: 'Harness 会话',
+    status: 'active',
+    equipmentId: body.equipmentId ?? null,
+    fixedAssetNo: body.fixedAssetNo ?? null,
+    faultCode: body.faultCode ?? null,
+    contextVersion: hasContext ? 1 : 0,
+    lastMessageAt: now,
+    createdAt: now,
+    context: {
+      equipmentId: body.equipmentId ?? null,
+      fixedAssetNo: body.fixedAssetNo ?? null,
+      faultCode: body.faultCode ?? null,
+      contextVersion: hasContext ? 1 : 0,
+      registryVersion: hasContext ? 'mock-registry-v1' : null,
+    },
+  };
+}
+
+function v2ScenarioError(value: string): Response | null {
+  if (value.includes('401')) return v2Error('AUTH_TOKEN_INVALID', 'Authentication token is invalid', 401);
+  if (value.includes('403')) return v2Error('ACL_DENIED', 'Access denied', 403);
+  if (value.includes('409')) return v2Error('CONVERSATION_CONTEXT_STALE', 'Conversation context is stale', 409);
+  if (value.includes('422')) return v2Error('VALIDATION_ERROR', 'Request validation failed', 422);
+  if (value.includes('503')) return v2Error('RAGFLOW_UNAVAILABLE', 'RAGFlow service is temporarily unavailable', 503, true);
+  return null;
+}
+
+function v2Stream(
+  result: V2MessageRunResult,
+  includeFailure: boolean,
+): Response {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    async start(controller) {
+      const send = (event: string, data: unknown) => {
+        controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+      };
+      send('run.started', {
+        conversationId: result.conversationId,
+        clientMessageId: result.clientMessageId,
+        runId: result.runId,
+        replayed: result.replayed,
+      });
+      await delay(10);
+      if (includeFailure) {
+        send('run.failed', {
+          conversationId: result.conversationId,
+          runId: result.runId,
+          code: 'RAGFLOW_UNAVAILABLE',
+          message: 'RAGFlow service is temporarily unavailable',
+        });
+        controller.close();
+        return;
+      }
+      if (result.answer) {
+        send('answer.delta', { conversationId: result.conversationId, runId: result.runId, content: result.answer.slice(0, Math.ceil(result.answer.length / 2)) });
+        await delay(10);
+        send('answer.delta', { conversationId: result.conversationId, runId: result.runId, content: result.answer.slice(Math.ceil(result.answer.length / 2)) });
+      }
+      for (const citation of result.citations) {
+        await delay(10);
+        send('citation', citation);
+      }
+      send('answer.completed', {
+        conversationId: result.conversationId,
+        runId: result.runId,
+        messageId: result.messageId,
+        status: result.status,
+        citations: result.citations,
+      });
+      controller.close();
+    },
+  });
+  return new Response(stream, {
+    headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
+  });
+}
+
+const v2Handlers = [
+  http.post(`${V2_BASE}/documents`, async ({ request }) => {
+    const authError = v2AuthError(request);
+    if (authError) return authError;
+    const body = (await request.json()) as { eventId?: string; externalDocumentId?: string; sourceVersionId?: string; sha256?: string; tenantId?: string; sourceSystem?: string; metadata?: Record<string, unknown> };
+    const scenario = v2ScenarioError(body.externalDocumentId ?? body.eventId ?? '');
+    if (scenario) return scenario;
+    if (!body.sha256 || !/^[0-9a-fA-F]{64}$/.test(body.sha256) || !body.metadata) {
+      return v2Error('DOCUMENT_METADATA_INVALID', 'Metadata validation failed', 422);
+    }
+    const externalDocumentId = body.externalDocumentId ?? 'HARNESS-DOC-001';
+    const payloadHash = canonicalJson(body);
+    const previousPayloadHash = body.eventId ? v2DocumentPayloadHashes.get(body.eventId) : undefined;
+    if (previousPayloadHash !== undefined && previousPayloadHash !== payloadHash) {
+      return v2Error('EVENT_PAYLOAD_CONFLICT', 'The eventId was already used with a different payload', 409);
+    }
+    const operation: DocumentOperation = {
+      operationId: body.eventId ?? `op-${Date.now()}`,
+      externalDocumentId,
+      sourceVersionId: body.sourceVersionId ?? 'v1',
+      status: 'received',
+      stage: 'accepted',
+      deduplicated: v2Documents.has(externalDocumentId),
+      businessStatus: 'active',
+      currentVersion: true,
+      eventStatus: 'accepted',
+      updatedAt: v2Now(),
+    };
+    v2Documents.set(externalDocumentId, operation);
+    if (body.eventId) v2DocumentPayloadHashes.set(body.eventId, payloadHash);
+    v2DocumentPolls.set(externalDocumentId, 0);
+    return HttpResponse.json(operation, { status: 202 });
+  }),
+
+  http.get(`${V2_BASE}/documents/sync-status`, ({ request }) => {
+    const authError = v2AuthError(request);
+    if (authError) return authError;
+    return HttpResponse.json({ items: [...v2Documents.values()], nextCursor: null, hasMore: false });
+  }),
+
+  http.get(`${V2_BASE}/documents/:externalDocumentId/status`, ({ params, request }) => {
+    const authError = v2AuthError(request);
+    if (authError) return authError;
+    const id = String(params.externalDocumentId);
+    const scenario = v2ScenarioError(id);
+    if (scenario) return scenario;
+    const operation = v2Documents.get(id);
+    if (!operation) return v2Error('DOCUMENT_NOT_FOUND', 'Document not found', 404);
+    const polls = (v2DocumentPolls.get(id) ?? 0) + 1;
+    v2DocumentPolls.set(id, polls);
+    if (polls >= 2 && operation.status !== 'ready') {
+      operation.status = 'ready';
+      operation.stage = 'complete';
+      operation.eventStatus = 'processed';
+      operation.updatedAt = v2Now();
+    }
+    return HttpResponse.json(operation);
+  }),
+
+  http.post(`${V2_BASE}/conversations`, async ({ request }) => {
+    const authError = v2AuthError(request);
+    if (authError) return authError;
+    const body = (await request.json()) as { equipmentId?: string | null; fixedAssetNo?: string | null; faultCode?: string | null };
+    const scenario = v2ScenarioError(`${body.equipmentId ?? ''}${body.faultCode ?? ''}`);
+    if (scenario) return scenario;
+    const id = `v2-conv-${Date.now()}`;
+    const detail = v2ConversationDetail(id, body);
+    v2Conversations.set(id, { detail, messages: [] });
+    return HttpResponse.json(detail, { status: 201 });
+  }),
+
+  http.get(`${V2_BASE}/conversations`, ({ request }) => {
+    const authError = v2AuthError(request);
+    if (authError) return authError;
+    const items: ConversationSummary[] = [...v2Conversations.values()].map(({ detail }) => ({ ...detail }));
+    return HttpResponse.json({ items, nextCursor: null, hasMore: false });
+  }),
+
+  http.get(`${V2_BASE}/conversations/:conversationId`, ({ params, request }) => {
+    const authError = v2AuthError(request);
+    if (authError) return authError;
+    const id = String(params.conversationId);
+    const record = v2Conversations.get(id);
+    if (!record) return v2Error('CONVERSATION_NOT_FOUND', 'Conversation not found', 404);
+    return HttpResponse.json(record.detail);
+  }),
+
+  http.patch(`${V2_BASE}/conversations/:conversationId/context`, async ({ params, request }) => {
+    const authError = v2AuthError(request);
+    if (authError) return authError;
+    const body = (await request.json()) as { equipmentId?: string | null; fixedAssetNo?: string | null; faultCode?: string | null };
+    const scenario = v2ScenarioError(`${body.equipmentId ?? ''}${body.faultCode ?? ''}`);
+    if (scenario) return scenario;
+    const record = v2Conversations.get(String(params.conversationId));
+    if (!record) return v2Error('CONVERSATION_NOT_FOUND', 'Conversation not found', 404);
+    const old = record.detail;
+    const next = {
+      equipmentId: body.equipmentId === undefined ? old.equipmentId : body.equipmentId,
+      fixedAssetNo: body.fixedAssetNo === undefined ? old.fixedAssetNo : body.fixedAssetNo,
+      faultCode: body.faultCode === undefined ? old.faultCode : body.faultCode,
+    };
+    const changed = next.equipmentId !== old.equipmentId || next.fixedAssetNo !== old.fixedAssetNo || next.faultCode !== old.faultCode;
+    const contextVersion = old.contextVersion + (changed ? 1 : 0);
+    const detail: ConversationDetail = {
+      ...old,
+      ...next,
+      contextVersion,
+      context: { ...old.context, ...next, contextVersion, registryVersion: next.equipmentId ? 'mock-registry-v1' : null },
+    };
+    record.detail = detail;
+    return HttpResponse.json(detail);
+  }),
+
+  http.get(`${V2_BASE}/conversations/:conversationId/messages`, ({ params, request }) => {
+    const authError = v2AuthError(request);
+    if (authError) return authError;
+    const record = v2Conversations.get(String(params.conversationId));
+    if (!record) return v2Error('CONVERSATION_NOT_FOUND', 'Conversation not found', 404);
+    return HttpResponse.json({ items: record.messages, nextCursor: null, hasMore: false });
+  }),
+
+  http.post(`${V2_BASE}/conversations/:conversationId/messages`, async ({ params, request }) => {
+    const authError = v2AuthError(request);
+    if (authError) return authError;
+    const id = String(params.conversationId);
+    const record = v2Conversations.get(id);
+    if (!record) return v2Error('CONVERSATION_NOT_FOUND', 'Conversation not found', 404);
+    const body = (await request.json()) as { clientMessageId?: string; question?: string };
+    const question = body.question ?? '';
+    const scenario = v2ScenarioError(question);
+    if (scenario) return scenario;
+    if (!body.clientMessageId || !question) return v2Error('VALIDATION_ERROR', 'Request validation failed', 422);
+    const runKey = `${id}:${body.clientMessageId}`;
+    const existing = v2Runs.get(runKey);
+    if (existing) {
+      if (existing.question !== question) {
+        return v2Error('MESSAGE_PAYLOAD_CONFLICT', 'The clientMessageId was already used with a different question', 409);
+      }
+      if (existing.pending) {
+        existing.pending = false;
+        return HttpResponse.json({ ...existing.result, status: 'running', replayed: true }, { status: 202 });
+      }
+      const replayed = { ...existing.result, replayed: true };
+      if ((request.headers.get('accept') ?? '').includes('text/event-stream')) return v2Stream(replayed, false);
+      return HttpResponse.json(replayed);
+    }
+    const noEvidence = question.toLowerCase().includes('noevidence');
+    const answer = noEvidence ? '未找到可靠依据，无法回答。' : `Harness answer: ${question}`;
+    const citations = noEvidence ? [] : [v2Citation];
+    const result: V2MessageRunResult = {
+      conversationId: id,
+      clientMessageId: body.clientMessageId,
+      runId: `run-${Date.now()}`,
+      messageId: `message-${Date.now()}`,
+      answer,
+      status: noEvidence ? 'no_reliable_evidence' : 'completed',
+      citations,
+      replayed: false,
+    };
+    const userMessage: Message = { messageId: `${result.messageId}-user`, role: 'user', content: question, status: 'completed', citations: [], createdAt: v2Now() };
+    const assistantMessage: Message = { messageId: result.messageId, role: 'assistant', content: answer, status: result.status, citations, createdAt: v2Now() };
+    const storedMessages = [...record.messages, userMessage, assistantMessage];
+    record.messages = storedMessages;
+    record.detail = { ...record.detail, lastMessageAt: v2Now(), title: question.slice(0, 40) || record.detail.title };
+    const pending = question.toLowerCase().includes('pending');
+    v2Runs.set(runKey, { result, messages: storedMessages, question, pending });
+    if (pending) return HttpResponse.json({ conversationId: id, clientMessageId: body.clientMessageId, runId: result.runId, status: 'running', replayed: true }, { status: 202 });
+    if ((request.headers.get('accept') ?? '').includes('text/event-stream')) return v2Stream(result, question.includes('sse-error'));
+    return HttpResponse.json(result);
+  }),
+
+  http.get(`${V2_BASE}/citations/:citationId`, ({ params, request }) => {
+    const authError = v2AuthError(request);
+    if (authError) return authError;
+    if (String(params.citationId) === v2Citation.citationId) return HttpResponse.json(v2Citation);
+    return v2Error('CITATION_NOT_FOUND', 'Citation not found', 404);
+  }),
+];
+
+handlers.push(...v2Handlers);
