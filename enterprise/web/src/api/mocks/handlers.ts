@@ -539,7 +539,7 @@ const v2Citation: V2Citation = {
   sourceVersionId: 'v1',
   pageNo: 3,
   bbox: { x1: 0.1, y1: 0.2, x2: 0.8, y2: 0.4 },
-  assetId: null,
+  assetId: 'ASSET-HARNESS-001',
   excerpt: '检查液压油位并确认维护步骤。',
   recordType: null,
   recordId: null,
@@ -597,6 +597,7 @@ function v2ScenarioError(value: string): Response | null {
   if (value.includes('403')) return v2Error('ACL_DENIED', 'Access denied', 403);
   if (value.includes('409')) return v2Error('CONVERSATION_CONTEXT_STALE', 'Conversation context is stale', 409);
   if (value.includes('422')) return v2Error('VALIDATION_ERROR', 'Request validation failed', 422);
+  if (value.toLowerCase().includes('asset-registry')) return v2Error('ASSET_REGISTRY_UNAVAILABLE', 'Asset Registry is temporarily unavailable', 503, true);
   if (value.includes('503')) return v2Error('RAGFLOW_UNAVAILABLE', 'RAGFlow service is temporarily unavailable', 503, true);
   return null;
 }
@@ -799,6 +800,7 @@ const v2Handlers = [
       return HttpResponse.json(replayed);
     }
     const noEvidence = question.toLowerCase().includes('noevidence');
+    const streamFailure = question.includes('sse-error');
     const answer = noEvidence ? '未找到可靠依据，无法回答。' : `Harness answer: ${question}`;
     const citations = noEvidence ? [] : [v2Citation];
     const result: V2MessageRunResult = {
@@ -807,7 +809,7 @@ const v2Handlers = [
       runId: `run-${Date.now()}`,
       messageId: `message-${Date.now()}`,
       answer,
-      status: noEvidence ? 'no_reliable_evidence' : 'completed',
+      status: streamFailure ? 'failed' : noEvidence ? 'no_reliable_evidence' : 'completed',
       citations,
       replayed: false,
     };
@@ -828,6 +830,19 @@ const v2Handlers = [
     if (authError) return authError;
     if (String(params.citationId) === v2Citation.citationId) return HttpResponse.json(v2Citation);
     return v2Error('CITATION_NOT_FOUND', 'Citation not found', 404);
+  }),
+
+  http.post(`${V2_BASE}/conversations/:conversationId/attachments`, async ({ params, request }) => {
+    const authError = v2AuthError(request);
+    if (authError) return authError;
+    if (!v2Conversations.has(String(params.conversationId))) {
+      return v2Error('CONVERSATION_NOT_FOUND', 'Conversation not found', 404);
+    }
+    const body = (await request.json()) as { fileName?: string };
+    if (body.fileName?.toLowerCase().includes('expired')) {
+      return v2Error('ATTACHMENT_EXPIRED', 'Transient attachment has expired', 404);
+    }
+    return v2Error('ATTACHMENT_NOT_IMPLEMENTED', 'Transient attachment is planned but not enabled', 501);
   }),
 ];
 

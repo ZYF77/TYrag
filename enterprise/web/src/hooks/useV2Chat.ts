@@ -169,7 +169,9 @@ export function useV2Chat(conversationId: string | null) {
           updateReply(request.replyId, (message) => ({
             ...message,
             status,
-            citations: citations.length > 0 ? citations : message.citations,
+            // An explicit empty citation array is meaningful and must not be
+            // replaced with evidence from an earlier stream event.
+            citations: Array.isArray(data.citations) ? citations : message.citations,
             runId: typeof data.runId === 'string' ? data.runId : message.runId,
           }));
           if (status !== 'failed') retryRef.current = null;

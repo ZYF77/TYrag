@@ -108,6 +108,14 @@ export interface PatchConversationContextRequest {
   faultCode?: string | null;
 }
 
+export interface ConversationAttachmentRequest {
+  fileName: string;
+  mediaType: string;
+  content: string;
+}
+
+export type ConversationAttachmentResponse = Record<string, unknown>;
+
 export type MessageStatus = 'completed' | 'no_reliable_evidence' | 'failed';
 
 export interface Citation {

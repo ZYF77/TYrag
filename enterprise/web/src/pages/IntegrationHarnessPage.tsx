@@ -5,7 +5,9 @@ import { DocumentDiagnostics } from '../components/harness/DocumentDiagnostics';
 import { DocumentEventForm } from '../components/harness/DocumentEventForm';
 import { HarnessChat } from '../components/harness/HarnessChat';
 import { HarnessCitationPanel } from '../components/harness/HarnessCitationPanel';
+import { TransientAttachmentPanel } from '../components/harness/TransientAttachmentPanel';
 import { toDisplayError, getHarnessToken, setHarnessToken, v2Api } from '../api/v2Client';
+import { API_MODE } from '../api/mode';
 import type {
   Citation,
   ConversationDetail,
@@ -38,6 +40,22 @@ function summaryFromDetail(detail: ConversationDetail): ConversationSummary {
 type DocumentQuery = Pick<DocumentCommand, 'externalDocumentId' | 'sourceVersionId'> &
   Partial<Pick<DocumentCommand, 'tenantId' | 'sourceSystem'>>;
 
+async function encodeAttachment(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result !== 'string') {
+        reject(new Error('Attachment content could not be read'));
+        return;
+      }
+      const separator = reader.result.indexOf(',');
+      resolve(separator >= 0 ? reader.result.slice(separator + 1) : reader.result);
+    };
+    reader.onerror = () => reject(reader.error ?? new Error('Attachment content could not be read'));
+    reader.readAsDataURL(file);
+  });
+}
+
 export function IntegrationHarnessPage() {
   const [documentQuery, setDocumentQuery] = useState<DocumentQuery | null>(null);
   const [documentOperation, setDocumentOperation] = useState<DocumentOperation | null>(null);
@@ -60,6 +78,9 @@ export function IntegrationHarnessPage() {
   const [selectedCitation, setSelectedCitation] = useState<Citation | null>(null);
   const [citationLoading, setCitationLoading] = useState(false);
   const [citationError, setCitationError] = useState<DisplayError | null>(null);
+  const [attachmentLoading, setAttachmentLoading] = useState(false);
+  const [attachmentError, setAttachmentError] = useState<DisplayError | null>(null);
+  const [attachmentNotice, setAttachmentNotice] = useState<string | null>(null);
   const [tokenDraft, setTokenDraft] = useState('');
   const [tokenConfigured, setTokenConfigured] = useState(() => Boolean(getHarnessToken()));
 
@@ -184,6 +205,8 @@ export function IntegrationHarnessPage() {
   const selectConversation = useCallback((conversationId: string) => {
     setSelectedCitation(null);
     setCitationError(null);
+    setAttachmentError(null);
+    setAttachmentNotice(null);
     setActiveId(conversationId);
   }, []);
 
@@ -219,23 +242,45 @@ export function IntegrationHarnessPage() {
     }
   }, []);
 
+  const uploadAttachment = useCallback(async (file: File) => {
+    if (!activeId) return;
+    setAttachmentLoading(true);
+    setAttachmentError(null);
+    setAttachmentNotice(null);
+    try {
+      await v2Api.createConversationAttachment(activeId, {
+        fileName: file.name,
+        mediaType: file.type || 'application/octet-stream',
+        content: await encodeAttachment(file),
+      });
+      setAttachmentNotice('Gateway 已返回临时附件结果；附件不进入持久知识库。');
+    } catch (error) {
+      setAttachmentError(toDisplayError(error));
+    } finally {
+      setAttachmentLoading(false);
+    }
+  }, [activeId]);
+
   const visibleError = useMemo(
     () => chat.error ?? documentError ?? conversationError ?? contextError ?? citationError,
     [chat.error, documentError, conversationError, contextError, citationError],
   );
 
   return (
-    <main className="min-h-screen bg-slate-100 text-slate-900">
+    <main data-testid="harness-page" className="min-h-screen bg-slate-100 text-slate-900">
       <div className="mx-auto max-w-[1500px] px-4 py-5 sm:px-6">
         <header className="mb-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-indigo-600">M1-E / T5 / WP-05</p>
               <h1 className="mt-1 text-xl font-semibold tracking-tight text-slate-900">TYrag v2 Integration Test Harness</h1>
-              <p className="mt-1 max-w-3xl text-xs leading-5 text-slate-500">仅用于 Gateway 集成、Demo 重放和状态诊断；不构成正式业务 UI。所有数据来自 v2 contract 或 mock response。</p>
+              <p className="mt-1 max-w-3xl text-xs leading-5 text-slate-500">仅用于 Gateway 联调、历史状态回放和契约诊断；不构成正式业务 UI。mock 模式只用于 UI contract test，不代表 Integration 通过。</p>
             </div>
             <div className="flex items-center gap-2 text-xs">
               <span className="rounded-full bg-emerald-50 px-2.5 py-1 font-medium text-emerald-700">external contract v2.0.0</span>
+              <span data-testid="harness-api-mode" className="rounded-full bg-slate-100 px-2.5 py-1 font-medium text-slate-600">
+                {API_MODE === 'gateway' ? 'Gateway v2 联调' : `UI contract ${API_MODE}（非 Integration）`}
+              </span>
               <span className={`rounded-full px-2.5 py-1 font-medium ${tokenConfigured ? 'bg-slate-100 text-slate-700' : 'bg-amber-50 text-amber-700'}`}>{tokenConfigured ? 'Bearer 已注入' : '无 Bearer（可测试 401）'}</span>
             </div>
           </div>
@@ -249,11 +294,11 @@ export function IntegrationHarnessPage() {
 
         {visibleError && <ErrorBanner error={visibleError} onDismiss={() => {}} />}
 
-        <div className="grid gap-4 xl:grid-cols-[360px_minmax(0,1fr)_300px]">
+        <div data-testid="harness-layout" className="grid grid-cols-1 gap-4 xl:grid-cols-[360px_minmax(0,1fr)_300px]">
           <aside className="space-y-4">
-            <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <section aria-label="Asset Registry 设备选择" className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
               <div className="flex items-center justify-between gap-2">
-                <div><h2 className="text-sm font-semibold text-slate-800">会话列表</h2><p className="mt-1 text-[11px] text-slate-500">v2 cursor page · owned sessions</p></div>
+                <div><h2 className="text-sm font-semibold text-slate-800">Asset Registry 设备选择</h2><p className="mt-1 text-[11px] text-slate-500">v2 cursor page · owned sessions</p></div>
                 <button type="button" onClick={() => void loadConversations()} className="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">刷新</button>
               </div>
               <div className="mt-3 space-y-1.5">
@@ -267,7 +312,8 @@ export function IntegrationHarnessPage() {
                 ))}
               </div>
               <div className="mt-4 border-t border-slate-100 pt-3">
-                <p className="mb-2 text-xs font-medium text-slate-700">创建会话</p>
+                <p className="mb-1 text-xs font-medium text-slate-700">选择设备并创建会话</p>
+                <p className="mb-2 text-[11px] leading-5 text-slate-500">equipmentId/fixedAssetNo 仅作为 Registry 查询键；canonical snapshot 由 Gateway 返回。</p>
                 <div className="space-y-2">
                   <input aria-label="new equipmentId" value={newEquipmentId} onChange={(event) => setNewEquipmentId(event.target.value)} placeholder="equipmentId" className="w-full rounded-md border border-slate-200 px-2.5 py-2 text-xs" />
                   <input aria-label="new fixedAssetNo" value={newFixedAssetNo} onChange={(event) => setNewFixedAssetNo(event.target.value)} placeholder="fixedAssetNo" className="w-full rounded-md border border-slate-200 px-2.5 py-2 text-xs" />
@@ -285,6 +331,7 @@ export function IntegrationHarnessPage() {
 
           <div className="space-y-4">
             <HarnessChat conversation={activeConversation} messages={chat.messages} isStreaming={chat.isStreaming} error={chat.error} onSend={chat.sendMessage} onRetry={chat.retry} onCancel={chat.cancelStream} onCitation={(citation) => void selectCitation(citation)} />
+            <TransientAttachmentPanel conversationId={activeId} loading={attachmentLoading} error={attachmentError} notice={attachmentNotice} onUpload={(file) => void uploadAttachment(file)} />
             <DocumentDiagnostics operation={documentOperation} loading={documentLoading} error={documentError} onRefresh={() => void pollDocument()} />
           </div>
 

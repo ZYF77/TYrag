@@ -41,6 +41,10 @@ function errorConfig(code: string): {
         suggestion: '请配置有效的登录凭证后继续使用。',
       };
     case 'AUTH_USER_MAPPING_MISSING':
+    case 'AUTH_BINDING_DENIED':
+    case 'AUTH_BINDING_MISSING':
+    case 'AUTH_BINDING_CONFLICT':
+    case 'AUTH_USER_DISABLED':
     case 'ACL_DENIED':
     case 'BUSINESS_QUERY_DENIED':
     case 'CONVERSATION_OWNER_MISMATCH':
@@ -63,6 +67,7 @@ function errorConfig(code: string): {
       };
     case 'CONVERSATION_CONTEXT_CONFLICT':
     case 'CONVERSATION_CONTEXT_INVALID':
+    case 'CONVERSATION_CONTEXT_REQUIRED':
     case 'CONVERSATION_CONTEXT_STALE':
     case 'CLIENT_MESSAGE_ID_CONFLICT':
     case 'SUGGESTION_STALE':
@@ -94,6 +99,26 @@ function errorConfig(code: string): {
         textColor: 'text-gray-700',
         title: '会话不存在',
         suggestion: '该会话可能已被删除或您无权访问。请选择其他会话或新建。',
+      };
+    case 'ATTACHMENT_EXPIRED':
+    case 'TRANSIENT_ATTACHMENT_EXPIRED':
+      return {
+        icon: FileQuestion,
+        bgColor: 'bg-amber-50',
+        borderColor: 'border-amber-200',
+        textColor: 'text-amber-800',
+        title: '临时附件已过期',
+        suggestion: '附件只在会话范围内短暂有效，请从设备管理系统重新发起上传。',
+      };
+    case 'ATTACHMENT_NOT_IMPLEMENTED':
+    case 'TRANSIENT_ATTACHMENT_NOT_IMPLEMENTED':
+      return {
+        icon: FileQuestion,
+        bgColor: 'bg-slate-50',
+        borderColor: 'border-slate-200',
+        textColor: 'text-slate-700',
+        title: '临时附件尚未启用（P1）',
+        suggestion: 'Gateway 已按契约拒绝该能力；不要改用对象存储或 RAGFlow 管理端口直连。',
       };
     case 'RAGFLOW_UNAVAILABLE':
     case 'RAGFLOW_API_INCOMPATIBLE':
@@ -169,6 +194,9 @@ export function ErrorBanner({ error, onDismiss }: ErrorBannerProps) {
         </p>
         <p className={`text-xs ${config.textColor} mt-0.5 opacity-80`}>
           {error.message}
+        </p>
+        <p className={`text-[10px] ${config.textColor} mt-1 opacity-70`}>
+          [{error.code}]
         </p>
         {error.httpStatus ? (
           <p className={`text-[10px] ${config.textColor} mt-1 opacity-70`}>

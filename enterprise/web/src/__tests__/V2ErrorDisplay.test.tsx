@@ -9,6 +9,9 @@ describe('v2 error diagnostics', () => {
     [409, 'CONVERSATION_CONTEXT_STALE'],
     [422, 'VALIDATION_ERROR'],
     [503, 'RAGFLOW_UNAVAILABLE'],
+    [503, 'ASSET_REGISTRY_UNAVAILABLE'],
+    [404, 'ATTACHMENT_EXPIRED'],
+    [501, 'ATTACHMENT_NOT_IMPLEMENTED'],
   ])('shows HTTP %s and the stable code', (httpStatus, code) => {
     render(
       <ErrorBanner
