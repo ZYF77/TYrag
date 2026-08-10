@@ -22,6 +22,7 @@ export function HarnessCitationPanel({ citation, loading, error, onClose }: Harn
           <div><dt className="text-slate-500">sourceType</dt><dd className="mt-0.5 text-slate-800">{citation.sourceType}</dd></div>
           <div><dt className="text-slate-500">externalDocumentId</dt><dd className="mt-0.5 break-all text-slate-800">{citation.externalDocumentId ?? 'null'}</dd></div>
           <div><dt className="text-slate-500">sourceVersionId</dt><dd className="mt-0.5 break-all text-slate-800">{citation.sourceVersionId ?? 'null'}</dd></div>
+          <div><dt className="text-slate-500">assetId</dt><dd className="mt-0.5 break-all text-slate-800">{citation.assetId ?? 'null'}</dd></div>
           <div><dt className="text-slate-500">pageNo</dt><dd className="mt-0.5 text-slate-800">{citation.pageNo ?? 'null'}</dd></div>
           <div><dt className="text-slate-500">excerpt</dt><dd className="mt-0.5 whitespace-pre-wrap leading-5 text-slate-800">{citation.excerpt ?? '未提供'}</dd></div>
           {citation.recordId && <div><dt className="text-slate-500">recordId</dt><dd className="mt-0.5 text-slate-800">{citation.recordId}</dd></div>}

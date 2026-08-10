@@ -1,6 +1,8 @@
 import { createSseParser } from './sse';
 import type {
   ConversationDetail,
+  ConversationAttachmentRequest,
+  ConversationAttachmentResponse,
   ConversationPage,
   CreateConversationRequest,
   CreateMessageRequest,
@@ -104,6 +106,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   }
 
   if (!response.ok) throw await errorFromResponse(response);
+  if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
 }
 
@@ -326,6 +329,16 @@ export const v2Api = {
 
   getCitation(citationId: string): Promise<Citation> {
     return request<Citation>(`/citations/${encodeURIComponent(citationId)}`);
+  },
+
+  createConversationAttachment(
+    conversationId: string,
+    body: ConversationAttachmentRequest,
+  ): Promise<ConversationAttachmentResponse> {
+    return request<ConversationAttachmentResponse>(
+      `/conversations/${encodeURIComponent(conversationId)}/attachments`,
+      { method: 'POST', body: JSON.stringify(body) },
+    );
   },
 
   streamMessage,

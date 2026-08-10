@@ -17,7 +17,8 @@ function statusLabel(status: string): string {
   if (status === 'streaming') return '正在回答…';
   if (status === 'completed') return '业务状态：completed';
   if (status === 'no_reliable_evidence') return '业务状态：no_reliable_evidence';
-  return '业务状态：failed';
+  if (status === 'failed') return '业务状态：failed';
+  return `业务状态：${status}`;
 }
 
 export function HarnessChat({
@@ -51,7 +52,11 @@ export function HarnessChat({
           }
           const isFailed = message.status === 'failed';
           return (
-            <article key={message.id} className="rounded-xl border border-slate-100 bg-slate-50 p-3">
+            <article
+              key={message.id}
+              data-message-status={message.status}
+              className="rounded-xl border border-slate-100 bg-slate-50 p-3"
+            >
               <div className="flex items-center justify-between gap-2 text-[11px] text-slate-500">
                 <span>{statusLabel(message.status)}</span>
                 <span>citations: {message.citations.length}</span>
@@ -71,6 +76,7 @@ export function HarnessChat({
                     className={`rounded-md border px-2 py-1 text-xs ${citation.sourceType === 'document' ? 'border-blue-200 bg-blue-50 text-blue-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}
                   >
                     [{index + 1}] {citation.title}
+                    {citation.assetId ? ` · assetId: ${citation.assetId}` : ''}
                   </button>
                 ))}
               </div>

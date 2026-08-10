@@ -73,6 +73,7 @@ describe('v2 API client', () => {
   it('creates a conversation, switches context, and keeps the response external-only', async () => {
     const conversation = await v2Api.createConversation({ equipmentId: 'EQ-1001', fixedAssetNo: 'FA-2001' });
     expect(conversation.context.equipmentId).toBe('EQ-1001');
+    expect(conversation.context.fixedAssetNo).toBe('FA-2001');
     expect(conversation.contextVersion).toBe(1);
     const updated = await v2Api.patchConversationContext(conversation.conversationId, { faultCode: 'E-104' });
     expect(updated.faultCode).toBe('E-104');
@@ -103,6 +104,22 @@ describe('v2 API client', () => {
     await replayStream.promise;
     expect(replay[0].event).toBe('run.started');
     expect(JSON.parse(replay[0].data).replayed).toBe(true);
+  });
+
+  it('replays persisted business status and citations without deriving one from the other', async () => {
+    const conversation = await v2Api.createConversation({ equipmentId: 'EQ-REPLAY-STATUS' });
+    const stream = v2Api.streamMessage(
+      conversation.conversationId,
+      { clientMessageId: 'client-failed-replay', question: 'sse-error replay' },
+      () => undefined,
+    );
+    await stream.promise;
+
+    const history = await v2Api.listMessages(conversation.conversationId);
+    const assistant = history.items.find((item) => item.role === 'assistant');
+    expect(assistant?.status).toBe('failed');
+    expect(assistant?.citations).toHaveLength(1);
+    expect(assistant?.citations[0].assetId).toBe('ASSET-HARNESS-001');
   });
 
   it('rejects a reused clientMessageId when the question changes', async () => {
@@ -141,5 +158,25 @@ describe('v2 API client', () => {
       expect(error).toBeInstanceOf(V2ApiError);
       expect((error as V2ApiError).body.code).toBeTruthy();
     }
+  });
+
+  it('retains the Asset Registry unavailable contract error', async () => {
+    await expect(v2Api.createConversation({ equipmentId: 'asset-registry' })).rejects.toMatchObject({
+      status: 503,
+      body: { code: 'ASSET_REGISTRY_UNAVAILABLE', retryable: true },
+    });
+  });
+
+  it('uses the planned attachment route and preserves expiry/not-implemented errors', async () => {
+    const conversation = await v2Api.createConversation({ equipmentId: 'EQ-ATTACHMENT' });
+    const body = { fileName: 'manual.pdf', mediaType: 'application/pdf', content: 'cGRm' };
+    await expect(v2Api.createConversationAttachment(conversation.conversationId, body)).rejects.toMatchObject({
+      status: 501,
+      body: { code: 'ATTACHMENT_NOT_IMPLEMENTED' },
+    });
+    await expect(v2Api.createConversationAttachment(conversation.conversationId, { ...body, fileName: 'expired.pdf' })).rejects.toMatchObject({
+      status: 404,
+      body: { code: 'ATTACHMENT_EXPIRED' },
+    });
   });
 });
