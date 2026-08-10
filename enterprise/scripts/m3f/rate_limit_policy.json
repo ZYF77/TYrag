@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "status": "proposed_not_enforced",
+  "algorithm": "distributed_fixed_window_counter_with_atomic_reservation",
+  "key_namespace": "tyrag:ratelimit:{dimension}:{tenant_id}:{subject_id}:{route_class}:{window_start}",
+  "dimensions": {
+    "tenant": {
+      "window_seconds": 60,
+      "max_requests": 600,
+      "max_concurrent": 100
+    },
+    "user": {
+      "window_seconds": 60,
+      "max_requests": 120,
+      "max_concurrent": 8
+    },
+    "api_key": {
+      "window_seconds": 60,
+      "max_requests": 300,
+      "max_concurrent": 32
+    },
+    "cost": {
+      "window_seconds": 3600,
+      "max_cost_units": 100000
+    }
+  },
+  "route_cost_units": {
+    "health": 0,
+    "query": 1,
+    "business_query": 2,
+    "ingestion": 5,
+    "streaming": 10,
+    "download": 2
+  },
+  "failure_policy": {
+    "redis_valkey_unavailable": "fail_closed",
+    "protected_routes": ["query", "business_query", "ingestion", "streaming", "download"],
+    "health_route_behavior": "allow_without_reservation",
+    "never_fallback_to_process_memory": true
+  },
+  "response": {
+    "http_status": 429,
+    "error_code": "RATE_LIMITED",
+    "retry_after_seconds": "remaining_window",
+    "required_headers": ["Retry-After", "X-RateLimit-Limit", "X-RateLimit-Remaining"]
+  },
+  "reservation_order": ["api_key", "user", "tenant", "cost"],
+  "rollback_on_partial_reservation_failure": true
+}
