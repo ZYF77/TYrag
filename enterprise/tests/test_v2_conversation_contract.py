@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -13,12 +14,33 @@ from httpx import ASGITransport, AsyncClient
 
 from enterprise.gateway.auth.middleware import require_user_principal
 from enterprise.gateway.auth.user_principal import UserPrincipal
+from enterprise.gateway.asset_registry import ResolvedAsset
 from enterprise.gateway.query import formal_router, v2_router, v2_store
 from enterprise.gateway.query.ragflow_client import RAGFlowQueryStub
-from enterprise.gateway.sync.models import ExtDocumentMap, insert_mapping
+from enterprise.gateway.sync.models import (
+    ExtDocumentMap,
+    insert_mapping,
+    update_mapping_status,
+)
 
 
 BASE = "/enterprise/api/v2"
+
+
+def test_message_one_of_rejects_explicit_null_opposite_fields():
+    with pytest.raises(ValueError):
+        v2_router.CreateMessageRequest.model_validate(
+            {"clientMessageId": "m-1", "question": "q", "suggestionId": None}
+        )
+    with pytest.raises(ValueError):
+        v2_router.CreateMessageRequest.model_validate(
+            {
+                "clientMessageId": "m-2",
+                "suggestionId": "s-1",
+                "contextVersion": 1,
+                "question": None,
+            }
+        )
 
 
 def _principal() -> UserPrincipal:
@@ -621,6 +643,16 @@ async def test_v2_sse_forwards_upstream_deltas(runtime):
             headers={"Accept": "text/event-stream"},
             json={"clientMessageId": "multi-delta", "question": "stream"},
         )
+        replay = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            headers={"Accept": "text/event-stream"},
+            json={"clientMessageId": "multi-delta", "question": "stream"},
+        )
+        json_replay = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            headers={"Accept": "application/json"},
+            json={"clientMessageId": "multi-delta", "question": "stream"},
+        )
 
     assert response.status_code == 200
     assert response.text.count("event: answer.delta") == 2
@@ -629,11 +661,16 @@ async def test_v2_sse_forwards_upstream_deltas(runtime):
     assert "first second" not in response.text.split("event: answer.delta", 1)[-1].split(
         "event: answer.completed", 1
     )[0]
+    assert replay.status_code == 200
+    assert replay.text.count("event: answer.delta") == 2
+    assert '"content": "first second"' not in replay.text
+    assert json_replay.status_code == 200
+    assert "_streamDeltas" not in json_replay.json()
 
 
 @pytest.mark.asyncio
 async def test_citation_uses_external_fields_and_state_is_independent(runtime):
-    await _insert_document(
+    document = await _insert_document(
         runtime.db,
         external_id="EXT-DOC-1",
         ragflow_id="doc-1",
@@ -655,6 +692,13 @@ async def test_citation_uses_external_fields_and_state_is_independent(runtime):
         assert result.status_code == 200, result.text
         body = result.json()
         citation = body["citations"][0]
+        await update_mapping_status(
+            runtime.db,
+            document,
+            "superseded",
+            business_status="superseded",
+            current_version=0,
+        )
         citation_response = await client.get(
             f"{BASE}/citations/{citation['citationId']}"
         )
@@ -703,3 +747,81 @@ async def test_completed_state_does_not_require_citations(runtime):
     assert response.status_code == 200
     assert response.json()["status"] == "completed"
     assert response.json()["citations"] == []
+
+
+@pytest.mark.asyncio
+async def test_history_filters_citations_after_acl_revocation(runtime):
+    document = await _insert_document(
+        runtime.db,
+        external_id="EXT-DOC-ACL",
+        ragflow_id="doc-1",
+        equipment_id="EQ-ACL",
+        fixed_asset_no="FA-ACL",
+    )
+    formal_router._query_stub = _ExplicitOutcomeStub(
+        status="completed", include_chunk=True
+    )
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(client, equipmentId="EQ-ACL")
+        result = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={"clientMessageId": "acl-history", "question": "question"},
+        )
+        citation_id = result.json()["citations"][0]["citationId"]
+        await update_mapping_status(
+            runtime.db,
+            document,
+            "ready",
+            allow_group_ids=json.dumps(["revoked-group"]),
+        )
+        history = await client.get(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages"
+        )
+        citation = await client.get(f"{BASE}/citations/{citation_id}")
+
+    assistant = [item for item in history.json()["items"] if item["role"] == "assistant"][0]
+    assert assistant["citations"] == []
+    assert citation.status_code == 403
+    assert citation.json()["code"] == "ACL_DENIED"
+
+
+@pytest.mark.asyncio
+async def test_ttl_refresh_increments_context_version_when_alias_changes(
+    runtime, monkeypatch
+):
+    await runtime.db.execute(
+        "INSERT INTO ext_asset_registry (tenant_id, equipment_id, fixed_asset_no, asset_id) "
+        "VALUES ('customer-a', 'EQ-TTL', 'FA-OLD', 'FA-OLD')"
+    )
+    await runtime.db.commit()
+
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(client, equipmentId="EQ-TTL")
+        conversation_id = conversation["conversationId"]
+        await runtime.db.execute(
+            "UPDATE ext_v2_conversation SET context_resolved_at=?, registry_version=? "
+            "WHERE conversation_id=?",
+            ("2000-01-01T00:00:00+00:00", "registry-old", conversation_id),
+        )
+        await runtime.db.commit()
+
+        async def refreshed_asset(*args, **kwargs):
+            return ResolvedAsset(
+                tenant_id="customer-a",
+                equipment_id="EQ-TTL",
+                fixed_asset_no="FA-NEW",
+                asset_id="FA-NEW",
+                registry_version="registry-new",
+                resolved_at=datetime.now(timezone.utc).isoformat(),
+            )
+
+        monkeypatch.setattr(v2_router, "resolve_asset", refreshed_asset)
+        response = await client.post(
+            f"{BASE}/conversations/{conversation_id}/messages",
+            json={"clientMessageId": "ttl-refresh", "question": "question"},
+        )
+        detail = await client.get(f"{BASE}/conversations/{conversation_id}")
+
+    assert response.status_code == 200
+    assert detail.json()["contextVersion"] == 2
+    assert detail.json()["fixedAssetNo"] == "FA-NEW"

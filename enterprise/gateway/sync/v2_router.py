@@ -1,13 +1,16 @@
 """Versioned document integration routes with external-only identifiers."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
+import sqlite3
 import uuid
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from pathlib import Path
 from typing import Literal
+from weakref import WeakKeyDictionary
 
 import aiosqlite
 import jsonschema
@@ -41,6 +44,7 @@ from enterprise.gateway.sync.sync_service import DocumentSyncError
 
 
 router = APIRouter(prefix="/enterprise/api/v2/documents", tags=["documents-v2"])
+_document_write_locks = WeakKeyDictionary()
 
 _SCHEMA_PATH = Path(__file__).resolve().parents[3] / "contracts" / "metadata-schema.json"
 with _SCHEMA_PATH.open(encoding="utf-8") as schema_file:
@@ -109,6 +113,54 @@ def _sync_service(db: aiosqlite.Connection):
     return app_module._sync_service(db)
 
 
+async def _document_write_lock(
+    tenant_id: str,
+    source_system: str,
+    external_document_id: str,
+    source_version_id: str,
+) -> asyncio.Lock:
+    # One aiosqlite connection has one transaction state.  Serialize all
+    # gateway writes in this process so unrelated document keys cannot
+    # interleave two BEGIN/COMMIT sequences on that shared connection.
+    del tenant_id, source_system, external_document_id, source_version_id
+    loop = asyncio.get_running_loop()
+    lock = _document_write_locks.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _document_write_locks[loop] = lock
+    return lock
+
+
+async def _persist_mapping_and_outbox(
+    db: aiosqlite.Connection,
+    mapping: ExtDocumentMap,
+    event: OutboxEvent,
+) -> tuple[ExtDocumentMap | None, bool]:
+    lock = await _document_write_lock(
+        mapping.tenant_id,
+        mapping.source_system,
+        mapping.external_document_id,
+        mapping.source_version_id,
+    )
+    async with lock:
+        try:
+            await db.execute("BEGIN IMMEDIATE")
+            doc, inserted = await insert_mapping(
+                db, mapping, commit=False, return_inserted=True,
+            )
+            if doc is None:
+                await db.rollback()
+                return None, False
+            if inserted or doc.event_id == event.event_id:
+                if not await get_outbox_by_event_id(db, event.event_id):
+                    await enqueue_outbox(db, event, commit=False)
+            await db.commit()
+            return doc, inserted
+        except Exception:
+            await db.rollback()
+            raise
+
+
 def _error(status_code: int, code: str, request_id: str) -> JSONResponse:
     messages = {
         "ACL_DENIED": "Access denied",
@@ -130,7 +182,7 @@ def _error(status_code: int, code: str, request_id: str) -> JSONResponse:
             "code": code,
             "message": messages.get(code, "Request failed"),
             "requestId": request_id,
-            "retryable": code == "RAGFLOW_UNAVAILABLE",
+            "retryable": code in {"RAGFLOW_UNAVAILABLE", "ASSET_REGISTRY_UNAVAILABLE"},
         },
     )
 
@@ -236,18 +288,22 @@ async def _record_receipt(
     source_version_id: str,
     outcome_code: str,
 ) -> DocumentEventReceipt:
-    return await insert_document_event_receipt(
-        db,
-        DocumentEventReceipt(
-            event_id=event_id,
-            payload_hash=payload_hash,
-            tenant_id=tenant_id,
-            source_system=source_system,
-            external_document_id=external_document_id,
-            source_version_id=source_version_id,
-            outcome_code=outcome_code,
-        ),
+    lock = await _document_write_lock(
+        tenant_id, source_system, external_document_id, source_version_id
     )
+    async with lock:
+        return await insert_document_event_receipt(
+            db,
+            DocumentEventReceipt(
+                event_id=event_id,
+                payload_hash=payload_hash,
+                tenant_id=tenant_id,
+                source_system=source_system,
+                external_document_id=external_document_id,
+                source_version_id=source_version_id,
+                outcome_code=outcome_code,
+            ),
+        )
 
 
 def _scope_allowed(
@@ -287,16 +343,23 @@ async def _seed_test_registry_fixture(
     asset_id = req.metadata.get("asset_id") or fixed_asset_no or equipment_id
     if not equipment_id and not fixed_asset_no and not asset_id:
         return
-    await db.execute(
-        """INSERT INTO ext_asset_registry
-           (tenant_id, equipment_id, fixed_asset_no, asset_id)
-           VALUES (?, ?, ?, ?)
-           ON CONFLICT(tenant_id, equipment_id) DO UPDATE SET
-             fixed_asset_no=excluded.fixed_asset_no,
-             asset_id=excluded.asset_id""",
-        (tenant_id, equipment_id or fixed_asset_no or asset_id, fixed_asset_no, asset_id),
+    lock = await _document_write_lock(
+        tenant_id,
+        req.sourceSystem,
+        req.externalDocumentId,
+        req.sourceVersionId,
     )
-    await db.commit()
+    async with lock:
+        await db.execute(
+            """INSERT INTO ext_asset_registry
+               (tenant_id, equipment_id, fixed_asset_no, asset_id)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(tenant_id, equipment_id) DO UPDATE SET
+                 fixed_asset_no=excluded.fixed_asset_no,
+                 asset_id=excluded.asset_id""",
+            (tenant_id, equipment_id or fixed_asset_no or asset_id, fixed_asset_no, asset_id),
+        )
+        await db.commit()
 
 
 async def _mapping_for_scope(
@@ -502,51 +565,54 @@ async def upsert_document(
         return _error(503, "ASSET_REGISTRY_UNAVAILABLE", request_id)
 
     payload_json = json.dumps(normalized, ensure_ascii=False, sort_keys=True)
-    await enqueue_outbox(
-        db,
-        OutboxEvent(
-            event_id=req.eventId,
-            event_type=req.eventType,
-            tenant_id=tenant_id,
-            source_system=req.sourceSystem,
-            external_document_id=req.externalDocumentId,
-            source_version_id=req.sourceVersionId,
-            batch_id=req.batchId,
-            payload=payload_json,
+    mapping = ExtDocumentMap(
+        tenant_id=tenant_id,
+        source_system=req.sourceSystem,
+        external_document_id=req.externalDocumentId,
+        source_version_id=req.sourceVersionId,
+        event_id=req.eventId,
+        event_type=req.eventType,
+        event_status="received",
+        sha256=req.sha256.lower(),
+        file_name=req.fileName,
+        media_type=req.mediaType,
+        document_type=req.metadata.get("document_type"),
+        source_page_count=req.metadata.get("page_count"),
+        bucket=req.source.bucket,
+        object_key=req.source.objectKey,
+        asset_id=canonical_asset.asset_id,
+        equipment_id=canonical_asset.equipment_id,
+        fixed_asset_no=canonical_asset.fixed_asset_no,
+        department_id=req.metadata.get("department_id"),
+        security_level=req.metadata.get("security_level"),
+        allow_group_ids=json.dumps(
+            req.metadata.get("allow_group_ids") or [], ensure_ascii=False
         ),
-    )
-    doc = await insert_mapping(
-        db,
-        ExtDocumentMap(
-            tenant_id=tenant_id,
-            source_system=req.sourceSystem,
-            external_document_id=req.externalDocumentId,
-            source_version_id=req.sourceVersionId,
-            event_id=req.eventId,
-            event_type=req.eventType,
-            event_status="received",
-            sha256=req.sha256.lower(),
-            file_name=req.fileName,
-            media_type=req.mediaType,
-            document_type=req.metadata.get("document_type"),
-            source_page_count=req.metadata.get("page_count"),
-            bucket=req.source.bucket,
-            object_key=req.source.objectKey,
-            asset_id=canonical_asset.asset_id,
-            equipment_id=canonical_asset.equipment_id,
-            fixed_asset_no=canonical_asset.fixed_asset_no,
-            department_id=req.metadata.get("department_id"),
-            security_level=req.metadata.get("security_level"),
-            allow_group_ids=json.dumps(
-                req.metadata.get("allow_group_ids") or [], ensure_ascii=False
-            ),
-            deny_group_ids=json.dumps(
-                req.metadata.get("deny_group_ids") or [], ensure_ascii=False
-            ),
-            batch_id=req.batchId,
-            sync_status="received",
+        deny_group_ids=json.dumps(
+            req.metadata.get("deny_group_ids") or [], ensure_ascii=False
         ),
+        batch_id=req.batchId,
+        sync_status="received",
     )
+    try:
+        doc, _inserted = await _persist_mapping_and_outbox(
+            db,
+            mapping,
+            OutboxEvent(
+                event_id=req.eventId,
+                event_type=req.eventType,
+                tenant_id=tenant_id,
+                source_system=req.sourceSystem,
+                external_document_id=req.externalDocumentId,
+                source_version_id=req.sourceVersionId,
+                batch_id=req.batchId,
+                payload=payload_json,
+            ),
+        )
+        if doc is None:
+            return _error(409, "EVENT_ID_CONFLICT", request_id)
+    except sqlite3.IntegrityError:
+        return _error(409, "EVENT_ID_CONFLICT", request_id)
     doc_identity = (
         doc.tenant_id,
         doc.source_system,

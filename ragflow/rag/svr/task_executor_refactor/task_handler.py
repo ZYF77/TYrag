@@ -732,6 +732,10 @@ class TaskHandler:
         from common import settings
 
         """Get binary from storage."""
+        if isinstance(name, str) and name.startswith("external://"):
+            from rag.utils.external_source import fetch_external_source
+
+            return await thread_pool_exec(fetch_external_source, name)
         return await thread_pool_exec(settings.STORAGE_IMPL.get, bucket, name)
 
     @staticmethod

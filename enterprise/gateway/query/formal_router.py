@@ -37,6 +37,7 @@ from enterprise.gateway.sync.models import (
     get_versions_for_document,
     list_all_mappings,
 )
+from enterprise.gateway.query.source_access import source_response
 
 logger = logging.getLogger(__name__)
 
@@ -341,6 +342,10 @@ class FormalScopeResolver(ScopeResolver):
             )
         for doc in docs:
             if not doc.ragflow_dataset_id or not doc.ragflow_document_id:
+                continue
+            if doc.source_kind == "FILE_SHARE" and not doc.current_version:
+                # A new external version may be parsed while the previously
+                # promoted version continues serving retrieval traffic.
                 continue
             if doc.business_status != "active":
                 continue
@@ -1050,7 +1055,6 @@ async def get_conversation(
 async def get_citation(
     citation_id: str,
     db=Depends(get_db),
-    client=Depends(_query_client),
     principal: UserPrincipal = Depends(
         require_capability("view_citations", "list_sessions")
     ),
@@ -1078,13 +1082,14 @@ async def get_citation(
         and doc.ragflow_document_id
     ):
         try:
+            client = _query_client()
             chunk_evidence = await client.get_chunk_evidence(
                 doc.ragflow_dataset_id,
                 doc.ragflow_document_id,
                 chunk_id,
                 request_id=request_id,
             )
-        except RAGFlowAPIError:
+        except (RAGFlowAPIError, RuntimeError):
             # The immutable citation snapshot remains readable even when the
             # upstream evidence service is temporarily unavailable.
             logger.warning(
@@ -1125,13 +1130,41 @@ async def get_citation(
     )
 
 
+@router.get("/citations/{citation_id}/source", include_in_schema=True)
+async def get_citation_source(
+    citation_id: str,
+    request: Request,
+    db=Depends(get_db),
+    principal: UserPrincipal = Depends(
+        require_capability("view_citations", "list_sessions")
+    ),
+):
+    """Stream only the exact ACL-authorized FILE_SHARE source version."""
+    await conversation_store.ensure_schema(db)
+    citation = await conversation_store.get_citation(
+        db,
+        citation_id=citation_id,
+        tenant_id=principal.tenant_id,
+        business_user_id=principal.business_user_id,
+    )
+    doc = await _citation_document_for_principal(db, principal, citation) if citation else None
+    # Missing and unauthorized citations deliberately share the same external
+    # result so the source endpoint cannot be used for enumeration.
+    if doc is None:
+        return JSONResponse(status_code=404, content={"code": "CITATION_NOT_FOUND"})
+    return await source_response(request, doc)
+
+
 async def _citation_document_for_principal(
     db,
     principal: UserPrincipal,
     citation: dict,
 ) -> ExtDocumentMap | None:
     ragflow_document_id = citation.get("ragflowDocumentId")
-    external_document_id = citation.get("documentId")
+    external_document_id = citation.get("documentId") or citation.get(
+        "externalDocumentId"
+    )
+    source_version_id = citation.get("versionId") or citation.get("sourceVersionId")
     doc = None
     if external_document_id:
         versions = await get_versions_for_document(
@@ -1141,10 +1174,15 @@ async def _citation_document_for_principal(
             external_document_id,
         )
         for candidate in versions:
+            if source_version_id and candidate.source_version_id != source_version_id:
+                continue
             if (
                 ragflow_document_id
                 and candidate.ragflow_document_id == ragflow_document_id
             ):
+                doc = candidate
+                break
+            if not ragflow_document_id and source_version_id:
                 doc = candidate
                 break
             if not ragflow_document_id and candidate.current_version:
@@ -1157,6 +1195,8 @@ async def _citation_document_for_principal(
             source_system=_SOURCE_SYSTEM,
         )
         for candidate in docs:
+            if source_version_id and candidate.source_version_id != source_version_id:
+                continue
             if (
                 ragflow_document_id
                 and candidate.ragflow_document_id == ragflow_document_id
@@ -1171,11 +1211,16 @@ async def _citation_document_for_principal(
                 break
     if doc is None:
         return None
+    if doc.business_status not in {"active", "superseded"}:
+        return None
     facts = DocumentAclFacts(
         tenant_id=doc.tenant_id,
         department_id=doc.department_id,
         security_level=doc.security_level,
-        business_status=doc.business_status,
+        # A superseded version remains a readable historical snapshot.  Its
+        # ACL facts are still current, while disabled/deleted versions are
+        # denied by the status check above.
+        business_status="active",
         allow_group_ids=_json_list(doc.allow_group_ids),
         deny_group_ids=_json_list(doc.deny_group_ids),
     )

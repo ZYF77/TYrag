@@ -292,6 +292,10 @@ async def collect():
 
 
 async def get_storage_binary(bucket, name):
+    if isinstance(name, str) and name.startswith("external://"):
+        from rag.utils.external_source import fetch_external_source
+
+        return await thread_pool_exec(fetch_external_source, name)
     return await thread_pool_exec(settings.STORAGE_IMPL.get, bucket, name)
 
 

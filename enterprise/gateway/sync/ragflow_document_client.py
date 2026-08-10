@@ -170,6 +170,51 @@ class RAGFlowDocumentClient:
                                      f"/api/v1/datasets/{dataset_id}/documents",
                                      rid, files=files)
 
+    async def register_external_document(
+        self,
+        dataset_id: str,
+        file_name: str,
+        *,
+        external_ticket: str,
+        size: int,
+        media_type: str,
+        meta_fields: dict | None = None,
+        request_id: str | None = None,
+    ) -> dict:
+        """Register a virtual RAGFlow document backed by a one-time source ticket."""
+        rid = request_id or self._new_request_id()
+        return await self._run_sync(
+            self._sync_request,
+            "POST",
+            f"/api/v1/datasets/{dataset_id}/documents/external",
+            rid,
+            json_data={
+                "name": file_name,
+                "ticket": external_ticket,
+                "size": size,
+                "media_type": media_type,
+                "meta_fields": meta_fields or {},
+            },
+        )
+
+    async def refresh_external_document(
+        self,
+        dataset_id: str,
+        document_id: str,
+        *,
+        external_ticket: str,
+        size: int,
+        request_id: str | None = None,
+    ) -> dict:
+        rid = request_id or self._new_request_id()
+        return await self._run_sync(
+            self._sync_request,
+            "PATCH",
+            f"/api/v1/datasets/{dataset_id}/documents/{document_id}/external-source",
+            rid,
+            json_data={"ticket": external_ticket, "size": size},
+        )
+
     async def start_parsing(
         self,
         dataset_id: str,
@@ -357,6 +402,63 @@ class RAGFlowDocumentStub(RAGFlowDocumentClient):
                           }, "enabled": 1}]}
         self._documents[doc_id] = doc
         self._operation_log.append("upload")
+        return doc
+
+    async def register_external_document(
+        self,
+        dataset_id: str,
+        file_name: str,
+        *,
+        external_ticket: str,
+        size: int,
+        media_type: str,
+        meta_fields: dict | None = None,
+        request_id: str | None = None,
+    ) -> dict:
+        if self._fail_next:
+            raise RAGFlowAPIError("Stub: simulated RAGFlow failure", 503)
+        doc_id = f"doc-{self._next_id}"; self._next_id += 1
+        doc = {"data": [{
+            "id": doc_id,
+            "name": file_name,
+            "dataset_id": dataset_id,
+            "run": "UNSTART",
+            "chunk_method": "naive",
+            "parser_config": {},
+            "meta_fields": {
+                **(meta_fields or {}),
+                "enterprise_source_kind": "FILE_SHARE",
+                "enterprise_external_ticket": external_ticket,
+            },
+            "source_type": "enterprise_file_share",
+            "location": external_ticket,
+            "size": size,
+            "media_type": media_type,
+            "enabled": 1,
+        }]}
+        self._documents[doc_id] = doc
+        self._operation_log.append("external_register")
+        return doc
+
+    async def refresh_external_document(
+        self,
+        dataset_id: str,
+        document_id: str,
+        *,
+        external_ticket: str,
+        size: int,
+        request_id: str | None = None,
+    ) -> dict:
+        doc = self._documents.get(document_id)
+        if not doc or doc["data"][0].get("dataset_id") != dataset_id:
+            raise RAGFlowAPIError("Stub: document not found", 404)
+        item = doc["data"][0]
+        item["location"] = external_ticket
+        item["size"] = size
+        item.setdefault("meta_fields", {})[
+            "enterprise_external_ticket"
+        ] = external_ticket
+        self._operation_log.append("external_refresh")
         return doc
 
     async def start_parsing(

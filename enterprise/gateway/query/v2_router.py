@@ -30,12 +30,15 @@ from enterprise.gateway.query.formal_router import (
     NO_RELIABLE_EVIDENCE_ANSWER,
     _FormalQueryError,
     _build_citations,
+    _citation_document_allowed,
+    _citation_document_for_principal,
     _conversation_lock,
     _ensure_chat,
     _query_client,
     _sse,
 )
 from enterprise.gateway.query.ragflow_client import RAGFlowAPIError
+from enterprise.gateway.query.source_access import source_response
 from enterprise.gateway.sync.models import ExtDocumentMap
 
 
@@ -95,15 +98,16 @@ class CreateMessageRequest(StrictModel):
 
     @model_validator(mode="after")
     def exactly_one_branch(self):
+        fields_set = self.model_fields_set
         question_branch = (
             self.question is not None
-            and self.suggestionId is None
-            and self.contextVersion is None
+            and "suggestionId" not in fields_set
+            and "contextVersion" not in fields_set
         )
         suggestion_branch = (
-            self.question is None
-            and self.suggestionId is not None
+            self.suggestionId is not None
             and self.contextVersion is not None
+            and "question" not in fields_set
         )
         if not (question_branch or suggestion_branch):
             raise ValueError("Use exactly one question or suggestion branch")
@@ -348,7 +352,19 @@ async def list_messages(
         )
     except ValueError:
         return _error(422, "VALIDATION_ERROR", "Invalid cursor")
-    return {"items": items, "nextCursor": next_cursor, "hasMore": has_more}
+    authorized_items = []
+    for item in items:
+        citations = [
+            citation
+            for citation in item.get("citations", [])
+            if await _citation_document_allowed(db, principal, citation)
+        ]
+        authorized_items.append({**item, "citations": citations})
+    return {
+        "items": authorized_items,
+        "nextCursor": next_cursor,
+        "hasMore": has_more,
+    }
 
 
 def _suggestions(row: dict) -> list[dict]:
@@ -499,7 +515,7 @@ async def _refresh_context_snapshot(
             equipment_id=resolved.equipment_id,
             fixed_asset_no=resolved.fixed_asset_no,
             fault_code=conversation.get("fault_code"),
-            context_version=conversation["context_version"],
+            context_version=conversation["context_version"] + 1,
             registry_version=resolved.registry_version,
             context_resolved_at=resolved.resolved_at,
         )
@@ -761,7 +777,7 @@ async def _execute_json_run(
             code, status_code, message = exc.code, exc.status_code, exc.message
         else:
             code = "RAGFLOW_API_INCOMPATIBLE" if exc.status_code and 400 <= exc.status_code < 500 else "RAGFLOW_UNAVAILABLE"
-            status_code = 502 if code.endswith("INCOMPATIBLE") else 503
+            status_code = 503
             message = "Query engine unavailable"
         return None, await _save_failed_run(
             db, principal, conversation, req, run, assistant_message_id,
@@ -786,6 +802,7 @@ async def _stream_run_events(
     assistant_message_id = run.get("assistant_message_id") or str(uuid.uuid4())
     yield _sse("run.started", {"conversationId": conversation_id, "clientMessageId": req.clientMessageId, "runId": run["run_id"], "replayed": False})
     accumulated = ""
+    deltas: list[str] = []
     chunks: list[dict] = []
     citations: list[dict] = []
     status = "no_reliable_evidence"
@@ -812,6 +829,7 @@ async def _stream_run_events(
                 delta = data.get("answer")
                 if delta and not data.get("final"):
                     accumulated += str(delta)
+                    deltas.append(str(delta))
                     yield _sse("answer.delta", {"conversationId": conversation_id, "runId": run["run_id"], "content": str(delta)})
                 elif delta and data.get("final") and not accumulated:
                     accumulated = str(delta)
@@ -845,6 +863,7 @@ async def _stream_run_events(
             "status": status,
             "citations": citations,
             "replayed": False,
+            "_streamDeltas": deltas,
         }
         await v2_store.complete_message_run(
             db,
@@ -872,7 +891,7 @@ async def _stream_run_events(
         else:
             code = "RAGFLOW_API_INCOMPATIBLE" if exc.status_code and 400 <= exc.status_code < 500 else "RAGFLOW_UNAVAILABLE"
             message = "Query engine unavailable"
-        status_code = 502 if code.endswith("INCOMPATIBLE") else (503 if code != "CONVERSATION_CONTEXT_STALE" else 409)
+        status_code = 503 if code.endswith("INCOMPATIBLE") else (503 if code != "CONVERSATION_CONTEXT_STALE" else 409)
         await _save_failed_run(
             db, principal, conversation, req, run, assistant_message_id,
             code=code, status_code=status_code, message=message, content=accumulated,
@@ -896,10 +915,10 @@ async def _result_events(result: dict) -> AsyncIterator[str]:
             "replayed": result["replayed"],
         },
     )
-    if result["answer"]:
+    for delta in result.get("_streamDeltas", []):
         yield _sse(
             "answer.delta",
-            {"conversationId": result["conversationId"], "runId": result.get("runId"), "content": result["answer"]},
+            {"conversationId": result["conversationId"], "runId": result.get("runId"), "content": delta},
         )
     for citation in result["citations"]:
         yield _sse("citation", citation)
@@ -950,7 +969,7 @@ async def create_message(
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
-        return result
+        return {key: value for key, value in result.items() if not key.startswith("_")}
     run = run_or_result
     if run.get("status") == "running" and not question:
         return _pending_response(conversation, req, run)
@@ -983,16 +1002,28 @@ async def get_citation(
     )
     if not citation:
         return _error(404, "CITATION_NOT_FOUND", "Citation not found")
-    resolver = FormalScopeResolver(db)
-    from enterprise.gateway.acl.context import AclContext
-    from enterprise.gateway.acl.scope import compile_scope
-
-    await compile_scope(AclContext(principal=principal), resolver)
-    allowed = any(
-        doc.external_document_id == citation.get("externalDocumentId")
-        and doc.source_version_id == citation.get("sourceVersionId")
-        for doc in resolver._docs.values()
-    )
-    if not allowed:
+    if not await _citation_document_allowed(db, principal, citation):
         return _error(403, "ACL_DENIED", "Access denied")
     return citation
+
+
+@router.get("/citations/{citation_id}/source")
+async def get_citation_source(
+    citation_id: str,
+    request: Request,
+    db=Depends(get_db),
+    principal: UserPrincipal = Depends(
+        require_capability("view_citations", "list_sessions")
+    ),
+):
+    await v2_store.ensure_schema(db)
+    citation = await v2_store.get_citation(
+        db,
+        citation_id=citation_id,
+        tenant_id=principal.tenant_id,
+        business_user_id=principal.business_user_id,
+    )
+    doc = await _citation_document_for_principal(db, principal, citation) if citation else None
+    if doc is None:
+        return JSONResponse(status_code=404, content={"code": "CITATION_NOT_FOUND"})
+    return await source_response(request, doc)

@@ -27,6 +27,7 @@ from enterprise.gateway.sync.source_adapter import (
     SourceHashMismatch,
     SourceTooLarge,
 )
+from enterprise.gateway.sync.external_source import FileShareSourceAdapter, SourceTicket
 from enterprise.gateway.sync.state_machine import (
     is_terminal_document_status,
     transition_allowed,
@@ -108,6 +109,12 @@ async def promote_quality_passed_version(
         doc.ragflow_dataset_id, [doc.ragflow_document_id], enabled=True,
     )
     if not await promote_version_if_latest(db, doc):
+        # A newer version may have won the SQLite promotion transaction while
+        # this quality job was running.  Never leave that stale RAGFlow
+        # document enabled when its promotion was rejected.
+        await ragflow_client.batch_update_status(
+            doc.ragflow_dataset_id, [doc.ragflow_document_id], enabled=False,
+        )
         return False
     versions = await get_versions_for_document(
         db, doc.tenant_id, doc.source_system, doc.external_document_id,
@@ -158,10 +165,12 @@ class SyncService:
         db: aiosqlite.Connection,
         source_adapter: SourceAdapter,
         ragflow_client: RAGFlowDocumentClient,
+        external_source_provider: FileShareSourceAdapter | None = None,
     ) -> None:
         self.db = db
         self.source_adapter = source_adapter
         self.ragflow_client = ragflow_client
+        self.external_source_provider = external_source_provider
 
     async def process_event(
         self, event: OutboxEvent,
@@ -212,17 +221,27 @@ class SyncService:
                     metadata.get("deny_group_ids") or [],
                     ensure_ascii=False,
                 ),
-                bucket=payload["source"]["bucket"],
-                object_key=payload["source"]["objectKey"],
+                source_kind=payload.get("source", {}).get("kind", "S3"),
+                bucket=payload.get("source", {}).get("bucket", ""),
+                object_key=payload.get("source", {}).get("objectKey", ""),
+                storage_root_id=payload.get("source", {}).get("storageRootId"),
+                relative_path=payload.get("source", {}).get("relativePath"),
+                source_size=payload.get("source", {}).get("size"),
+                source_etag=payload.get("source", {}).get("etag"),
+                document_subtype=metadata.get("document_subtype"),
+                source_document_type=metadata.get("source_document_type"),
                 batch_id=event.batch_id,
                 sync_status="received",
                 business_status="active",
             )
             doc = await insert_mapping(self.db, doc)
             if doc.event_id != event.event_id:
-                existing = doc
-                if existing.event_status == "completed" and existing.sync_status in TERMINAL_DONE:
-                    return existing, True
+                if doc.sha256.lower() != payload["sha256"].lower():
+                    raise TerminalDocumentSyncError(
+                        "DOCUMENT_VERSION_CONFLICT",
+                        "Document version already has different content",
+                    )
+                return doc, True
 
         try:
             await self._sync_event(doc, payload, event)
@@ -264,25 +283,44 @@ class SyncService:
             await self._set_status(
                 doc, "validated", event_status="validating",
                 attempt_count=event.attempts,
+                ingest_state="VALIDATED" if doc.source_kind == "FILE_SHARE" else None,
             )
 
-        try:
-            source_file = await self.source_adapter.fetch(
-                payload["source"]["bucket"],
-                payload["source"]["objectKey"],
-                payload["sha256"],
-            )
-        except SourceHashMismatch as e:
-            raise TerminalDocumentSyncError("DOCUMENT_HASH_MISMATCH", str(e)) from e
-        except SourceTooLarge as e:
-            raise TerminalDocumentSyncError("DOCUMENT_SOURCE_NOT_FOUND", str(e)) from e
-        except SourceFetchError as e:
-            raise RetryableDocumentSyncError("DOCUMENT_SOURCE_NOT_FOUND", str(e)) from e
+        source_file = None
+        external_ticket: SourceTicket | None = None
+        if doc.source_kind == "FILE_SHARE" or payload.get("source", {}).get("kind") == "FILE_SHARE":
+            try:
+                external_ticket = await self._issue_external_ticket(doc, payload)
+            except SourceFetchError as e:
+                await update_mapping_status(
+                    self.db,
+                    doc,
+                    doc.sync_status,
+                    source_state="UNAVAILABLE",
+                    source_state_reason=type(e).__name__,
+                )
+                raise RetryableDocumentSyncError("DOCUMENT_SOURCE_NOT_FOUND", str(e)) from e
+        else:
+            try:
+                source_file = await self.source_adapter.fetch(
+                    payload["source"]["bucket"],
+                    payload["source"]["objectKey"],
+                    payload["sha256"],
+                )
+            except SourceHashMismatch as e:
+                raise TerminalDocumentSyncError("DOCUMENT_HASH_MISMATCH", str(e)) from e
+            except SourceTooLarge as e:
+                raise TerminalDocumentSyncError("DOCUMENT_SOURCE_NOT_FOUND", str(e)) from e
+            except SourceFetchError as e:
+                raise RetryableDocumentSyncError("DOCUMENT_SOURCE_NOT_FOUND", str(e)) from e
 
         if doc.sync_status in ("received", "validated", "failed", "retry_wait"):
             await self._set_status(
                 doc, "accepted", event_status="transferring",
                 attempt_count=event.attempts,
+                ingest_state="SOURCE_TICKET_ISSUED" if external_ticket else "TRANSFERRING",
+                source_state="AVAILABLE" if external_ticket else None,
+                source_state_reason="" if external_ticket else None,
             )
         elif doc.sync_status == "cancelled":
             await self._set_status(
@@ -305,6 +343,7 @@ class SyncService:
             await self._set_status(
                 doc, "registered", event_status="registering",
                 attempt_count=event.attempts,
+                ingest_state="REGISTERED" if doc.source_kind == "FILE_SHARE" else None,
             )
         elif not doc.ragflow_dataset_id:
             doc.ragflow_dataset_id = dataset_id
@@ -314,7 +353,7 @@ class SyncService:
             )
 
         doc = await self._register_ragflow(
-            doc, payload, source_file, dataset_id, event,
+            doc, payload, source_file, dataset_id, event, external_ticket,
         )
         mapped = map_ragflow_run_to_sync_status(doc.pipeline_status)
         if mapped == "ready":
@@ -322,6 +361,7 @@ class SyncService:
             await self._set_status(
                 doc, "ready", event_status="completed",
                 pipeline_status=doc.pipeline_status,
+                ingest_state="READY",
             )
             await self._ensure_quality_evaluation(doc)
         else:
@@ -359,6 +399,7 @@ class SyncService:
         source_file,
         dataset_id: str,
         event: OutboxEvent,
+        external_ticket: SourceTicket | None = None,
     ) -> ExtDocumentMap:
         if not doc.ragflow_document_id:
             existing_doc = await self._find_document_by_event(
@@ -370,9 +411,19 @@ class SyncService:
                 doc.pipeline_status = existing_doc.get("run") or "UNSTART"
             else:
                 try:
-                    result = await self.ragflow_client.upload_document(
-                        dataset_id, payload["fileName"], source_file.content,
-                    )
+                    if external_ticket:
+                        result = await self.ragflow_client.register_external_document(
+                            dataset_id,
+                            payload["fileName"],
+                            external_ticket=f"external://{external_ticket.token}",
+                            size=external_ticket.size,
+                            media_type=payload.get("mediaType", doc.media_type),
+                            meta_fields=self._external_meta_fields(doc, event),
+                        )
+                    else:
+                        result = await self.ragflow_client.upload_document(
+                            dataset_id, payload["fileName"], source_file.content,
+                        )
                 except RAGFlowAPIError as e:
                     raise self._ragflow_error(e) from e
                 docs_data = result.get("data", [])
@@ -385,6 +436,17 @@ class SyncService:
                 doc.ragflow_document_id = ragflow_doc.get("id", "")
                 doc.ragflow_task_id = ragflow_doc.get("id", "")
                 doc.pipeline_status = ragflow_doc.get("run") or "UNSTART"
+
+        if external_ticket and doc.ragflow_document_id:
+            try:
+                await self.ragflow_client.refresh_external_document(
+                    dataset_id,
+                    doc.ragflow_document_id,
+                    external_ticket=f"external://{external_ticket.token}",
+                    size=external_ticket.size,
+                )
+            except RAGFlowAPIError as e:
+                raise self._ragflow_error(e) from e
 
         # Persist the RAGFlow document id before the optional metadata write so
         # an interrupted retry can reuse the uploaded document instead of
@@ -431,6 +493,42 @@ class SyncService:
             pipeline_status=doc.pipeline_status,
         )
         return doc
+
+    async def _issue_external_ticket(
+        self, doc: ExtDocumentMap, payload: dict,
+    ) -> SourceTicket:
+        if self.external_source_provider is None:
+            raise SourceFetchError("FILE_SHARE source provider is not configured")
+        source = payload.get("source") or {}
+        ticket = await self.external_source_provider.issue_ticket(
+            self.db,
+            tenant_id=doc.tenant_id,
+            source_system=doc.source_system,
+            external_document_id=doc.external_document_id,
+            source_version_id=doc.source_version_id,
+            storage_root_id=source.get("storageRootId") or doc.storage_root_id or "",
+            relative_path=source.get("relativePath") or doc.relative_path or "",
+            file_name=payload.get("fileName") or doc.file_name,
+            media_type=payload.get("mediaType") or doc.media_type,
+            expected_sha256=payload.get("sha256") or doc.sha256,
+        )
+        expected_size = source.get("size") or doc.source_size
+        if expected_size is not None and int(expected_size) != ticket.size:
+            raise SourceFetchError("FILE_SHARE source size changed")
+        expected_etag = source.get("etag") or doc.source_etag
+        if expected_etag and expected_etag != ticket.etag:
+            raise SourceFetchError("FILE_SHARE source etag changed")
+        return ticket
+
+    @staticmethod
+    def _external_meta_fields(doc: ExtDocumentMap, event: OutboxEvent) -> dict:
+        return {
+            "enterprise_event_id": event.event_id,
+            "enterprise_external_document_id": doc.external_document_id,
+            "enterprise_source_version_id": doc.source_version_id,
+            "enterprise_sha256": doc.sha256,
+            "enterprise_document_type": doc.document_type,
+        }
 
     async def _ensure_parser_configured(
         self,
@@ -696,6 +794,45 @@ class SyncService:
             raise TerminalDocumentSyncError(
                 "DOCUMENT_NOT_READY", "Document is not registered in RAGFlow"
             )
+        event = OutboxEvent(
+            event_id=doc.event_id,
+            event_type="reindex",
+            tenant_id=doc.tenant_id,
+            source_system=doc.source_system,
+            external_document_id=doc.external_document_id,
+            source_version_id=doc.source_version_id,
+            payload="{}",
+            batch_id=doc.batch_id,
+        )
+        external_ticket = None
+        if doc.source_kind == "FILE_SHARE":
+            external_ticket = await self._issue_external_ticket(
+                doc,
+                {
+                    "sha256": doc.sha256,
+                    "fileName": doc.file_name,
+                    "mediaType": doc.media_type,
+                    "source": {
+                        "kind": "FILE_SHARE",
+                        "storageRootId": doc.storage_root_id,
+                        "relativePath": doc.relative_path,
+                        "size": doc.source_size,
+                        "etag": doc.source_etag,
+                    },
+                },
+            )
+            try:
+                await self.ragflow_client.refresh_external_document(
+                    doc.ragflow_dataset_id,
+                    doc.ragflow_document_id,
+                    external_ticket=f"external://{external_ticket.token}",
+                    size=external_ticket.size,
+                )
+            except RAGFlowAPIError as e:
+                raise self._ragflow_error(e) from e
+        await self._ensure_parser_configured(
+            doc, doc.ragflow_dataset_id, event,
+        )
         try:
             await self.ragflow_client.start_parsing(
                 doc.ragflow_dataset_id, [doc.ragflow_document_id]
@@ -724,16 +861,34 @@ class SyncService:
             "sha256": doc.sha256,
             "fileName": doc.file_name,
             "mediaType": doc.media_type,
-            "source": {"bucket": doc.bucket, "objectKey": doc.object_key},
+            "source": (
+                {
+                    "kind": "FILE_SHARE",
+                    "storageRootId": doc.storage_root_id,
+                    "relativePath": doc.relative_path,
+                    "size": doc.source_size,
+                    "etag": doc.source_etag,
+                }
+                if doc.source_kind == "FILE_SHARE"
+                else {"bucket": doc.bucket, "objectKey": doc.object_key}
+            ),
         }
-        try:
-            source_file = await self.source_adapter.fetch(
-                doc.bucket, doc.object_key, doc.sha256,
-            )
-        except SourceHashMismatch as e:
-            raise TerminalDocumentSyncError("DOCUMENT_HASH_MISMATCH", str(e)) from e
-        except SourceFetchError as e:
-            raise RetryableDocumentSyncError("DOCUMENT_SOURCE_NOT_FOUND", str(e)) from e
+        source_file = None
+        external_ticket = None
+        if doc.source_kind == "FILE_SHARE":
+            try:
+                external_ticket = await self._issue_external_ticket(doc, payload)
+            except SourceFetchError as e:
+                raise RetryableDocumentSyncError("DOCUMENT_SOURCE_NOT_FOUND", str(e)) from e
+        else:
+            try:
+                source_file = await self.source_adapter.fetch(
+                    doc.bucket, doc.object_key, doc.sha256,
+                )
+            except SourceHashMismatch as e:
+                raise TerminalDocumentSyncError("DOCUMENT_HASH_MISMATCH", str(e)) from e
+            except SourceFetchError as e:
+                raise RetryableDocumentSyncError("DOCUMENT_SOURCE_NOT_FOUND", str(e)) from e
 
         if doc.sync_status != "ready":
             await self._set_status(
@@ -743,6 +898,17 @@ class SyncService:
         dataset = await self._ensure_dataset(doc.tenant_id)
         dataset_id = dataset.get("id") or dataset.get("data", {}).get("id", "")
         if doc.ragflow_document_id:
+            event = OutboxEvent(
+                event_id=doc.event_id,
+                event_type="restore",
+                tenant_id=doc.tenant_id,
+                source_system=doc.source_system,
+                external_document_id=doc.external_document_id,
+                source_version_id=doc.source_version_id,
+                payload=json.dumps(payload),
+                batch_id=doc.batch_id,
+            )
+            await self._ensure_parser_configured(doc, dataset_id, event)
             try:
                 await self.ragflow_client.update_document_metadata(
                     dataset_id, doc.ragflow_document_id, {},
@@ -773,7 +939,7 @@ class SyncService:
                 batch_id=doc.batch_id,
             )
             doc = await self._register_ragflow(
-                doc, payload, source_file, dataset_id, event,
+                doc, payload, source_file, dataset_id, event, external_ticket,
             )
         if map_ragflow_run_to_sync_status(doc.pipeline_status) == "ready":
             await self._record_terminal_parser_evidence(doc)

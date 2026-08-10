@@ -117,12 +117,12 @@ class RedisReplayStore:
                         "AUTH", self.password
                     )
                     writer.write(_resp_command(*auth_args))
-                    await writer.drain()
-                    await _read_resp(reader)
+                    await asyncio.wait_for(writer.drain(), timeout=self.timeout)
+                    await asyncio.wait_for(_read_resp(reader), timeout=self.timeout)
                 if self.database:
                     writer.write(_resp_command("SELECT", str(self.database)))
-                    await writer.drain()
-                    await _read_resp(reader)
+                    await asyncio.wait_for(writer.drain(), timeout=self.timeout)
+                    await asyncio.wait_for(_read_resp(reader), timeout=self.timeout)
                 writer.write(
                     _resp_command(
                         "SET",
@@ -133,12 +133,17 @@ class RedisReplayStore:
                         str(REPLAY_RETENTION_SECONDS),
                     )
                 )
-                await writer.drain()
-                return (await _read_resp(reader)) is not None
+                await asyncio.wait_for(writer.drain(), timeout=self.timeout)
+                return (
+                    await asyncio.wait_for(_read_resp(reader), timeout=self.timeout)
+                ) is not None
             finally:
                 writer.close()
-                await writer.wait_closed()
-        except (OSError, asyncio.TimeoutError, ValueError) as exc:
+                try:
+                    await asyncio.wait_for(writer.wait_closed(), timeout=self.timeout)
+                except Exception:
+                    pass
+        except Exception as exc:
             raise ReplayStoreUnavailable("Shared replay store unavailable") from exc
 
 
@@ -154,12 +159,15 @@ def _default_replay_store():
         return MemoryReplayStore()
     if configured != "redis":
         raise ReplayStoreUnavailable("Unsupported service replay store")
-    return RedisReplayStore(
-        os.environ.get("ENTERPRISE_REDIS_URL", "redis://127.0.0.1:6379/0"),
-        prefix=os.environ.get(
-            "ENTERPRISE_REPLAY_KEY_PREFIX", "tyrag:service-replay:"
-        ),
-    )
+    try:
+        return RedisReplayStore(
+            os.environ.get("ENTERPRISE_REDIS_URL", "redis://127.0.0.1:6379/0"),
+            prefix=os.environ.get(
+                "ENTERPRISE_REPLAY_KEY_PREFIX", "tyrag:service-replay:"
+            ),
+        )
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise ReplayStoreUnavailable("Shared replay store is misconfigured") from exc
 
 
 def _epoch(value: object | None) -> float | None:

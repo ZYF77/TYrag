@@ -1,0 +1,62 @@
+openapi: 3.0.3
+info:
+  title: TYRAG FILE_SHARE document integration
+  version: 3.0.0
+paths:
+  /enterprise/api/v3/documents:
+    post:
+      summary: Register an immutable external FILE_SHARE PDF version
+      description: The Gateway stores only source coordinates and metadata. It never stores PDF bytes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DocumentUpsertRequest'
+      responses:
+        '202':
+          description: Accepted into the transactional outbox
+        '409':
+          description: Event or immutable source-version conflict
+  /enterprise/internal/source-tickets/{ticket}:
+    get:
+      summary: Consume one short-lived internal source ticket
+      parameters:
+        - in: path
+          name: ticket
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: One source stream; the ticket cannot be reused
+        '404':
+          description: Missing, expired, replayed, or unauthorized ticket
+components:
+  schemas:
+    FileShareSource:
+      type: object
+      additionalProperties: false
+      required: [kind, storageRootId, relativePath]
+      properties:
+        kind: { type: string, enum: [FILE_SHARE] }
+        storageRootId: { type: string, minLength: 1, maxLength: 64 }
+        relativePath: { type: string, minLength: 1, maxLength: 1024 }
+        size: { type: integer, minimum: 0 }
+        etag: { type: string, maxLength: 256 }
+    DocumentUpsertRequest:
+      type: object
+      additionalProperties: false
+      required: [eventId, eventType, tenantId, sourceSystem, externalDocumentId, sourceVersionId, sha256, fileName, mediaType, source, metadata]
+      properties:
+        eventId: { type: string }
+        eventType: { type: string, enum: [upsert, reindex] }
+        tenantId: { type: string }
+        sourceSystem: { type: string }
+        externalDocumentId: { type: string }
+        sourceVersionId: { type: string }
+        sha256: { type: string, pattern: '^[0-9a-fA-F]{64}$' }
+        fileName: { type: string }
+        mediaType: { type: string, enum: [application/pdf] }
+        source: { $ref: '#/components/schemas/FileShareSource' }
+        metadata: { type: object }
+        batchId: { type: string }

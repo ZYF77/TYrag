@@ -30,8 +30,14 @@ CREATE TABLE IF NOT EXISTS ext_document_map (
     media_type TEXT DEFAULT 'application/pdf',
     document_type TEXT,
     source_page_count INTEGER,
+    source_kind TEXT NOT NULL DEFAULT 'S3',
     bucket TEXT NOT NULL DEFAULT '',
     object_key TEXT NOT NULL DEFAULT '',
+    storage_root_id TEXT,
+    relative_path TEXT,
+    source_size INTEGER,
+    source_modified_ns INTEGER,
+    source_etag TEXT,
     asset_id TEXT,
     equipment_id TEXT,
     fixed_asset_no TEXT,
@@ -52,6 +58,11 @@ CREATE TABLE IF NOT EXISTS ext_document_map (
     parser_configured_json TEXT,
     parser_executed_json TEXT,
     parser_application_status TEXT NOT NULL DEFAULT 'legacy_unverified',
+    document_subtype TEXT,
+    source_document_type TEXT,
+    ingest_state TEXT NOT NULL DEFAULT 'RECEIVED',
+    source_state TEXT NOT NULL DEFAULT 'AVAILABLE',
+    source_state_reason TEXT,
     attempt_count INTEGER NOT NULL DEFAULT 0,
     next_retry_at TEXT,
     batch_id TEXT,
@@ -78,6 +89,33 @@ CREATE INDEX IF NOT EXISTS idx_ext_doc_sha
 
 CREATE INDEX IF NOT EXISTS idx_ext_doc_batch
     ON ext_document_map(tenant_id, batch_id);
+"""
+
+
+CREATE_SOURCE_TICKET = """
+CREATE TABLE IF NOT EXISTS ext_source_ticket (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticket_hash TEXT NOT NULL UNIQUE,
+    tenant_id TEXT NOT NULL,
+    source_system TEXT NOT NULL,
+    external_document_id TEXT NOT NULL,
+    source_version_id TEXT NOT NULL,
+    storage_root_id TEXT NOT NULL,
+    relative_path TEXT NOT NULL,
+    file_name TEXT NOT NULL,
+    media_type TEXT NOT NULL,
+    expected_sha256 TEXT NOT NULL,
+    source_size INTEGER NOT NULL,
+    source_modified_ns INTEGER NOT NULL,
+    source_etag TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    consumed_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_ext_source_ticket_expiry
+    ON ext_source_ticket(expires_at, consumed_at);
 """
 
 
@@ -133,8 +171,14 @@ _MIGRATION_COLUMNS = {
     "event_status": "TEXT NOT NULL DEFAULT 'received'",
     "document_type": "TEXT",
     "source_page_count": "INTEGER",
+    "source_kind": "TEXT NOT NULL DEFAULT 'S3'",
     "bucket": "TEXT NOT NULL DEFAULT ''",
     "object_key": "TEXT NOT NULL DEFAULT ''",
+    "storage_root_id": "TEXT",
+    "relative_path": "TEXT",
+    "source_size": "INTEGER",
+    "source_modified_ns": "INTEGER",
+    "source_etag": "TEXT",
     "asset_id": "TEXT",
     "equipment_id": "TEXT",
     "fixed_asset_no": "TEXT",
@@ -150,6 +194,11 @@ _MIGRATION_COLUMNS = {
     "parser_configured_json": "TEXT",
     "parser_executed_json": "TEXT",
     "parser_application_status": "TEXT NOT NULL DEFAULT 'legacy_unverified'",
+    "document_subtype": "TEXT",
+    "source_document_type": "TEXT",
+    "ingest_state": "TEXT NOT NULL DEFAULT 'RECEIVED'",
+    "source_state": "TEXT NOT NULL DEFAULT 'AVAILABLE'",
+    "source_state_reason": "TEXT",
     "attempt_count": "INTEGER NOT NULL DEFAULT 0",
     "next_retry_at": "TEXT",
     "batch_id": "TEXT",
@@ -170,8 +219,14 @@ class ExtDocumentMap:
     source_page_count: int | None = None
     event_type: str = "upsert"
     event_status: str = "received"
+    source_kind: str = "S3"
     bucket: str = ""
     object_key: str = ""
+    storage_root_id: str | None = None
+    relative_path: str | None = None
+    source_size: int | None = None
+    source_modified_ns: int | None = None
+    source_etag: str | None = None
     asset_id: str | None = None
     equipment_id: str | None = None
     fixed_asset_no: str | None = None
@@ -192,6 +247,11 @@ class ExtDocumentMap:
     parser_configured_json: str | None = None
     parser_executed_json: str | None = None
     parser_application_status: str = "legacy_unverified"
+    document_subtype: str | None = None
+    source_document_type: str | None = None
+    ingest_state: str = "RECEIVED"
+    source_state: str = "AVAILABLE"
+    source_state_reason: str | None = None
     attempt_count: int = 0
     next_retry_at: str | None = None
     batch_id: str | None = None
@@ -261,8 +321,14 @@ def _row_to_mapping(row: aiosqlite.Row) -> ExtDocumentMap:
         media_type=row["media_type"],
         document_type=row["document_type"],
         source_page_count=row["source_page_count"],
+        source_kind=row["source_kind"] or "S3",
         bucket=row["bucket"],
         object_key=row["object_key"],
+        storage_root_id=row["storage_root_id"],
+        relative_path=row["relative_path"],
+        source_size=row["source_size"],
+        source_modified_ns=row["source_modified_ns"],
+        source_etag=row["source_etag"],
         asset_id=row["asset_id"],
         equipment_id=row["equipment_id"],
         fixed_asset_no=row["fixed_asset_no"],
@@ -285,6 +351,11 @@ def _row_to_mapping(row: aiosqlite.Row) -> ExtDocumentMap:
         parser_application_status=(
             row["parser_application_status"] or "legacy_unverified"
         ),
+        document_subtype=row["document_subtype"],
+        source_document_type=row["source_document_type"],
+        ingest_state=row["ingest_state"] or "RECEIVED",
+        source_state=row["source_state"] or "AVAILABLE",
+        source_state_reason=row["source_state_reason"],
         attempt_count=row["attempt_count"],
         next_retry_at=row["next_retry_at"],
         batch_id=row["batch_id"],
@@ -335,6 +406,7 @@ async def migrate_schema(db: aiosqlite.Connection) -> None:
             await db.execute(f"ALTER TABLE ext_document_map ADD COLUMN {column} {ddl}")
     await db.executescript(CREATE_SYNC_OUTBOX)
     await db.executescript(CREATE_DOCUMENT_EVENT_RECEIPT)
+    await db.executescript(CREATE_SOURCE_TICKET)
     await db.commit()
 
 
@@ -351,35 +423,47 @@ async def init_db(db_path: str = "enterprise/ext_document_map.db") -> aiosqlite.
     return db
 
 
-async def insert_mapping(db: aiosqlite.Connection, doc: ExtDocumentMap) -> ExtDocumentMap:
+async def insert_mapping(
+    db: aiosqlite.Connection,
+    doc: ExtDocumentMap,
+    *,
+    commit: bool = True,
+    return_inserted: bool = False,
+) -> ExtDocumentMap | tuple[ExtDocumentMap, bool]:
     now = utc_now()
     try:
         cursor = await db.execute(
             """INSERT INTO ext_document_map
                (tenant_id, source_system, external_document_id, source_version_id,
-                event_id, event_type, event_status, sha256, file_name, media_type,
-                document_type,
-                source_page_count, bucket, object_key, asset_id,
-                equipment_id, fixed_asset_no,
+                 event_id, event_type, event_status, sha256, file_name, media_type,
+                 document_type,
+                 source_page_count, source_kind, bucket, object_key,
+                 storage_root_id, relative_path, source_size,
+                 source_modified_ns, source_etag, asset_id,
+                 equipment_id, fixed_asset_no,
                 department_id, security_level, allow_group_ids, deny_group_ids,
                 ragflow_dataset_id, ragflow_document_id,
                 ragflow_task_id, sync_status, pipeline_status, business_status,
                 current_version, parser_profile, parser_profile_version,
-                parser_expected_json, parser_configured_json,
-                parser_executed_json, parser_application_status,
-                attempt_count, next_retry_at, batch_id,
+                 parser_expected_json, parser_configured_json,
+                 parser_executed_json, parser_application_status,
+                 document_subtype, source_document_type, ingest_state,
+                 source_state, source_state_reason,
+                 attempt_count, next_retry_at, batch_id,
                 last_error_code, last_error_message, last_sync_at,
                 source_updated_at, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(tenant_id, source_system, external_document_id, source_version_id)
                DO NOTHING""",
             (
                 doc.tenant_id, doc.source_system, doc.external_document_id,
                 doc.source_version_id, doc.event_id, doc.event_type,
-                doc.event_status, doc.sha256, doc.file_name, doc.media_type,
-                doc.document_type,
-                doc.source_page_count, doc.bucket, doc.object_key,
-                doc.asset_id,
+                 doc.event_status, doc.sha256, doc.file_name, doc.media_type,
+                 doc.document_type,
+                 doc.source_page_count, doc.source_kind, doc.bucket, doc.object_key,
+                 doc.storage_root_id, doc.relative_path, doc.source_size,
+                 doc.source_modified_ns, doc.source_etag,
+                 doc.asset_id,
                 doc.equipment_id, doc.fixed_asset_no,
                 doc.department_id, doc.security_level,
                 doc.allow_group_ids, doc.deny_group_ids,
@@ -387,15 +471,18 @@ async def insert_mapping(db: aiosqlite.Connection, doc: ExtDocumentMap) -> ExtDo
                 doc.ragflow_task_id, doc.sync_status, doc.pipeline_status,
                 doc.business_status, doc.current_version,
                 doc.parser_profile, doc.parser_profile_version,
-                doc.parser_expected_json, doc.parser_configured_json,
-                doc.parser_executed_json, doc.parser_application_status,
-                doc.attempt_count,
+                 doc.parser_expected_json, doc.parser_configured_json,
+                 doc.parser_executed_json, doc.parser_application_status,
+                 doc.document_subtype, doc.source_document_type,
+                 doc.ingest_state, doc.source_state, doc.source_state_reason,
+                 doc.attempt_count,
                 doc.next_retry_at, doc.batch_id, doc.last_error_code,
                 doc.last_error_message, doc.last_sync_at, doc.source_updated_at,
                 now, now,
             ),
         )
-        await db.commit()
+        if commit:
+            await db.commit()
         if cursor.rowcount:
             doc.id = cursor.lastrowid
             doc.created_at = now
@@ -417,19 +504,23 @@ async def insert_mapping(db: aiosqlite.Connection, doc: ExtDocumentMap) -> ExtDo
                         doc.asset_id or doc.fixed_asset_no or doc.equipment_id,
                     ),
                 )
-                await db.commit()
-            return doc
+                if commit:
+                    await db.commit()
+            return (doc, True) if return_inserted else doc
     except sqlite3.IntegrityError:
         # Unique event_id conflict with a different composite key: replay wins.
-        await db.rollback()
-        return await get_mapping_by_event_id(db, doc.event_id)
+        if commit:
+            await db.rollback()
+        else:
+            raise
     existing = await get_mapping_by_event_id(db, doc.event_id)
     if existing:
-        return existing
-    return await get_mapping(
+        return (existing, False) if return_inserted else existing
+    existing = await get_mapping(
         db, doc.tenant_id, doc.source_system,
         doc.external_document_id, doc.source_version_id,
     )
+    return (existing, False) if return_inserted else existing
 
 
 async def get_mapping(
@@ -624,6 +715,9 @@ async def update_mapping_status(
     security_level: int | None = None,
     allow_group_ids: str | None = None,
     deny_group_ids: str | None = None,
+    ingest_state: str | None = None,
+    source_state: str | None = None,
+    source_state_reason: str | None = None,
 ) -> None:
     now = utc_now()
     await db.execute(
@@ -645,9 +739,12 @@ async def update_mapping_status(
                asset_id=COALESCE(?, asset_id),
                department_id=COALESCE(?, department_id),
                security_level=COALESCE(?, security_level),
-               allow_group_ids=COALESCE(?, allow_group_ids),
-               deny_group_ids=COALESCE(?, deny_group_ids),
-               ragflow_dataset_id=COALESCE(?, ragflow_dataset_id),
+                allow_group_ids=COALESCE(?, allow_group_ids),
+                deny_group_ids=COALESCE(?, deny_group_ids),
+                ingest_state=COALESCE(?, ingest_state),
+                source_state=COALESCE(?, source_state),
+                source_state_reason=COALESCE(?, source_state_reason),
+                ragflow_dataset_id=COALESCE(?, ragflow_dataset_id),
                ragflow_document_id=COALESCE(?, ragflow_document_id),
                ragflow_task_id=COALESCE(?, ragflow_task_id),
                last_sync_at=?,
@@ -656,11 +753,12 @@ async def update_mapping_status(
         (
             sync_status, pipeline_status, error_code, error_message,
             event_status, business_status, current_version, attempt_count,
-            next_retry_at, event_type, document_type, source_page_count,
-            bucket, object_key,
-            asset_id,
-            department_id, security_level, allow_group_ids, deny_group_ids,
-            doc.ragflow_dataset_id, doc.ragflow_document_id,
+             next_retry_at, event_type, document_type, source_page_count,
+             bucket, object_key,
+             asset_id,
+             department_id, security_level, allow_group_ids, deny_group_ids,
+             ingest_state, source_state, source_state_reason,
+             doc.ragflow_dataset_id, doc.ragflow_document_id,
             doc.ragflow_task_id, now, now, doc.id,
         ),
     )
@@ -700,6 +798,12 @@ async def update_mapping_status(
         doc.allow_group_ids = allow_group_ids
     if deny_group_ids is not None:
         doc.deny_group_ids = deny_group_ids
+    if ingest_state is not None:
+        doc.ingest_state = ingest_state
+    if source_state is not None:
+        doc.source_state = source_state
+    if source_state_reason is not None:
+        doc.source_state_reason = source_state_reason
     doc.last_sync_at = now
     doc.updated_at = now
 
@@ -833,7 +937,12 @@ async def set_current_version(
     await db.commit()
 
 
-async def enqueue_outbox(db: aiosqlite.Connection, event: OutboxEvent) -> OutboxEvent:
+async def enqueue_outbox(
+    db: aiosqlite.Connection,
+    event: OutboxEvent,
+    *,
+    commit: bool = True,
+) -> OutboxEvent:
     now = utc_now()
     try:
         cursor = await db.execute(
@@ -850,7 +959,8 @@ async def enqueue_outbox(db: aiosqlite.Connection, event: OutboxEvent) -> Outbox
                 event.max_attempts, now, now,
             ),
         )
-        await db.commit()
+        if commit:
+            await db.commit()
         if cursor.rowcount:
             event.id = cursor.lastrowid
             event.status = "pending"
@@ -858,7 +968,10 @@ async def enqueue_outbox(db: aiosqlite.Connection, event: OutboxEvent) -> Outbox
             event.updated_at = now
             return event
     except sqlite3.IntegrityError:
-        await db.rollback()
+        if commit:
+            await db.rollback()
+        else:
+            raise
     existing = await get_outbox_by_event_id(db, event.event_id)
     return existing if existing else event
 

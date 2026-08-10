@@ -1,7 +1,11 @@
 import pytest
 
 from enterprise.gateway.quality.routing import route_document
-from enterprise.gateway.sync.models import get_mapping, init_db
+from enterprise.gateway.sync.models import (
+    get_mapping,
+    init_db,
+    update_parser_application,
+)
 from enterprise.gateway.sync.ragflow_document_client import RAGFlowDocumentStub
 from enterprise.gateway.sync.source_adapter import SourceStub
 from enterprise.gateway.sync.sync_service import (
@@ -74,6 +78,23 @@ async def test_parser_readback_mismatch_fails_before_parse():
 
 
 @pytest.mark.asyncio
+async def test_reindex_rejects_legacy_unverified_parser_before_parse():
+    db = await init_db(":memory:")
+    client = RAGFlowDocumentStub()
+    client.run_status = "DONE"
+    service = SyncService(db, SourceStub(b"manual"), client)
+    doc, _ = await service.process_event(make_event(b"manual"))
+    await update_parser_application(db, doc, status="legacy_unverified")
+
+    with pytest.raises(TerminalDocumentSyncError) as error:
+        await service.reindex_document("tenant-1", "EAM", "DOC-1", "v1")
+
+    assert error.value.code == "PARSER_APPLICATION_UNVERIFIABLE"
+    assert client._parse_calls == [(doc.ragflow_dataset_id, [doc.ragflow_document_id])]
+    await db.close()
+
+
+@pytest.mark.asyncio
 async def test_only_quality_passed_executed_latest_version_is_promoted():
     db = await init_db(":memory:")
     client = RAGFlowDocumentStub()
@@ -103,4 +124,7 @@ async def test_only_quality_passed_executed_latest_version_is_promoted():
     assert first.business_status == "superseded"
     assert second.current_version == 1
     assert any(enabled is False for _, _, enabled in client._status_updates)
+    stale_attempt = await first_service.promote_quality_passed_version(first, "passed")
+    assert stale_attempt is False
+    assert client._status_updates[-1][2] is False
     await db.close()

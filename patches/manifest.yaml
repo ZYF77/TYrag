@@ -9,4 +9,23 @@ baseline:
   upstream_image: infiniflow/ragflow:v0.26.4
   note: P0 stabilization changes live under enterprise/ and do not modify upstream sources.
 
-patches: [{id: RF-PATCH-001, reason: "entrypoint.sh mount disabled for local compatibility", upstream_files: [ragflow/docker/docker-compose.yml], adr: "decisions/ADR-002", introduced_in: "WP-00", tests: ["docker compose up -d", "curl /api/v1/system/ping"]}]
+patches:
+  - id: RF-PATCH-001
+    reason: "entrypoint.sh mount disabled for local compatibility"
+    upstream_files: [ragflow/docker/docker-compose.yml]
+    adr: "decisions/ADR-002"
+    introduced_in: "WP-00"
+    tests: ["docker compose up -d", "curl /api/v1/system/ping"]
+  - id: RF-PATCH-002
+    reason: "virtual FILE_SHARE document registration and one-shot temporary source fetch"
+    upstream_files:
+      - ragflow/api/apps/restful_apis/document_api.py
+      - ragflow/rag/utils/external_source.py
+      - ragflow/rag/svr/task_executor.py
+      - ragflow/rag/svr/task_executor_refactor/task_handler.py
+    adr: "decisions/ADR-007-外部文件权威源与零持久PDF.md"
+    change_request: "patches/CHANGE-REQUEST-外部文件票据解析.md"
+    introduced_in: "WP-04"
+    tests:
+      - "python -m py_compile ragflow/api/apps/restful_apis/document_api.py ragflow/rag/utils/external_source.py ragflow/rag/svr/task_executor.py ragflow/rag/svr/task_executor_refactor/task_handler.py"
+      - "enterprise/tests/test_external_file_source.py"

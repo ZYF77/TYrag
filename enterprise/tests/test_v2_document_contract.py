@@ -1,4 +1,5 @@
 """P0 v2 external document contract tests, isolated from RAGFlow core."""
+import asyncio
 import hashlib
 
 import pytest
@@ -8,7 +9,14 @@ from httpx import ASGITransport, AsyncClient
 from enterprise.gateway.auth.service_auth import require_service_principal
 from enterprise.gateway.auth.service_principal import ServicePrincipal
 from enterprise.gateway.sync import v2_router
-from enterprise.gateway.sync.models import get_mapping, update_mapping_status
+from enterprise.gateway.sync.models import (
+    get_mapping,
+    update_mapping_status,
+    update_parser_application,
+)
+from enterprise.gateway.sync.ragflow_document_client import RAGFlowDocumentStub
+from enterprise.gateway.sync.source_adapter import SourceStub
+from enterprise.gateway.sync.sync_service import SyncService
 
 
 CONTENT_SHA = hashlib.sha256(b"test pdf content").hexdigest()
@@ -46,6 +54,13 @@ def _payload(
             "business_status": "active",
         },
     }
+
+
+def test_asset_registry_outage_is_retryable():
+    body = v2_router._error(
+        503, "ASSET_REGISTRY_UNAVAILABLE", "request-1"
+    ).body
+    assert b'"retryable":true' in body
 
 
 @pytest.fixture
@@ -136,6 +151,67 @@ async def test_same_document_version_and_sha_deduplicates_new_event(v2_app):
     assert first.status_code == 202
     assert duplicate.status_code == 202
     assert duplicate.json()["deduplicated"] is True
+
+
+@pytest.mark.asyncio
+async def test_concurrent_same_business_key_creates_one_outbox_event(
+    v2_app, isolated_gateway_db
+):
+    db, _ = isolated_gateway_db
+    payloads = [_payload(event_id=f"evt-concurrent-{index}") for index in range(2)]
+    async with AsyncClient(
+        transport=ASGITransport(app=v2_app), base_url="http://test"
+    ) as client:
+        responses = await asyncio.gather(
+            *(
+                client.post("/enterprise/api/v2/documents", json=payload)
+                for payload in payloads
+            )
+        )
+
+    assert [response.status_code for response in responses] == [202, 202]
+    assert sorted(response.json()["deduplicated"] for response in responses) == [
+        False,
+        True,
+    ]
+    async with db.execute(
+        "SELECT COUNT(*) AS count FROM ext_document_map"
+    ) as cursor:
+        assert (await cursor.fetchone())["count"] == 1
+    async with db.execute(
+        "SELECT COUNT(*) AS count FROM sync_outbox"
+    ) as cursor:
+        assert (await cursor.fetchone())["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_different_business_keys_share_one_sqlite_transaction(
+    v2_app, isolated_gateway_db
+):
+    db, _ = isolated_gateway_db
+    payloads = [
+        _payload(event_id=f"evt-other-{index}", document_id=f"DOC-{index}")
+        for index in range(2)
+    ]
+    async with AsyncClient(
+        transport=ASGITransport(app=v2_app), base_url="http://test"
+    ) as client:
+        responses = await asyncio.gather(
+            *(
+                client.post("/enterprise/api/v2/documents", json=payload)
+                for payload in payloads
+            )
+        )
+
+    assert [response.status_code for response in responses] == [202, 202]
+    async with db.execute(
+        "SELECT COUNT(*) AS count FROM ext_document_map"
+    ) as cursor:
+        assert (await cursor.fetchone())["count"] == 2
+    async with db.execute(
+        "SELECT COUNT(*) AS count FROM sync_outbox"
+    ) as cursor:
+        assert (await cursor.fetchone())["count"] == 2
 
 
 @pytest.mark.asyncio
@@ -323,8 +399,25 @@ async def test_lifecycle_routes_keep_scope_and_external_responses(v2_app):
 
 
 @pytest.mark.asyncio
-async def test_reindex_has_independent_idempotent_command(v2_app, isolated_gateway_db):
+async def test_reindex_has_independent_idempotent_command(
+    v2_app, isolated_gateway_db, monkeypatch
+):
     db, _ = isolated_gateway_db
+    client_stub = RAGFlowDocumentStub()
+    client_stub._documents["internal-document"] = {
+        "data": [{
+            "id": "internal-document",
+            "dataset_id": "internal-dataset",
+            "run": "DONE",
+            "chunk_method": "naive",
+            "parser_config": {"layout_recognize": "DeepDOC"},
+        }]
+    }
+    monkeypatch.setattr(
+        v2_router,
+        "_sync_service",
+        lambda connection: SyncService(connection, SourceStub(b"test pdf content"), client_stub),
+    )
     async with AsyncClient(
         transport=ASGITransport(app=v2_app), base_url="http://test"
     ) as client:
@@ -340,6 +433,7 @@ async def test_reindex_has_independent_idempotent_command(v2_app, isolated_gatew
             pipeline_status="DONE",
             event_status="completed",
         )
+        await update_parser_application(db, doc, status="executed")
         command = _payload(event_id="evt-reindex-1")
         command["eventType"] = "reindex"
         first = await client.post(

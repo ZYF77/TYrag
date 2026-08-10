@@ -271,6 +271,22 @@ async def test_production_replay_store_failure_fails_closed(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_malformed_production_replay_store_fails_closed(monkeypatch):
+    monkeypatch.setenv("ENTERPRISE_TEST_MODE", "0")
+    monkeypatch.setenv("ENTERPRISE_SERVICE_REPLAY_STORE", "redis")
+    monkeypatch.setenv("ENTERPRISE_REDIS_URL", "http://not-redis")
+    auth = ServiceAuthenticator(identities=[_identity()])
+
+    with pytest.raises(HTTPException) as exc:
+        await auth.authenticate_request(
+            _request(body=_body()), credentials=None, now=NOW
+        )
+
+    assert exc.value.status_code == 503
+    assert exc.value.detail["code"] == "AUTH_REPLAY_STORE_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
 async def test_previous_key_grace_and_revocation():
     previous = _identity(
         key_id="key-previous",
