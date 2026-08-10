@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "status": "initial_target_not_measured",
+  "scope": "enterprise_gateway_p0",
+  "measurement_rules": {
+    "percentile": "nearest_rank",
+    "latency_unit": "milliseconds",
+    "queue_latency_unit": "milliseconds",
+    "throughput_unit": "successful_requests_per_second",
+    "error_rate": "errors_divided_by_attempts",
+    "raw_samples": "real_environment_input_only_and_never_committed"
+  },
+  "workloads": [
+    {
+      "id": "retrieval",
+      "route_class": "query",
+      "description": "ACL-filtered retrieval without external answer-model time",
+      "concurrency": [1, 5, 10, 25, 50],
+      "duration_seconds": 300,
+      "targets": {
+        "latency_ms": {"p50_max": 750, "p95_max": 2000, "p99_max": 4000},
+        "queue_latency_ms": {"p50_max": 250, "p95_max": 1000, "p99_max": 2000},
+        "throughput_rps_min": 20,
+        "error_rate_max": 0.01
+      },
+      "required_evidence": [
+        "tenant_and_user_acl_scope",
+        "concurrency_and_duration",
+        "p50_p95_p99_latency",
+        "queue_latency",
+        "http_status_error_rate"
+      ]
+    },
+    {
+      "id": "gateway_query",
+      "route_class": "business_query",
+      "description": "Read-only Gateway adapter query with bounded result size",
+      "concurrency": [1, 5, 10, 25],
+      "duration_seconds": 300,
+      "targets": {
+        "latency_ms": {"p50_max": 400, "p95_max": 1000, "p99_max": 2000},
+        "queue_latency_ms": {"p50_max": 100, "p95_max": 500, "p99_max": 1000},
+        "throughput_rps_min": 20,
+        "error_rate_max": 0.01
+      },
+      "required_evidence": [
+        "read_only_query_shape",
+        "bounded_rows_and_timeout",
+        "p50_p95_p99_latency",
+        "queue_latency",
+        "error_rate"
+      ]
+    },
+    {
+      "id": "document_event_registration",
+      "route_class": "ingestion",
+      "description": "Accept and durably register an external document event; parsing is asynchronous",
+      "concurrency": [1, 5, 10, 25],
+      "duration_seconds": 300,
+      "targets": {
+        "latency_ms": {"p50_max": 500, "p95_max": 2000, "p99_max": 5000},
+        "queue_latency_ms": {"p50_max": 500, "p95_max": 2000, "p99_max": 5000},
+        "throughput_rps_min": 10,
+        "error_rate_max": 0.01
+      },
+      "required_evidence": [
+        "idempotency_key_and_replay_result",
+        "registration_latency_separate_from_parse_latency",
+        "queue_depth_and_oldest_age",
+        "p50_p95_p99_latency",
+        "error_rate"
+      ]
+    },
+    {
+      "id": "sse_control_plane",
+      "route_class": "streaming",
+      "description": "Conversation run control path excluding external model generation time",
+      "concurrency": [1, 5, 10, 25],
+      "duration_seconds": 300,
+      "targets": {
+        "latency_ms": {"p50_max": 500, "p95_max": 1000, "p99_max": 2000},
+        "queue_latency_ms": {"p50_max": 250, "p95_max": 1000, "p99_max": 2000},
+        "throughput_rps_min": 10,
+        "error_rate_max": 0.01,
+        "run_started_ms_max": 1000,
+        "content_or_heartbeat_gap_ms_max": 15000
+      },
+      "required_evidence": [
+        "run_started_event",
+        "first_content_or_heartbeat",
+        "heartbeat_gap",
+        "terminal_run_status",
+        "p50_p95_p99_latency",
+        "error_rate"
+      ]
+    }
+  ],
+  "required_report_fields": [
+    "workload_id",
+    "environment_version",
+    "gateway_instance_count",
+    "redis_valkey_mode",
+    "object_storage_mode",
+    "concurrency",
+    "duration_seconds",
+    "sample_count",
+    "p50",
+    "p95",
+    "p99",
+    "throughput_rps",
+    "queue_latency_p50",
+    "queue_latency_p95",
+    "queue_latency_p99",
+    "error_rate"
+  ]
+}
