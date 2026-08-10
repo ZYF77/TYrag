@@ -25,7 +25,7 @@ class GatewayConfig:
         default_factory=lambda: os.getenv("RAGFLOW_API_VERSION", "v1")
     )
 
-    # --- Business PostgreSQL (future) ---
+    # --- Business PostgreSQL read-only adapter ---
     pg_host: str = field(
         default_factory=lambda: os.getenv("PG_HOST", "localhost")
     )
@@ -43,6 +43,50 @@ class GatewayConfig:
     )
     pg_timeout: float = field(
         default_factory=lambda: float(os.getenv("PG_TIMEOUT", "10.0"))
+    )
+    business_query_enabled: bool = field(
+        default_factory=lambda: os.getenv(
+            "ENTERPRISE_BUSINESS_QUERY_ENABLED", "false"
+        ).lower()
+        in ("1", "true", "yes", "on")
+    )
+    business_query_transport: str = field(
+        default_factory=lambda: os.getenv(
+            "ENTERPRISE_BUSINESS_QUERY_TRANSPORT", "unconfigured"
+        ).strip().lower()
+    )
+    business_query_max_rows: int = field(
+        default_factory=lambda: int(
+            os.getenv("ENTERPRISE_BUSINESS_QUERY_MAX_ROWS", "100")
+        )
+    )
+    business_query_max_range_days: int = field(
+        default_factory=lambda: int(
+            os.getenv("ENTERPRISE_BUSINESS_QUERY_MAX_RANGE_DAYS", "31")
+        )
+    )
+
+    # --- Business TimeSeries read-only adapter ---
+    timeseries_query_enabled: bool = field(
+        default_factory=lambda: os.getenv(
+            "ENTERPRISE_TIMESERIES_QUERY_ENABLED", "false"
+        ).lower()
+        in ("1", "true", "yes", "on")
+    )
+    timeseries_query_transport: str = field(
+        default_factory=lambda: os.getenv(
+            "ENTERPRISE_TIMESERIES_QUERY_TRANSPORT", "unconfigured"
+        ).strip().lower()
+    )
+    timeseries_timeout: float = field(
+        default_factory=lambda: float(
+            os.getenv("ENTERPRISE_TIMESERIES_TIMEOUT", "10.0")
+        )
+    )
+    timeseries_query_max_range_hours: int = field(
+        default_factory=lambda: int(
+            os.getenv("ENTERPRISE_TIMESERIES_MAX_RANGE_HOURS", "24")
+        )
     )
 
     # --- Object storage (future) ---
@@ -129,6 +173,54 @@ class GatewayConfig:
         return os.getenv(
             "ENTERPRISE_DEMO_ROUTES_ENABLED", default
         ).lower() in ("1", "true", "yes", "on")
+
+    def validate_business_query(self) -> None:
+        """Validate safe adapter settings without inspecting or logging secrets.
+
+        ``external`` means that the application will inject a transport
+        implementation.  A driver name is deliberately not accepted until a
+        customer schema and dependency contract are frozen.
+        """
+        transport_values = {"unconfigured", "external"}
+        if self.business_query_transport not in transport_values:
+            raise ValueError("unsupported business query transport")
+        if self.timeseries_query_transport not in transport_values:
+            raise ValueError("unsupported time-series query transport")
+        if not 1 <= self.pg_port <= 65535:
+            raise ValueError("PG_PORT must be between 1 and 65535")
+        if not self.business_query_max_rows or not (
+            1 <= self.business_query_max_rows <= 500
+        ):
+            raise ValueError("business query row limit is outside the safe range")
+        if not 1 <= self.business_query_max_range_days <= 365:
+            raise ValueError("business query range is outside the safe range")
+        if not 1 <= self.timeseries_query_max_range_hours <= 168:
+            raise ValueError("time-series query range is outside the safe range")
+        for value, name in (
+            (self.pg_timeout, "PG_TIMEOUT"),
+            (self.timeseries_timeout, "ENTERPRISE_TIMESERIES_TIMEOUT"),
+        ):
+            if (
+                value != value
+                or value in (float("inf"), float("-inf"))
+                or not 0 < value <= 60
+            ):
+                raise ValueError(f"{name} must be between 0 and 60 seconds")
+        if self.business_query_enabled:
+            if self.business_query_transport == "unconfigured":
+                raise ValueError(
+                    "business query transport must be injected when enabled"
+                )
+            if not self.pg_database.strip() or not self.pg_user.strip():
+                raise ValueError(
+                    "PG_DATABASE and PG_USER are required when business query is enabled"
+                )
+        if self.timeseries_query_enabled and (
+            self.timeseries_query_transport == "unconfigured"
+        ):
+            raise ValueError(
+                "time-series query transport must be injected when enabled"
+            )
 
     # --- Logging & observability ---
     log_level: str = field(
