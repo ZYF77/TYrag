@@ -49,6 +49,24 @@ def _canonical_json(value: Any) -> str:
     )
 
 
+def _ragflow_file_name(doc: ExtDocumentMap, original_name: str) -> str:
+    """Return a stable dataset-unique internal name, preserving the suffix."""
+
+    dot = original_name.rfind(".")
+    stem = original_name[:dot] if dot > 0 else original_name
+    suffix = original_name[dot:] if dot > 0 else ""
+    identity = "\n".join(
+        (
+            doc.tenant_id,
+            doc.source_system,
+            doc.external_document_id,
+            doc.source_version_id,
+        )
+    )
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+    return f"{stem[:80]}-{digest}{suffix}"
+
+
 def _expected_parser_json(routing: dict[str, Any]) -> str:
     return _canonical_json({
         "profile": routing["selected_parser_profile"],
@@ -535,7 +553,7 @@ class SyncService:
                         result = _validate_ragflow_response(
                             await self.ragflow_client.register_external_document(
                                 dataset_id,
-                                payload["fileName"],
+                                _ragflow_file_name(doc, payload["fileName"]),
                                 external_ticket=f"external://{external_ticket.token}",
                                 size=external_ticket.size,
                                 media_type=payload.get("mediaType", doc.media_type),
@@ -546,7 +564,9 @@ class SyncService:
                     else:
                         result = _validate_ragflow_response(
                             await self.ragflow_client.upload_document(
-                                dataset_id, payload["fileName"], source_file.content,
+                                dataset_id,
+                                _ragflow_file_name(doc, payload["fileName"]),
+                                source_file.content,
                             ),
                             "register document",
                         )
@@ -667,12 +687,27 @@ class SyncService:
 
     @staticmethod
     def _external_meta_fields(doc: ExtDocumentMap, event: OutboxEvent) -> dict:
+        ground_truth_fields = {
+            name: value
+            for name, value in (
+                ("equipment_id", doc.equipment_id),
+                ("fixed_asset_no", doc.fixed_asset_no),
+            )
+            if value
+        }
+        required_capabilities = ["text", "position"]
+        if ground_truth_fields:
+            required_capabilities.append("key_field")
         return {
             "enterprise_event_id": event.event_id,
             "enterprise_external_document_id": doc.external_document_id,
             "enterprise_source_version_id": doc.source_version_id,
             "enterprise_sha256": doc.sha256,
             "enterprise_document_type": doc.document_type,
+            "enterprise_quality_expected_tables": [],
+            "enterprise_quality_ground_truth_fields": ground_truth_fields,
+            "enterprise_quality_citation_expected": False,
+            "enterprise_quality_required_capabilities": required_capabilities,
         }
 
     async def _ensure_parser_configured(
@@ -727,12 +762,13 @@ class SyncService:
                     "PARSER_APPLICATION_UNVERIFIABLE",
                     "Parser configuration was not verified before parsing started",
                 )
-            meta_fields = {
-                "enterprise_event_id": event.event_id,
-                "enterprise_external_document_id": doc.external_document_id,
-                "enterprise_source_version_id": doc.source_version_id,
-                "enterprise_sha256": doc.sha256,
-            }
+            meta_fields = self._external_meta_fields(doc, event)
+            # RAGFlow's document update schema accepts scalars and scalar
+            # arrays, but not nested objects. Ground-truth fields remain in
+            # the Enterprise mapping and are loaded directly by the quality
+            # worker; keep the other declarations across replace-style
+            # metadata updates.
+            meta_fields.pop("enterprise_quality_ground_truth_fields", None)
             try:
                 _validate_ragflow_response(
                     await self.ragflow_client.update_document(

@@ -159,7 +159,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--fixed-asset-no", default="FA-LOCAL-001")
     parser.add_argument("--fault-code", default="FAULT-LOCAL")
     parser.add_argument("--source-version-id", default="local-v3-001")
-    parser.add_argument("--document-type", default="manual")
+    parser.add_argument("--document-type", default="PRODUCT_MANUAL")
     parser.add_argument("--department-id", default="maintenance")
     parser.add_argument("--security-level", type=int, default=2)
     parser.add_argument("--allow-group-id", default="maintenance")

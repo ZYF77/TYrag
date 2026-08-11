@@ -100,6 +100,13 @@ def test_local_defaults_and_polling_are_runner_safe():
     assert "普通 Send" in runbook
 
 
+def test_collection_signer_resolves_dynamic_status_url_before_signing():
+    collection = json.loads(COLLECTION_PATH.read_text(encoding="utf-8"))
+    serialized = json.dumps(collection, ensure_ascii=False)
+    assert "pm.variables.replaceIn(pm.request.url.toString())" in serialized
+    assert "var resolvedTarget = resolvedPathAndQuery()" in serialized
+
+
 def test_hmac_fixed_vector_matches_python_producer():
     secret = "".join(chr(65 + (index % 26)) for index in range(48))
     body = b'{"a":"two words","z":"%"}'

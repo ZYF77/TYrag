@@ -436,7 +436,11 @@ class ServiceAuthenticator:
         try:
             parsed = json.loads(raw)
             if isinstance(parsed, dict):
-                parsed = parsed.get("credentials")
+                parsed = (
+                    parsed.get("credentials")
+                    if "credentials" in parsed
+                    else [parsed]
+                )
             if not isinstance(parsed, list):
                 raise ValueError("credential configuration must be an array")
             return _validate_identities(

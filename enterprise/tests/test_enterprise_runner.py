@@ -207,6 +207,10 @@ def test_runner_rejects_skips_and_xpasses_in_test_steps():
     assert "offlineImplementationTests" in source
     assert "FILE_SHARE v3 + formal v2" in source
     assert "no P1 implementation tests executed" not in source
+    assert "applicationEnvironmentNames" in source
+    assert "ENTERPRISE_TEST_MODE', '1', 'Process'" in source
+    assert "RAGFLOW_" in source
+    assert "TYRAG_EXTERNAL_SOURCE_INTERNAL_KEY" in source
 
 
 def test_required_live_suite_is_v3_v2_and_has_strict_status_url_path():
@@ -225,6 +229,48 @@ def test_required_live_suite_is_v3_v2_and_has_strict_status_url_path():
     assert "pytest.xfail" not in source
     assert "unittest.mock" not in source
     assert "Mock(" not in source
+    assert '"reason": str(exc)' in source
+
+
+def test_live_suite_accepts_asset_scope_citations_but_requires_new_document(tmp_path):
+    from enterprise.scripts.run_file_share_v3_v2_e2e import (
+        _stage_unique_source_copy,
+        matching_ingested_citations,
+    )
+
+    citations = [
+        {
+            "citationId": "old",
+            "externalDocumentId": "DOC-OLD",
+            "sourceVersionId": "v1",
+        },
+        {
+            "citationId": "new",
+            "externalDocumentId": "DOC-NEW",
+            "sourceVersionId": "v2",
+        },
+    ]
+
+    assert matching_ingested_citations(
+        citations,
+        external_document_id="DOC-NEW",
+        source_version_id="v2",
+    ) == [citations[1]]
+    assert matching_ingested_citations(
+        citations,
+        external_document_id="DOC-MISSING",
+        source_version_id="v2",
+    ) == []
+
+    source = tmp_path / "manual.pdf"
+    source.write_bytes(b"test-pdf-bytes")
+    staged, relative = _stage_unique_source_copy(source, "manual.pdf")
+    try:
+        assert staged.read_bytes() == source.read_bytes()
+        assert staged.name != source.name
+        assert relative == staged.name
+    finally:
+        staged.unlink(missing_ok=True)
 
 
 def test_preflight_reports_only_states_and_has_no_s3_requirements():
@@ -244,6 +290,29 @@ def test_preflight_reports_only_states_and_has_no_s3_requirements():
     assert "configured" in source
     assert "missing" in source
     assert "unavailable" in source
+
+
+@pytest.mark.parametrize(
+    "credentials",
+    (
+        {"credentialId": "runner-test"},
+        {"credentials": [{"credentialId": "runner-test"}]},
+    ),
+)
+def test_preflight_accepts_supported_hmac_credential_shapes(
+    monkeypatch, credentials
+):
+    from enterprise.scripts.probe_integration_environment import _auth_state
+
+    monkeypatch.setenv("ENTERPRISE_TEST_MODE", "0")
+    monkeypatch.setenv("ENTERPRISE_SYNC_AUTH_ENABLED", "true")
+    monkeypatch.setenv("ENTERPRISE_SYNC_HMAC_CREDENTIALS", json.dumps(credentials))
+    monkeypatch.setenv("JWT_ISSUER", "runner-test-issuer")
+    monkeypatch.setenv("JWT_AUDIENCE", "runner-test-audience")
+    monkeypatch.setenv("JWT_ENABLE_HS", "true")
+    monkeypatch.setenv("JWT_SHARED_SECRET", "runner-test-secret")
+
+    assert _auth_state() == {"status": "configured", "reason": "hmac_and_jwt"}
 
 
 def test_overlay_wires_gateway_file_share_and_internal_ticket_network():

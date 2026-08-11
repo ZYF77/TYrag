@@ -45,6 +45,20 @@
         }).join("&");
     }
 
+    function resolvedPathAndQuery() {
+        var resolved = pm.variables.replaceIn(pm.request.url.toString());
+        var fragmentAt = resolved.indexOf("#");
+        if (fragmentAt >= 0) resolved = resolved.slice(0, fragmentAt);
+        var schemeAt = resolved.indexOf("://");
+        var pathAt = schemeAt >= 0 ? resolved.indexOf("/", schemeAt + 3) : 0;
+        var relative = pathAt >= 0 ? resolved.slice(pathAt) : "/";
+        var queryAt = relative.indexOf("?");
+        return {
+            path: queryAt >= 0 ? relative.slice(0, queryAt) : relative,
+            query: queryAt >= 0 ? relative.slice(queryAt + 1) : ""
+        };
+    }
+
     function readVariable(name) {
         return String(pm.variables.get(name) || "");
     }
@@ -71,8 +85,9 @@
         : String(Math.floor(Date.now() / 1000));
     if (!/^\d{10}$/.test(timestamp)) throw new Error("timestamp must be a ten-digit epoch value");
 
-    var path = pm.request.url.getPath();
-    var query = pm.request.url.getQueryString();
+    var resolvedTarget = resolvedPathAndQuery();
+    var path = resolvedTarget.path;
+    var query = resolvedTarget.query;
     var rawBody = pm.request.body && pm.request.body.mode === "raw"
         ? pm.variables.replaceIn(pm.request.body.raw || "")
         : "";

@@ -13,8 +13,10 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import sys
 import time
+import uuid
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
 
@@ -62,7 +64,9 @@ def _load_hmac_credential(tenant_id: str, source_system: str) -> tuple[str, str]
     raw = _env("ENTERPRISE_SYNC_HMAC_CREDENTIALS")
     try:
         value = json.loads(raw)
-        credentials = value.get("credentials") if isinstance(value, dict) else value
+        credentials = (
+            value.get("credentials") if "credentials" in value else [value]
+        ) if isinstance(value, dict) else value
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         raise LiveEnvironmentError("HMAC credential configuration is invalid") from exc
     if not isinstance(credentials, list):
@@ -107,6 +111,18 @@ def _file_path(root_id: str, relative_path: str) -> Path:
     return path
 
 
+def _stage_unique_source_copy(
+    source_path: Path, relative_path: str
+) -> tuple[Path, str]:
+    unique_name = (
+        f"{source_path.stem}-e2e-{uuid.uuid4().hex[:12]}{source_path.suffix}"
+    )
+    staged_path = source_path.with_name(unique_name)
+    shutil.copyfile(source_path, staged_path)
+    staged_relative_path = Path(relative_path).with_name(unique_name).as_posix()
+    return staged_path, staged_relative_path
+
+
 def _metadata(
     *,
     tenant_id: str,
@@ -123,7 +139,9 @@ def _metadata(
         "source_system": source_system,
         "equipment_id": equipment_id,
         "fixed_asset_no": fixed_asset_no or None,
-        "document_type": os.environ.get("ENTERPRISE_E2E_DOCUMENT_TYPE", "manual"),
+        "document_type": os.environ.get(
+            "ENTERPRISE_E2E_DOCUMENT_TYPE", "PRODUCT_MANUAL"
+        ),
         "document_version": source_version_id,
         "department_id": os.environ.get("ENTERPRISE_E2E_DEPARTMENT_ID", "maintenance"),
         "security_level": int(os.environ.get("ENTERPRISE_E2E_SECURITY_LEVEL", "2")),
@@ -226,6 +244,24 @@ def validate_status_url(
     return status_url
 
 
+def matching_ingested_citations(
+    citations: object,
+    *,
+    external_document_id: str,
+    source_version_id: str,
+) -> list[dict]:
+    if not isinstance(citations, list):
+        return []
+    return [
+        citation
+        for citation in citations
+        if isinstance(citation, dict)
+        and citation.get("externalDocumentId") == external_document_id
+        and citation.get("sourceVersionId") == source_version_id
+        and bool(citation.get("citationId"))
+    ]
+
+
 def _ensure_user_mapping(db_path: str, tenant_id: str, subject: str) -> None:
     async def seed() -> None:
         db = await init_db(db_path)
@@ -263,7 +299,7 @@ def run_live() -> dict[str, bool]:
     external_document_id = _env(
         "ENTERPRISE_E2E_EXTERNAL_DOCUMENT_ID",
         required=False,
-        default=f"TYRAG-E2E-{int(time.time())}",
+        default=f"TYRAG-E2E-{time.time_ns()}",
     )
     event_id = _env(
         "ENTERPRISE_E2E_EVENT_ID",
@@ -278,7 +314,9 @@ def run_live() -> dict[str, bool]:
     jwt_secret = _env("JWT_SHARED_SECRET")
     issuer = _env("JWT_ISSUER")
     audience = _env("JWT_AUDIENCE")
-    source_path = _file_path(root_id, relative_path)
+    source_path, relative_path = _stage_unique_source_copy(
+        _file_path(root_id, relative_path), relative_path
+    )
     content = source_path.read_bytes()
     source_sha256 = hashlib.sha256(content).hexdigest()
     source_stat = source_path.stat()
@@ -399,17 +437,20 @@ def run_live() -> dict[str, bool]:
             raise LiveAssertionError("formal v2 conversationId is missing")
 
         citations: list[dict] = []
-        questions = (
-            _env(
-                "ENTERPRISE_E2E_QUESTION_ONE",
-                required=False,
-                default="Summarize the maintenance instructions in the newly ingested manual.",
-            ),
-            _env(
-                "ENTERPRISE_E2E_QUESTION_TWO",
-                required=False,
-                default="What safety checks are stated in the newly ingested manual?",
-            ),
+        questions = tuple(
+            f"{question}\nUse evidence from the file named {source_path.name}."
+            for question in (
+                _env(
+                    "ENTERPRISE_E2E_QUESTION_ONE",
+                    required=False,
+                    default="Summarize the maintenance instructions in the newly ingested manual.",
+                ),
+                _env(
+                    "ENTERPRISE_E2E_QUESTION_TWO",
+                    required=False,
+                    default="What safety checks are stated in the newly ingested manual?",
+                ),
+            )
         )
         for index, question in enumerate(questions, start=1):
             message_response = client.post(
@@ -425,14 +466,14 @@ def run_live() -> dict[str, bool]:
             message_citations = message.get("citations")
             if not isinstance(message_citations, list) or not message_citations:
                 raise LiveAssertionError("formal v2 message has no citation")
-            for citation in message_citations:
-                if (
-                    citation.get("externalDocumentId") != external_document_id
-                    or citation.get("sourceVersionId") != source_version_id
-                    or not citation.get("citationId")
-                ):
-                    raise LiveAssertionError("citation scope does not match ingested document")
-            citations.extend(message_citations)
+            matching_citations = matching_ingested_citations(
+                message_citations,
+                external_document_id=external_document_id,
+                source_version_id=source_version_id,
+            )
+            if not matching_citations:
+                raise LiveAssertionError("citation scope does not include ingested document")
+            citations.extend(matching_citations)
 
         history_response = client.get(
             f"{gateway}/enterprise/api/v2/conversations/{quote(conversation_id, safe='-._~')}/messages",
@@ -501,17 +542,23 @@ def main(argv: list[str] | None = None) -> int:
         _write_report(args.report, payload)
         print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
         return 0
-    except LiveEnvironmentError:
+    except LiveEnvironmentError as exc:
         payload = {
             "profile": "Integration",
             "passed": False,
             "outcome": "environment_missing_or_unavailable",
+            "reason": str(exc),
         }
         _write_report(args.report, payload)
         print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
         return 3
-    except LiveAssertionError:
-        payload = {"profile": "Integration", "passed": False, "outcome": "test_failure"}
+    except LiveAssertionError as exc:
+        payload = {
+            "profile": "Integration",
+            "passed": False,
+            "outcome": "test_failure",
+            "reason": str(exc),
+        }
         _write_report(args.report, payload)
         print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
         return 1

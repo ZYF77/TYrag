@@ -427,6 +427,28 @@ def test_credential_identity_parses_server_side_json(monkeypatch):
     assert "secret" not in repr(identities[0]).lower()
 
 
+def test_single_credential_object_is_accepted(monkeypatch):
+    monkeypatch.setenv(
+        "ENTERPRISE_SYNC_HMAC_CREDENTIALS",
+        json.dumps(
+            {
+                "credentialId": "device-sync",
+                "keyId": "key-active",
+                "secret": SECRET,
+                "allowedBindings": [
+                    {"tenantId": "tenant-a", "sourceSystem": "EAM"}
+                ],
+                "status": "active",
+            }
+        ),
+    )
+
+    identities = ServiceAuthenticator().identities
+
+    assert len(identities) == 1
+    assert identities[0].key_id == "key-active"
+
+
 def test_production_default_replay_store_is_never_memory(monkeypatch):
     monkeypatch.setenv("ENTERPRISE_TEST_MODE", "0")
     monkeypatch.delenv("ENTERPRISE_SERVICE_REPLAY_STORE", raising=False)

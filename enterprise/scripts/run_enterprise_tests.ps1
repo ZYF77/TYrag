@@ -318,7 +318,30 @@ function Invoke-PytestStep {
         '-o', 'xfail_strict=true', '-p', 'no:cacheprovider',
         "--junitxml=$junit"
     )
-    $code = Invoke-Logged -FilePath $PythonRuntime.path -Arguments $arguments -Label $Name
+    $savedEnvironment = @{}
+    $applicationEnvironmentNames = @(
+        Get-ChildItem Env: | Where-Object {
+            $_.Name -match '^(ENTERPRISE_|RAGFLOW_|JWT_|S3_|PG_)' -or
+            $_.Name -in @('AUTH_ENABLED', 'GATEWAY_URL', 'TYRAG_EXTERNAL_SOURCE_INTERNAL_KEY')
+        } | ForEach-Object { $_.Name }
+    )
+    foreach ($environmentName in $applicationEnvironmentNames) {
+        $savedEnvironment[$environmentName] = [Environment]::GetEnvironmentVariable($environmentName)
+        [Environment]::SetEnvironmentVariable($environmentName, $null, 'Process')
+    }
+    [Environment]::SetEnvironmentVariable('ENTERPRISE_TEST_MODE', '1', 'Process')
+    try {
+        $code = Invoke-Logged -FilePath $PythonRuntime.path -Arguments $arguments -Label $Name
+    } finally {
+        [Environment]::SetEnvironmentVariable('ENTERPRISE_TEST_MODE', $null, 'Process')
+        foreach ($environmentName in $savedEnvironment.Keys) {
+            [Environment]::SetEnvironmentVariable(
+                $environmentName,
+                $savedEnvironment[$environmentName],
+                'Process'
+            )
+        }
+    }
     $counts = Read-JUnitCounts -Path $junit
     if ($null -eq $counts) {
         Add-Step -Name $Name -Status failed -ExitCode 4 -Detail 'JUnit report was not produced' -JUnit $junit

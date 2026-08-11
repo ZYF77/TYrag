@@ -18,11 +18,13 @@ from enterprise.gateway.quality import models as quality_models
 from enterprise.gateway.sync import v3_router
 from enterprise.gateway.sync.models import (
     ExtDocumentMap,
+    OutboxEvent,
     get_mapping,
     insert_mapping,
     update_mapping_status,
     update_parser_application,
 )
+from enterprise.gateway.sync.sync_service import SyncService, _ragflow_file_name
 
 
 def _metadata(
@@ -86,6 +88,71 @@ def _payload(
             source_version_id=source_version_id,
         ),
     }
+
+
+def test_real_ragflow_metadata_declares_quality_expectations():
+    doc = ExtDocumentMap(
+        tenant_id="tenant-a",
+        source_system="DEMO",
+        external_document_id="DOC-V3-001",
+        source_version_id="v1",
+        event_id="evt-v3-001",
+        sha256="a" * 64,
+        file_name="manual.pdf",
+        document_type="PRODUCT_MANUAL",
+        equipment_id="EQ-001",
+        fixed_asset_no="FA-001",
+    )
+    event = OutboxEvent(
+        event_id=doc.event_id,
+        event_type="upsert",
+        tenant_id=doc.tenant_id,
+        source_system=doc.source_system,
+        external_document_id=doc.external_document_id,
+        source_version_id=doc.source_version_id,
+        payload="{}",
+    )
+
+    metadata = SyncService._external_meta_fields(doc, event)
+
+    assert metadata["enterprise_quality_expected_tables"] == []
+    assert metadata["enterprise_quality_ground_truth_fields"] == {
+        "equipment_id": "EQ-001",
+        "fixed_asset_no": "FA-001",
+    }
+    assert metadata["enterprise_quality_citation_expected"] is False
+    assert metadata["enterprise_quality_required_capabilities"] == [
+        "text",
+        "position",
+        "key_field",
+    ]
+
+
+def test_ragflow_internal_name_is_stable_and_business_document_unique():
+    first = ExtDocumentMap(
+        tenant_id="tenant-a",
+        source_system="EAM",
+        external_document_id="DOC-001",
+        source_version_id="v1",
+        event_id="evt-001",
+        sha256="a" * 64,
+        file_name="manual.pdf",
+    )
+    second = ExtDocumentMap(
+        tenant_id="tenant-a",
+        source_system="EAM",
+        external_document_id="DOC-002",
+        source_version_id="v1",
+        event_id="evt-002",
+        sha256="b" * 64,
+        file_name="manual.pdf",
+    )
+
+    first_name = _ragflow_file_name(first, first.file_name)
+
+    assert first_name == _ragflow_file_name(first, first.file_name)
+    assert first_name.endswith(".pdf")
+    assert first_name != _ragflow_file_name(second, second.file_name)
 
 
 @pytest.fixture
