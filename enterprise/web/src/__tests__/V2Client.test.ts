@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { V2ApiError, v2Api } from '../api/v2Client';
 
 const command = {
@@ -29,6 +29,21 @@ const command = {
 };
 
 describe('v2 API client', () => {
+  it('does not issue browser document requests in gateway mode', async () => {
+    vi.stubEnv('VITE_API_MODE', 'gateway');
+    vi.resetModules();
+    try {
+      const { v2Api: gatewayApi } = await import('../api/v2Client');
+      await expect(gatewayApi.submitDocument(command)).rejects.toMatchObject({
+        status: 0,
+        body: { code: 'DOCUMENT_PRODUCER_REQUIRED' },
+      });
+    } finally {
+      vi.unstubAllEnvs();
+      vi.resetModules();
+    }
+  });
+
   it('submits and polls external document status without engine identifiers', async () => {
     const accepted = await v2Api.submitDocument(command);
     expect(accepted.externalDocumentId).toBe('TEST-DOC-V2');
@@ -42,7 +57,10 @@ describe('v2 API client', () => {
 
   it('rejects an eventId reused with a different payload', async () => {
     await v2Api.submitDocument(command);
-    await expect(v2Api.submitDocument({ ...command, sourceVersionId: 'v2' })).rejects.toMatchObject({ status: 409 });
+    await expect(v2Api.submitDocument({ ...command, sourceVersionId: 'v2' })).rejects.toMatchObject({
+      status: 409,
+      body: { code: 'EVENT_ID_CONFLICT' },
+    });
   });
 
   it('replays an event when equivalent JSON fields use a different order', async () => {
@@ -135,7 +153,10 @@ describe('v2 API client', () => {
       { clientMessageId: 'client-conflict-v2', question: 'different question' },
       () => undefined,
     );
-    await expect(second.promise).rejects.toMatchObject({ status: 409 });
+    await expect(second.promise).rejects.toMatchObject({
+      status: 409,
+      body: { code: 'CLIENT_MESSAGE_ID_CONFLICT' },
+    });
   });
 
   it('polls a 202 pending run until the durable result is available', async () => {

@@ -667,7 +667,7 @@ const v2Handlers = [
     const payloadHash = canonicalJson(body);
     const previousPayloadHash = body.eventId ? v2DocumentPayloadHashes.get(body.eventId) : undefined;
     if (previousPayloadHash !== undefined && previousPayloadHash !== payloadHash) {
-      return v2Error('EVENT_PAYLOAD_CONFLICT', 'The eventId was already used with a different payload', 409);
+      return v2Error('EVENT_ID_CONFLICT', 'The eventId was already used with a different payload', 409);
     }
     const operation: DocumentOperation = {
       operationId: body.eventId ?? `op-${Date.now()}`,
@@ -789,7 +789,7 @@ const v2Handlers = [
     const existing = v2Runs.get(runKey);
     if (existing) {
       if (existing.question !== question) {
-        return v2Error('MESSAGE_PAYLOAD_CONFLICT', 'The clientMessageId was already used with a different question', 409);
+        return v2Error('CLIENT_MESSAGE_ID_CONFLICT', 'The clientMessageId was already used with a different question', 409);
       }
       if (existing.pending) {
         existing.pending = false;

@@ -3,11 +3,13 @@ import { ErrorBanner } from '../components/errors/ErrorBanner';
 import { ContextEditor } from '../components/harness/ContextEditor';
 import { DocumentDiagnostics } from '../components/harness/DocumentDiagnostics';
 import { DocumentEventForm } from '../components/harness/DocumentEventForm';
+import { DocumentProducerNotice } from '../components/harness/DocumentProducerNotice';
 import { HarnessChat } from '../components/harness/HarnessChat';
 import { HarnessCitationPanel } from '../components/harness/HarnessCitationPanel';
 import { TransientAttachmentPanel } from '../components/harness/TransientAttachmentPanel';
 import { toDisplayError, getHarnessToken, setHarnessToken, v2Api } from '../api/v2Client';
 import { API_MODE } from '../api/mode';
+import { browserDocumentSyncEnabled } from '../api/documentSyncPolicy';
 import type {
   Citation,
   ConversationDetail,
@@ -57,6 +59,7 @@ async function encodeAttachment(file: File): Promise<string> {
 }
 
 export function IntegrationHarnessPage() {
+  const browserDocumentSync = browserDocumentSyncEnabled(API_MODE);
   const [documentQuery, setDocumentQuery] = useState<DocumentQuery | null>(null);
   const [documentOperation, setDocumentOperation] = useState<DocumentOperation | null>(null);
   const [documentLoading, setDocumentLoading] = useState(false);
@@ -274,12 +277,12 @@ export function IntegrationHarnessPage() {
             <div>
               <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-indigo-600">M1-E / T5 / WP-05</p>
               <h1 className="mt-1 text-xl font-semibold tracking-tight text-slate-900">TYrag v2 Integration Test Harness</h1>
-              <p className="mt-1 max-w-3xl text-xs leading-5 text-slate-500">仅用于 Gateway 联调、历史状态回放和契约诊断；不构成正式业务 UI。mock 模式只用于 UI contract test，不代表 Integration 通过。</p>
+              <p className="mt-1 max-w-3xl text-xs leading-5 text-slate-500">仅用于用户 JWT 会话、真 SSE、历史状态回放和契约诊断；不构成正式业务 UI。mock 模式文档区域仅用于 UI contract test，Gateway/demo 模式的文档同步由服务侧 producer 负责。</p>
             </div>
             <div className="flex items-center gap-2 text-xs">
               <span className="rounded-full bg-emerald-50 px-2.5 py-1 font-medium text-emerald-700">external contract v2.0.0</span>
               <span data-testid="harness-api-mode" className="rounded-full bg-slate-100 px-2.5 py-1 font-medium text-slate-600">
-                {API_MODE === 'gateway' ? 'Gateway v2 联调' : `UI contract ${API_MODE}（非 Integration）`}
+                {API_MODE === 'gateway' ? 'Gateway v2 用户 Harness · 文档 producer 独立' : `UI contract ${API_MODE}（非 Integration）`}
               </span>
               <span className={`rounded-full px-2.5 py-1 font-medium ${tokenConfigured ? 'bg-slate-100 text-slate-700' : 'bg-amber-50 text-amber-700'}`}>{tokenConfigured ? 'Bearer 已注入' : '无 Bearer（可测试 401）'}</span>
             </div>
@@ -332,21 +335,23 @@ export function IntegrationHarnessPage() {
           <div className="space-y-4">
             <HarnessChat conversation={activeConversation} messages={chat.messages} isStreaming={chat.isStreaming} error={chat.error} onSend={chat.sendMessage} onRetry={chat.retry} onCancel={chat.cancelStream} onCitation={(citation) => void selectCitation(citation)} />
             <TransientAttachmentPanel conversationId={activeId} loading={attachmentLoading} error={attachmentError} notice={attachmentNotice} onUpload={(file) => void uploadAttachment(file)} />
-            <DocumentDiagnostics operation={documentOperation} loading={documentLoading} error={documentError} onRefresh={() => void pollDocument()} />
+            {browserDocumentSync && <DocumentDiagnostics operation={documentOperation} loading={documentLoading} error={documentError} onRefresh={() => void pollDocument()} />}
           </div>
 
           <aside className="space-y-4">
-            <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-              <div className="mb-3 flex items-center justify-between gap-2"><div><h2 className="text-sm font-semibold text-slate-800">文件事件</h2><p className="mt-1 text-[11px] text-slate-500">POST /documents · 202 + status poll</p></div><button type="button" onClick={() => void refreshDocumentList()} className="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">{documentListLoading ? '查询中…' : '列表'}</button></div>
-              <DocumentEventForm loading={documentLoading} onSubmit={(command) => void submitDocument(command)} />
-            </section>
-            <section aria-label="文件操作列表" className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-              <h2 className="text-sm font-semibold text-slate-800">最近文件操作</h2>
-              <div className="mt-3 space-y-2">
-                {documentItems.length === 0 && <p className="text-xs text-slate-400">尚未加载列表。</p>}
-                 {documentItems.map((item) => <button type="button" key={item.operationId} onClick={() => { setDocumentOperation(item); setDocumentQuery({ externalDocumentId: item.externalDocumentId, sourceVersionId: item.sourceVersionId }); }} className="w-full rounded-md border border-slate-100 px-2.5 py-2 text-left text-xs hover:bg-slate-50"><span className="font-medium text-slate-800">{item.externalDocumentId}</span><span className="ml-2 text-slate-500">{item.status} · {item.stage}</span></button>)}
-              </div>
-            </section>
+             {browserDocumentSync ? <>
+               <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+                 <div className="mb-3 flex items-center justify-between gap-2"><div><h2 className="text-sm font-semibold text-slate-800">文件事件</h2><p className="mt-1 text-[11px] text-slate-500">mock POST /documents · 非 Integration 证据</p></div><button type="button" onClick={() => void refreshDocumentList()} className="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">{documentListLoading ? '查询中…' : '列表'}</button></div>
+                 <DocumentEventForm loading={documentLoading} onSubmit={(command) => void submitDocument(command)} />
+               </section>
+               <section aria-label="文件操作列表" className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+                 <h2 className="text-sm font-semibold text-slate-800">最近文件操作（mock）</h2>
+                 <div className="mt-3 space-y-2">
+                   {documentItems.length === 0 && <p className="text-xs text-slate-400">尚未加载列表。</p>}
+                   {documentItems.map((item) => <button type="button" key={item.operationId} onClick={() => { setDocumentOperation(item); setDocumentQuery({ externalDocumentId: item.externalDocumentId, sourceVersionId: item.sourceVersionId }); }} className="w-full rounded-md border border-slate-100 px-2.5 py-2 text-left text-xs hover:bg-slate-50"><span className="font-medium text-slate-800">{item.externalDocumentId}</span><span className="ml-2 text-slate-500">{item.status} · {item.stage}</span></button>)}
+                 </div>
+               </section>
+             </> : <DocumentProducerNotice />}
             <HarnessCitationPanel citation={selectedCitation} loading={citationLoading} error={citationError} onClose={() => { setSelectedCitation(null); setCitationError(null); }} />
           </aside>
         </div>
