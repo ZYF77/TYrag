@@ -209,6 +209,8 @@ def test_runner_rejects_skips_and_xpasses_in_test_steps():
     assert "no P1 implementation tests executed" not in source
     assert "applicationEnvironmentNames" in source
     assert "ENTERPRISE_TEST_MODE', '1', 'Process'" in source
+    assert 'Remove-Item -LiteralPath "Env:$environmentName"' in source
+    assert "Remove-Item -LiteralPath 'Env:ENTERPRISE_TEST_MODE'" in source
     assert "RAGFLOW_" in source
     assert "TYRAG_EXTERNAL_SOURCE_INTERNAL_KEY" in source
 

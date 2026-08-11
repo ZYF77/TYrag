@@ -327,13 +327,13 @@ function Invoke-PytestStep {
     )
     foreach ($environmentName in $applicationEnvironmentNames) {
         $savedEnvironment[$environmentName] = [Environment]::GetEnvironmentVariable($environmentName)
-        [Environment]::SetEnvironmentVariable($environmentName, $null, 'Process')
+        Remove-Item -LiteralPath "Env:$environmentName" -ErrorAction SilentlyContinue
     }
     [Environment]::SetEnvironmentVariable('ENTERPRISE_TEST_MODE', '1', 'Process')
     try {
         $code = Invoke-Logged -FilePath $PythonRuntime.path -Arguments $arguments -Label $Name
     } finally {
-        [Environment]::SetEnvironmentVariable('ENTERPRISE_TEST_MODE', $null, 'Process')
+        Remove-Item -LiteralPath 'Env:ENTERPRISE_TEST_MODE' -ErrorAction SilentlyContinue
         foreach ($environmentName in $savedEnvironment.Keys) {
             [Environment]::SetEnvironmentVariable(
                 $environmentName,
