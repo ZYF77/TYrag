@@ -36,6 +36,7 @@ from enterprise.gateway.sync.source_adapter import (
 )
 from enterprise.gateway.sync.external_source import FileShareSourceAdapter, router as external_source_router
 from enterprise.gateway.sync.transient_attachment import (
+    TransientAttachmentBodyLimitMiddleware,
     TransientAttachmentCleanupWorker,
     TransientAttachmentService,
     attachment_cleanup_interval_seconds,
@@ -111,14 +112,14 @@ async def lifespan(app: FastAPI):
         reconciler_task = asyncio.create_task(
             StatusReconciler(service).run_forever(config.reconcile_seconds)
         )
-        attachment_cleanup_task = asyncio.create_task(
-            TransientAttachmentCleanupWorker(
-                TransientAttachmentService(_db)
-            ).run_forever(attachment_cleanup_interval_seconds())
-        )
-        started_tasks.extend(
-            [worker_task, reconciler_task, attachment_cleanup_task]
-        )
+        started_tasks.extend([worker_task, reconciler_task])
+        if config.transient_attachments_enabled:
+            attachment_cleanup_task = asyncio.create_task(
+                TransientAttachmentCleanupWorker(
+                    TransientAttachmentService(_db)
+                ).run_forever(attachment_cleanup_interval_seconds())
+            )
+            started_tasks.append(attachment_cleanup_task)
         _background_tasks.extend(started_tasks)
     if config.quality_worker_enabled and not _test_mode():
         quality_service = QualityEvaluationService(
@@ -158,6 +159,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Enterprise RAGFlow Gateway", version="1.0.0", lifespan=lifespan)
+app.add_middleware(TransientAttachmentBodyLimitMiddleware)
 
 
 @app.exception_handler(UserAuthError)

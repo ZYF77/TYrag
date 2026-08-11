@@ -34,6 +34,7 @@ from enterprise.gateway.auth.middleware import (
     require_user_principal,
 )
 from enterprise.gateway.auth.user_principal import UserPrincipal
+from enterprise.gateway.config import config
 from enterprise.gateway.query import v2_store
 from enterprise.gateway.sync.source_adapter import (
     S3SourceAdapter,
@@ -49,6 +50,10 @@ DEFAULT_TTL_SECONDS = 24 * 60 * 60
 DEFAULT_MAX_DOWNLOADS = 1
 DEFAULT_RETRY_ATTEMPTS = 3
 DEFAULT_CLEANUP_INTERVAL_SECONDS = 60
+DEFAULT_REQUEST_OVERHEAD_BYTES = 64 * 1024
+ATTACHMENT_NOT_IMPLEMENTED_MESSAGE = (
+    "Transient attachment is planned but not enabled"
+)
 
 ALLOWED_MEDIA_TYPES: dict[str, frozenset[str]] = {
     ".csv": frozenset({"text/csv"}),
@@ -242,6 +247,16 @@ def attachment_max_size_bytes() -> int:
     return DEFAULT_MAX_SIZE_BYTES
 
 
+def attachment_max_encoded_length() -> int:
+    """Return the largest valid base64 representation for the decoded limit."""
+    return 4 * ((attachment_max_size_bytes() + 2) // 3)
+
+
+def attachment_max_request_body_bytes() -> int:
+    """Bound JSON framing and metadata in addition to the base64 content."""
+    return attachment_max_encoded_length() + DEFAULT_REQUEST_OVERHEAD_BYTES
+
+
 def attachment_ttl_seconds() -> int:
     return _env_int("ENTERPRISE_ATTACHMENT_TTL_SECONDS", DEFAULT_TTL_SECONDS)
 
@@ -362,14 +377,27 @@ def _validate_payload(
 
 
 def decode_attachment_content(encoded: str) -> bytes:
+    if not isinstance(encoded, str) or len(encoded) > attachment_max_encoded_length():
+        raise TransientAttachmentError(
+            "ATTACHMENT_TOO_LARGE",
+            413,
+            "Attachment exceeds the configured size limit",
+        )
     try:
-        return base64.b64decode(encoded, validate=True)
+        decoded = base64.b64decode(encoded, validate=True)
     except (binascii.Error, TypeError, ValueError) as exc:
         raise TransientAttachmentError(
             "ATTACHMENT_CONTENT_INVALID",
             422,
             "Attachment content must be valid base64",
         ) from exc
+    if len(decoded) > attachment_max_size_bytes():
+        raise TransientAttachmentError(
+            "ATTACHMENT_TOO_LARGE",
+            413,
+            "Attachment exceeds the configured size limit",
+        )
+    return decoded
 
 
 def _row_to_record(row: aiosqlite.Row | dict[str, Any]) -> AttachmentRecord:
@@ -651,9 +679,26 @@ class TransientAttachmentService:
                 ),
             ) as cursor:
                 conversation = await cursor.fetchone()
-        except aiosqlite.OperationalError:
+        except aiosqlite.OperationalError as exc:
+            raise TransientAttachmentError(
+                "CONVERSATION_UNAVAILABLE",
+                503,
+                "Conversation history is temporarily unavailable",
+                retryable=True,
+            ) from exc
+        if not conversation:
+            return False
+        status = conversation["status"]
+        if status == "active":
             return True
-        return bool(conversation and conversation["status"] == "active")
+        if status == "archived":
+            return False
+        raise TransientAttachmentError(
+            "CONVERSATION_UNAVAILABLE",
+            503,
+            "Conversation history is temporarily unavailable",
+            retryable=True,
+        )
 
     async def issue_download_ticket(
         self,
@@ -903,7 +948,15 @@ class TransientAttachmentService:
                 "ATTACHMENT_FORBIDDEN", 403, "Attachment access is denied"
             )
 
-        if not await self._conversation_is_active(row):
+        try:
+            conversation_active = await self._conversation_is_active(row)
+        except TransientAttachmentError:
+            try:
+                await self.db.rollback()
+            except Exception:
+                pass
+            raise
+        if not conversation_active:
             await self.db.rollback()
             await self._record_denied(
                 row,
@@ -1221,6 +1274,117 @@ def _error(exc: TransientAttachmentError, request_id: str) -> JSONResponse:
     )
 
 
+def _not_implemented(request_id: str) -> JSONResponse:
+    return _error(
+        TransientAttachmentError(
+            "ATTACHMENT_NOT_IMPLEMENTED",
+            501,
+            ATTACHMENT_NOT_IMPLEMENTED_MESSAGE,
+        ),
+        request_id,
+    )
+
+
+class TransientAttachmentBodyLimitMiddleware:
+    """Gate the planned endpoint and bound its body before JSON parsing."""
+
+    def __init__(self, app: Callable[..., Awaitable[Any]]) -> None:
+        self.app = app
+
+    @staticmethod
+    def _is_create_path(scope: dict[str, Any]) -> bool:
+        if scope.get("method") != "POST":
+            return False
+        parts = str(scope.get("path", "")).split("/")
+        return (
+            len(parts) == 7
+            and parts[:5] == ["", "enterprise", "api", "v2", "conversations"]
+            and bool(parts[5])
+            and parts[6] == "attachments"
+        )
+
+    @staticmethod
+    def _declared_length(scope: dict[str, Any]) -> int | None:
+        lengths: list[int] = []
+        for name, value in scope.get("headers", []):
+            if name.lower() != b"content-length":
+                continue
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                continue
+            if parsed >= 0:
+                lengths.append(parsed)
+        return max(lengths) if lengths else None
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http" or not self._is_create_path(scope):
+            await self.app(scope, receive, send)
+            return
+
+        request_id = str(uuid.uuid4())
+        if not config.transient_attachments_enabled:
+            response = _not_implemented(request_id)
+            await response(scope, receive, send)
+            return
+
+        limit = attachment_max_request_body_bytes()
+        declared_length = self._declared_length(scope)
+        if declared_length is not None and declared_length > limit:
+            response = _error(
+                TransientAttachmentError(
+                    "ATTACHMENT_TOO_LARGE",
+                    413,
+                    "Attachment exceeds the configured size limit",
+                ),
+                request_id,
+            )
+            await response(scope, receive, send)
+            return
+
+        chunks: list[bytes] = []
+        received = 0
+        while True:
+            message = await receive()
+            if message.get("type") == "http.disconnect":
+                return
+            if message.get("type") != "http.request":
+                await self.app(scope, receive, send)
+                return
+            chunk = message.get("body", b"")
+            received += len(chunk)
+            if received > limit:
+                response = _error(
+                    TransientAttachmentError(
+                        "ATTACHMENT_TOO_LARGE",
+                        413,
+                        "Attachment exceeds the configured size limit",
+                    ),
+                    request_id,
+                )
+                await response(scope, receive, send)
+                return
+            chunks.append(chunk)
+            if not message.get("more_body", False):
+                break
+
+        chunk_index = 0
+
+        async def replay_receive():
+            nonlocal chunk_index
+            if chunk_index < len(chunks):
+                chunk = chunks[chunk_index]
+                chunk_index += 1
+                return {
+                    "type": "http.request",
+                    "body": chunk,
+                    "more_body": chunk_index < len(chunks),
+                }
+            return {"type": "http.disconnect"}
+
+        await self.app(scope, replay_receive, send)
+
+
 def _safe_download_name(file_name: str) -> str:
     return PurePath(file_name).name.replace('"', "_")
 
@@ -1383,10 +1547,13 @@ __all__ = [
     "AttachmentStorage",
     "CreateAttachmentRequest",
     "DownloadTicket",
+    "TransientAttachmentBodyLimitMiddleware",
     "TransientAttachmentCleanupWorker",
     "TransientAttachmentError",
     "TransientAttachmentService",
     "attachment_cleanup_interval_seconds",
+    "attachment_max_encoded_length",
+    "attachment_max_request_body_bytes",
     "ensure_attachment_schema",
     "get_db",
     "get_storage",

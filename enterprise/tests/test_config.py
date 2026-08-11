@@ -6,12 +6,14 @@ from enterprise.gateway.config import GatewayConfig, require_ragflow_api_key
 
 
 class TestGatewayConfig:
-    def test_defaults(self):
+    def test_defaults(self, monkeypatch):
+        monkeypatch.delenv("ENTERPRISE_TRANSIENT_ATTACHMENTS_ENABLED", raising=False)
         cfg = GatewayConfig()
         assert cfg.ragflow_base_url == "http://localhost:9380"
         assert cfg.ragflow_timeout == 30.0
         assert cfg.ragflow_api_version == "v1"
         assert cfg.auth_enabled is True
+        assert cfg.transient_attachments_enabled is False
 
     def test_ragflow_api_url_property(self):
         cfg = GatewayConfig()
@@ -25,6 +27,13 @@ class TestGatewayConfig:
         assert cfg.ragflow_base_url == "http://ragflow:9380"
         assert cfg.ragflow_timeout == 60.0
         assert cfg.auth_enabled is False
+
+    def test_transient_attachments_require_explicit_enablement(self, monkeypatch):
+        monkeypatch.delenv("ENTERPRISE_TRANSIENT_ATTACHMENTS_ENABLED", raising=False)
+        assert GatewayConfig().transient_attachments_enabled is False
+
+        monkeypatch.setenv("ENTERPRISE_TRANSIENT_ATTACHMENTS_ENABLED", "true")
+        assert GatewayConfig().transient_attachments_enabled is True
 
     def test_pg_defaults(self):
         cfg = GatewayConfig()
