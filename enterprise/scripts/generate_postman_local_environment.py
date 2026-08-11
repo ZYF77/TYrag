@@ -115,6 +115,8 @@ def build_environment(
         _value("hmacTimestamp", ""),
         _value("statusUrl", ""),
         _value("missingStatusUrl", ""),
+        _value("pollAttempt", "0"),
+        _value("maxPollAttempts", "120"),
         _value("conversationId", ""),
         _value("citationId", ""),
         _value("messageIdOne", "device-question-001"),
@@ -146,7 +148,7 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help="ignored path ending in .local.postman_environment.json",
     )
-    parser.add_argument("--base-url", default="http://localhost:9380")
+    parser.add_argument("--base-url", default="http://127.0.0.1:5188")
     parser.add_argument("--tenant", default="device-tenant")
     parser.add_argument("--user", default="device-user")
     parser.add_argument("--source-system", default="EAM")

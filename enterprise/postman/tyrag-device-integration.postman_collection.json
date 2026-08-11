@@ -102,7 +102,7 @@
             "header": [ { "key": "Accept", "value": "application/json" } ],
             "auth": { "type": "noauth" },
             "body": { "mode": "raw", "raw": "" },
-            "url": "{{statusUrl}}"
+            "url": "{{baseUrl}}{{statusUrl}}"
           },
           "event": [
             {
@@ -111,7 +111,9 @@
                 "type": "text/javascript",
                 "exec": [
                   "pm.test('status response is successful', function () { pm.expect(pm.response.code).to.eql(200); });",
-                  "var payload = pm.response.json(); pm.test('status belongs to the registered FILE_SHARE document', function () { pm.expect(payload.externalDocumentId).to.eql(pm.environment.get('externalDocumentId')); pm.expect(payload.sourceKind).to.eql('FILE_SHARE'); });"
+                  "var payload = pm.response.json(); var attempt = Number(pm.environment.get('pollAttempt') || '0'); var maxAttempts = Number(pm.environment.get('maxPollAttempts') || '10');",
+                  "pm.test('status belongs to the registered FILE_SHARE document', function () { pm.expect(payload.externalDocumentId).to.eql(pm.environment.get('externalDocumentId')); pm.expect(payload.sourceKind).to.eql('FILE_SHARE'); });",
+                  "if (payload.retrievable === true) { pm.test('payload.retrievable is true', function () { pm.expect(payload.retrievable).to.eql(true); }); pm.environment.set('pollAttempt', '0'); } else { var nextAttempt = attempt + 1; pm.environment.set('pollAttempt', String(nextAttempt)); if (nextAttempt < maxAttempts) { pm.execution.setNextRequest('FILE_SHARE v3 · poll response statusUrl'); } else { pm.execution.setNextRequest(null); pm.expect.fail('FILE_SHARE document did not become retrievable within maxPollAttempts'); } }"
                 ]
               }
             }

@@ -9,7 +9,7 @@ from pathlib import Path
 import jwt
 
 from enterprise.gateway.auth.service_auth import canonical_request, sign_request
-from enterprise.scripts.generate_postman_local_environment import build_user_jwt
+from enterprise.scripts.generate_postman_local_environment import _parser, build_user_jwt
 from enterprise.scripts.validate_postman_artifacts import validate_artifacts
 
 
@@ -58,6 +58,46 @@ def test_collection_has_required_p0_examples_and_only_frozen_routes():
     assert "/enterprise/api/s3" not in serialized.lower()
     assert "pm.vault" in serialized
     assert "statusUrl" in serialized
+
+
+def test_local_defaults_and_polling_are_runner_safe():
+    environment = json.loads(ENVIRONMENT_PATH.read_text(encoding="utf-8"))
+    values = {entry["key"]: entry["value"] for entry in environment["values"]}
+    assert values["baseUrl"] == "http://127.0.0.1:5188"
+    assert values["pollAttempt"] == "0"
+    assert values["maxPollAttempts"] == "120"
+
+    args = _parser().parse_args(
+        ["--file", "manual.pdf", "--output", "device.local.postman_environment.json"]
+    )
+    assert args.base_url == "http://127.0.0.1:5188"
+
+    collection = json.loads(COLLECTION_PATH.read_text(encoding="utf-8"))
+    poll = next(
+        item
+        for folder in collection["item"]
+        for item in folder.get("item", [])
+        if item.get("name") == "FILE_SHARE v3 · poll response statusUrl"
+    )
+    assert poll["request"]["url"] == "{{baseUrl}}{{statusUrl}}"
+    test_script = "\n".join(
+        line
+        for event in poll["event"]
+        if event["listen"] == "test"
+        for line in event["script"]["exec"]
+    )
+    assert "payload.retrievable" in test_script
+    assert "pollAttempt" in test_script
+    assert "maxPollAttempts" in test_script
+    assert "pm.execution.setNextRequest" in test_script
+
+    runbook = (REPO_ROOT / "docs" / "integration" / "device-postman-runbook.md").read_text(
+        encoding="utf-8"
+    )
+    assert "--delay-request 2000" in runbook
+    assert "2000ms" in runbook
+    assert "Collection Runner" in runbook
+    assert "普通 Send" in runbook
 
 
 def test_hmac_fixed_vector_matches_python_producer():
