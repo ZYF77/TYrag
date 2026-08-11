@@ -30,7 +30,10 @@ $StartedUtc = [DateTime]::UtcNow
 $RunStamp = $StartedUtc.ToString('yyyyMMddTHHmmssZ')
 if ([string]::IsNullOrWhiteSpace($ArtifactRoot)) {
     $ArtifactRoot = Join-Path $RepoRoot 'artifacts\enterprise-tests'
+} elseif (-not [System.IO.Path]::IsPathRooted($ArtifactRoot)) {
+    $ArtifactRoot = Join-Path $RepoRoot $ArtifactRoot
 }
+$ArtifactRoot = [System.IO.Path]::GetFullPath($ArtifactRoot)
 $RunArtifactDir = Join-Path $ArtifactRoot ("{0}-{1}" -f $RunStamp, $PID)
 $JUnitDir = Join-Path $RunArtifactDir 'junit'
 $LogPath = Join-Path $RunArtifactDir 'runner.log'

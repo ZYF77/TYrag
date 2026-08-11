@@ -22,8 +22,16 @@ def _powershell() -> str:
     raise AssertionError("PowerShell is required to test the acceptance runner")
 
 
-def _run_runner(tmp_path: Path, profile: str, env: dict[str, str] | None = None):
-    artifact_root = tmp_path / "artifacts"
+def _run_runner(
+    tmp_path: Path,
+    profile: str,
+    env: dict[str, str] | None = None,
+    artifact_root: Path | str | None = None,
+):
+    artifact_root_arg = artifact_root or (tmp_path / "artifacts")
+    artifact_root_path = Path(artifact_root_arg)
+    if not artifact_root_path.is_absolute():
+        artifact_root_path = ROOT / artifact_root_path
     command = [
         _powershell(),
         "-NoProfile",
@@ -35,7 +43,7 @@ def _run_runner(tmp_path: Path, profile: str, env: dict[str, str] | None = None)
         "-PythonPath",
         sys.executable,
         "-ArtifactRoot",
-        str(artifact_root),
+        str(artifact_root_arg),
     ]
     result = subprocess.run(
         command,
@@ -45,7 +53,7 @@ def _run_runner(tmp_path: Path, profile: str, env: dict[str, str] | None = None)
         text=True,
         timeout=120,
     )
-    summaries = sorted(artifact_root.glob("*/summary.json"))
+    summaries = sorted(artifact_root_path.glob("*/summary.json"))
     summary = json.loads(summaries[-1].read_text(encoding="utf-8")) if summaries else None
     return result, summary
 
@@ -150,6 +158,22 @@ def test_contract_artifact_binds_current_head_and_dirty_state(tmp_path):
     assert summary["evidence"]["ragflowGuardUnchanged"] is True
     assert "worktreeChangeCountBefore" in summary["evidence"]
     assert "trackedChangeCountBefore" not in summary["evidence"]
+
+
+def test_relative_artifact_root_is_normalized_before_child_tools_run(tmp_path):
+    artifact_root = tmp_path / "relative-artifacts"
+    relative_root = os.path.relpath(artifact_root, ROOT)
+
+    result, summary = _run_runner(
+        tmp_path,
+        "Contract",
+        artifact_root=relative_root,
+    )
+
+    assert result.returncode == 0
+    assert summary["passed"] is True
+    assert Path(summary["artifacts"]["summary"]).is_absolute()
+    assert list(artifact_root.glob("*/junit/contract-static.xml"))
 
 
 def test_runner_rejects_skips_and_xpasses_in_test_steps():
