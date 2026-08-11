@@ -1,4 +1,6 @@
 import { createSseParser } from './sse';
+import { API_MODE } from './mode';
+import { browserDocumentSyncEnabled } from './documentSyncPolicy';
 import type {
   ConversationDetail,
   ConversationAttachmentRequest,
@@ -37,6 +39,16 @@ export class V2ApiError extends Error {
     super(body.message);
     this.name = 'V2ApiError';
   }
+}
+
+function requireBrowserDocumentSync(): void {
+  if (browserDocumentSyncEnabled(API_MODE)) return;
+  throw new V2ApiError(0, {
+    code: 'DOCUMENT_PRODUCER_REQUIRED',
+    message: '文档同步必须由服务侧 HMAC producer 执行；浏览器不会调用文档接口。',
+    requestId: 'browser-document-sync-disabled',
+    retryable: false,
+  });
 }
 
 export function getHarnessToken(): string {
@@ -255,17 +267,19 @@ export function streamMessage(
 }
 
 export const v2Api = {
-  submitDocument(command: DocumentCommand): Promise<DocumentOperation> {
+  async submitDocument(command: DocumentCommand): Promise<DocumentOperation> {
+    requireBrowserDocumentSync();
     return request<DocumentOperation>('/documents', {
       method: 'POST',
       body: JSON.stringify(command),
     });
   },
 
-  getDocumentStatus(
+  async getDocumentStatus(
     externalDocumentId: string,
     params: { tenantId?: string; sourceSystem?: string; sourceVersionId?: string } = {},
   ): Promise<DocumentOperation> {
+    requireBrowserDocumentSync();
     return request<DocumentOperation>(
       queryPath(`/documents/${encodeURIComponent(externalDocumentId)}/status`, {
         tenantId: params.tenantId ?? HARNESS_DEFAULTS.tenantId,
@@ -275,9 +289,10 @@ export const v2Api = {
     );
   },
 
-  listDocumentStatus(
+  async listDocumentStatus(
     params: { tenantId?: string; sourceSystem?: string; limit?: number; cursor?: string } = {},
   ): Promise<DocumentOperationPage> {
+    requireBrowserDocumentSync();
     return request<DocumentOperationPage>(
       queryPath('/documents/sync-status', {
         tenantId: params.tenantId ?? HARNESS_DEFAULTS.tenantId,
