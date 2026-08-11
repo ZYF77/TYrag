@@ -15,6 +15,7 @@ from enterprise.gateway.auth.user_principal import UserPrincipal
 from enterprise.gateway.app import app
 from enterprise.gateway.query import v2_router
 from enterprise.gateway.quality import models as quality_models
+from enterprise.gateway.quality.worker import _quality_expectations
 from enterprise.gateway.sync import v3_router
 from enterprise.gateway.sync.models import (
     ExtDocumentMap,
@@ -116,16 +117,70 @@ def test_real_ragflow_metadata_declares_quality_expectations():
     metadata = SyncService._external_meta_fields(doc, event)
 
     assert metadata["enterprise_quality_expected_tables"] == []
-    assert metadata["enterprise_quality_ground_truth_fields"] == {
-        "equipment_id": "EQ-001",
-        "fixed_asset_no": "FA-001",
-    }
+    assert metadata["enterprise_quality_ground_truth_json"] == "{}"
+    assert "enterprise_quality_ground_truth_fields" not in metadata
     assert metadata["enterprise_quality_citation_expected"] is False
     assert metadata["enterprise_quality_required_capabilities"] == [
         "text",
         "position",
-        "key_field",
     ]
+
+
+def test_asset_identifiers_are_not_ocr_ground_truth_by_default():
+    doc = ExtDocumentMap(
+        tenant_id="tenant-a",
+        source_system="DEMO",
+        external_document_id="DOC-V3-002",
+        source_version_id="v1",
+        event_id="evt-v3-002",
+        sha256="b" * 64,
+        file_name="scan.pdf",
+        document_type="PRODUCT_MANUAL",
+        equipment_id="EQ-001",
+        fixed_asset_no="FA-001",
+    )
+    meta = {
+        "enterprise_quality_expected_tables": [],
+        "enterprise_quality_ground_truth_json": "{}",
+        "enterprise_quality_citation_expected": False,
+        "enterprise_quality_required_capabilities": ["text", "position"],
+    }
+
+    _, ground_truth, _, _, required, expectations = _quality_expectations(
+        doc, {"meta_fields": meta}
+    )
+
+    assert ground_truth == {}
+    assert required == ["text", "position"]
+    assert expectations["ground_truth_fields"] == []
+    assert expectations["declarations_complete"] is True
+
+
+def test_explicit_quality_ground_truth_still_requires_key_field():
+    doc = ExtDocumentMap(
+        tenant_id="tenant-a",
+        source_system="DEMO",
+        external_document_id="DOC-V3-003",
+        source_version_id="v1",
+        event_id="evt-v3-003",
+        sha256="c" * 64,
+        file_name="scan.pdf",
+        document_type="PRODUCT_MANUAL",
+        equipment_id="EQ-001",
+    )
+    meta = {
+        "enterprise_quality_expected_tables": [],
+        "enterprise_quality_ground_truth_json": '{"equipment_id":"EQ-001"}',
+        "enterprise_quality_citation_expected": False,
+        "enterprise_quality_required_capabilities": ["text", "position"],
+    }
+
+    _, ground_truth, _, _, required, _ = _quality_expectations(
+        doc, {"meta_fields": meta}
+    )
+
+    assert ground_truth == {"equipment_id": "EQ-001"}
+    assert required == ["text", "position", "key_field"]
 
 
 def test_ragflow_internal_name_is_stable_and_business_document_unique():

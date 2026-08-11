@@ -138,10 +138,14 @@ class RAGFlowDocumentClient:
         
 
     async def create_dataset(self, name: str, description: str = "",
-                             request_id: str | None = None) -> dict:
+                             request_id: str | None = None,
+                             permission: str | None = None) -> dict:
         rid = request_id or self._new_request_id()
+        payload = {"name": name, "description": description}
+        if permission is not None:
+            payload["permission"] = permission
         return await self._run_sync(self._sync_request, "POST", "/api/v1/datasets",
-                                     rid, json_data={"name": name, "description": description})
+                                     rid, json_data=payload)
 
     async def list_datasets(self, request_id: str | None = None) -> list[dict]:
         rid = request_id or self._new_request_id()
@@ -343,13 +347,18 @@ class RAGFlowDocumentClient:
         self,
         name: str,
         request_id: str | None = None,
+        permission: str | None = None,
     ) -> dict:
         rid = request_id or self._new_request_id()
         datasets = await self.list_datasets(rid)
         for ds in datasets:
             if ds.get("name") == name:
                 return ds
-        return await self.create_dataset(name, request_id=rid)
+        return await self.create_dataset(
+            name,
+            request_id=rid,
+            permission=permission,
+        )
 
 
 # Stub for testing
@@ -368,11 +377,15 @@ class RAGFlowDocumentStub(RAGFlowDocumentClient):
         self._operation_log: list[str] = []
 
     async def create_dataset(self, name: str, description: str = "",
-                             request_id: str | None = None) -> dict:
+                             request_id: str | None = None,
+                             permission: str | None = None) -> dict:
         if self._fail_next:
             raise RAGFlowAPIError("Stub: simulated RAGFlow failure", 503)
         ds_id = f"ds-{self._next_id}"; self._next_id += 1
-        ds = {"data": {"id": ds_id, "name": name}}
+        data = {"id": ds_id, "name": name}
+        if permission is not None:
+            data["permission"] = permission
+        ds = {"data": data}
         self._datasets[ds_id] = ds
         return ds
 

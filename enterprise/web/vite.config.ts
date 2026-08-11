@@ -18,7 +18,7 @@ export default defineConfig(({ mode }) => {
       },
     },
     server: {
-      port: 9223,
+      port: 3000,
       strictPort: false,
       proxy: {
         '/enterprise/api': {

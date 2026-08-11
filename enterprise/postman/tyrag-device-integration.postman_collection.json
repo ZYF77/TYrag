@@ -5,6 +5,11 @@
     "description": "P0 local device flow. The v3 poll request uses the statusUrl returned by registration; no live result is implied by this export.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
+  "variable": [
+    { "key": "pageCount", "value": "1", "type": "string" },
+    { "key": "questionOne", "value": "请根据已入库的设备文档，说明设备名称、固定资产号、文档类型和主要结论。", "type": "string" },
+    { "key": "questionTwo", "value": "请继续说明同一设备资料中的关键日期、责任单位，以及检验、调试或验收结果。", "type": "string" }
+  ],
   "item": [
     {
       "name": "FILE_SHARE v3 · HMAC",
@@ -48,7 +53,7 @@
             "auth": { "type": "noauth" },
             "body": {
               "mode": "raw",
-              "raw": "{\"eventId\":\"{{eventId}}\",\"eventType\":\"upsert\",\"externalDocumentId\":\"{{externalDocumentId}}\",\"fileName\":\"{{fileName}}\",\"mediaType\":\"application/pdf\",\"metadata\":{\"allow_group_ids\":[\"{{allowGroupId}}\"],\"business_status\":\"active\",\"department_id\":\"{{departmentId}}\",\"document_type\":\"{{documentType}}\",\"document_version\":\"{{sourceVersionId}}\",\"equipment_id\":\"{{equipmentId}}\",\"external_document_id\":\"{{externalDocumentId}}\",\"fixed_asset_no\":\"{{fixedAssetNo}}\",\"page_count\":1,\"schema_version\":1,\"security_level\":{{securityLevel}},\"source_system\":\"{{sourceSystem}}\",\"tenant_id\":\"{{tenantId}}\"},\"sha256\":\"{{fileSha256}}\",\"source\":{\"kind\":\"FILE_SHARE\",\"relativePath\":\"{{relativePath}}\",\"size\":{{fileSize}},\"storageRootId\":\"{{storageRootId}}\"},\"sourceVersionId\":\"{{sourceVersionId}}\",\"sourceSystem\":\"{{sourceSystem}}\",\"tenantId\":\"{{tenantId}}\"}",
+              "raw": "{\"eventId\":\"{{eventId}}\",\"eventType\":\"upsert\",\"externalDocumentId\":\"{{externalDocumentId}}\",\"fileName\":\"{{fileName}}\",\"mediaType\":\"application/pdf\",\"metadata\":{\"allow_group_ids\":[\"{{allowGroupId}}\"],\"business_status\":\"active\",\"department_id\":\"{{departmentId}}\",\"document_type\":\"{{documentType}}\",\"document_version\":\"{{sourceVersionId}}\",\"equipment_id\":\"{{equipmentId}}\",\"external_document_id\":\"{{externalDocumentId}}\",\"fixed_asset_no\":\"{{fixedAssetNo}}\",\"page_count\":{{pageCount}},\"schema_version\":1,\"security_level\":{{securityLevel}},\"source_system\":\"{{sourceSystem}}\",\"tenant_id\":\"{{tenantId}}\"},\"sha256\":\"{{fileSha256}}\",\"source\":{\"kind\":\"FILE_SHARE\",\"relativePath\":\"{{relativePath}}\",\"size\":{{fileSize}},\"storageRootId\":\"{{storageRootId}}\"},\"sourceVersionId\":\"{{sourceVersionId}}\",\"sourceSystem\":\"{{sourceSystem}}\",\"tenantId\":\"{{tenantId}}\"}",
               "options": { "raw": { "language": "json" } }
             },
             "url": "{{baseUrl}}/enterprise/api/v3/documents"
@@ -78,7 +83,7 @@
             "auth": { "type": "noauth" },
             "body": {
               "mode": "raw",
-              "raw": "{\"eventId\":\"{{eventId}}\",\"eventType\":\"upsert\",\"externalDocumentId\":\"{{externalDocumentId}}\",\"fileName\":\"{{fileName}}\",\"mediaType\":\"application/pdf\",\"metadata\":{\"allow_group_ids\":[\"{{allowGroupId}}\"],\"business_status\":\"active\",\"department_id\":\"{{departmentId}}\",\"document_type\":\"{{documentType}}\",\"document_version\":\"{{sourceVersionId}}\",\"equipment_id\":\"{{equipmentId}}\",\"external_document_id\":\"{{externalDocumentId}}\",\"fixed_asset_no\":\"{{fixedAssetNo}}\",\"page_count\":1,\"schema_version\":1,\"security_level\":{{securityLevel}},\"source_system\":\"{{sourceSystem}}\",\"tenant_id\":\"{{tenantId}}\"},\"sha256\":\"{{fileSha256}}\",\"source\":{\"kind\":\"FILE_SHARE\",\"relativePath\":\"{{relativePath}}\",\"size\":{{fileSize}},\"storageRootId\":\"{{storageRootId}}\"},\"sourceVersionId\":\"{{sourceVersionId}}\",\"sourceSystem\":\"{{sourceSystem}}\",\"tenantId\":\"{{tenantId}}\"}",
+              "raw": "{\"eventId\":\"{{eventId}}\",\"eventType\":\"upsert\",\"externalDocumentId\":\"{{externalDocumentId}}\",\"fileName\":\"{{fileName}}\",\"mediaType\":\"application/pdf\",\"metadata\":{\"allow_group_ids\":[\"{{allowGroupId}}\"],\"business_status\":\"active\",\"department_id\":\"{{departmentId}}\",\"document_type\":\"{{documentType}}\",\"document_version\":\"{{sourceVersionId}}\",\"equipment_id\":\"{{equipmentId}}\",\"external_document_id\":\"{{externalDocumentId}}\",\"fixed_asset_no\":\"{{fixedAssetNo}}\",\"page_count\":{{pageCount}},\"schema_version\":1,\"security_level\":{{securityLevel}},\"source_system\":\"{{sourceSystem}}\",\"tenant_id\":\"{{tenantId}}\"},\"sha256\":\"{{fileSha256}}\",\"source\":{\"kind\":\"FILE_SHARE\",\"relativePath\":\"{{relativePath}}\",\"size\":{{fileSize}},\"storageRootId\":\"{{storageRootId}}\"},\"sourceVersionId\":\"{{sourceVersionId}}\",\"sourceSystem\":\"{{sourceSystem}}\",\"tenantId\":\"{{tenantId}}\"}",
               "options": { "raw": { "language": "json" } }
             },
             "url": "{{baseUrl}}/enterprise/api/v3/documents"
@@ -131,7 +136,7 @@
             "auth": { "type": "noauth" },
             "body": {
               "mode": "raw",
-              "raw": "{\"eventId\":\"{{invalidEventId}}\",\"eventType\":\"upsert\",\"externalDocumentId\":\"{{externalDocumentId}}\",\"fileName\":\"{{fileName}}\",\"mediaType\":\"application/pdf\",\"metadata\":{\"allow_group_ids\":[\"{{allowGroupId}}\"],\"business_status\":\"active\",\"department_id\":\"{{departmentId}}\",\"document_type\":\"{{documentType}}\",\"document_version\":\"{{sourceVersionId}}\",\"equipment_id\":\"{{equipmentId}}\",\"external_document_id\":\"{{externalDocumentId}}\",\"fixed_asset_no\":\"{{fixedAssetNo}}\",\"page_count\":1,\"schema_version\":1,\"security_level\":{{securityLevel}},\"source_system\":\"{{sourceSystem}}\",\"tenant_id\":\"{{tenantId}}\"},\"sha256\":\"{{fileSha256}}\",\"source\":{\"kind\":\"FILE_SHARE\",\"relativePath\":\"{{relativePath}}\",\"size\":{{fileSize}},\"storageRootId\":\"{{storageRootId}}\"},\"sourceVersionId\":\"{{sourceVersionId}}\",\"sourceSystem\":\"{{sourceSystem}}\",\"tenantId\":\"{{tenantId}}\"}",
+              "raw": "{\"eventId\":\"{{invalidEventId}}\",\"eventType\":\"upsert\",\"externalDocumentId\":\"{{externalDocumentId}}\",\"fileName\":\"{{fileName}}\",\"mediaType\":\"application/pdf\",\"metadata\":{\"allow_group_ids\":[\"{{allowGroupId}}\"],\"business_status\":\"active\",\"department_id\":\"{{departmentId}}\",\"document_type\":\"{{documentType}}\",\"document_version\":\"{{sourceVersionId}}\",\"equipment_id\":\"{{equipmentId}}\",\"external_document_id\":\"{{externalDocumentId}}\",\"fixed_asset_no\":\"{{fixedAssetNo}}\",\"page_count\":{{pageCount}},\"schema_version\":1,\"security_level\":{{securityLevel}},\"source_system\":\"{{sourceSystem}}\",\"tenant_id\":\"{{tenantId}}\"},\"sha256\":\"{{fileSha256}}\",\"source\":{\"kind\":\"FILE_SHARE\",\"relativePath\":\"{{relativePath}}\",\"size\":{{fileSize}},\"storageRootId\":\"{{storageRootId}}\"},\"sourceVersionId\":\"{{sourceVersionId}}\",\"sourceSystem\":\"{{sourceSystem}}\",\"tenantId\":\"{{tenantId}}\"}",
               "options": { "raw": { "language": "json" } }
             },
             "url": "{{baseUrl}}/enterprise/api/v3/documents"
@@ -167,7 +172,7 @@
             "auth": { "type": "noauth" },
             "body": {
               "mode": "raw",
-              "raw": "{\"eventId\":\"{{missingEventId}}\",\"eventType\":\"upsert\",\"externalDocumentId\":\"{{missingExternalDocumentId}}\",\"fileName\":\"{{fileName}}\",\"mediaType\":\"application/pdf\",\"metadata\":{\"allow_group_ids\":[\"{{allowGroupId}}\"],\"business_status\":\"active\",\"department_id\":\"{{departmentId}}\",\"document_type\":\"{{documentType}}\",\"document_version\":\"{{sourceVersionId}}\",\"equipment_id\":\"{{equipmentId}}\",\"external_document_id\":\"{{missingExternalDocumentId}}\",\"fixed_asset_no\":\"{{fixedAssetNo}}\",\"page_count\":1,\"schema_version\":1,\"security_level\":{{securityLevel}},\"source_system\":\"{{sourceSystem}}\",\"tenant_id\":\"{{tenantId}}\"},\"sha256\":\"{{fileSha256}}\",\"source\":{\"kind\":\"FILE_SHARE\",\"relativePath\":\"{{missingRelativePath}}\",\"size\":{{fileSize}},\"storageRootId\":\"{{storageRootId}}\"},\"sourceVersionId\":\"{{sourceVersionId}}\",\"sourceSystem\":\"{{sourceSystem}}\",\"tenantId\":\"{{tenantId}}\"}",
+              "raw": "{\"eventId\":\"{{missingEventId}}\",\"eventType\":\"upsert\",\"externalDocumentId\":\"{{missingExternalDocumentId}}\",\"fileName\":\"{{fileName}}\",\"mediaType\":\"application/pdf\",\"metadata\":{\"allow_group_ids\":[\"{{allowGroupId}}\"],\"business_status\":\"active\",\"department_id\":\"{{departmentId}}\",\"document_type\":\"{{documentType}}\",\"document_version\":\"{{sourceVersionId}}\",\"equipment_id\":\"{{equipmentId}}\",\"external_document_id\":\"{{missingExternalDocumentId}}\",\"fixed_asset_no\":\"{{fixedAssetNo}}\",\"page_count\":{{pageCount}},\"schema_version\":1,\"security_level\":{{securityLevel}},\"source_system\":\"{{sourceSystem}}\",\"tenant_id\":\"{{tenantId}}\"},\"sha256\":\"{{fileSha256}}\",\"source\":{\"kind\":\"FILE_SHARE\",\"relativePath\":\"{{missingRelativePath}}\",\"size\":{{fileSize}},\"storageRootId\":\"{{storageRootId}}\"},\"sourceVersionId\":\"{{sourceVersionId}}\",\"sourceSystem\":\"{{sourceSystem}}\",\"tenantId\":\"{{tenantId}}\"}",
               "options": { "raw": { "language": "json" } }
             },
             "url": "{{baseUrl}}/enterprise/api/v3/documents"
@@ -253,7 +258,7 @@
             "auth": { "type": "bearer", "bearer": [ { "key": "token", "value": "{{userJwt}}", "type": "string" } ] },
             "body": {
               "mode": "raw",
-              "raw": "{\"clientMessageId\":\"{{messageIdOne}}\",\"question\":\"请说明设备当前故障的检查步骤。\"}",
+              "raw": "{\"clientMessageId\":\"{{messageIdOne}}\",\"question\":\"{{questionOne}}\"}",
               "options": { "raw": { "language": "json" } }
             },
             "url": "{{baseUrl}}/enterprise/api/v2/conversations/{{conversationId}}/messages"
@@ -265,7 +270,17 @@
                 "type": "text/javascript",
                 "exec": [
                   "pm.test('question round 1 returns a run result', function () { pm.expect(pm.response.code).to.eql(200); });",
-                  "var payload = pm.response.json(); pm.expect(['completed', 'no_reliable_evidence', 'failed']).to.include(payload.status); if (payload.citations && payload.citations[0]) pm.environment.set('citationId', payload.citations[0].citationId);"
+                  "var payload = pm.response.json();",
+                  "pm.test('question round 1 returns completed cited evidence', function () {",
+                  "  pm.expect(payload.status).to.eql('completed');",
+                  "  pm.expect(payload.answer).to.be.a('string').and.not.empty;",
+                  "  var answer = payload.answer.trim().toLowerCase();",
+                  "  pm.expect(answer).not.to.include(\"i don't have enough information\");",
+                  "  pm.expect(answer).not.to.include('未找到可靠依据');",
+                  "  pm.expect(payload.citations).to.be.an('array').that.is.not.empty;",
+                  "  pm.expect(payload.citations[0].citationId).to.be.a('string').and.not.empty;",
+                  "});",
+                  "pm.environment.set('citationId', payload.citations[0].citationId);"
                 ]
               }
             }
@@ -282,7 +297,7 @@
             "auth": { "type": "bearer", "bearer": [ { "key": "token", "value": "{{userJwt}}", "type": "string" } ] },
             "body": {
               "mode": "raw",
-              "raw": "{\"clientMessageId\":\"{{messageIdTwo}}\",\"question\":\"请说明该设备的维护周期和注意事项。\"}",
+              "raw": "{\"clientMessageId\":\"{{messageIdTwo}}\",\"question\":\"{{questionTwo}}\"}",
               "options": { "raw": { "language": "json" } }
             },
             "url": "{{baseUrl}}/enterprise/api/v2/conversations/{{conversationId}}/messages"
@@ -294,7 +309,17 @@
                 "type": "text/javascript",
                 "exec": [
                   "pm.test('question round 2 returns a run result', function () { pm.expect(pm.response.code).to.eql(200); });",
-                  "var payload = pm.response.json(); pm.expect(['completed', 'no_reliable_evidence', 'failed']).to.include(payload.status); if (payload.citations && payload.citations[0]) pm.environment.set('citationId', payload.citations[0].citationId);"
+                  "var payload = pm.response.json();",
+                  "pm.test('question round 2 returns completed cited evidence', function () {",
+                  "  pm.expect(payload.status).to.eql('completed');",
+                  "  pm.expect(payload.answer).to.be.a('string').and.not.empty;",
+                  "  var answer = payload.answer.trim().toLowerCase();",
+                  "  pm.expect(answer).not.to.include(\"i don't have enough information\");",
+                  "  pm.expect(answer).not.to.include('未找到可靠依据');",
+                  "  pm.expect(payload.citations).to.be.an('array').that.is.not.empty;",
+                  "  pm.expect(payload.citations[0].citationId).to.be.a('string').and.not.empty;",
+                  "});",
+                  "pm.environment.set('citationId', payload.citations[0].citationId);"
                 ]
               }
             }

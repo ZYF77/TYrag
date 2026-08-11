@@ -17,6 +17,7 @@ import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
+from urllib.parse import quote
 
 import aiosqlite
 from fastapi import APIRouter, Depends, Request
@@ -346,10 +347,15 @@ async def download_source_ticket(
         return JSONResponse(status_code=404, content={"code": "DOCUMENT_SOURCE_NOT_FOUND"})
 
     safe_name = Path(ticket["file_name"]).name.replace('"', "_")
+    encoded_name = quote(safe_name, safe="")
     headers = {
         "Content-Length": str(current.size),
         "Content-Type": ticket["media_type"] or "application/pdf",
-        "Content-Disposition": f'attachment; filename="{safe_name}"',
+        # HTTP headers are Latin-1 in Starlette; keep an ASCII fallback and
+        # preserve the original Unicode name through RFC 5987 filename*.
+        "Content-Disposition": (
+            f'attachment; filename="source.pdf"; filename*=UTF-8\'\'{encoded_name}'
+        ),
         "ETag": current.etag,
         "X-Source-SHA256": ticket["expected_sha256"],
         "X-Source-Version-Id": ticket["source_version_id"],

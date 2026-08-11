@@ -132,10 +132,10 @@ def _quality_expectations(
 ]:
     """Read fail-closed quality expectations from persisted/public metadata.
 
-    Business identifiers already persisted by the enterprise mapping are safe
-    to use as parse ground truth.  Acceptance-only table/citation annotations
-    can be supplied through namespaced RAGFlow ``meta_fields`` without reading
-    RAGFlow's internal database.
+    Asset identifiers persisted by the enterprise mapping describe business
+    scope; they are not proof that an OCR scan must contain those identifiers.
+    Only an explicit namespaced RAGFlow ``meta_fields`` declaration is used as
+    parse ground truth.
     """
     meta = _quality_meta(doc_info)
 
@@ -154,13 +154,13 @@ def _quality_expectations(
                 expected_tables.append(page)
 
     ground_truth_fields: dict[str, str] = {}
-    for field in ("equipment_id", "fixed_asset_no"):
-        value = getattr(doc, field, None)
-        if value is not None and str(value).strip():
-            ground_truth_fields[field] = str(value)
     metadata_fields_value, metadata_fields_declared = _meta_entry(
         meta, "ground_truth_fields"
     )
+    if not metadata_fields_declared:
+        metadata_fields_value, metadata_fields_declared = _meta_entry(
+            meta, "ground_truth_json"
+        )
     metadata_fields = _decoded_json(metadata_fields_value)
     if isinstance(metadata_fields, dict):
         for field, value in metadata_fields.items():

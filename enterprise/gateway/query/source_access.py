@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from email.utils import parsedate_to_datetime
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -112,11 +113,14 @@ async def source_response(request: Request, doc: ExtDocumentMap):
     start, end = selected if selected else (0, current.size - 1)
     length = max(0, end - start + 1)
     safe_name = Path(doc.file_name).name.replace('"', "_")
+    encoded_name = quote(safe_name, safe="")
     headers = {
         "Accept-Ranges": "bytes",
         "Content-Length": str(length),
         "Content-Type": doc.media_type or "application/pdf",
-        "Content-Disposition": f'inline; filename="{safe_name}"',
+        "Content-Disposition": (
+            f'inline; filename="source.pdf"; filename*=UTF-8\'\'{encoded_name}'
+        ),
         "ETag": current.etag,
         "Cache-Control": "private, no-store",
     }

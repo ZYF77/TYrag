@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import json
 import time
+import zlib
 from pathlib import Path
 
 import jwt
+import pytest
 
 from enterprise.gateway.auth.service_auth import canonical_request, sign_request
-from enterprise.scripts.generate_postman_local_environment import _parser, build_user_jwt
+from enterprise.scripts.generate_postman_local_environment import (
+    _count_pdf_pages_from_bytes,
+    _parser,
+    build_user_jwt,
+    main as generate_local_environment,
+)
 from enterprise.scripts.validate_postman_artifacts import validate_artifacts
 
 
@@ -71,6 +78,9 @@ def test_local_defaults_and_polling_are_runner_safe():
         ["--file", "manual.pdf", "--output", "device.local.postman_environment.json"]
     )
     assert args.base_url == "http://127.0.0.1:5188"
+    assert args.storage_root_id == "device-share"
+    assert "设备" in args.question_one
+    assert "设备" in args.question_two
 
     collection = json.loads(COLLECTION_PATH.read_text(encoding="utf-8"))
     poll = next(
@@ -103,6 +113,100 @@ def test_local_defaults_and_polling_are_runner_safe():
     assert "2000ms" in runbook
     assert "Collection Runner" in runbook
     assert "普通 Send" in runbook
+
+
+def test_collection_uses_real_page_count_and_strict_query_assertions():
+    collection = json.loads(COLLECTION_PATH.read_text(encoding="utf-8"))
+    raw_bodies = [
+        item["request"]["body"]["raw"]
+        for folder in collection["item"]
+        for item in folder.get("item", [])
+        if item.get("request", {}).get("body", {}).get("mode") == "raw"
+    ]
+    assert any('"page_count":{{pageCount}}' in body for body in raw_bodies)
+    assert all('"page_count":1' not in body for body in raw_bodies)
+    assert any('"question":"{{questionOne}}"' in body for body in raw_bodies)
+    assert any('"question":"{{questionTwo}}"' in body for body in raw_bodies)
+
+    for name in ("JWT v2 · question round 1", "JWT v2 · question round 2"):
+        item = next(
+            item
+            for folder in collection["item"]
+            for item in folder.get("item", [])
+            if item.get("name") == name
+        )
+        test_script = "\n".join(
+            line
+            for event in item["event"]
+            if event["listen"] == "test"
+            for line in event["script"]["exec"]
+        )
+        assert "payload.status).to.eql('completed')" in test_script
+        assert "payload.citations" in test_script
+        assert "payload.answer" in test_script
+        assert "i don't have enough information" in test_script
+        assert "未找到可靠依据" in test_script
+
+
+def test_standard_library_pdf_page_count_handles_plain_and_object_stream_pages():
+    plain = (
+        b"%PDF-1.4\n"
+        b"1 0 obj << /Type /Pages /Count 2 >> endobj\n"
+        b"2 0 obj << /Type /Page /Parent 1 0 R >> endobj\n"
+        b"3 0 obj << /Type /Page /Parent 1 0 R >> endobj\n%%EOF"
+    )
+    assert _count_pdf_pages_from_bytes(plain) == 2
+
+    object_stream = (
+        b"10 0 << /Type /Pages /Count 3 >> "
+        b"11 0 << /Type /Page >> 12 0 << /Type /Page >> "
+        b"13 0 << /Type /Page >>"
+    )
+    compressed = zlib.compress(object_stream)
+    flate = (
+        b"%PDF-1.5\n4 0 obj << /Type /ObjStm /Filter /FlateDecode "
+        + f"/Length {len(compressed)}".encode()
+        + b" >>\nstream\n"
+        + compressed
+        + b"\nendstream\nendobj\n%%EOF"
+    )
+    assert _count_pdf_pages_from_bytes(flate) == 3
+
+    with pytest.raises(ValueError, match="page count"):
+        _count_pdf_pages_from_bytes(b"%PDF-1.7\n%%EOF")
+
+
+def test_generator_writes_page_count_questions_and_unified_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    pdf_path = tmp_path / "设备单机调试记录.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%%EOF")
+    output = tmp_path / "device.local.postman_environment.json"
+    monkeypatch.setenv("TYRAG_JWT_SHARED_SECRET", "j" * 48)
+    monkeypatch.setenv("TYRAG_HMAC_SECRET", "h" * 48)
+
+    assert generate_local_environment(
+        [
+            "--file",
+            str(pdf_path),
+            "--output",
+            str(output),
+            "--page-count",
+            "7",
+            "--question-one",
+            "第一轮设备问题",
+            "--question-two",
+            "第二轮设备问题",
+        ]
+    ) == 0
+    environment = json.loads(output.read_text(encoding="utf-8"))
+    assert environment["_postman_variable_scope"] == "environment"
+    assert "info" not in environment
+    values = {entry["key"]: entry["value"] for entry in environment["values"]}
+    assert values["pageCount"] == "7"
+    assert values["storageRootId"] == "device-share"
+    assert values["questionOne"] == "第一轮设备问题"
+    assert values["questionTwo"] == "第二轮设备问题"
 
 
 def test_collection_signer_resolves_dynamic_status_url_before_signing():

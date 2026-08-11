@@ -72,8 +72,8 @@ export function IntegrationHarnessPage() {
   const [conversationError, setConversationError] = useState<DisplayError | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [activeConversation, setActiveConversation] = useState<ConversationDetail | null>(null);
-  const [newEquipmentId, setNewEquipmentId] = useState('EQ-1001');
-  const [newFixedAssetNo, setNewFixedAssetNo] = useState('FA-2001');
+  const [newEquipmentId, setNewEquipmentId] = useState(API_MODE === 'gateway' ? 'EQ-GD01250002' : 'EQ-1001');
+  const [newFixedAssetNo, setNewFixedAssetNo] = useState(API_MODE === 'gateway' ? 'GD01250002' : 'FA-2001');
   const [newFaultCode, setNewFaultCode] = useState('E-104');
   const [contextSaving, setContextSaving] = useState(false);
   const [contextError, setContextError] = useState<DisplayError | null>(null);
@@ -316,11 +316,11 @@ export function IntegrationHarnessPage() {
               </div>
               <div className="mt-4 border-t border-slate-100 pt-3">
                 <p className="mb-1 text-xs font-medium text-slate-700">选择设备并创建会话</p>
-                <p className="mb-2 text-[11px] leading-5 text-slate-500">equipmentId/fixedAssetNo 仅作为 Registry 查询键；canonical snapshot 由 Gateway 返回。</p>
+                <p className="mb-2 text-[11px] leading-5 text-slate-500">equipmentId/fixedAssetNo 仅作为 Registry 查询键；canonical snapshot 由 Gateway 返回。本地联调请使用 <code>EQ-GD01250002</code> + <code>GD01250002</code>（或 <code>EQ-GR01220020</code> + <code>GR01220020</code>）。</p>
                 <div className="space-y-2">
-                  <input aria-label="new equipmentId" value={newEquipmentId} onChange={(event) => setNewEquipmentId(event.target.value)} placeholder="equipmentId" className="w-full rounded-md border border-slate-200 px-2.5 py-2 text-xs" />
-                  <input aria-label="new fixedAssetNo" value={newFixedAssetNo} onChange={(event) => setNewFixedAssetNo(event.target.value)} placeholder="fixedAssetNo" className="w-full rounded-md border border-slate-200 px-2.5 py-2 text-xs" />
-                  <input aria-label="new faultCode" value={newFaultCode} onChange={(event) => setNewFaultCode(event.target.value)} placeholder="faultCode" className="w-full rounded-md border border-slate-200 px-2.5 py-2 text-xs" />
+                  <input aria-label="new equipmentId" value={newEquipmentId} onChange={(event) => setNewEquipmentId(event.target.value)} placeholder="equipmentId，例如 EQ-GD01250002" className="w-full rounded-md border border-slate-200 px-2.5 py-2 text-xs" />
+                  <input aria-label="new fixedAssetNo" value={newFixedAssetNo} onChange={(event) => setNewFixedAssetNo(event.target.value)} placeholder="fixedAssetNo，例如 GD01250002" className="w-full rounded-md border border-slate-200 px-2.5 py-2 text-xs" />
+                  <input aria-label="new faultCode" value={newFaultCode} onChange={(event) => setNewFaultCode(event.target.value)} placeholder="faultCode，例如 E-104" className="w-full rounded-md border border-slate-200 px-2.5 py-2 text-xs" />
                   <button type="button" onClick={() => void createConversation()} disabled={conversationLoading} className="w-full rounded-md bg-slate-800 px-3 py-2 text-xs font-medium text-white hover:bg-slate-900 disabled:opacity-50">创建并选择</button>
                 </div>
               </div>

@@ -14,6 +14,15 @@ describe('IntegrationHarnessPage', () => {
     expect(screen.getByLabelText('transient attachment 边界')).toBeTruthy();
   });
 
+  it('guides local Asset Registry keys when creating a conversation', () => {
+    render(<IntegrationHarnessPage />);
+
+    expect(screen.getByText(/本地联调请使用/)).toBeTruthy();
+    expect(screen.getByPlaceholderText('equipmentId，例如 EQ-GD01250002')).toBeTruthy();
+    expect(screen.getByPlaceholderText('fixedAssetNo，例如 GD01250002')).toBeTruthy();
+    expect(screen.getByPlaceholderText('faultCode，例如 E-104')).toBeTruthy();
+  });
+
   it('replays file event, document polling, and context switch scenarios', async () => {
     const user = userEvent.setup();
     render(<IntegrationHarnessPage />);

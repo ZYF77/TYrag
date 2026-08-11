@@ -76,7 +76,7 @@ async def test_file_share_ticket_is_one_shot_and_does_not_store_bytes(
     isolated_gateway_db, tmp_path, monkeypatch
 ):
     db, _ = isolated_gateway_db
-    source_path = tmp_path / "manual.pdf"
+    source_path = tmp_path / "设备调试记录.pdf"
     source_path.write_bytes(b"authoritative pdf bytes")
     monkeypatch.setenv("ENTERPRISE_FILE_SHARE_ROOTS", json.dumps({"test-root": str(tmp_path)}))
     provider = FileShareSourceAdapter()
@@ -103,6 +103,7 @@ async def test_file_share_ticket_is_one_shot_and_does_not_store_bytes(
     assert first.status_code == 200
     assert first.content == source_path.read_bytes()
     assert first.headers["x-source-sha256"] == hashlib.sha256(first.content).hexdigest()
+    assert "filename*=UTF-8''" in first.headers["content-disposition"]
     assert second.status_code == 404
     async with db.execute("PRAGMA table_info(ext_source_ticket)") as cursor:
         columns = {row["name"] for row in await cursor.fetchall()}
@@ -184,7 +185,7 @@ async def test_source_response_supports_exact_range_and_if_range(
         source_version_id="v1",
         event_id="evt-range",
         sha256=hashlib.sha256(source_path.read_bytes()).hexdigest(),
-        file_name=source_path.name,
+        file_name="设备调试记录.pdf",
         source_kind="FILE_SHARE",
         storage_root_id="test-root",
         relative_path=source_path.name,
@@ -199,6 +200,7 @@ async def test_source_response_supports_exact_range_and_if_range(
     assert response.status_code == 206
     assert body == b"2345"
     assert response.headers["content-range"] == "bytes 2-5/10"
+    assert "filename*=UTF-8''" in response.headers["content-disposition"]
 
     full_response = await source_response(
         _request([(b"range", b"bytes=2-5"), (b"if-range", b'"stale"')]), doc

@@ -2,6 +2,7 @@
 import hashlib
 import json
 import logging
+import os
 from typing import Any
 
 import aiosqlite
@@ -521,10 +522,24 @@ class SyncService:
         )
 
     async def _ensure_dataset(self, tenant_id: str) -> dict:
-        name = f"enterprise-{tenant_id}"
+        name = (
+            os.environ.get("ENTERPRISE_RAGFLOW_DATASET_NAME", "").strip()
+            or f"enterprise-{tenant_id}"
+        )
+        permission = os.environ.get(
+            "ENTERPRISE_RAGFLOW_DATASET_PERMISSION", ""
+        ).strip().lower()
+        if permission not in {"", "me", "team"}:
+            raise TerminalDocumentSyncError(
+                "RAGFLOW_DATASET_PERMISSION_INVALID",
+                "ENTERPRISE_RAGFLOW_DATASET_PERMISSION must be 'me' or 'team'",
+            )
         try:
             return _validate_ragflow_response(
-                await self.ragflow_client.find_or_create_dataset(name),
+                await self.ragflow_client.find_or_create_dataset(
+                    name,
+                    permission=permission or None,
+                ),
                 "find or create dataset",
             )
         except RAGFlowAPIError as e:
@@ -687,17 +702,14 @@ class SyncService:
 
     @staticmethod
     def _external_meta_fields(doc: ExtDocumentMap, event: OutboxEvent) -> dict:
-        ground_truth_fields = {
-            name: value
-            for name, value in (
-                ("equipment_id", doc.equipment_id),
-                ("fixed_asset_no", doc.fixed_asset_no),
-            )
-            if value
-        }
+        # Asset identifiers are registration metadata, not OCR ground truth.
+        # A scan may legitimately omit both identifiers.  Keep the quality
+        # declaration explicit and scalar so RAGFlow's metadata update API can
+        # preserve it.  The older ``...ground_truth_fields`` key is already
+        # mapped as an object in some RAGFlow indices, so use a new scalar key
+        # instead of changing that field's type.
+        ground_truth_fields = {}
         required_capabilities = ["text", "position"]
-        if ground_truth_fields:
-            required_capabilities.append("key_field")
         return {
             "enterprise_event_id": event.event_id,
             "enterprise_external_document_id": doc.external_document_id,
@@ -705,7 +717,9 @@ class SyncService:
             "enterprise_sha256": doc.sha256,
             "enterprise_document_type": doc.document_type,
             "enterprise_quality_expected_tables": [],
-            "enterprise_quality_ground_truth_fields": ground_truth_fields,
+            "enterprise_quality_ground_truth_json": json.dumps(
+                ground_truth_fields, separators=(",", ":")
+            ),
             "enterprise_quality_citation_expected": False,
             "enterprise_quality_required_capabilities": required_capabilities,
         }
@@ -764,11 +778,8 @@ class SyncService:
                 )
             meta_fields = self._external_meta_fields(doc, event)
             # RAGFlow's document update schema accepts scalars and scalar
-            # arrays, but not nested objects. Ground-truth fields remain in
-            # the Enterprise mapping and are loaded directly by the quality
-            # worker; keep the other declarations across replace-style
-            # metadata updates.
-            meta_fields.pop("enterprise_quality_ground_truth_fields", None)
+            # arrays, not nested objects. Ground-truth fields are carried in
+            # the scalar JSON declaration above and decoded by the worker.
             try:
                 _validate_ragflow_response(
                     await self.ragflow_client.update_document(
