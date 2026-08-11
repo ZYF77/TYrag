@@ -9,9 +9,15 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNNER = ROOT / "enterprise" / "scripts" / "run_enterprise_tests.ps1"
+PREFLIGHT = ROOT / "enterprise" / "scripts" / "probe_integration_environment.py"
+LIVE_SUITE = ROOT / "enterprise" / "scripts" / "run_file_share_v3_v2_e2e.py"
+OVERLAY = ROOT / "deploy" / "overlays" / "docker-compose.enterprise.yml"
 
 
 def _powershell() -> str:
@@ -58,7 +64,12 @@ def _run_runner(
     return result, summary
 
 
-def _integration_env() -> dict[str, str]:
+def _integration_env(tmp_path: Path) -> dict[str, str]:
+    file_share_root = tmp_path / "file-share"
+    file_share_root.mkdir()
+    state_host_dir = tmp_path / "gateway-state"
+    state_host_dir.mkdir()
+    db_path = state_host_dir / "gateway.db"
     env = os.environ.copy()
     env.update(
         {
@@ -67,11 +78,13 @@ def _integration_env() -> dict[str, str]:
             "ENTERPRISE_ASSET_REGISTRY_BASE_URL": "http://127.0.0.1:9390",
             "ENTERPRISE_REDIS_URL": "redis://127.0.0.1:6379/0",
             "GATEWAY_URL": "http://127.0.0.1:5188",
-            "S3_ENDPOINT": "http://127.0.0.1:9000",
-            "S3_ACCESS_KEY": "runner-test-access-key",
-            "S3_SECRET_KEY": "runner-test-secret-key",
-            "S3_BUCKET": "runner-test-bucket",
-            "ENTERPRISE_SYNC_SERVICE_TOKEN": "runner-test-service-token",
+            "ENTERPRISE_FILE_SHARE_ROOTS": json.dumps(
+                {"device-share": str(file_share_root)}
+            ),
+            "ENTERPRISE_GATEWAY_STATE_HOST_DIR": str(state_host_dir),
+            "ENTERPRISE_DB_PATH": str(db_path),
+            "ENTERPRISE_SYNC_DB_PATH": str(db_path),
+            "ENTERPRISE_SYNC_HMAC_CREDENTIALS": "runner-test-hmac-config",
             "JWT_SHARED_SECRET": "runner-test-jwt-secret",
         }
     )
@@ -92,11 +105,13 @@ def test_missing_integration_environment_returns_exit_three(tmp_path):
         "ENTERPRISE_ASSET_REGISTRY_BASE_URL",
         "ENTERPRISE_REDIS_URL",
         "GATEWAY_URL",
-        "S3_ENDPOINT",
-        "S3_ACCESS_KEY",
-        "S3_SECRET_KEY",
-        "S3_BUCKET",
-        "ENTERPRISE_SYNC_SERVICE_TOKEN",
+        "ENTERPRISE_FILE_SHARE_ROOTS",
+        "ENTERPRISE_FILE_SHARE_ROOT",
+        "ENTERPRISE_FILE_SHARE_ROOT_ID",
+        "ENTERPRISE_GATEWAY_STATE_HOST_DIR",
+        "ENTERPRISE_DB_PATH",
+        "ENTERPRISE_SYNC_DB_PATH",
+        "ENTERPRISE_SYNC_HMAC_CREDENTIALS",
         "JWT_SHARED_SECRET",
     ):
         env.pop(name, None)
@@ -108,13 +123,14 @@ def test_missing_integration_environment_returns_exit_three(tmp_path):
     assert summary["offlineImplementationTestsRequested"] is True
     assert summary["offlineImplementationTestsExecuted"] is False
     assert summary["p1Status"] == "offline_implementation_tests_not_reached"
-    assert summary["m3LiveIntegrationEvidence"] is False
+    assert summary["requiredIntegrationEvidence"] is False
+    assert summary["requiredIntegrationEvidenceReason"]
     assert summary["gitCommit"]
     assert isinstance(summary["worktreeDirty"], bool)
 
 
 def test_invalid_integration_url_returns_exit_three(tmp_path):
-    env = _integration_env()
+    env = _integration_env(tmp_path)
     env["ENTERPRISE_RAGFLOW_BASE_URL"] = "not-a-url"
     result, summary = _run_runner(tmp_path, "Integration", env)
     assert result.returncode == 3
@@ -125,7 +141,7 @@ def test_invalid_integration_url_returns_exit_three(tmp_path):
         if path.is_file()
     )
     assert "runner-test-ragflow-key" not in artifact_text
-    assert "runner-test-secret-key" not in artifact_text
+    assert "runner-test-hmac-config" not in artifact_text
 
 
 def test_contract_artifact_binds_current_head_and_dirty_state(tmp_path):
@@ -183,10 +199,107 @@ def test_runner_rejects_skips_and_xpasses_in_test_steps():
     assert "xfail_strict=true" in source
     assert "counts.skipped -gt 0" in source
     assert "--runxfail" not in source
-    assert "pytest-live-integration" in source
+    assert "live-file-share-v3-v2" in source
     assert "Assert-NoIntegrationBypassTests" in source
     assert "probe_integration_environment.py" in source
-    assert "run_wp04_phase2_e2e.py" in source
-    assert "offline implementation tests" in source
-    assert "no M3-specific live Integration evidence" in source
+    assert "run_file_share_v3_v2_e2e.py" in source
+    assert "S3_ENDPOINT" not in source
+    assert "offlineImplementationTests" in source
+    assert "FILE_SHARE v3 + formal v2" in source
     assert "no P1 implementation tests executed" not in source
+
+
+def test_required_live_suite_is_v3_v2_and_has_strict_status_url_path():
+    source = LIVE_SUITE.read_text(encoding="utf-8")
+    assert "/enterprise/api/v3/documents" in source
+    assert "/enterprise/api/v2/conversations" in source
+    assert "X-TY-Signature" in source
+    assert "statusUrl" in source
+    assert "statusUrl" in source
+    assert "status_url" in source
+    assert 'status.get("retrievable") is True' in source
+    assert 'status.get("status") == "retrievable"' not in source
+    assert "S3_" not in source
+    assert "/enterprise/api/v1/" not in source
+    assert "pytest.skip" not in source
+    assert "pytest.xfail" not in source
+    assert "unittest.mock" not in source
+    assert "Mock(" not in source
+
+
+def test_preflight_reports_only_states_and_has_no_s3_requirements():
+    source = PREFLIGHT.read_text(encoding="utf-8")
+    assert "ENTERPRISE_FILE_SHARE_ROOTS" in source
+    assert "ENTERPRISE_ASSET_REGISTRY_BASE_URL" in source
+    assert "ENTERPRISE_RAGFLOW_BASE_URL" in source
+    assert "ENTERPRISE_REDIS_URL" in source
+    assert "GATEWAY_URL" in source
+    assert "ENTERPRISE_DB_PATH" in source
+    assert "ENTERPRISE_SYNC_DB_PATH" in source
+    assert "ENTERPRISE_GATEWAY_STATE_HOST_DIR" in source
+    assert "database_path_not_shared" in source
+    assert "S3_ENDPOINT" not in source
+    assert "S3_ACCESS_KEY" not in source
+    assert "S3_SECRET_KEY" not in source
+    assert "configured" in source
+    assert "missing" in source
+    assert "unavailable" in source
+
+
+def test_overlay_wires_gateway_file_share_and_internal_ticket_network():
+    overlay_source = OVERLAY.read_text(encoding="utf-8")
+    overlay = yaml.safe_load(OVERLAY.read_text(encoding="utf-8"))
+    services = overlay["services"]
+    gateway = services["enterprise-gateway"]
+    ragflow = services["ragflow-cpu"]
+    assert "ragflow" in gateway["networks"]
+    assert any(":ro" in str(volume) for volume in gateway["volumes"])
+    assert gateway["environment"]["RAGFLOW_BASE_URL"] == "http://ragflow-cpu:9380"
+    assert gateway["environment"]["TYRAG_EXTERNAL_SOURCE_INTERNAL_KEY"]
+    assert gateway["environment"]["ENTERPRISE_SYNC_AUTH_ENABLED"] == "true"
+    assert gateway["environment"].get("ENTERPRISE_TEST_MODE") != "1"
+    assert ragflow["environment"]["TYRAG_EXTERNAL_SOURCE_GATEWAY_URL"] == (
+        "http://enterprise-gateway:5188"
+    )
+    assert ragflow["environment"]["TYRAG_EXTERNAL_SOURCE_INTERNAL_KEY"]
+    assert (
+        "${ENTERPRISE_GATEWAY_STATE_HOST_DIR:?set ENTERPRISE_GATEWAY_STATE_HOST_DIR}:/var/lib/tyrag/state"
+        in overlay_source
+    )
+    assert "enterprise_gateway_state" not in overlay_source
+
+
+def test_unshared_gateway_db_returns_exit_three(tmp_path):
+    env = _integration_env(tmp_path)
+    other_state_dir = tmp_path / "other-state"
+    other_state_dir.mkdir()
+    env["ENTERPRISE_DB_PATH"] = str(other_state_dir / "gateway.db")
+    result, summary = _run_runner(tmp_path, "Integration", env)
+    assert result.returncode == 3
+    assert summary["requiredIntegrationEvidence"] is False
+
+
+def test_status_url_fixture_is_server_owned_and_scope_checked():
+    from enterprise.scripts.run_file_share_v3_v2_e2e import (
+        LiveAssertionError,
+        validate_status_url,
+    )
+
+    scope = {
+        "tenant_id": "tyrag-integration",
+        "source_system": "EAM",
+        "external_document_id": "DOC-1",
+        "source_version_id": "v3-1",
+    }
+    server_url = (
+        "/enterprise/api/v3/documents/DOC-1/status"
+        "?tenantId=tyrag-integration&sourceSystem=EAM&sourceVersionId=v3-1"
+    )
+    assert validate_status_url({"statusUrl": server_url}, **scope) == server_url
+
+    with pytest.raises(LiveAssertionError):
+        validate_status_url({}, **scope)
+    with pytest.raises(LiveAssertionError):
+        validate_status_url(
+            {"statusUrl": server_url.replace("DOC-1", "OTHER")}, **scope
+        )

@@ -1,8 +1,10 @@
-"""Probe the real services required by the Integration profile.
+"""Fail-closed preflight for the required FILE_SHARE/v2 Integration profile.
 
-Only status labels and HTTP status codes are printed. Credentials, response
-bodies, URLs with embedded credentials, and exception text are intentionally
-excluded from the evidence stream.
+The probe reports only component names, state labels, and stable reasons.  It
+never prints configuration values, response bodies, exception text, or secret
+material.  Exit codes are intentionally small and stable for the PowerShell
+runner: 0 means every component is available, 3 means the environment is
+missing or unavailable, and 4 means the probe itself failed.
 """
 
 from __future__ import annotations
@@ -12,6 +14,7 @@ import json
 import os
 import sys
 import uuid
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import httpx
@@ -21,123 +24,252 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 
+CONFIGURED = "configured"
+MISSING = "missing"
+UNAVAILABLE = "unavailable"
+
+
+def _state(status: str, reason: str) -> dict[str, str]:
+    return {"status": status, "reason": reason}
+
+
+def _value(name: str) -> str:
+    return os.environ.get(name, "").strip()
+
+
+def _first_value(*names: str) -> str:
+    for name in names:
+        value = _value(name)
+        if value:
+            return value
+    return ""
+
+
 def _url_is_valid(value: str, schemes: set[str]) -> bool:
     parsed = urlsplit(value)
     return parsed.scheme in schemes and bool(parsed.hostname)
 
 
-def _result(passed: bool, status: int | str, reason: str) -> dict[str, object]:
-    return {"passed": passed, "status": status, "reason": reason}
-
-
-async def _probe_http_services() -> dict[str, dict[str, object]]:
-    ragflow_base = os.environ.get("ENTERPRISE_RAGFLOW_BASE_URL", "").strip().rstrip("/")
-    ragflow_key = os.environ.get("ENTERPRISE_RAGFLOW_API_KEY", "").strip()
-    asset_base = os.environ.get(
-        "ENTERPRISE_ASSET_REGISTRY_BASE_URL", ""
-    ).strip().rstrip("/")
-    asset_token = os.environ.get("ENTERPRISE_ASSET_REGISTRY_TOKEN", "").strip()
-
-    async with httpx.AsyncClient(timeout=5.0, follow_redirects=False) as client:
+def _file_share_config() -> tuple[dict[str, Path] | None, dict[str, str]]:
+    raw = _value("ENTERPRISE_FILE_SHARE_ROOTS")
+    if raw:
         try:
-            ragflow_response = await client.get(
-                f"{ragflow_base}/api/v1/system/version",
-                headers={"Authorization": f"Bearer {ragflow_key}"},
-            )
-            ragflow = _result(
-                200 <= ragflow_response.status_code < 300,
-                ragflow_response.status_code,
-                "public_version_endpoint",
-            )
-        except httpx.HTTPError:
-            ragflow = _result(False, "unreachable", "public_version_endpoint")
+            parsed = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None, _state(UNAVAILABLE, "root_registry_invalid")
+        if not isinstance(parsed, dict) or not parsed:
+            return None, _state(UNAVAILABLE, "root_registry_invalid")
+        roots: dict[str, Path] = {}
+        for root_id, root_path in parsed.items():
+            if not isinstance(root_id, str) or not root_id.strip():
+                return None, _state(UNAVAILABLE, "root_registry_invalid")
+            if not isinstance(root_path, str) or not root_path.strip():
+                return None, _state(UNAVAILABLE, "root_registry_invalid")
+            roots[root_id.strip()] = Path(root_path)
+    else:
+        root = _value("ENTERPRISE_FILE_SHARE_ROOT")
+        root_id = _value("ENTERPRISE_FILE_SHARE_ROOT_ID") or "default"
+        if not root:
+            return None, _state(MISSING, "root_registry")
+        roots = {root_id: Path(root)}
 
-        headers = {"Accept": "application/json"}
+    if any(not path.is_dir() or not os.access(path, os.R_OK) for path in roots.values()):
+        return roots, _state(UNAVAILABLE, "root_unreadable")
+    return roots, _state(CONFIGURED, "root_registry")
+
+
+def _database_state() -> dict[str, str]:
+    state_host_dir = _value("ENTERPRISE_GATEWAY_STATE_HOST_DIR")
+    sync_path = _value("ENTERPRISE_SYNC_DB_PATH")
+    user_path = _value("ENTERPRISE_DB_PATH")
+    if not state_host_dir or not sync_path or not user_path:
+        return _state(MISSING, "shared_database_paths")
+    if sync_path == ":memory:" or user_path == ":memory:":
+        return _state(UNAVAILABLE, "database_must_be_durable")
+    try:
+        state_dir = Path(state_host_dir).resolve()
+        expected_path = (state_dir / "gateway.db").resolve()
+        paths = (Path(sync_path).resolve(), Path(user_path).resolve())
+    except (OSError, RuntimeError, ValueError):
+        return _state(UNAVAILABLE, "shared_database_path_invalid")
+    if not state_dir.is_dir() or not os.access(state_dir, os.W_OK):
+        return _state(UNAVAILABLE, "gateway_state_host_dir_unavailable")
+    if any(path != expected_path for path in paths):
+        return _state(UNAVAILABLE, "database_path_not_shared")
+    return _state(CONFIGURED, "shared_gateway_db")
+
+
+def _auth_state() -> dict[str, str]:
+    if _value("ENTERPRISE_TEST_MODE") == "1":
+        return _state(UNAVAILABLE, "test_mode_not_allowed")
+    if _value("ENTERPRISE_SYNC_AUTH_ENABLED").lower() == "false":
+        return _state(UNAVAILABLE, "service_auth_disabled")
+
+    credentials = _value("ENTERPRISE_SYNC_HMAC_CREDENTIALS")
+    if not credentials:
+        return _state(MISSING, "hmac_credentials")
+    try:
+        parsed = json.loads(credentials)
+        if isinstance(parsed, dict):
+            parsed = parsed.get("credentials")
+        if not isinstance(parsed, list) or not parsed:
+            return _state(UNAVAILABLE, "hmac_credentials_invalid")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return _state(UNAVAILABLE, "hmac_credentials_invalid")
+
+    issuer = _value("JWT_ISSUER")
+    audience = _value("JWT_AUDIENCE")
+    if not issuer or not audience:
+        return _state(MISSING, "jwt_issuer_or_audience")
+    jwks_url = _value("JWT_JWKS_URL")
+    hs_enabled = _value("JWT_ENABLE_HS").lower() == "true"
+    shared_secret = _value("JWT_SHARED_SECRET")
+    if not jwks_url and (not hs_enabled or not shared_secret):
+        return _state(MISSING, "jwt_verification_key")
+    if jwks_url and not _url_is_valid(jwks_url, {"http", "https"}):
+        return _state(UNAVAILABLE, "jwt_jwks_url")
+    return _state(CONFIGURED, "hmac_and_jwt")
+
+
+async def _probe_http(
+    *,
+    base_url: str,
+    path: str,
+    accepted_statuses: set[int],
+    headers: dict[str, str] | None = None,
+) -> bool:
+    try:
+        async with httpx.AsyncClient(timeout=5.0, follow_redirects=False) as client:
+            response = await client.get(f"{base_url.rstrip('/')}{path}", headers=headers)
+    except httpx.HTTPError:
+        return False
+    return response.status_code in accepted_statuses
+
+
+async def _probe_services() -> dict[str, dict[str, str]]:
+    results: dict[str, dict[str, str]] = {}
+
+    ragflow_base = _first_value("ENTERPRISE_RAGFLOW_BASE_URL", "RAGFLOW_BASE_URL")
+    ragflow_key = _first_value("ENTERPRISE_RAGFLOW_API_KEY", "RAGFLOW_API_KEY")
+    if not ragflow_base or not ragflow_key:
+        results["ragflow"] = _state(MISSING, "base_url_or_api_key")
+    elif not _url_is_valid(ragflow_base, {"http", "https"}):
+        results["ragflow"] = _state(UNAVAILABLE, "base_url_invalid")
+    elif await _probe_http(
+        base_url=ragflow_base,
+        path="/api/v1/system/version",
+        accepted_statuses=set(range(200, 300)),
+        headers={"Authorization": f"Bearer {ragflow_key}"},
+    ):
+        results["ragflow"] = _state(CONFIGURED, "api_reachable")
+    else:
+        results["ragflow"] = _state(UNAVAILABLE, "api_unreachable")
+
+    asset_base = _value("ENTERPRISE_ASSET_REGISTRY_BASE_URL")
+    if not asset_base:
+        results["assetRegistry"] = _state(MISSING, "base_url")
+    elif not _url_is_valid(asset_base, {"http", "https"}):
+        results["assetRegistry"] = _state(UNAVAILABLE, "base_url_invalid")
+    else:
+        asset_headers = {"Accept": "application/json"}
+        asset_token = _value("ENTERPRISE_ASSET_REGISTRY_TOKEN")
         if asset_token:
-            headers["Authorization"] = f"Bearer {asset_token}"
-        try:
-            asset_response = await client.get(
-                f"{asset_base}/v1/assets/resolve",
-                params={
-                    "tenantId": "tyrag-integration-probe",
-                    "equipmentId": "tyrag-integration-probe",
-                },
-                headers=headers,
-            )
-            # A 404 is valid evidence for a live resolver when the synthetic
-            # probe identifier does not exist. A successful response is also
-            # accepted; no response body is persisted.
-            asset = _result(
-                asset_response.status_code in {200, 404},
-                asset_response.status_code,
-                "resolver_endpoint",
-            )
-        except httpx.HTTPError:
-            asset = _result(False, "unreachable", "resolver_endpoint")
-    return {"ragflow": ragflow, "assetRegistry": asset}
+            asset_headers["Authorization"] = f"Bearer {asset_token}"
+        reachable = await _probe_http(
+            base_url=asset_base,
+            path="/v1/assets/resolve?tenantId=tyrag-integration-probe&equipmentId=tyrag-integration-probe",
+            accepted_statuses={200, 404},
+            headers=asset_headers,
+        )
+        results["assetRegistry"] = _state(
+            CONFIGURED if reachable else UNAVAILABLE,
+            "resolver_reachable" if reachable else "resolver_unreachable",
+        )
+
+    gateway = _value("GATEWAY_URL")
+    if not gateway:
+        results["gateway"] = _state(MISSING, "base_url")
+    elif not _url_is_valid(gateway, {"http", "https"}):
+        results["gateway"] = _state(UNAVAILABLE, "base_url_invalid")
+    else:
+        reachable = await _probe_http(
+            base_url=gateway,
+            path="/enterprise/api/v1/health",
+            accepted_statuses={200},
+        )
+        results["gateway"] = _state(
+            CONFIGURED if reachable else UNAVAILABLE,
+            "health_reachable" if reachable else "health_unreachable",
+        )
+    return results
 
 
-async def _probe_redis() -> dict[str, object]:
+async def _probe_redis() -> dict[str, str]:
+    url = _value("ENTERPRISE_REDIS_URL")
+    if not url:
+        return _state(MISSING, "redis_url")
+    if not _url_is_valid(url, {"redis", "rediss"}):
+        return _state(UNAVAILABLE, "redis_url_invalid")
+
     from enterprise.gateway.auth.service_auth import (
         RedisReplayStore,
         ReplayStoreUnavailable,
     )
 
-    url = os.environ.get("ENTERPRISE_REDIS_URL", "").strip()
-    prefix = f"tyrag:integration-probe:{uuid.uuid4().hex}:"
+    prefix = f"tyrag:integration-preflight:{uuid.uuid4().hex}:"
     first = RedisReplayStore(url, prefix=prefix, timeout=3.0)
     second = RedisReplayStore(url, prefix=prefix, timeout=3.0)
     key = uuid.uuid4().hex
     try:
-        first_result = await first.remember(key, 0)
-        second_result = await second.remember(key, 0)
+        first_result = await first.reserve(key, 0)
+        second_result = await second.reserve(key, 0)
     except (ReplayStoreUnavailable, ValueError):
-        return _result(False, "unavailable", "shared_replay_store")
-    return _result(
-        first_result is True and second_result is False,
-        "atomic_set_nx",
-        "shared_replay_store",
-    )
+        return _state(UNAVAILABLE, "shared_replay_store")
+    if first_result is True and second_result is False:
+        return _state(CONFIGURED, "atomic_set_nx")
+    return _state(UNAVAILABLE, "atomic_set_nx_failed")
 
 
 async def _run() -> tuple[int, dict[str, object]]:
-    required = (
-        "ENTERPRISE_RAGFLOW_BASE_URL",
-        "ENTERPRISE_RAGFLOW_API_KEY",
-        "ENTERPRISE_ASSET_REGISTRY_BASE_URL",
-        "ENTERPRISE_REDIS_URL",
-    )
-    missing = [name for name in required if not os.environ.get(name, "").strip()]
-    if missing:
-        return 3, {
-            "passed": False,
-            "evidence": {"environment": _result(False, "missing", "required_variables")},
-        }
+    file_roots, file_share = _file_share_config()
+    del file_roots
+    database = _database_state()
+    auth = _auth_state()
 
-    if not _url_is_valid(
-        os.environ["ENTERPRISE_RAGFLOW_BASE_URL"].strip(), {"http", "https"}
-    ) or not _url_is_valid(
-        os.environ["ENTERPRISE_ASSET_REGISTRY_BASE_URL"].strip(), {"http", "https"}
-    ) or not _url_is_valid(
-        os.environ["ENTERPRISE_REDIS_URL"].strip(), {"redis", "rediss"}
-    ):
-        return 3, {
-            "passed": False,
-            "evidence": {"environment": _result(False, "invalid", "url_syntax")},
-        }
-
-    evidence = await _probe_http_services()
+    evidence: dict[str, dict[str, str]] = {
+        "fileShare": file_share,
+        "database": database,
+        "auth": auth,
+    }
+    evidence.update(await _probe_services())
     evidence["redis"] = await _probe_redis()
-    passed = all(bool(item["passed"]) for item in evidence.values())
-    return (0 if passed else 3), {"passed": passed, "evidence": evidence}
+
+    missing = sorted(name for name, item in evidence.items() if item["status"] == MISSING)
+    unavailable = sorted(
+        name for name, item in evidence.items() if item["status"] == UNAVAILABLE
+    )
+    passed = not missing and not unavailable
+    payload = {
+        "profile": "Integration",
+        "passed": passed,
+        "evidence": evidence,
+        "missing": missing,
+        "unavailable": unavailable,
+    }
+    return (0 if passed else 3), payload
 
 
 def main() -> int:
     try:
         code, payload = asyncio.run(_run())
     except Exception:
-        # Keep tool failures distinguishable without exposing exception text.
-        code, payload = 4, {"passed": False, "evidence": {"probe": "tool_error"}}
+        code, payload = 4, {
+            "profile": "Integration",
+            "passed": False,
+            "evidence": {"probe": _state(UNAVAILABLE, "tool_error")},
+            "missing": [],
+            "unavailable": ["probe"],
+        }
     print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
     return code
 

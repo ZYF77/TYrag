@@ -1,8 +1,67 @@
-# Enterprise overlay -- adds health-check service.
-# Run AFTER RAGFlow is already up:
-#   docker compose -f ragflow/docker/docker-compose.yml -f deploy/overlays/docker-compose.enterprise.yml --profile enterprise run --rm enterprise-health
+# Required local Integration overlay.
+#
+# Start with the upstream CPU compose file first so all relative paths resolve
+# from ragflow/docker:
+#   docker compose -f ragflow/docker/docker-compose.yml \
+#     -f deploy/overlays/docker-compose.enterprise.yml \
+#     --profile cpu up -d
+# The host live runner must set ENTERPRISE_DB_PATH and
+# ENTERPRISE_SYNC_DB_PATH to ENTERPRISE_GATEWAY_STATE_HOST_DIR/gateway.db.
+# The bind mount below is the single SQLite state shared by host E2E and Gateway.
 
 services:
+  enterprise-gateway:
+    image: ${ENTERPRISE_GATEWAY_IMAGE:-tyrag/ragflow:v0.26.4}
+    working_dir: /ragflow
+    command:
+      - /ragflow/.venv/bin/python
+      - -m
+      - uvicorn
+      - enterprise.gateway.app:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "5188"
+    ports:
+      - ${ENTERPRISE_GATEWAY_PORT:-5188}:5188
+    volumes:
+      - ../../enterprise:/ragflow/enterprise:ro
+      - ../../contracts:/ragflow/contracts:ro
+      - ${ENTERPRISE_FILE_SHARE_HOST_ROOT:?set ENTERPRISE_FILE_SHARE_HOST_ROOT}:/var/lib/tyrag/file-share:ro
+      - ${ENTERPRISE_GATEWAY_STATE_HOST_DIR:?set ENTERPRISE_GATEWAY_STATE_HOST_DIR}:/var/lib/tyrag/state
+    environment:
+      PYTHONPATH: /ragflow
+      RAGFLOW_BASE_URL: http://ragflow-cpu:9380
+      RAGFLOW_API_KEY: ${RAGFLOW_API_KEY:?set RAGFLOW_API_KEY}
+      ENTERPRISE_RAGFLOW_BASE_URL: http://ragflow-cpu:9380
+      ENTERPRISE_RAGFLOW_API_KEY: ${RAGFLOW_API_KEY:?set RAGFLOW_API_KEY}
+      ENTERPRISE_FILE_SHARE_ROOTS: '{"device-share":"/var/lib/tyrag/file-share"}'
+      ENTERPRISE_GATEWAY_STATE_HOST_DIR: /var/lib/tyrag/state
+      ENTERPRISE_SYNC_DB_PATH: /var/lib/tyrag/state/gateway.db
+      ENTERPRISE_DB_PATH: /var/lib/tyrag/state/gateway.db
+      ENTERPRISE_REDIS_URL: ${ENTERPRISE_REDIS_URL:?set ENTERPRISE_REDIS_URL}
+      ENTERPRISE_ASSET_REGISTRY_BASE_URL: ${ENTERPRISE_ASSET_REGISTRY_BASE_URL:?set ENTERPRISE_ASSET_REGISTRY_BASE_URL}
+      ENTERPRISE_ASSET_REGISTRY_TOKEN: ${ENTERPRISE_ASSET_REGISTRY_TOKEN:-}
+      ENTERPRISE_SYNC_AUTH_ENABLED: "true"
+      ENTERPRISE_SYNC_HMAC_CREDENTIALS: ${ENTERPRISE_SYNC_HMAC_CREDENTIALS:?set ENTERPRISE_SYNC_HMAC_CREDENTIALS}
+      JWT_ISSUER: ${JWT_ISSUER:?set JWT_ISSUER}
+      JWT_AUDIENCE: ${JWT_AUDIENCE:?set JWT_AUDIENCE}
+      JWT_ENABLE_HS: ${JWT_ENABLE_HS:-true}
+      JWT_ALLOWED_ALGS: ${JWT_ALLOWED_ALGS:-HS256}
+      JWT_SHARED_SECRET: ${JWT_SHARED_SECRET:?set JWT_SHARED_SECRET}
+      TYRAG_EXTERNAL_SOURCE_INTERNAL_KEY: ${TYRAG_EXTERNAL_SOURCE_INTERNAL_KEY:?set TYRAG_EXTERNAL_SOURCE_INTERNAL_KEY}
+    depends_on:
+      ragflow-cpu:
+        condition: service_started
+    networks:
+      - ragflow
+    restart: unless-stopped
+
+  ragflow-cpu:
+    environment:
+      TYRAG_EXTERNAL_SOURCE_GATEWAY_URL: http://enterprise-gateway:5188
+      TYRAG_EXTERNAL_SOURCE_INTERNAL_KEY: ${TYRAG_EXTERNAL_SOURCE_INTERNAL_KEY:?set TYRAG_EXTERNAL_SOURCE_INTERNAL_KEY}
+
   enterprise-health:
     image: python:3.13-slim
     profiles:
@@ -13,17 +72,18 @@ services:
       - -c
       - |
         import time, urllib.request, json, sys
-        print("Enterprise health probe waiting for RAGFlow...", flush=True)
+        print("Enterprise health probe waiting for Gateway and RAGFlow...", flush=True)
         for i in range(30):
             try:
-                resp = urllib.request.urlopen("http://ragflow-cpu:9380/api/v1/system/ping", timeout=5)
-                if resp.read().decode().strip() == "pong":
-                    print(json.dumps({"status": "ready", "ragflow": "live", "attempt": i+1}))
+                gateway = urllib.request.urlopen("http://enterprise-gateway:5188/enterprise/api/v1/health", timeout=5)
+                ragflow = urllib.request.urlopen("http://ragflow-cpu:9380/api/v1/system/ping", timeout=5)
+                if gateway.status == 200 and ragflow.read().decode().strip() == "pong":
+                    print(json.dumps({"status": "ready", "gateway": "live", "ragflow": "live", "attempt": i + 1}))
                     sys.exit(0)
-            except Exception as e:
+            except Exception:
                 pass
             time.sleep(2)
-        print(json.dumps({"status": "not_ready", "ragflow": "unreachable"}))
+        print(json.dumps({"status": "not_ready", "gateway": "unreachable", "ragflow": "unreachable"}))
         sys.exit(1)
     networks:
       - ragflow

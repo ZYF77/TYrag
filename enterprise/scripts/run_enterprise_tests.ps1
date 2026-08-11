@@ -73,6 +73,8 @@ function Redact-SensitiveText {
         'ENTERPRISE_RAGFLOW_API_KEY',
         'ENTERPRISE_ASSET_REGISTRY_TOKEN',
         'ENTERPRISE_SYNC_SERVICE_TOKEN',
+        'ENTERPRISE_SYNC_HMAC_CREDENTIALS',
+        'ENTERPRISE_E2E_HMAC_SECRET',
         'WP03_UNAUTHORIZED_USER_TOKEN',
         'ENTERPRISE_REDIS_URL',
         'RAGFLOW_API_KEY',
@@ -442,50 +444,9 @@ function Test-UrlWithScheme {
     return $uri.Scheme -in $Schemes -and -not [string]::IsNullOrWhiteSpace($uri.Host)
 }
 
-function Assert-IntegrationEnvironment {
-    $required = @(
-        'ENTERPRISE_RAGFLOW_BASE_URL',
-        'ENTERPRISE_RAGFLOW_API_KEY',
-        'ENTERPRISE_ASSET_REGISTRY_BASE_URL',
-        'ENTERPRISE_REDIS_URL',
-        'GATEWAY_URL',
-        'S3_ENDPOINT',
-        'S3_ACCESS_KEY',
-        'S3_SECRET_KEY',
-        'S3_BUCKET',
-        'ENTERPRISE_SYNC_SERVICE_TOKEN',
-        'JWT_SHARED_SECRET'
-    )
-    $missing = @($required | Where-Object { [string]::IsNullOrWhiteSpace((Get-EnvironmentValue -Name $_)) })
-    if ($missing.Count -gt 0) {
-        throw [ExternalEnvironmentException]::new(
-            "Integration environment is missing required variables: $($missing -join ', ')"
-        )
-    }
-    $invalidUrls = @()
-    if (-not (Test-UrlWithScheme -Value (Get-EnvironmentValue 'ENTERPRISE_RAGFLOW_BASE_URL') -Schemes @('http', 'https'))) {
-        $invalidUrls += 'ENTERPRISE_RAGFLOW_BASE_URL'
-    }
-    if (-not (Test-UrlWithScheme -Value (Get-EnvironmentValue 'ENTERPRISE_ASSET_REGISTRY_BASE_URL') -Schemes @('http', 'https'))) {
-        $invalidUrls += 'ENTERPRISE_ASSET_REGISTRY_BASE_URL'
-    }
-    if (-not (Test-UrlWithScheme -Value (Get-EnvironmentValue 'ENTERPRISE_REDIS_URL') -Schemes @('redis', 'rediss'))) {
-        $invalidUrls += 'ENTERPRISE_REDIS_URL'
-    }
-    if (-not (Test-UrlWithScheme -Value (Get-EnvironmentValue 'GATEWAY_URL') -Schemes @('http', 'https'))) {
-        $invalidUrls += 'GATEWAY_URL'
-    }
-    if (-not (Test-UrlWithScheme -Value (Get-EnvironmentValue 'S3_ENDPOINT') -Schemes @('http', 'https'))) {
-        $invalidUrls += 'S3_ENDPOINT'
-    }
-    if ($invalidUrls.Count -gt 0) {
-        throw [ExternalEnvironmentException]::new(
-            "Integration environment contains invalid URL variables: $($invalidUrls -join ', ')"
-        )
-    }
-
-    # The WP-04 script uses these names. The values remain process-local and are
-    # never written to runner output or artifacts.
+function Set-IntegrationAliases {
+    # Keep legacy client names process-local for the shared gateway libraries.
+    # Values are never written to runner output or artifacts.
     [Environment]::SetEnvironmentVariable(
         'RAGFLOW_BASE_URL',
         (Get-EnvironmentValue 'ENTERPRISE_RAGFLOW_BASE_URL'),
@@ -506,13 +467,13 @@ function Invoke-IntegrationProbeStep {
     $code = Invoke-Logged -FilePath $PythonRuntime.path -Arguments @($probe) -Label 'integration-environment-probe'
     if ($code -eq 0) {
         Add-Step -Name integration-environment-probe -Status passed -ExitCode 0 `
-            -Detail 'RAGFlow, Asset Registry resolver, and Redis/Valkey cross-instance probe passed'
+            -Detail 'FILE_SHARE root, Asset Registry, RAGFlow, Redis/Valkey, Gateway, DB, and auth preflight passed'
     } elseif ($code -eq 3) {
         Add-Step -Name integration-environment-probe -Status blocked -ExitCode 3 `
-            -Detail 'RAGFlow, Asset Registry, or Redis/Valkey integration environment is unavailable'
+            -Detail 'FILE_SHARE root, Asset Registry, RAGFlow, Redis/Valkey, Gateway, DB, or auth integration environment is unavailable'
         Set-ExitCode 3
         throw [ExternalEnvironmentException]::new(
-            'RAGFlow, Asset Registry, or Redis/Valkey integration environment is unavailable'
+            'FILE_SHARE root, Asset Registry, RAGFlow, Redis/Valkey, Gateway, DB, or auth integration environment is unavailable'
         )
     } elseif ($code -eq 4) {
         Add-Step -Name integration-environment-probe -Status failed -ExitCode 4 `
@@ -527,9 +488,7 @@ function Invoke-IntegrationProbeStep {
 
 function Assert-NoIntegrationBypassTests {
     $liveTests = @(
-        'enterprise/tests/test_query_contract.py',
-        'enterprise/tests/test_wp03_contract.py',
-        'enterprise/tests/test_v2_redis_integration.py'
+        'enterprise/scripts/run_file_share_v3_v2_e2e.py'
     )
     $bypassPattern = '(?im)pytest\.(?:skip|xfail)|pytest\.mark\.(?:skip|xfail)|unittest\.mock|from\s+unittest\s+import\s+mock|(?:MagicMock|AsyncMock|Mock)\('
     foreach ($relativePath in $liveTests) {
@@ -544,23 +503,22 @@ function Assert-NoIntegrationBypassTests {
     }
 }
 
-function Invoke-WP04E2EStep {
-    $script = Join-Path $RepoRoot 'enterprise\scripts\run_wp04_phase2_e2e.py'
+function Invoke-RequiredIntegrationE2EStep {
+    $script = Join-Path $RepoRoot 'enterprise\scripts\run_file_share_v3_v2_e2e.py'
     if (-not (Test-Path -LiteralPath $script -PathType Leaf)) {
-        throw [DependencyException]::new('WP-04 E2E runner script is missing')
+        throw [DependencyException]::new('required FILE_SHARE/v2 E2E script is missing')
     }
-    $code = Invoke-Logged -FilePath $PythonRuntime.path -Arguments @($script) -Label 'wp04-e2e'
+    $report = Join-Path $RunArtifactDir 'file-share-v3-v2-e2e.json'
+    $code = Invoke-Logged -FilePath $PythonRuntime.path -Arguments @($script, '--report', $report) -Label 'live-file-share-v3-v2'
     if ($code -eq 0) {
-        Add-Step -Name wp04-e2e -Status passed -ExitCode 0 -Detail 'real WP-04 phase2 E2E passed'
-    } elseif ($code -eq 2) {
-        Add-Step -Name wp04-e2e -Status blocked -ExitCode 2 -Detail 'WP-04 E2E formal prerequisite is blocked'
-        Set-ExitCode 2
+        Add-Step -Name live-file-share-v3-v2 -Status passed -ExitCode 0 -Detail 'FILE_SHARE v3 registration, server statusUrl polling, and formal v2 conversation E2E passed'
     } elseif ($code -eq 3) {
-        Add-Step -Name wp04-e2e -Status blocked -ExitCode 3 -Detail 'WP-04 E2E integration environment is unavailable'
+        Add-Step -Name live-file-share-v3-v2 -Status blocked -ExitCode 3 -Detail 'required FILE_SHARE/v2 E2E environment is unavailable'
         Set-ExitCode 3
     } else {
-        Add-Step -Name wp04-e2e -Status failed -ExitCode 1 -Detail 'real WP-04 phase2 E2E failed'
-        Set-ExitCode 1
+        $stepCode = if ($code -eq 4) { 4 } else { 1 }
+        Add-Step -Name live-file-share-v3-v2 -Status failed -ExitCode $stepCode -Detail 'required FILE_SHARE/v2 E2E failed'
+        Set-ExitCode $stepCode
     }
 }
 
@@ -602,6 +560,15 @@ function Write-Reports {
     } else {
         'not_requested'
     }
+    $requiredIntegrationStep = @($Steps | Where-Object { $_.name -eq 'live-file-share-v3-v2' }) | Select-Object -First 1
+    $requiredIntegrationEvidence = $null -ne $requiredIntegrationStep -and $requiredIntegrationStep.status -eq 'passed'
+    $requiredIntegrationEvidenceReason = if ($requiredIntegrationEvidence) {
+        'FILE_SHARE v3 + formal v2 live evidence was collected'
+    } elseif ($null -eq $requiredIntegrationStep) {
+        'FILE_SHARE v3 + formal v2 live suite was not reached'
+    } else {
+        'FILE_SHARE v3 + formal v2 live suite did not pass'
+    }
     $summary = [ordered]@{
         profile = $Profile
         gitCommit = $GitCommit
@@ -623,12 +590,14 @@ function Write-Reports {
             node = if ($null -eq $NodeRuntime) { $null } else { $NodeRuntime.source }
         }
         liveTestsIncluded = ($Profile -in @('Integration', 'All'))
+        requiredIntegrationEvidence = [bool]$requiredIntegrationEvidence
+        requiredIntegrationEvidenceReason = $requiredIntegrationEvidenceReason
         offlineImplementationTestsExist = $true
         offlineImplementationTestsRequested = [bool]$offlineImplementationTestsRequested
         offlineImplementationTestsExecuted = [bool]$offlineImplementationTestsExecuted
         offlineImplementationTestStatus = $offlineImplementationTestStatus
         m3LiveIntegrationEvidence = $false
-        m3LiveIntegrationEvidenceReason = 'This runner has no M3-specific live Integration suite; offline implementation tests do not count as live evidence'
+        m3LiveIntegrationEvidenceReason = 'Legacy M3/v1/S3/demo regression is outside the Required Integration evidence profile'
         persistence = [ordered]@{
             backend = 'sqlite'
             postgresIntegration = 'not_applicable'
@@ -671,8 +640,9 @@ function Write-Reports {
     $lines.Add('- Exit codes: 0 accepted; 1 test/acceptance; 2 formal samples/local dependency blocked; 3 external environment; 4 runner/report/ragflow guard')
     $lines.Add("- Result: $(if ($DesiredExitCode -eq 0) { 'ACCEPTED' } else { 'NOT ACCEPTED' })")
     $lines.Add("- Live tests included: $($Profile -in @('Integration', 'All'))")
+    $lines.Add("- Required Integration evidence: $requiredIntegrationEvidence ($requiredIntegrationEvidenceReason)")
     $lines.Add("- Offline implementation tests exist in repository; requested=$offlineImplementationTestsRequested; executed=$offlineImplementationTestsExecuted; status=$offlineImplementationTestStatus")
-    $lines.Add('- M3 live Integration evidence: NOT ESTABLISHED by this runner (offline implementation tests do not count as live evidence)')
+    $lines.Add('- Legacy v1/S3/demo regression is not counted as Required Integration evidence')
     $lines.Add('- Persistence backend: sqlite')
     $lines.Add('- PostgreSQL integration: N/A (no enterprise PostgreSQL runtime call path)')
     $lines.Add("- P1 status: $($summary.p1Status)")
@@ -706,13 +676,15 @@ try {
                 Join-Path $root 'python\bin\python.exe'
                 Join-Path $root 'cua_python\python.exe'
             }
-        }
+    }
     Write-Log "Python runtime source=$($PythonRuntime.source)"
 
     if ($Profile -in @('Integration', 'All')) {
-        Assert-IntegrationEnvironment
+        Assert-NoIntegrationBypassTests
+        Set-IntegrationAliases
+        Invoke-IntegrationProbeStep
         Add-Step -Name live-environment -Status passed -ExitCode 0 `
-            -Detail 'required RAGFlow, Asset Registry, Redis/Valkey, and WP-04 environment is configured'
+            -Detail 'FILE_SHARE root, Asset Registry, RAGFlow, Redis/Valkey, Gateway, DB, and auth configuration is available'
     }
 
     $needsNode = $Profile -in @('P0', 'Integration', 'WP03', 'All')
@@ -738,9 +710,6 @@ try {
     [Environment]::SetEnvironmentVariable('TMPDIR', $RunTempDir, 'Process')
 
     $importCheck = 'import aiosqlite, fastapi, httpx, jsonschema, jwt, pydantic, pytest, pytest_asyncio, yaml'
-    if ($Profile -in @('Integration', 'All')) {
-        $importCheck += ', boto3, Cryptodome'
-    }
     $dependencyCode = Invoke-Logged -FilePath $PythonRuntime.path -Arguments @('-c', $importCheck) -Label 'python-dependencies'
     if ($dependencyCode -ne 0) {
         throw [DependencyException]::new('Python test dependencies are missing; use enterprise/requirements-test.txt explicitly')
@@ -756,11 +725,6 @@ try {
         $nodeCode = Invoke-Logged -FilePath $NodeRuntime.path -Arguments @('--version') -Label 'node-runtime'
         if ($nodeCode -ne 0) { throw [DependencyException]::new('Node.js runtime cannot be executed') }
         Add-Step -Name node-runtime -Status passed -ExitCode 0 -Detail "runtime source=$($NodeRuntime.source)"
-    }
-
-    if ($Profile -in @('Integration', 'All')) {
-        Assert-NoIntegrationBypassTests
-        Invoke-IntegrationProbeStep
     }
 
     if ($Profile -eq 'Contract') {
@@ -788,14 +752,7 @@ try {
     }
 
     if ($Profile -in @('Integration', 'All')) {
-        $liveTests = @(
-            'enterprise/tests/test_query_contract.py',
-            'enterprise/tests/test_wp03_contract.py',
-            'enterprise/tests/test_v2_redis_integration.py',
-            '-q'
-        )
-        Invoke-PytestStep -Name pytest-live-integration -TestArguments $liveTests -JUnitName 'pytest-live.xml'
-        Invoke-WP04E2EStep
+        Invoke-RequiredIntegrationE2EStep
     }
 
     if ($Profile -eq 'WP03' -or $Profile -eq 'All') {
@@ -813,7 +770,7 @@ try {
     }
     if ($Profile -eq 'All') {
         Add-Step -Name p1-status -Status blocked -ExitCode 2 `
-            -Detail 'P1 callback and attachment capabilities remain planned; offline implementation tests exist, but this runner has no M3-specific live Integration evidence'
+            -Detail 'P1 callback and attachment capabilities remain planned; FILE_SHARE v3 + formal v2 is the Required Integration evidence profile'
         Set-ExitCode 2
     }
 } catch [DependencyException] {
