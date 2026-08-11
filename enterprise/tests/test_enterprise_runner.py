@@ -96,6 +96,11 @@ def test_missing_integration_environment_returns_exit_three(tmp_path):
     assert result.returncode == 3
     assert summary["profile"] == "Integration"
     assert summary["passed"] is False
+    assert summary["offlineImplementationTestsExist"] is True
+    assert summary["offlineImplementationTestsRequested"] is True
+    assert summary["offlineImplementationTestsExecuted"] is False
+    assert summary["p1Status"] == "offline_implementation_tests_not_reached"
+    assert summary["m3LiveIntegrationEvidence"] is False
     assert summary["gitCommit"]
     assert isinstance(summary["worktreeDirty"], bool)
 
@@ -136,6 +141,11 @@ def test_contract_artifact_binds_current_head_and_dirty_state(tmp_path):
     assert summary["worktreeDirty"] is bool(worktree_status)
     assert summary["profile"] == "Contract"
     assert summary["passed"] is True
+    assert summary["offlineImplementationTestsExist"] is True
+    assert summary["offlineImplementationTestsRequested"] is False
+    assert summary["offlineImplementationTestsExecuted"] is False
+    assert summary["p1Status"] == "not_requested"
+    assert summary["m3LiveIntegrationEvidence"] is False
     assert summary["evidenceSummary"]
     assert summary["evidence"]["ragflowGuardUnchanged"] is True
     assert "worktreeChangeCountBefore" in summary["evidence"]
@@ -153,3 +163,6 @@ def test_runner_rejects_skips_and_xpasses_in_test_steps():
     assert "Assert-NoIntegrationBypassTests" in source
     assert "probe_integration_environment.py" in source
     assert "run_wp04_phase2_e2e.py" in source
+    assert "offline implementation tests" in source
+    assert "no M3-specific live Integration evidence" in source
+    assert "no P1 implementation tests executed" not in source

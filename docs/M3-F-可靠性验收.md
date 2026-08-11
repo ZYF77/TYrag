@@ -4,6 +4,10 @@
 
 本资产是平台可靠性验收的计划、契约校验和证据工具，不是外部环境替身。M2 当前仍为 blocked：没有真实 RAGFlow、Asset Registry、Redis/Valkey、对象存储和脱敏业务样本时，不生成 Integration 通过报告。
 
+M1/M3 的逐项验收状态以 [M1/M3 验收状态矩阵](M1-M3-验收状态矩阵.md) 为准。M3 总状态为
+`internal scaffolding/core merged; M3 Beta not accepted`；本资产的离线 implementation tests
+不构成 M3 live Integration evidence。
+
 现有统一入口仍是：
 
 ```powershell

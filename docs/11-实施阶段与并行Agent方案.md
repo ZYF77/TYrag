@@ -82,6 +82,7 @@ Lead 负责跨模块模型、迁移、配置和 RAGFlow 核心补丁。
 
 ### M3 Beta
 - 复核、批量、审计、备份、监控和大文件。
+- 当前事实边界：`internal scaffolding/core merged; M3 Beta not accepted`；逐项代码、接线、依赖和证据见 [M1/M3 验收状态矩阵](M1-M3-验收状态矩阵.md)。
 
 ### M4 Production
 - HA、灾备、安全、升级和 SLO。

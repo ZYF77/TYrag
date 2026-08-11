@@ -588,6 +588,17 @@ function Write-Reports {
     $evidenceSummary = @($Steps | ForEach-Object {
         "{0}:{1}({2})" -f $_.name, $_.status, $_.exitCode
     }) -join '; '
+    $offlineImplementationProfiles = @('P0', 'Integration', 'WP03', 'All')
+    $offlineImplementationTestsRequested = $Profile -in $offlineImplementationProfiles
+    $offlineImplementationStep = @($Steps | Where-Object { $_.name -eq 'pytest-offline' }) | Select-Object -First 1
+    $offlineImplementationTestsExecuted = $null -ne $offlineImplementationStep
+    $offlineImplementationTestStatus = if ($null -ne $offlineImplementationStep) {
+        $offlineImplementationStep.status
+    } elseif ($offlineImplementationTestsRequested) {
+        'not_reached'
+    } else {
+        'not_requested'
+    }
     $summary = [ordered]@{
         profile = $Profile
         gitCommit = $GitCommit
@@ -609,13 +620,25 @@ function Write-Reports {
             node = if ($null -eq $NodeRuntime) { $null } else { $NodeRuntime.source }
         }
         liveTestsIncluded = ($Profile -in @('Integration', 'All'))
+        offlineImplementationTestsExist = $true
+        offlineImplementationTestsRequested = [bool]$offlineImplementationTestsRequested
+        offlineImplementationTestsExecuted = [bool]$offlineImplementationTestsExecuted
+        offlineImplementationTestStatus = $offlineImplementationTestStatus
+        m3LiveIntegrationEvidence = $false
+        m3LiveIntegrationEvidenceReason = 'This runner has no M3-specific live Integration suite; offline implementation tests do not count as live evidence'
         persistence = [ordered]@{
             backend = 'sqlite'
             postgresIntegration = 'not_applicable'
             reason = 'no enterprise PostgreSQL runtime call path'
         }
-        p1TestsRequested = $false
-        p1Status = 'planned'
+        p1TestsRequested = [bool]$offlineImplementationTestsRequested
+        p1Status = if ($offlineImplementationTestsExecuted) {
+            'offline_implementation_tests_only'
+        } elseif ($offlineImplementationTestsRequested) {
+            'offline_implementation_tests_not_reached'
+        } else {
+            'not_requested'
+        }
         evidenceSummary = $evidenceSummary
         evidence = [ordered]@{
             stepCount = $Steps.Count
@@ -645,9 +668,11 @@ function Write-Reports {
     $lines.Add('- Exit codes: 0 accepted; 1 test/acceptance; 2 formal samples/local dependency blocked; 3 external environment; 4 runner/report/ragflow guard')
     $lines.Add("- Result: $(if ($DesiredExitCode -eq 0) { 'ACCEPTED' } else { 'NOT ACCEPTED' })")
     $lines.Add("- Live tests included: $($Profile -in @('Integration', 'All'))")
+    $lines.Add("- Offline implementation tests exist in repository; requested=$offlineImplementationTestsRequested; executed=$offlineImplementationTestsExecuted; status=$offlineImplementationTestStatus")
+    $lines.Add('- M3 live Integration evidence: NOT ESTABLISHED by this runner (offline implementation tests do not count as live evidence)')
     $lines.Add('- Persistence backend: sqlite')
     $lines.Add('- PostgreSQL integration: N/A (no enterprise PostgreSQL runtime call path)')
-    $lines.Add('- P1 status: planned (no P1 implementation tests executed)')
+    $lines.Add("- P1 status: $($summary.p1Status)")
     $lines.Add('')
     $lines.Add('| Step | Status | Exit | Detail |')
     $lines.Add('|---|---:|---:|---|')
@@ -785,7 +810,7 @@ try {
     }
     if ($Profile -eq 'All') {
         Add-Step -Name p1-status -Status blocked -ExitCode 2 `
-            -Detail 'P1 callback and attachment capabilities remain planned; no implementation tests executed'
+            -Detail 'P1 callback and attachment capabilities remain planned; offline implementation tests exist, but this runner has no M3-specific live Integration evidence'
         Set-ExitCode 2
     }
 } catch [DependencyException] {
