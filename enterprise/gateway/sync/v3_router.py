@@ -11,6 +11,7 @@ import inspect
 import sqlite3
 import uuid
 from typing import Literal
+from urllib.parse import quote
 
 import aiosqlite
 import jsonschema
@@ -38,6 +39,11 @@ from enterprise.gateway.sync.models import (
     insert_mapping,
 )
 from enterprise.gateway.sync.status_mapping import enterprise_stage
+from enterprise.gateway.sync.readiness import (
+    DocumentCandidateReadiness,
+    document_candidate_readiness,
+    document_candidate_readiness_from_db,
+)
 from enterprise.gateway.sync.sync_service import DocumentSyncError
 from enterprise.gateway.sync import v2_router as v2
 
@@ -108,16 +114,74 @@ def _error(status_code: int, code: str, request_id: str) -> JSONResponse:
     )
 
 
+_STATUS_ERROR_MESSAGES = {
+    "DOCUMENT_SOURCE_NOT_FOUND": "Document source is unavailable",
+    "DOCUMENT_HASH_MISMATCH": "Document content hash mismatch",
+    "DOCUMENT_PARSE_FAILED": "Document parsing failed",
+    "PARSER_APPLICATION_MISMATCH": "Document parser verification failed",
+    "DOCUMENT_SYNC_FAILED": "Document synchronization failed",
+    "RAGFLOW_UNAVAILABLE": "Document processing service is unavailable",
+}
+_STATUS_ERROR_RETRYABLE = {
+    "DOCUMENT_SOURCE_NOT_FOUND",
+    "RAGFLOW_UNAVAILABLE",
+    "DOCUMENT_SYNC_FAILED",
+}
+
+
+def _status_url(
+    tenant_id: str,
+    source_system: str,
+    external_document_id: str,
+    source_version_id: str,
+) -> str:
+    path_id = quote(external_document_id, safe="")
+    query = "&".join(
+        f"{key}={quote(value, safe='')}"
+        for key, value in (
+            ("tenantId", tenant_id),
+            ("sourceSystem", source_system),
+            ("sourceVersionId", source_version_id),
+        )
+    )
+    return f"/enterprise/api/v3/documents/{path_id}/status?{query}"
+
+
+def _status_error(doc: ExtDocumentMap) -> dict | None:
+    code = doc.last_error_code
+    if not code and doc.sync_status == "failed":
+        code = "DOCUMENT_SYNC_FAILED"
+    if not code:
+        return None
+    safe_code = code if code in _STATUS_ERROR_MESSAGES else "DOCUMENT_SYNC_FAILED"
+    return {
+        "code": safe_code,
+        "message": _STATUS_ERROR_MESSAGES[safe_code],
+        "retryable": safe_code in _STATUS_ERROR_RETRYABLE,
+    }
+
+
 def _status_payload(
     doc: ExtDocumentMap,
     *,
     deduplicated: bool = False,
     operation_id: str | None = None,
+    readiness: DocumentCandidateReadiness | None = None,
+    quality_status: str | None = None,
 ) -> dict:
+    readiness = readiness or document_candidate_readiness(
+        doc, quality_allowed=False, quality_required=True,
+    )
     return {
         "operationId": operation_id or doc.event_id,
         "externalDocumentId": doc.external_document_id,
         "sourceVersionId": doc.source_version_id,
+        "statusUrl": _status_url(
+            doc.tenant_id,
+            doc.source_system,
+            doc.external_document_id,
+            doc.source_version_id,
+        ),
         "sourceKind": doc.source_kind,
         "status": doc.sync_status,
         "stage": enterprise_stage(doc.sync_status),
@@ -128,7 +192,36 @@ def _status_payload(
         "currentVersion": bool(doc.current_version),
         "eventStatus": doc.event_status,
         "updatedAt": doc.updated_at,
+        "retrievable": readiness.retrievable,
+        "readiness": {
+            "currentVersion": readiness.current_version,
+            "active": readiness.active,
+            "syncReady": readiness.sync_ready,
+            "parserReadback": readiness.parser_readback,
+            "ragflowIdsPresent": readiness.ragflow_ids_present,
+            "qualityPassed": readiness.quality_allowed,
+            "blockingReason": readiness.blocking_reason,
+        },
+        "qualityStatus": quality_status,
+        "error": _status_error(doc),
     }
+
+
+async def _status_payload_for_db(
+    db: aiosqlite.Connection,
+    doc: ExtDocumentMap,
+    *,
+    deduplicated: bool = False,
+    operation_id: str | None = None,
+) -> dict:
+    readiness, quality_status = await document_candidate_readiness_from_db(db, doc)
+    return _status_payload(
+        doc,
+        deduplicated=deduplicated,
+        operation_id=operation_id,
+        readiness=readiness,
+        quality_status=quality_status,
+    )
 
 
 def _normalized_request(req: DocumentUpsertRequest) -> tuple[dict, dict]:
@@ -288,7 +381,8 @@ async def upsert_document(
             return _error(409, outcome, request_id)
         return JSONResponse(
             status_code=202,
-            content=_status_payload(
+            content=await _status_payload_for_db(
+                db,
                 existing,
                 deduplicated=outcome == "deduplicated",
                 operation_id=req.eventId if outcome == "reindex_accepted" else None,
@@ -380,7 +474,10 @@ async def upsert_document(
             source_version_id=req.sourceVersionId,
             outcome_code="deduplicated",
         )
-        return JSONResponse(status_code=202, content=_status_payload(doc, deduplicated=True))
+        return JSONResponse(
+            status_code=202,
+            content=await _status_payload_for_db(db, doc, deduplicated=True),
+        )
 
     await _record_receipt(
         db,
@@ -392,7 +489,10 @@ async def upsert_document(
         source_version_id=req.sourceVersionId,
         outcome_code="accepted",
     )
-    return JSONResponse(status_code=202, content=_status_payload(doc))
+    return JSONResponse(
+        status_code=202,
+        content=await _status_payload_for_db(db, doc),
+    )
 
 
 async def _replay_receipt(
@@ -416,7 +516,8 @@ async def _replay_receipt(
         return _error(404, "DOCUMENT_NOT_FOUND", request_id)
     return JSONResponse(
         status_code=202,
-        content=_status_payload(
+        content=await _status_payload_for_db(
+            db,
             doc,
             deduplicated=True,
             operation_id=receipt.event_id,
@@ -455,10 +556,13 @@ async def list_document_status(
         rows = await cursor.fetchall()
     from enterprise.gateway.sync.models import row_to_mapping
 
-    return {"items": [_status_payload(row_to_mapping(row)) for row in rows]}
+    items = []
+    for row in rows:
+        items.append(await _status_payload_for_db(db, row_to_mapping(row)))
+    return {"items": items}
 
 
-@router.get("/{external_document_id}/status")
+@router.get("/{external_document_id:path}/status")
 async def get_document_status(
     external_document_id: str,
     tenant_id: str = Query(alias="tenantId", min_length=1, max_length=64),
@@ -475,4 +579,4 @@ async def get_document_status(
     )
     if not doc or doc.source_kind != "FILE_SHARE":
         return _error(404, "DOCUMENT_NOT_FOUND", request_id)
-    return _status_payload(doc)
+    return await _status_payload_for_db(db, doc)

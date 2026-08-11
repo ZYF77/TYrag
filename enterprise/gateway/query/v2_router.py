@@ -4,7 +4,6 @@ from __future__ import annotations
 import hashlib
 import json
 import asyncio
-import os
 import uuid
 from datetime import datetime, timezone
 from typing import AsyncIterator
@@ -39,11 +38,10 @@ from enterprise.gateway.query.formal_router import (
     _query_client,
     _sse,
 )
-from enterprise.gateway.quality.gate import enforce_quality_gate
-from enterprise.gateway.quality.models import get_latest_evaluation
 from enterprise.gateway.query.ragflow_client import RAGFlowAPIError
 from enterprise.gateway.query.source_access import source_response
 from enterprise.gateway.sync.models import ExtDocumentMap
+from enterprise.gateway.sync.readiness import document_candidate_readiness_from_db
 
 
 router = APIRouter(prefix="/enterprise/api/v2", tags=["query-v2"])
@@ -464,14 +462,6 @@ async def _context_scope(
     if not equipment:
         return AclScope.empty(acl_scope.policy_version), {}
     filtered: dict[str, ExtDocumentMap] = {}
-    quality_required = os.environ.get("ENTERPRISE_QUERY_QUALITY_REQUIRED", "true").lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-    if os.environ.get("ENTERPRISE_TEST_MODE") == "1" and "ENTERPRISE_QUERY_QUALITY_REQUIRED" not in os.environ:
-        quality_required = False
     for internal_id, doc in resolver._docs.items():
         # Asset Registry canonical equipment is the identity boundary.  Do
         # not treat a fixed-asset or asset alias as an equipment id: that can
@@ -482,24 +472,10 @@ async def _context_scope(
             continue
         if asset_id and doc.asset_id != asset_id:
             continue
-        if doc.business_status != "active":
-            continue
-        if not doc.current_version:
-            continue
-        if not doc.ragflow_dataset_id or not doc.ragflow_document_id:
-            continue
-        evaluation = await get_latest_evaluation(
-            db,
-            doc.tenant_id,
-            doc.source_system,
-            doc.external_document_id,
-            doc.source_version_id,
+        readiness, _quality_status = await document_candidate_readiness_from_db(
+            db, doc
         )
-        if evaluation is not None:
-            quality_allowed, _ = enforce_quality_gate(evaluation)
-            if not quality_allowed:
-                continue
-        elif quality_required:
+        if not readiness.retrievable:
             continue
         filtered[internal_id] = doc
     if not filtered:
