@@ -1,0 +1,398 @@
+{
+  "info": {
+    "_postman_id": "tyrag-device-integration",
+    "name": "TYRAG device integration · FILE_SHARE v3 + query v2",
+    "description": "P0 local device flow. The v3 poll request uses the statusUrl returned by registration; no live result is implied by this export.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "FILE_SHARE v3 · HMAC",
+      "description": "Service-to-service FILE_SHARE v3 requests. Set hmacSecret in Postman Vault for manual runs; Newman uses the ignored local environment.",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "(async function () {",
+              "  function enc(value) { return encodeURIComponent(String(value)).replace(/[!'()*]/g, function (c) { return '%' + c.charCodeAt(0).toString(16).toUpperCase(); }); }",
+              "  function dec(value) { return decodeURIComponent(String(value).replace(/\\+/g, ' ')); }",
+              "  function canonicalPathQuery(path, query) {",
+              "    var targetPath = enc(decodeURIComponent(path || '/')).replace(/%2F/gi, '/');",
+              "    var pairs = []; String(query || '').split('&').forEach(function (part) { if (!part) return; var i = part.indexOf('='); var k = i < 0 ? part : part.slice(0, i); var v = i < 0 ? '' : part.slice(i + 1); pairs.push([enc(dec(k)), enc(dec(v))]); });",
+              "    pairs.sort(function (a, b) { return a[0] === b[0] ? (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0) : (a[0] < b[0] ? -1 : 1); });",
+              "    return pairs.length ? targetPath + '?' + pairs.map(function (pair) { return pair[0] + '=' + pair[1]; }).join('&') : targetPath;",
+              "  }",
+              "  async function readSecret(name) { var value = ''; try { if (pm.vault && typeof pm.vault.get === 'function') value = await pm.vault.get(name); } catch (error) { value = ''; } return String(value || pm.variables.get(name) || ''); }",
+              "  var keyId = String(pm.variables.get('keyId') || ''); var secret = await readSecret('hmacSecret'); if (!keyId || !secret) throw new Error('keyId and hmacSecret are required');",
+              "  var configured = String(pm.variables.get('hmacTimestamp') || ''); var timestamp = /^\\d{10}$/.test(configured) ? configured : String(Math.floor(Date.now() / 1000)); if (!/^\\d{10}$/.test(timestamp)) throw new Error('timestamp must be a ten-digit epoch value');",
+              "  var path = pm.request.url.getPath(); var query = pm.request.url.getQueryString(); var rawBody = pm.request.body && pm.request.body.mode === 'raw' ? pm.variables.replaceIn(pm.request.body.raw || '') : '';",
+              "  var bodyHash = CryptoJS.SHA256(CryptoJS.enc.Utf8.parse(rawBody)).toString(CryptoJS.enc.Hex); var canonical = ['v1', timestamp, pm.request.method.toUpperCase(), canonicalPathQuery(path, query), bodyHash].join('\\n');",
+              "  var digest = CryptoJS.HmacSHA256(canonical, secret).toString(CryptoJS.enc.Hex); pm.request.headers.upsert({ key: 'X-TY-Timestamp', value: timestamp }); pm.request.headers.upsert({ key: 'X-TY-Key-Id', value: keyId }); pm.request.headers.upsert({ key: 'X-TY-Signature', value: 'v1=' + digest });",
+              "})();"
+            ]
+          }
+        }
+      ],
+      "item": [
+        {
+          "name": "FILE_SHARE v3 · register",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Accept", "value": "application/json" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "auth": { "type": "noauth" },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"eventId\":\"{{eventId}}\",\"eventType\":\"upsert\",\"externalDocumentId\":\"{{externalDocumentId}}\",\"fileName\":\"{{fileName}}\",\"mediaType\":\"application/pdf\",\"metadata\":{\"allow_group_ids\":[\"{{allowGroupId}}\"],\"business_status\":\"active\",\"department_id\":\"{{departmentId}}\",\"document_type\":\"{{documentType}}\",\"document_version\":\"{{sourceVersionId}}\",\"equipment_id\":\"{{equipmentId}}\",\"external_document_id\":\"{{externalDocumentId}}\",\"fixed_asset_no\":\"{{fixedAssetNo}}\",\"page_count\":1,\"schema_version\":1,\"security_level\":{{securityLevel}},\"source_system\":\"{{sourceSystem}}\",\"tenant_id\":\"{{tenantId}}\"},\"sha256\":\"{{fileSha256}}\",\"source\":{\"kind\":\"FILE_SHARE\",\"relativePath\":\"{{relativePath}}\",\"size\":{{fileSize}},\"storageRootId\":\"{{storageRootId}}\"},\"sourceVersionId\":\"{{sourceVersionId}}\",\"sourceSystem\":\"{{sourceSystem}}\",\"tenantId\":\"{{tenantId}}\"}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/enterprise/api/v3/documents"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('registration is accepted', function () { pm.expect(pm.response.code).to.eql(202); });",
+                  "var payload = pm.response.json(); pm.test('registration returns statusUrl', function () { pm.expect(typeof payload.statusUrl).to.eql('string'); pm.expect(payload.statusUrl).to.not.eql(''); });",
+                  "pm.environment.set('statusUrl', payload.statusUrl || ''); pm.environment.set('operationId', payload.operationId || '');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "FILE_SHARE v3 · duplicate register",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Accept", "value": "application/json" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "auth": { "type": "noauth" },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"eventId\":\"{{eventId}}\",\"eventType\":\"upsert\",\"externalDocumentId\":\"{{externalDocumentId}}\",\"fileName\":\"{{fileName}}\",\"mediaType\":\"application/pdf\",\"metadata\":{\"allow_group_ids\":[\"{{allowGroupId}}\"],\"business_status\":\"active\",\"department_id\":\"{{departmentId}}\",\"document_type\":\"{{documentType}}\",\"document_version\":\"{{sourceVersionId}}\",\"equipment_id\":\"{{equipmentId}}\",\"external_document_id\":\"{{externalDocumentId}}\",\"fixed_asset_no\":\"{{fixedAssetNo}}\",\"page_count\":1,\"schema_version\":1,\"security_level\":{{securityLevel}},\"source_system\":\"{{sourceSystem}}\",\"tenant_id\":\"{{tenantId}}\"},\"sha256\":\"{{fileSha256}}\",\"source\":{\"kind\":\"FILE_SHARE\",\"relativePath\":\"{{relativePath}}\",\"size\":{{fileSize}},\"storageRootId\":\"{{storageRootId}}\"},\"sourceVersionId\":\"{{sourceVersionId}}\",\"sourceSystem\":\"{{sourceSystem}}\",\"tenantId\":\"{{tenantId}}\"}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/enterprise/api/v3/documents"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('duplicate registration is accepted', function () { pm.expect(pm.response.code).to.eql(202); });",
+                  "pm.test('duplicate registration is marked deduplicated', function () { pm.expect(pm.response.json().deduplicated).to.eql(true); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "FILE_SHARE v3 · poll response statusUrl",
+          "request": {
+            "method": "GET",
+            "header": [ { "key": "Accept", "value": "application/json" } ],
+            "auth": { "type": "noauth" },
+            "body": { "mode": "raw", "raw": "" },
+            "url": "{{statusUrl}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status response is successful', function () { pm.expect(pm.response.code).to.eql(200); });",
+                  "var payload = pm.response.json(); pm.test('status belongs to the registered FILE_SHARE document', function () { pm.expect(payload.externalDocumentId).to.eql(pm.environment.get('externalDocumentId')); pm.expect(payload.sourceKind).to.eql('FILE_SHARE'); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "FILE_SHARE v3 · invalid HMAC",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Accept", "value": "application/json" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "auth": { "type": "noauth" },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"eventId\":\"{{invalidEventId}}\",\"eventType\":\"upsert\",\"externalDocumentId\":\"{{externalDocumentId}}\",\"fileName\":\"{{fileName}}\",\"mediaType\":\"application/pdf\",\"metadata\":{\"allow_group_ids\":[\"{{allowGroupId}}\"],\"business_status\":\"active\",\"department_id\":\"{{departmentId}}\",\"document_type\":\"{{documentType}}\",\"document_version\":\"{{sourceVersionId}}\",\"equipment_id\":\"{{equipmentId}}\",\"external_document_id\":\"{{externalDocumentId}}\",\"fixed_asset_no\":\"{{fixedAssetNo}}\",\"page_count\":1,\"schema_version\":1,\"security_level\":{{securityLevel}},\"source_system\":\"{{sourceSystem}}\",\"tenant_id\":\"{{tenantId}}\"},\"sha256\":\"{{fileSha256}}\",\"source\":{\"kind\":\"FILE_SHARE\",\"relativePath\":\"{{relativePath}}\",\"size\":{{fileSize}},\"storageRootId\":\"{{storageRootId}}\"},\"sourceVersionId\":\"{{sourceVersionId}}\",\"sourceSystem\":\"{{sourceSystem}}\",\"tenantId\":\"{{tenantId}}\"}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/enterprise/api/v3/documents"
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [ "pm.request.headers.upsert({ key: 'X-TY-Signature', value: 'v1=' + '0'.repeat(64) });" ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('invalid HMAC is rejected', function () { pm.expect(pm.response.code).to.eql(401); });",
+                  "pm.test('invalid HMAC has a stable error code', function () { pm.expect(pm.response.json().code).to.eql('AUTH_SIGNATURE_INVALID'); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "FILE_SHARE v3 · missing source registration",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Accept", "value": "application/json" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "auth": { "type": "noauth" },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"eventId\":\"{{missingEventId}}\",\"eventType\":\"upsert\",\"externalDocumentId\":\"{{missingExternalDocumentId}}\",\"fileName\":\"{{fileName}}\",\"mediaType\":\"application/pdf\",\"metadata\":{\"allow_group_ids\":[\"{{allowGroupId}}\"],\"business_status\":\"active\",\"department_id\":\"{{departmentId}}\",\"document_type\":\"{{documentType}}\",\"document_version\":\"{{sourceVersionId}}\",\"equipment_id\":\"{{equipmentId}}\",\"external_document_id\":\"{{missingExternalDocumentId}}\",\"fixed_asset_no\":\"{{fixedAssetNo}}\",\"page_count\":1,\"schema_version\":1,\"security_level\":{{securityLevel}},\"source_system\":\"{{sourceSystem}}\",\"tenant_id\":\"{{tenantId}}\"},\"sha256\":\"{{fileSha256}}\",\"source\":{\"kind\":\"FILE_SHARE\",\"relativePath\":\"{{missingRelativePath}}\",\"size\":{{fileSize}},\"storageRootId\":\"{{storageRootId}}\"},\"sourceVersionId\":\"{{sourceVersionId}}\",\"sourceSystem\":\"{{sourceSystem}}\",\"tenantId\":\"{{tenantId}}\"}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/enterprise/api/v3/documents"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('missing source registration is accepted for async processing', function () { pm.expect(pm.response.code).to.eql(202); });",
+                  "var payload = pm.response.json(); if (payload.statusUrl) pm.environment.set('missingStatusUrl', payload.statusUrl);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "FILE_SHARE v3 · missing document status error",
+          "request": {
+            "method": "GET",
+            "header": [ { "key": "Accept", "value": "application/json" } ],
+            "auth": { "type": "noauth" },
+            "body": { "mode": "raw", "raw": "" },
+            "url": "{{baseUrl}}/enterprise/api/v3/documents/NOT-REGISTERED/status?tenantId={{tenantId}}&sourceSystem={{sourceSystem}}&sourceVersionId={{sourceVersionId}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('missing document is rejected', function () { pm.expect(pm.response.code).to.eql(404); });",
+                  "pm.test('missing document has a stable error code', function () { pm.expect(pm.response.json().code).to.eql('DOCUMENT_NOT_FOUND'); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "JWT v2 · session and messages",
+      "description": "Formal user flow. Bearer JWT is read from the userJwt variable; the local generator creates the Gateway HS256 test claim shape.",
+      "item": [
+        {
+          "name": "JWT v2 · create session",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Accept", "value": "application/json" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "auth": { "type": "bearer", "bearer": [ { "key": "token", "value": "{{userJwt}}", "type": "string" } ] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"equipmentId\":\"{{equipmentId}}\",\"fixedAssetNo\":\"{{fixedAssetNo}}\",\"faultCode\":\"{{faultCode}}\"}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/enterprise/api/v2/conversations"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('session is created', function () { pm.expect(pm.response.code).to.eql(201); });",
+                  "var payload = pm.response.json(); pm.expect(payload.conversationId).to.be.a('string'); pm.environment.set('conversationId', payload.conversationId);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "JWT v2 · question round 1",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Accept", "value": "application/json" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "auth": { "type": "bearer", "bearer": [ { "key": "token", "value": "{{userJwt}}", "type": "string" } ] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"clientMessageId\":\"{{messageIdOne}}\",\"question\":\"请说明设备当前故障的检查步骤。\"}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/enterprise/api/v2/conversations/{{conversationId}}/messages"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('question round 1 returns a run result', function () { pm.expect(pm.response.code).to.eql(200); });",
+                  "var payload = pm.response.json(); pm.expect(['completed', 'no_reliable_evidence', 'failed']).to.include(payload.status); if (payload.citations && payload.citations[0]) pm.environment.set('citationId', payload.citations[0].citationId);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "JWT v2 · question round 2",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Accept", "value": "application/json" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "auth": { "type": "bearer", "bearer": [ { "key": "token", "value": "{{userJwt}}", "type": "string" } ] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"clientMessageId\":\"{{messageIdTwo}}\",\"question\":\"请说明该设备的维护周期和注意事项。\"}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/enterprise/api/v2/conversations/{{conversationId}}/messages"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('question round 2 returns a run result', function () { pm.expect(pm.response.code).to.eql(200); });",
+                  "var payload = pm.response.json(); pm.expect(['completed', 'no_reliable_evidence', 'failed']).to.include(payload.status); if (payload.citations && payload.citations[0]) pm.environment.set('citationId', payload.citations[0].citationId);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "JWT v2 · history",
+          "request": {
+            "method": "GET",
+            "header": [ { "key": "Accept", "value": "application/json" } ],
+            "auth": { "type": "bearer", "bearer": [ { "key": "token", "value": "{{userJwt}}", "type": "string" } ] },
+            "body": { "mode": "raw", "raw": "" },
+            "url": "{{baseUrl}}/enterprise/api/v2/conversations/{{conversationId}}/messages?limit=20"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('history is readable', function () { pm.expect(pm.response.code).to.eql(200); });",
+                  "pm.test('history preserves message status and citations independently', function () { var payload = pm.response.json(); pm.expect(payload.items).to.be.an('array'); payload.items.forEach(function (item) { pm.expect(['completed', 'no_reliable_evidence', 'failed']).to.include(item.status); pm.expect(item.citations).to.be.an('array'); }); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "JWT v2 · citation detail",
+          "request": {
+            "method": "GET",
+            "header": [ { "key": "Accept", "value": "application/json" } ],
+            "auth": { "type": "bearer", "bearer": [ { "key": "token", "value": "{{userJwt}}", "type": "string" } ] },
+            "body": { "mode": "raw", "raw": "" },
+            "url": "{{baseUrl}}/enterprise/api/v2/citations/{{citationId}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('citation detail is readable', function () { pm.expect(pm.response.code).to.eql(200); });",
+                  "pm.expect(pm.response.json().citationId).to.eql(pm.environment.get('citationId'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "JWT v2 · citation source",
+          "request": {
+            "method": "GET",
+            "header": [ { "key": "Accept", "value": "application/pdf" } ],
+            "auth": { "type": "bearer", "bearer": [ { "key": "token", "value": "{{userJwt}}", "type": "string" } ] },
+            "body": { "mode": "raw", "raw": "" },
+            "url": "{{baseUrl}}/enterprise/api/v2/citations/{{citationId}}/source"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('citation source is readable', function () { pm.expect(pm.response.code).to.eql(200); });",
+                  "pm.expect(pm.response.headers.get('Content-Type')).to.match(/application\\/(pdf|octet-stream)/i);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "JWT v2 · invalid JWT",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Accept", "value": "application/json" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "auth": { "type": "bearer", "bearer": [ { "key": "token", "value": "{{invalidJwt}}", "type": "string" } ] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"equipmentId\":\"{{equipmentId}}\"}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/enterprise/api/v2/conversations"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('invalid JWT is rejected', function () { pm.expect(pm.response.code).to.eql(401); });",
+                  "pm.test('invalid JWT has a stable error code', function () { pm.expect(['AUTH_TOKEN_MISSING', 'AUTH_TOKEN_INVALID']).to.include(pm.response.json().code); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
