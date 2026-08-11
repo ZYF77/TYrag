@@ -440,6 +440,10 @@ async def test_status_never_reports_retrievable_for_incomplete_document_facts(
     body = response.json()
     assert response.status_code == 200
     assert body["retrievable"] is False
+    assert body["pipelineStatus"] == doc.pipeline_status
+    assert body["parseCompleted"] is (doc.parser_application_status == "executed")
+    assert body["indexCompleted"] is (str(doc.pipeline_status).upper() in {"DONE", "3"})
+    assert body["errorCode"] is None
     assert body["readiness"]["blockingReason"] == reason
 
 
@@ -473,6 +477,7 @@ async def test_failed_status_error_is_stable_and_secret_free(
         "message": "Document synchronization failed",
         "retryable": True,
     }
+    assert response.json()["errorCode"] == "DOCUMENT_SYNC_FAILED"
     assert "sensitive details" not in response.text
 
 
@@ -519,7 +524,12 @@ async def test_retrievable_is_document_readiness_only_and_acl_is_applied_later(
     denied_scope, _ = await v2_router._context_scope(
         db, _user(groups=("other",)), conversation
     )
-    assert status.json()["retrievable"] is True
+    status_body = status.json()
+    assert status_body["retrievable"] is True
+    assert status_body["pipelineStatus"] == "DONE"
+    assert status_body["parseCompleted"] is True
+    assert status_body["indexCompleted"] is True
+    assert status_body["errorCode"] is None
     assert (
         v3_router.document_candidate_readiness_from_db
         is v2_router.document_candidate_readiness_from_db

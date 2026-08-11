@@ -393,6 +393,16 @@ def run_live() -> dict[str, bool]:
             if status_response.status_code == 200:
                 status = _json_response(status_response)
                 if status.get("retrievable") is True:
+                    if (
+                        str(status.get("pipelineStatus", "")).upper() not in {"DONE", "3"}
+                        or status.get("parseCompleted") is not True
+                        or status.get("indexCompleted") is not True
+                        or status.get("qualityStatus") != "passed"
+                        or status.get("errorCode") is not None
+                    ):
+                        raise LiveAssertionError(
+                            "retrievable status is missing completed parse/index facts"
+                        )
                     retrievable = True
                     break
                 status_name = str(status.get("status", "")).lower()
@@ -513,6 +523,7 @@ def run_live() -> dict[str, bool]:
         "fileShareRegistration": True,
         "serverStatusUrl": True,
         "retrievable": True,
+        "statusTruthFields": True,
         "formalConversation": True,
         "formalMessages": True,
         "history": True,

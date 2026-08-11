@@ -38,7 +38,7 @@ npx newman run enterprise/postman/tyrag-device-integration.postman_collection.js
 
 ## 3. 运行顺序与当前边界
 
-按 Collection 顺序执行。登记测试从响应 JSON 读取相对 `statusUrl` 并原样写入变量；轮询请求使用 `{{baseUrl}}{{statusUrl}}`，只补本地服务 base URL，不改写服务端返回的 path/query。如果 `retrievable` 不是 `true`，Runner/Newman 会把当前 poll 请求重新执行，直到 `maxPollAttempts=120`；请求间应保持约 2000ms delay，超限失败，只有 `retrievable === true` 才继续到 v2 问询。Newman 使用上面的 `--delay-request 2000`；Postman Collection Runner 也应设置约 2000ms request delay。`pm.execution.setNextRequest` 只在 Collection Runner/Newman 中驱动下一请求，普通 Send 不会自动循环。如果服务当前响应缺少 `statusUrl` 或 `retrievable`，测试会明确失败，这是接口缺口，不应手工猜 URL。
+按 Collection 顺序执行。登记测试从响应 JSON 读取相对 `statusUrl` 并原样写入变量；轮询请求使用 `{{baseUrl}}{{statusUrl}}`，只补本地服务 base URL，不改写服务端返回的 path/query。如果 `retrievable` 不是 `true`，Runner/Newman 会把当前 poll 请求重新执行，直到 `maxPollAttempts=120`；请求间应保持约 2000ms delay，超限失败。进入 v2 问询前，Collection 还会确认 `pipelineStatus` 已完成、`parseCompleted=true`、`indexCompleted=true`、`qualityStatus=passed` 且 `errorCode=null`，不能只凭 HTTP 200 或单一 `retrievable` 字段判定入库成功。Newman 使用上面的 `--delay-request 2000`；Postman Collection Runner 也应设置约 2000ms request delay。`pm.execution.setNextRequest` 只在 Collection Runner/Newman 中驱动下一请求，普通 Send 不会自动循环。如果服务当前响应缺少 `statusUrl` 或这些状态事实字段，测试会明确失败，这是接口缺口，不应手工猜 URL。
 
 FILE_SHARE 源文件不存在可能在异步 worker 阶段才出现 `DOCUMENT_SOURCE_NOT_FOUND`；Collection 另带一个确定性的未登记文档 `DOCUMENT_NOT_FOUND` 示例。2026-08-11 已在当前本地测试环境使用该 Collection 完成一次 live Newman 验证：13 个请求、21 个断言、0 失败；这只证明当前开发环境和 Asset Registry Stub 下的联调链路，不替代真实设备管理系统环境验收。
 

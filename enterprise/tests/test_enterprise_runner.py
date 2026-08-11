@@ -222,6 +222,11 @@ def test_required_live_suite_is_v3_v2_and_has_strict_status_url_path():
     assert "statusUrl" in source
     assert "status_url" in source
     assert 'status.get("retrievable") is True' in source
+    assert 'status.get("pipelineStatus", "")' in source
+    assert 'status.get("parseCompleted") is not True' in source
+    assert 'status.get("indexCompleted") is not True' in source
+    assert 'status.get("qualityStatus") != "passed"' in source
+    assert 'status.get("errorCode") is not None' in source
     assert 'status.get("status") == "retrievable"' not in source
     assert "S3_" not in source
     assert "/enterprise/api/v1/" not in source

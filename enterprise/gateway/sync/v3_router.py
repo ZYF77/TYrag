@@ -172,6 +172,11 @@ def _status_payload(
     readiness = readiness or document_candidate_readiness(
         doc, quality_allowed=False, quality_required=True,
     )
+    pipeline_status = str(doc.pipeline_status) if doc.pipeline_status is not None else None
+    index_completed = bool(
+        pipeline_status and pipeline_status.upper() in {"DONE", "3"}
+    )
+    error = _status_error(doc)
     return {
         "operationId": operation_id or doc.event_id,
         "externalDocumentId": doc.external_document_id,
@@ -185,6 +190,9 @@ def _status_payload(
         "sourceKind": doc.source_kind,
         "status": doc.sync_status,
         "stage": enterprise_stage(doc.sync_status),
+        "pipelineStatus": pipeline_status,
+        "parseCompleted": readiness.parser_readback,
+        "indexCompleted": index_completed,
         "ingestState": doc.ingest_state,
         "sourceState": doc.source_state,
         "deduplicated": deduplicated,
@@ -203,7 +211,8 @@ def _status_payload(
             "blockingReason": readiness.blocking_reason,
         },
         "qualityStatus": quality_status,
-        "error": _status_error(doc),
+        "errorCode": error["code"] if error else None,
+        "error": error,
     }
 
 

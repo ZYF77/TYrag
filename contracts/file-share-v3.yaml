@@ -2,11 +2,30 @@ openapi: 3.0.3
 info:
   title: TYRAG FILE_SHARE document integration
   version: 3.0.0
+  description: >-
+    Frozen local-integration contract for registering immutable PDFs already
+    stored on an external file share. Device systems use only the public v3
+    document routes and never call RAGFlow or the internal source-ticket route.
+servers:
+  - url: /
+tags:
+  - name: documents-v3
+  - name: internal-source
 paths:
   /enterprise/api/v3/documents:
     post:
+      tags: [documents-v3]
       summary: Register an immutable external FILE_SHARE PDF version
-      description: The Gateway stores only source coordinates and metadata. It never stores PDF bytes.
+      description: >-
+        The Gateway stores source coordinates and metadata, not PDF bytes. A
+        successful response includes the server-owned relative statusUrl that
+        the caller must sign and poll without reconstructing it.
+      operationId: v3RegisterFileShareDocument
+      security:
+        - HmacSignature: []
+      parameters:
+        - $ref: '#/components/parameters/TimestampHeader'
+        - $ref: '#/components/parameters/KeyIdHeader'
       requestBody:
         required: true
         content:
@@ -15,23 +34,142 @@ paths:
               $ref: '#/components/schemas/DocumentUpsertRequest'
       responses:
         '202':
-          description: Accepted into the transactional outbox
-        '409':
-          description: Event or immutable source-version conflict
+          description: First acceptance or idempotent replay
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentStatus'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /enterprise/api/v3/documents/sync-status:
+    get:
+      tags: [documents-v3]
+      summary: List FILE_SHARE document statuses in an authorized binding
+      operationId: v3ListFileShareDocumentStatus
+      security:
+        - HmacSignature: []
+      parameters:
+        - $ref: '#/components/parameters/TimestampHeader'
+        - $ref: '#/components/parameters/KeyIdHeader'
+        - $ref: '#/components/parameters/TenantIdQuery'
+        - $ref: '#/components/parameters/SourceSystemQuery'
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        '200':
+          description: Most recently updated FILE_SHARE document versions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentStatusPage'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+  /enterprise/api/v3/documents/{externalDocumentId}/status:
+    get:
+      tags: [documents-v3]
+      summary: Read one FILE_SHARE document version status
+      operationId: v3GetFileShareDocumentStatus
+      security:
+        - HmacSignature: []
+      parameters:
+        - $ref: '#/components/parameters/TimestampHeader'
+        - $ref: '#/components/parameters/KeyIdHeader'
+        - name: externalDocumentId
+          in: path
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 128 }
+        - $ref: '#/components/parameters/TenantIdQuery'
+        - $ref: '#/components/parameters/SourceSystemQuery'
+        - name: sourceVersionId
+          in: query
+          required: false
+          schema: { type: string, minLength: 1, maxLength: 64 }
+      responses:
+        '200':
+          description: Current processing and retrieval-readiness facts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentStatus'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
   /enterprise/internal/source-tickets/{ticket}:
     get:
+      tags: [internal-source]
       summary: Consume one short-lived internal source ticket
+      description: Internal RAGFlow worker route; not available to device systems.
+      operationId: consumeFileShareSourceTicket
+      x-internal: true
+      security:
+        - InternalSourceKey: []
       parameters:
         - in: path
           name: ticket
           required: true
-          schema: { type: string }
+          schema: { type: string, minLength: 1 }
       responses:
         '200':
           description: One source stream; the ticket cannot be reused
+          headers:
+            X-Source-SHA256:
+              schema: { type: string, pattern: '^[0-9a-f]{64}$' }
+            X-Source-Version-Id:
+              schema: { type: string }
+          content:
+            application/pdf:
+              schema: { type: string, format: binary }
         '404':
           description: Missing, expired, replayed, or unauthorized ticket
+        '409':
+          description: Source bytes changed after registration
 components:
+  securitySchemes:
+    HmacSignature:
+      type: apiKey
+      in: header
+      name: X-TY-Signature
+      description: >-
+        v1=<lowercase hex HMAC-SHA256>. Verification also requires
+        X-TY-Timestamp, X-TY-Key-Id, and an allowed tenant/source binding.
+    InternalSourceKey:
+      type: apiKey
+      in: header
+      name: X-Internal-Source-Key
+  parameters:
+    TimestampHeader:
+      name: X-TY-Timestamp
+      in: header
+      required: true
+      schema: { type: string, pattern: '^\d{10}$' }
+    KeyIdHeader:
+      name: X-TY-Key-Id
+      in: header
+      required: true
+      schema: { type: string, minLength: 1 }
+    TenantIdQuery:
+      name: tenantId
+      in: query
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 64 }
+    SourceSystemQuery:
+      name: sourceSystem
+      in: query
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 64 }
+  responses:
+    Error:
+      description: Stable external error envelope
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
   schemas:
     FileShareSource:
       type: object
@@ -41,22 +179,188 @@ components:
         kind: { type: string, enum: [FILE_SHARE] }
         storageRootId: { type: string, minLength: 1, maxLength: 64 }
         relativePath: { type: string, minLength: 1, maxLength: 1024 }
-        size: { type: integer, minimum: 0 }
-        etag: { type: string, maxLength: 256 }
+        size: { type: integer, minimum: 0, nullable: true }
+        etag: { type: string, maxLength: 256, nullable: true }
+    DocumentMetadata:
+      type: object
+      additionalProperties: false
+      required:
+        - schema_version
+        - tenant_id
+        - external_document_id
+        - source_system
+        - equipment_id
+        - document_type
+        - document_version
+        - department_id
+        - security_level
+        - business_status
+      properties:
+        schema_version: { type: integer, enum: [1] }
+        tenant_id: { type: string, minLength: 1, maxLength: 64 }
+        external_document_id: { type: string, minLength: 1, maxLength: 128 }
+        source_system: { type: string, minLength: 1, maxLength: 64 }
+        equipment_id: { type: string, minLength: 1, maxLength: 128 }
+        fixed_asset_no: { type: string, maxLength: 128, nullable: true }
+        asset_id: { type: string, maxLength: 128, nullable: true }
+        equipment_name: { type: string, maxLength: 256, nullable: true }
+        document_type: { type: string, minLength: 1, maxLength: 64 }
+        document_subtype: { type: string, maxLength: 64, nullable: true }
+        source_document_type: { type: string, maxLength: 128, nullable: true }
+        document_version: { type: string, minLength: 1, maxLength: 64 }
+        department_id: { type: string, minLength: 1, maxLength: 64 }
+        security_level: { type: integer, minimum: 0, maximum: 9 }
+        allow_group_ids:
+          type: array
+          maxItems: 100
+          uniqueItems: true
+          items: { type: string, maxLength: 64 }
+        deny_group_ids:
+          type: array
+          maxItems: 100
+          uniqueItems: true
+          items: { type: string, maxLength: 64 }
+        business_status:
+          type: string
+          enum: [active, superseded, disabled, deleted, review_required]
+        effective_date: { type: string, format: date, nullable: true }
+        source_updated_at: { type: string, format: date-time, nullable: true }
+        page_count: { type: integer, minimum: 0, maximum: 100000, nullable: true }
+        manufacturer: { type: string, maxLength: 128, nullable: true }
+        model: { type: string, maxLength: 128, nullable: true }
+        serial_number: { type: string, maxLength: 128, nullable: true }
+        archive_package_id: { type: string, maxLength: 128, nullable: true }
+        quality_status:
+          type: string
+          enum: [unknown, passed, review_required, rejected]
     DocumentUpsertRequest:
       type: object
       additionalProperties: false
-      required: [eventId, eventType, tenantId, sourceSystem, externalDocumentId, sourceVersionId, sha256, fileName, mediaType, source, metadata]
+      required:
+        - eventId
+        - eventType
+        - tenantId
+        - sourceSystem
+        - externalDocumentId
+        - sourceVersionId
+        - sha256
+        - fileName
+        - mediaType
+        - source
+        - metadata
       properties:
-        eventId: { type: string }
+        eventId: { type: string, minLength: 1, maxLength: 128 }
         eventType: { type: string, enum: [upsert, reindex] }
-        tenantId: { type: string }
-        sourceSystem: { type: string }
-        externalDocumentId: { type: string }
-        sourceVersionId: { type: string }
+        tenantId: { type: string, minLength: 1, maxLength: 64 }
+        sourceSystem: { type: string, minLength: 1, maxLength: 64 }
+        externalDocumentId: { type: string, minLength: 1, maxLength: 128 }
+        sourceVersionId: { type: string, minLength: 1, maxLength: 64 }
         sha256: { type: string, pattern: '^[0-9a-fA-F]{64}$' }
-        fileName: { type: string }
+        fileName: { type: string, minLength: 1, maxLength: 255 }
         mediaType: { type: string, enum: [application/pdf] }
         source: { $ref: '#/components/schemas/FileShareSource' }
-        metadata: { type: object }
-        batchId: { type: string }
+        metadata: { $ref: '#/components/schemas/DocumentMetadata' }
+        batchId: { type: string, maxLength: 128, nullable: true }
+    DocumentReadiness:
+      type: object
+      additionalProperties: false
+      required:
+        - currentVersion
+        - active
+        - syncReady
+        - parserReadback
+        - ragflowIdsPresent
+        - qualityPassed
+        - blockingReason
+      properties:
+        currentVersion: { type: boolean }
+        active: { type: boolean }
+        syncReady: { type: boolean }
+        parserReadback: { type: boolean }
+        ragflowIdsPresent: { type: boolean }
+        qualityPassed: { type: boolean }
+        blockingReason: { type: string, nullable: true }
+    StatusError:
+      type: object
+      additionalProperties: false
+      required: [code, message, retryable]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        retryable: { type: boolean }
+    DocumentStatus:
+      type: object
+      additionalProperties: false
+      required:
+        - operationId
+        - externalDocumentId
+        - sourceVersionId
+        - statusUrl
+        - sourceKind
+        - status
+        - stage
+        - pipelineStatus
+        - parseCompleted
+        - indexCompleted
+        - ingestState
+        - sourceState
+        - deduplicated
+        - businessStatus
+        - currentVersion
+        - eventStatus
+        - updatedAt
+        - retrievable
+        - readiness
+        - qualityStatus
+        - errorCode
+        - error
+      properties:
+        operationId: { type: string }
+        externalDocumentId: { type: string }
+        sourceVersionId: { type: string }
+        statusUrl:
+          type: string
+          description: Server-owned relative polling URL; sign and use it unchanged.
+          pattern: '^/enterprise/api/v3/documents/.+/status\?'
+        sourceKind: { type: string, enum: [FILE_SHARE] }
+        status: { type: string }
+        stage: { type: string, nullable: true }
+        pipelineStatus: { type: string, nullable: true }
+        parseCompleted: { type: boolean }
+        indexCompleted: { type: boolean }
+        ingestState: { type: string }
+        sourceState: { type: string }
+        deduplicated: { type: boolean }
+        businessStatus: { type: string }
+        currentVersion: { type: boolean }
+        eventStatus: { type: string }
+        updatedAt: { type: string, format: date-time }
+        retrievable:
+          type: boolean
+          description: >-
+            Document-level candidacy only. User JWT and ACL checks are still
+            applied for every query and citation request.
+        readiness: { $ref: '#/components/schemas/DocumentReadiness' }
+        qualityStatus: { type: string, nullable: true }
+        errorCode: { type: string, nullable: true }
+        error:
+          allOf:
+            - $ref: '#/components/schemas/StatusError'
+          nullable: true
+    DocumentStatusPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/DocumentStatus' }
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [code, message, requestId, retryable]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        requestId: { type: string }
+        retryable: { type: boolean }

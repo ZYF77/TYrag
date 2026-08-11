@@ -333,6 +333,13 @@ def test_p0_operations_are_implemented_and_p1_attachment_is_planned():
         paths["/conversations/{conversationId}/attachments"]["post"]["x-status"]
         == "planned"
     )
+    source = paths["/citations/{citationId}/source"]["get"]
+    assert set(source["responses"]) >= {"200", "206", "404", "409", "416"}
+    assert {item["name"] for item in source["parameters"]} >= {
+        "citationId",
+        "Range",
+        "If-Range",
+    }
 
 
 def test_document_idempotency_and_metadata_boundary_are_frozen():

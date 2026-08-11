@@ -393,6 +393,56 @@ paths:
                 $ref: '#/components/schemas/Citation'
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
+  /citations/{citationId}/source:
+    get:
+      tags: [citations]
+      summary: Stream the authorized immutable FILE_SHARE source PDF
+      description: >-
+        Rechecks the current document ACL before reading the source. Supports
+        one RFC 7233 byte range and never exposes a storage path or RAGFlow ID.
+      operationId: v2GetCitationSource
+      x-status: implemented
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: citationId
+          in: path
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 256 }
+        - name: Range
+          in: header
+          required: false
+          schema: { type: string, example: bytes=0-1023 }
+        - name: If-Range
+          in: header
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Complete PDF source
+          headers:
+            Accept-Ranges:
+              schema: { type: string, enum: [bytes] }
+            ETag:
+              schema: { type: string }
+          content:
+            application/pdf:
+              schema: { type: string, format: binary }
+        '206':
+          description: Requested single byte range
+          headers:
+            Accept-Ranges:
+              schema: { type: string, enum: [bytes] }
+            Content-Range:
+              schema: { type: string }
+            ETag:
+              schema: { type: string }
+          content:
+            application/pdf:
+              schema: { type: string, format: binary }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '416': { $ref: '#/components/responses/Error' }
 components:
   securitySchemes:
     BearerAuth:

@@ -292,8 +292,26 @@ def test_file_share_contract_is_strict_and_matches_the_registered_routes():
     assert contract["openapi"] == "3.0.3"
     assert set(contract["paths"]) == {
         "/enterprise/api/v3/documents",
+        "/enterprise/api/v3/documents/sync-status",
+        "/enterprise/api/v3/documents/{externalDocumentId}/status",
         "/enterprise/internal/source-tickets/{ticket}",
+    }
+    register = contract["paths"]["/enterprise/api/v3/documents"]["post"]
+    assert register["security"] == [{"HmacSignature": []}]
+    assert register["responses"]["202"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/DocumentStatus"
     }
     request_schema = contract["components"]["schemas"]["DocumentUpsertRequest"]
     assert request_schema["additionalProperties"] is False
     assert request_schema["properties"]["mediaType"]["enum"] == ["application/pdf"]
+    status_schema = contract["components"]["schemas"]["DocumentStatus"]
+    assert {
+        "statusUrl",
+        "pipelineStatus",
+        "parseCompleted",
+        "indexCompleted",
+        "qualityStatus",
+        "retrievable",
+        "errorCode",
+    } <= set(status_schema["required"])
+    assert "ragflowDocumentId" not in status_schema["properties"]

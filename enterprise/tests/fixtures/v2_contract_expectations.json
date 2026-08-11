@@ -30,6 +30,7 @@
     ["/conversations/{conversationId}/messages", "get"],
     ["/conversations/{conversationId}/messages", "post"],
     ["/conversations/{conversationId}/suggestions", "get"],
-    ["/citations/{citationId}", "get"]
+    ["/citations/{citationId}", "get"],
+    ["/citations/{citationId}/source", "get"]
   ]
 }

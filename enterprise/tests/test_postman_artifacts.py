@@ -87,6 +87,11 @@ def test_local_defaults_and_polling_are_runner_safe():
         for line in event["script"]["exec"]
     )
     assert "payload.retrievable" in test_script
+    assert "payload.pipelineStatus" in test_script
+    assert "payload.parseCompleted" in test_script
+    assert "payload.indexCompleted" in test_script
+    assert "payload.qualityStatus" in test_script
+    assert "payload.errorCode" in test_script
     assert "pollAttempt" in test_script
     assert "maxPollAttempts" in test_script
     assert "pm.execution.setNextRequest" in test_script

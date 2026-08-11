@@ -90,12 +90,15 @@ repo-root/
 
 - `contracts/integration-openapi.yaml`：企业集成 API 初始契约。
 - `contracts/integration-openapi-v2.yaml`：设备管理系统使用的 v2.0.0 wire 契约；当前仓库实现为 integrated candidate，v1 保持兼容。
+- `contracts/file-share-v3.yaml`：新设备系统唯一推荐的 FILE_SHARE v3 登记、状态和内部取件边界。
 - `contracts/external-integration-contract-freeze-v2.md`：P0 决策、优先级与验收门禁。
 - `contracts/metadata-schema.json`：文档 metadata 规范。
 - `contracts/error-codes.yaml`：稳定错误码。
 - `contracts/status-state-machine.md`：同步、文档和问答状态机。
 - `contracts/acl-policy-examples.json`：ACL 编译示例。
 - `contracts/acl-design-freeze.md`：P0 ACL 冻结规则与 fail-closed 约束。
+
+本地联调入口见 [`docs/integration/device-postman-runbook.md`](docs/integration/device-postman-runbook.md)，交付设备管理系统开发人员的接口说明见 [`docs/设备管理系统—企业知识库对接协议.md`](docs/设备管理系统—企业知识库对接协议.md)。
 
 ## 7. Agent 工作包
 
