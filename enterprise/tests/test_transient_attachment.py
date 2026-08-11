@@ -228,6 +228,44 @@ async def test_attachment_post_is_501_by_default_without_reading_or_resolving_de
 
 
 @pytest.mark.asyncio
+async def test_disabled_feature_gates_ticket_and_download_before_dependencies(
+    monkeypatch,
+):
+    monkeypatch.setattr(config, "transient_attachments_enabled", False)
+
+    async def fail_dependency():
+        raise AssertionError("attachment dependency must not run when disabled")
+
+    monkeypatch.setitem(app_module.app.dependency_overrides, app_module.get_db, fail_dependency)
+    monkeypatch.setitem(app_module.app.dependency_overrides, get_db, fail_dependency)
+    monkeypatch.setitem(app_module.app.dependency_overrides, get_storage, fail_dependency)
+    monkeypatch.setitem(
+        app_module.app.dependency_overrides,
+        require_user_principal,
+        fail_dependency,
+    )
+    monkeypatch.setitem(
+        app_module.app.dependency_overrides,
+        optional_user_principal,
+        fail_dependency,
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app_module.app), base_url="http://gateway.test"
+    ) as client:
+        ticket = await client.post(
+            "/enterprise/api/v2/attachments/attachment-a/ticket"
+        )
+        download = await client.get(
+            "/enterprise/api/v2/attachments/attachment-a/download/ticket-a"
+        )
+
+    for response in (ticket, download):
+        assert response.status_code == 501
+        assert response.json()["code"] == "ATTACHMENT_NOT_IMPLEMENTED"
+
+
+@pytest.mark.asyncio
 async def test_enabled_attachment_post_keeps_201(storage_env, monkeypatch):
     monkeypatch.setattr(config, "transient_attachments_enabled", True)
     db = await init_db(":memory:")

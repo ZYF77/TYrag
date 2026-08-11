@@ -1286,22 +1286,41 @@ def _not_implemented(request_id: str) -> JSONResponse:
 
 
 class TransientAttachmentBodyLimitMiddleware:
-    """Gate the planned endpoint and bound its body before JSON parsing."""
+    """Gate transient attachment routes and bound creates before JSON parsing."""
 
     def __init__(self, app: Callable[..., Awaitable[Any]]) -> None:
         self.app = app
 
     @staticmethod
-    def _is_create_path(scope: dict[str, Any]) -> bool:
-        if scope.get("method") != "POST":
-            return False
+    def _route_kind(scope: dict[str, Any]) -> str | None:
+        method = scope.get("method")
         parts = str(scope.get("path", "")).split("/")
-        return (
-            len(parts) == 7
+        if (
+            method == "POST"
+            and len(parts) == 7
             and parts[:5] == ["", "enterprise", "api", "v2", "conversations"]
             and bool(parts[5])
             and parts[6] == "attachments"
-        )
+        ):
+            return "create"
+        if (
+            method == "POST"
+            and len(parts) == 7
+            and parts[:5] == ["", "enterprise", "api", "v2", "attachments"]
+            and bool(parts[5])
+            and parts[6] == "ticket"
+        ):
+            return "ticket"
+        if (
+            method == "GET"
+            and len(parts) == 8
+            and parts[:5] == ["", "enterprise", "api", "v2", "attachments"]
+            and bool(parts[5])
+            and parts[6] == "download"
+            and bool(parts[7])
+        ):
+            return "download"
+        return None
 
     @staticmethod
     def _declared_length(scope: dict[str, Any]) -> int | None:
@@ -1318,7 +1337,8 @@ class TransientAttachmentBodyLimitMiddleware:
         return max(lengths) if lengths else None
 
     async def __call__(self, scope, receive, send):
-        if scope.get("type") != "http" or not self._is_create_path(scope):
+        route_kind = self._route_kind(scope) if scope.get("type") == "http" else None
+        if route_kind is None:
             await self.app(scope, receive, send)
             return
 
@@ -1326,6 +1346,10 @@ class TransientAttachmentBodyLimitMiddleware:
         if not config.transient_attachments_enabled:
             response = _not_implemented(request_id)
             await response(scope, receive, send)
+            return
+
+        if route_kind != "create":
+            await self.app(scope, receive, send)
             return
 
         limit = attachment_max_request_body_bytes()
