@@ -57,6 +57,13 @@ export function DemoSidebar({
           <Plus size={14} />
           新建会话
         </button>
+        <a
+          href="/console"
+          data-testid="console-nav-link"
+          className="mt-2 flex items-center justify-center rounded-md border border-gray-200 bg-white py-1.5 px-3 text-xs font-medium text-gray-600 hover:border-teal-200 hover:bg-teal-50 hover:text-teal-700"
+        >
+          打开联调 Console
+        </a>
       </div>
 
       <SidebarSection title="历史会话">

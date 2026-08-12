@@ -128,6 +128,6 @@ describe('IntegrationHarnessPage', () => {
     await user.click(uploadButton);
     const attachmentError = await screen.findByRole('alert');
     expect(attachmentError.textContent).toContain('ATTACHMENT_EXPIRED');
-    expect(attachmentError.textContent).toContain('HTTP 404');
+    expect(attachmentError.textContent).toContain('HTTP 410');
   });
 });

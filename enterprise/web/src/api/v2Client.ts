@@ -1,6 +1,7 @@
 import { createSseParser } from './sse';
 import { API_MODE } from './mode';
 import { browserDocumentSyncEnabled } from './documentSyncPolicy';
+import type { UserPrincipal } from './types';
 import type {
   ConversationDetail,
   ConversationAttachmentRequest,
@@ -21,8 +22,15 @@ import type {
   SseEvent,
   SuggestionPage,
 } from './v2Types';
+import type {
+  ConsoleUserPrincipal,
+  FileShareDocumentStatusPage,
+  GatewayHealth,
+} from './consoleTypes';
 
+const V1_BASE = '/enterprise/api/v1';
 const BASE = '/enterprise/api/v2';
+const V3_BASE = '/enterprise/api/v3';
 const TOKEN_STORAGE_KEY = 'enterprise.harness.jwt';
 
 export const HARNESS_DEFAULTS = {
@@ -95,10 +103,14 @@ async function errorFromResponse(response: Response): Promise<V2ApiError> {
   return new V2ApiError(response.status, normalizeErrorBody(payload, response.status));
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function request<T>(
+  path: string,
+  init: RequestInit = {},
+  base = BASE,
+): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(`${BASE}${path}`, {
+    response = await fetch(`${base}${path}`, {
       ...init,
       headers: {
         Accept: 'application/json',
@@ -267,6 +279,29 @@ export function streamMessage(
 }
 
 export const v2Api = {
+  getHealth(): Promise<GatewayHealth> {
+    return request<GatewayHealth>('/health', {}, V1_BASE);
+  },
+
+  async getAuthMe(): Promise<ConsoleUserPrincipal> {
+    const principal = await request<UserPrincipal>('/auth/me', {}, V1_BASE);
+    return {
+      displayName: principal.displayName,
+      tenantId: principal.tenantId,
+      roles: principal.roles,
+      capabilities: principal.capabilities,
+      mappingStatus: principal.mappingStatus,
+    };
+  },
+
+  listFileShareStatuses(): Promise<FileShareDocumentStatusPage> {
+    return request<FileShareDocumentStatusPage>(
+      '/documents/sync-status',
+      {},
+      V3_BASE,
+    );
+  },
+
   async submitDocument(command: DocumentCommand): Promise<DocumentOperation> {
     requireBrowserDocumentSync();
     return request<DocumentOperation>('/documents', {
@@ -354,6 +389,57 @@ export const v2Api = {
       `/conversations/${encodeURIComponent(conversationId)}/attachments`,
       { method: 'POST', body: JSON.stringify(body) },
     );
+  },
+
+  issueConversationAttachmentTicket(
+    attachmentId: string,
+  ): Promise<ConversationAttachmentResponse> {
+    return request<ConversationAttachmentResponse>(
+      `/attachments/${encodeURIComponent(attachmentId)}/ticket`,
+      { method: 'POST' },
+    );
+  },
+
+  async verifyConversationAttachmentDownload(
+    attachment: ConversationAttachmentResponse,
+  ): Promise<{ contentType: string; sizeBytes: number }> {
+    const origin = typeof window === 'undefined' ? 'http://localhost' : window.location.origin;
+    const url = new URL(attachment.downloadUrl, origin);
+    if (
+      url.origin !== origin ||
+      !/^\/enterprise\/api\/v2\/attachments\/[^/]+\/download\/[^/]+$/.test(url.pathname)
+    ) {
+      throw new V2ApiError(0, {
+        code: 'ATTACHMENT_DOWNLOAD_URL_INVALID',
+        message: 'Gateway returned an invalid attachment download route',
+        requestId: 'attachment-download-url-invalid',
+        retryable: false,
+      });
+    }
+
+    let response: Response;
+    try {
+      response = await fetch(url.toString(), {
+        headers: {
+          Accept: attachment.mediaType,
+          ...authHeaders(),
+        },
+      });
+    } catch {
+      throw new V2ApiError(0, {
+        code: 'GATEWAY_UNAVAILABLE',
+        message: 'Gateway 不可用或网络异常',
+        requestId: 'gateway-unavailable',
+        retryable: true,
+      });
+    }
+
+    if (!response.ok) throw await errorFromResponse(response);
+    const content = await response.arrayBuffer();
+    return {
+      contentType: response.headers.get('content-type') ?? attachment.mediaType,
+      sizeBytes: content.byteLength,
+    };
   },
 
   streamMessage,

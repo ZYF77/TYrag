@@ -114,7 +114,20 @@ export interface ConversationAttachmentRequest {
   content: string;
 }
 
-export type ConversationAttachmentResponse = Record<string, unknown>;
+export interface ConversationAttachmentResponse {
+  attachmentId: string;
+  conversationId: string;
+  fileName: string;
+  mediaType: string;
+  sizeBytes: number;
+  sha256: string;
+  expiresAt: string;
+  indexPolicy: 'never';
+  maxDownloads: number;
+  downloadCount: number;
+  downloadUrl: string;
+  ticketExpiresAt: string;
+}
 
 export type MessageStatus = 'completed' | 'no_reliable_evidence' | 'failed';
 

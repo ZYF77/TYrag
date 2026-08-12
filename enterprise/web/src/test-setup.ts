@@ -3,7 +3,7 @@ import { http, HttpResponse } from 'msw';
 import { setupServer } from 'msw/node';
 import { handlers } from './api/mocks/handlers';
 
-const server = setupServer(
+export const server = setupServer(
   http.post(
     '/enterprise/api/v1/conversations/conv-test/messages:stream',
     () => HttpResponse.error(),

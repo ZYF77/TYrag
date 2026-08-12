@@ -8,6 +8,7 @@ import type {
 import type {
   ConversationDetail,
   ConversationSummary,
+  ConversationAttachmentResponse,
   DocumentOperation,
   Message,
   Citation as V2Citation,
@@ -190,6 +191,11 @@ function makeError(
 }
 
 export const handlers = [
+  // GET /health - public Gateway liveness probe
+  http.get(`${BASE}/health`, () =>
+    HttpResponse.json({ status: 'healthy', version: '1.0.0' }),
+  ),
+
   // GET /auth/me - demo identity probe
   http.get(`${BASE}/auth/me`, ({ request }) => {
     if (!bearerToken(request)) {
@@ -503,11 +509,108 @@ export const handlers = [
 // They only expose the frozen v2 external response shape.
 
 const V2_BASE = '/enterprise/api/v2';
+const V3_BASE = '/enterprise/api/v3';
 const v2Documents = new Map<string, DocumentOperation>();
 const v2DocumentPolls = new Map<string, number>();
 const v2DocumentPayloadHashes = new Map<string, string>();
 const v2Conversations = new Map<string, { detail: ConversationDetail; messages: Message[] }>();
 const v2Runs = new Map<string, { result: V2MessageRunResult; messages: Message[]; question: string; pending: boolean }>();
+const v2Attachments = new Map<string, { response: ConversationAttachmentResponse; content: Uint8Array }>();
+const v2AttachmentTickets = new Map<string, string>();
+
+const fileShareStatuses = [
+  {
+    externalDocumentId: 'FILE-SHARE-READY',
+    sourceVersionId: 'v3',
+    status: 'ready',
+    stage: 'complete',
+    pipelineStatus: 'DONE',
+    parseCompleted: true,
+    indexCompleted: true,
+    ingestState: 'INDEXED',
+    sourceState: 'AVAILABLE',
+    deduplicated: false,
+    businessStatus: 'active',
+    currentVersion: true,
+    eventStatus: 'processed',
+    updatedAt: new Date(Date.now() - 60_000).toISOString(),
+    retrievable: true,
+    readiness: {
+      currentVersion: true,
+      active: true,
+      syncReady: true,
+      parserReadback: true,
+      ragflowIdsPresent: true,
+      qualityPassed: true,
+      blockingReason: null,
+    },
+    qualityStatus: 'passed',
+    errorCode: null,
+    error: null,
+  },
+  {
+    externalDocumentId: 'FILE-SHARE-PARSING',
+    sourceVersionId: 'v2',
+    status: 'parsing',
+    stage: 'ocr_processing',
+    pipelineStatus: 'RUNNING',
+    parseCompleted: false,
+    indexCompleted: false,
+    ingestState: 'PARSING',
+    sourceState: 'AVAILABLE',
+    deduplicated: false,
+    businessStatus: 'active',
+    currentVersion: true,
+    eventStatus: 'accepted',
+    updatedAt: new Date(Date.now() - 120_000).toISOString(),
+    retrievable: false,
+    readiness: {
+      currentVersion: true,
+      active: true,
+      syncReady: false,
+      parserReadback: false,
+      ragflowIdsPresent: false,
+      qualityPassed: false,
+      blockingReason: 'PARSER_NOT_COMPLETE',
+    },
+    qualityStatus: 'unknown',
+    errorCode: null,
+    error: null,
+  },
+  {
+    externalDocumentId: 'FILE-SHARE-FAILED',
+    sourceVersionId: 'v1',
+    status: 'failed',
+    stage: 'validation',
+    pipelineStatus: 'FAILED',
+    parseCompleted: false,
+    indexCompleted: false,
+    ingestState: 'FAILED',
+    sourceState: 'UNAVAILABLE',
+    deduplicated: false,
+    businessStatus: 'active',
+    currentVersion: true,
+    eventStatus: 'failed',
+    updatedAt: new Date(Date.now() - 300_000).toISOString(),
+    retrievable: false,
+    readiness: {
+      currentVersion: true,
+      active: true,
+      syncReady: false,
+      parserReadback: false,
+      ragflowIdsPresent: false,
+      qualityPassed: false,
+      blockingReason: 'DOCUMENT_SOURCE_NOT_FOUND',
+    },
+    qualityStatus: 'rejected',
+    errorCode: 'DOCUMENT_SOURCE_NOT_FOUND',
+    error: {
+      code: 'DOCUMENT_SOURCE_NOT_FOUND',
+      message: 'Document source is unavailable',
+      retryable: true,
+    },
+  },
+];
 
 const canonicalJson = (value: unknown): string => {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
@@ -835,15 +938,82 @@ const v2Handlers = [
   http.post(`${V2_BASE}/conversations/:conversationId/attachments`, async ({ params, request }) => {
     const authError = v2AuthError(request);
     if (authError) return authError;
-    if (!v2Conversations.has(String(params.conversationId))) {
+    const conversationId = String(params.conversationId);
+    if (!v2Conversations.has(conversationId)) {
       return v2Error('CONVERSATION_NOT_FOUND', 'Conversation not found', 404);
     }
-    const body = (await request.json()) as { fileName?: string };
-    if (body.fileName?.toLowerCase().includes('expired')) {
-      return v2Error('ATTACHMENT_EXPIRED', 'Transient attachment has expired', 404);
+    const body = (await request.json()) as { fileName?: string; mediaType?: string };
+    const fileName = body.fileName ?? 'console-attachment.pdf';
+    if (fileName.toLowerCase().includes('expired')) {
+      return v2Error('ATTACHMENT_EXPIRED', 'Transient attachment has expired', 410);
     }
-    return v2Error('ATTACHMENT_NOT_IMPLEMENTED', 'Transient attachment is planned but not enabled', 501);
+    if (fileName.toLowerCase().includes('forbidden')) {
+      return v2Error('ATTACHMENT_FORBIDDEN', 'Attachment access is denied', 403);
+    }
+    const attachmentId = `attachment-${Date.now()}-${v2Attachments.size}`;
+    const ticket = `mock-ticket-${Date.now()}-${v2Attachments.size}`;
+    const content = new TextEncoder().encode('mock attachment bytes');
+    const now = Date.now();
+    const response: ConversationAttachmentResponse = {
+      attachmentId,
+      conversationId,
+      fileName,
+      mediaType: body.mediaType ?? 'application/octet-stream',
+      sizeBytes: content.byteLength,
+      sha256: 'a'.repeat(64),
+      expiresAt: new Date(now + 86_400_000).toISOString(),
+      indexPolicy: 'never',
+      maxDownloads: 1,
+      downloadCount: 0,
+      downloadUrl: `${V2_BASE}/attachments/${attachmentId}/download/${ticket}`,
+      ticketExpiresAt: new Date(now + 900_000).toISOString(),
+    };
+    v2Attachments.set(attachmentId, { response, content });
+    v2AttachmentTickets.set(ticket, attachmentId);
+    return HttpResponse.json(response, { status: 201 });
   }),
+
+  http.post(`${V2_BASE}/attachments/:attachmentId/ticket`, ({ params, request }) => {
+    const authError = v2AuthError(request);
+    if (authError) return authError;
+    const attachmentId = String(params.attachmentId);
+    const stored = v2Attachments.get(attachmentId);
+    if (!stored) return v2Error('ATTACHMENT_NOT_FOUND', 'Attachment not found', 404);
+    const ticket = `mock-ticket-${Date.now()}-${attachmentId}`;
+    const response: ConversationAttachmentResponse = {
+      ...stored.response,
+      downloadUrl: `${V2_BASE}/attachments/${attachmentId}/download/${ticket}`,
+      ticketExpiresAt: new Date(Date.now() + 900_000).toISOString(),
+    };
+    stored.response = response;
+    v2AttachmentTickets.set(ticket, attachmentId);
+    return HttpResponse.json(response, { status: 201 });
+  }),
+
+  http.get(`${V2_BASE}/attachments/:attachmentId/download/:ticket`, ({ params, request }) => {
+    const authError = v2AuthError(request);
+    if (authError) return authError;
+    const attachmentId = String(params.attachmentId);
+    const ticket = String(params.ticket);
+    const stored = v2Attachments.get(attachmentId);
+    if (!stored || v2AttachmentTickets.get(ticket) !== attachmentId) {
+      return v2Error('ATTACHMENT_TICKET_INVALID', 'Download ticket is invalid', 404);
+    }
+    v2AttachmentTickets.delete(ticket);
+    stored.response = { ...stored.response, downloadCount: stored.response.downloadCount + 1 };
+    return new Response(stored.content, {
+      headers: {
+        'Content-Type': stored.response.mediaType,
+        'Content-Length': String(stored.content.byteLength),
+        ETag: stored.response.sha256,
+      },
+    });
+  }),
+
+  // GET /enterprise/api/v3/documents/sync-status - FILE_SHARE diagnostic fixture.
+  http.get(`${V3_BASE}/documents/sync-status`, () =>
+    HttpResponse.json({ items: fileShareStatuses }),
+  ),
 ];
 
 handlers.push(...v2Handlers);

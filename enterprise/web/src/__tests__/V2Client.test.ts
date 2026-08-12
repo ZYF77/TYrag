@@ -188,16 +188,29 @@ describe('v2 API client', () => {
     });
   });
 
-  it('uses the planned attachment route and preserves expiry/not-implemented errors', async () => {
+  it('uses the public create/ticket/download attachment routes and preserves expiry errors', async () => {
     const conversation = await v2Api.createConversation({ equipmentId: 'EQ-ATTACHMENT' });
     const body = { fileName: 'manual.pdf', mediaType: 'application/pdf', content: 'cGRm' };
-    await expect(v2Api.createConversationAttachment(conversation.conversationId, body)).rejects.toMatchObject({
-      status: 501,
-      body: { code: 'ATTACHMENT_NOT_IMPLEMENTED' },
+    const created = await v2Api.createConversationAttachment(conversation.conversationId, body);
+    expect(created.indexPolicy).toBe('never');
+    expect(created.downloadUrl).toContain('/enterprise/api/v2/attachments/');
+    const ticketed = await v2Api.issueConversationAttachmentTicket(created.attachmentId);
+    expect(ticketed.ticketExpiresAt).toBeTruthy();
+    await expect(v2Api.verifyConversationAttachmentDownload(ticketed)).resolves.toMatchObject({
+      contentType: 'application/pdf',
+      sizeBytes: 21,
+    });
+    await expect(v2Api.verifyConversationAttachmentDownload(ticketed)).rejects.toMatchObject({
+      status: 404,
+      body: { code: 'ATTACHMENT_TICKET_INVALID' },
     });
     await expect(v2Api.createConversationAttachment(conversation.conversationId, { ...body, fileName: 'expired.pdf' })).rejects.toMatchObject({
-      status: 404,
+      status: 410,
       body: { code: 'ATTACHMENT_EXPIRED' },
+    });
+    await expect(v2Api.createConversationAttachment(conversation.conversationId, { ...body, fileName: 'forbidden.pdf' })).rejects.toMatchObject({
+      status: 403,
+      body: { code: 'ATTACHMENT_FORBIDDEN' },
     });
   });
 });
