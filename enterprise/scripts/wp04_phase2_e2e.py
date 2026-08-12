@@ -296,6 +296,7 @@ def sync_payload(
     bucket: str,
     content: bytes,
     page_count: int,
+    equipment_id: str,
     allow_groups: list[str] | None = None,
 ) -> dict:
     allow_groups = allow_groups or ["maintenance"]
@@ -314,7 +315,7 @@ def sync_payload(
             "tenant_id": TENANT,
             "external_document_id": f"E2E-{doc_id}",
             "source_system": SOURCE_SYSTEM,
-            "equipment_id": "EQ-E2E-001",
+            "equipment_id": equipment_id,
             "fixed_asset_no": f"FA-{doc_id}",
             "page_count": page_count,
             "document_type": "manual",
@@ -698,7 +699,7 @@ def main() -> int:
 
     event_a = f"wp04-{uuid.uuid4().hex[:16]}"
     payload_a = sync_payload(
-        "Doc1", event_a, "DocA", bucket, content_a, 3,
+        "Doc1", event_a, "DocA", bucket, content_a, 3, "EQ-E2E-001",
         allow_groups=["group-a"],
     )
     resp = gateway_post(
@@ -712,7 +713,7 @@ def main() -> int:
 
     event_b = f"wp04-{uuid.uuid4().hex[:16]}"
     payload_b = sync_payload(
-        "Doc2", event_b, "DocB", bucket, content_b, 4,
+        "Doc2", event_b, "DocB", bucket, content_b, 4, "EQ-E2E-002",
         allow_groups=["group-b"],
     )
     resp = gateway_post(
