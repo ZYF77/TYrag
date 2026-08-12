@@ -169,6 +169,7 @@ async def user_auth_error_handler(request: Request, exc: UserAuthError):
             "code": exc.code,
             "message": exc.message,
             "requestId": str(uuid.uuid4()),
+            "retryable": False,
         },
     )
 

@@ -282,6 +282,37 @@ async def test_attachment_post_is_reachable_by_default(storage_env, monkeypatch)
     await db.close()
 
 
+@pytest.mark.asyncio
+async def test_formal_attachment_jwt_errors_use_error_envelope():
+    application = FastAPI()
+    application.include_router(router)
+    application.add_exception_handler(
+        app_module.UserAuthError, app_module.user_auth_error_handler
+    )
+    application.dependency_overrides[get_db] = lambda: None
+    application.dependency_overrides[get_storage] = lambda: None
+
+    async with AsyncClient(
+        transport=ASGITransport(app=application), base_url="http://gateway.test"
+    ) as client:
+        create = await client.post(
+            "/enterprise/api/v2/conversations/conversation-a/attachments",
+            json={
+                "fileName": "manual.pdf",
+                "mediaType": "application/pdf",
+                "content": base64.b64encode(b"jwt-required").decode("ascii"),
+            },
+        )
+        ticket = await client.post(
+            "/enterprise/api/v2/attachments/attachment-a/ticket"
+        )
+
+    for response in (create, ticket):
+        assert response.status_code == 401
+        assert response.json()["code"] == "AUTH_TOKEN_MISSING"
+        assert response.json()["retryable"] is False
+
+
 def test_formal_attachment_routes_are_visible_in_openapi():
     application = FastAPI()
     application.include_router(router)
