@@ -31,7 +31,7 @@ DEFAULT_RECORDS: tuple[AssetRecord, ...] = (
     },
     {
         "tenantId": "wp04e2e",
-        "equipmentId": "EQ-E2E-001",
+        "equipmentId": "EQ-E2E-002",
         "fixedAssetNo": "FA-Doc2",
         "assetId": "FA-Doc2",
         "registryVersion": "dev-stub-v1",
@@ -43,40 +43,88 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _normalise_records(items: list[AssetRecord]) -> list[AssetRecord]:
+    records: list[AssetRecord] = []
+    for item in items:
+        if not isinstance(item, dict):
+            raise ValueError("Each Asset Registry stub record must be an object")
+
+        tenant_id = item.get("tenantId")
+        equipment_id = item.get("equipmentId")
+        fixed_asset_no = item.get("fixedAssetNo")
+        if not isinstance(tenant_id, str) or not tenant_id.strip():
+            raise ValueError("Each stub record requires a non-empty tenantId")
+        if not isinstance(equipment_id, str) or not equipment_id.strip():
+            raise ValueError("Each stub record requires a non-empty equipmentId")
+        if not isinstance(fixed_asset_no, str) or not fixed_asset_no.strip():
+            raise ValueError("Each stub record requires a non-empty fixedAssetNo")
+
+        record: AssetRecord = {
+            "tenantId": tenant_id,
+            "equipmentId": equipment_id,
+            "fixedAssetNo": fixed_asset_no,
+            "assetId": item.get("assetId"),
+            "registryVersion": item.get("registryVersion") or "dev-stub-v1",
+        }
+        for field in ("assetId", "registryVersion"):
+            value = record[field]
+            if value is not None and (
+                not isinstance(value, str) or not value.strip()
+            ):
+                raise ValueError(f"Stub field {field} must be a non-empty string or null")
+        records.append(record)
+
+    equipment_to_fixed: dict[tuple[str, str], str] = {}
+    fixed_to_equipment: dict[tuple[str, str], str] = {}
+    asset_to_identity: dict[tuple[str, str], tuple[str, str]] = {}
+    seen_pairs: set[tuple[str, str, str]] = set()
+    for record in records:
+        tenant_id = record["tenantId"]
+        equipment_id = record["equipmentId"]
+        fixed_asset_no = record["fixedAssetNo"]
+        pair_key = (tenant_id, equipment_id, fixed_asset_no)
+        if pair_key in seen_pairs:
+            raise ValueError(
+                "Asset Registry stub fixture contains a duplicate equipmentId/fixedAssetNo pair"
+            )
+        seen_pairs.add(pair_key)
+
+        equipment_key = (tenant_id, equipment_id)
+        if equipment_key in equipment_to_fixed:
+            raise ValueError(
+                "Asset Registry stub fixture violates the equipmentId/fixedAssetNo one-to-one mapping"
+            )
+        equipment_to_fixed[equipment_key] = fixed_asset_no
+
+        fixed_key = (tenant_id, fixed_asset_no)
+        if fixed_key in fixed_to_equipment:
+            raise ValueError(
+                "Asset Registry stub fixture violates the equipmentId/fixedAssetNo one-to-one mapping"
+            )
+        fixed_to_equipment[fixed_key] = equipment_id
+
+        asset_id = record["assetId"]
+        if asset_id is not None:
+            asset_key = (tenant_id, asset_id)
+            if asset_key in asset_to_identity:
+                raise ValueError(
+                    "Asset Registry stub fixture maps one assetId to multiple identities"
+                )
+            asset_to_identity[asset_key] = (equipment_id, fixed_asset_no)
+    return records
+
+
 def _load_records(data_file: str | None = None) -> list[AssetRecord]:
     path_value = data_file or os.environ.get("ENTERPRISE_ASSET_REGISTRY_STUB_DATA", "")
     if not path_value.strip():
-        return [dict(record) for record in DEFAULT_RECORDS]
+        return _normalise_records([dict(record) for record in DEFAULT_RECORDS])
 
     payload = json.loads(Path(path_value).read_text(encoding="utf-8"))
     if isinstance(payload, dict):
         payload = payload.get("assets")
     if not isinstance(payload, list):
         raise ValueError("Asset Registry stub data must be a JSON array or {\"assets\": [...]}")
-
-    records: list[AssetRecord] = []
-    for item in payload:
-        if not isinstance(item, dict):
-            raise ValueError("Each Asset Registry stub record must be an object")
-        tenant_id = item.get("tenantId")
-        equipment_id = item.get("equipmentId")
-        if not isinstance(tenant_id, str) or not tenant_id:
-            raise ValueError("Each stub record requires a non-empty tenantId")
-        if not isinstance(equipment_id, str) or not equipment_id:
-            raise ValueError("Each stub record requires a non-empty equipmentId")
-        record: AssetRecord = {
-            "tenantId": tenant_id,
-            "equipmentId": equipment_id,
-            "fixedAssetNo": item.get("fixedAssetNo"),
-            "assetId": item.get("assetId"),
-            "registryVersion": item.get("registryVersion") or "dev-stub-v1",
-        }
-        for field in ("fixedAssetNo", "assetId", "registryVersion"):
-            value = record[field]
-            if value is not None and not isinstance(value, str):
-                raise ValueError(f"Stub field {field} must be a string or null")
-        records.append(record)
-    return records
+    return _normalise_records(payload)
 
 
 def _error(status_code: int, code: str, message: str) -> JSONResponse:
@@ -99,6 +147,14 @@ def _resolve(
         "fixedAssetNo": fixed_asset_no,
         "assetId": asset_id,
     }
+    if any(
+        value is not None and (not isinstance(value, str) or not value.strip())
+        for value in supplied.values()
+    ):
+        return 422, {
+            "code": "ASSET_IDENTIFIER_REQUIRED",
+            "message": "Asset identifiers must be non-empty",
+        }
     if not any(supplied.values()):
         return 422, {
             "code": "ASSET_IDENTIFIER_REQUIRED",
@@ -132,37 +188,13 @@ def _resolve(
             "code": "ASSET_IDENTIFIER_CONFLICT",
             "message": "Asset identifiers resolve to multiple registry identities",
         }
-    candidate_records = [tenant_records[index] for index in candidate_indexes]
-
-    identities = {
-        (
-            record["equipmentId"],
-            record["fixedAssetNo"],
-            record["assetId"],
-        )
-        for record in candidate_records
-    }
-    if len(identities) > 1:
-        # Equipment-only context can legitimately identify the equipment
-        # parent while its fixed assets remain separate query dimensions.
-        if equipment_id and not fixed_asset_no and not asset_id:
-            equipment_ids = {record["equipmentId"] for record in candidate_records}
-            if len(equipment_ids) == 1:
-                record = candidate_records[0]
-                return 200, {
-                    "tenantId": tenant_id,
-                    "equipmentId": record["equipmentId"],
-                    "fixedAssetNo": None,
-                    "assetId": None,
-                    "registryVersion": "dev-stub-v1",
-                    "resolvedAt": _now(),
-                }
+    if len(candidate_indexes) != 1:
         return 409, {
             "code": "ASSET_IDENTIFIER_CONFLICT",
             "message": "Asset identifiers resolve to multiple registry identities",
         }
 
-    record = candidate_records[0]
+    record = tenant_records[next(iter(candidate_indexes))]
     return 200, {
         "tenantId": tenant_id,
         "equipmentId": record["equipmentId"],
@@ -178,7 +210,7 @@ def create_app(
     *,
     token: str | None = None,
 ) -> FastAPI:
-    known_records = records if records is not None else _load_records()
+    known_records = _load_records() if records is None else _normalise_records(records)
     expected_token = (
         os.environ.get("ENTERPRISE_ASSET_REGISTRY_TOKEN", "").strip()
         if token is None
