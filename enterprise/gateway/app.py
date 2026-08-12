@@ -112,14 +112,12 @@ async def lifespan(app: FastAPI):
         reconciler_task = asyncio.create_task(
             StatusReconciler(service).run_forever(config.reconcile_seconds)
         )
-        started_tasks.extend([worker_task, reconciler_task])
-        if config.transient_attachments_enabled:
-            attachment_cleanup_task = asyncio.create_task(
-                TransientAttachmentCleanupWorker(
-                    TransientAttachmentService(_db)
-                ).run_forever(attachment_cleanup_interval_seconds())
-            )
-            started_tasks.append(attachment_cleanup_task)
+        attachment_cleanup_task = asyncio.create_task(
+            TransientAttachmentCleanupWorker(
+                TransientAttachmentService(_db)
+            ).run_forever(attachment_cleanup_interval_seconds())
+        )
+        started_tasks.extend([worker_task, reconciler_task, attachment_cleanup_task])
         _background_tasks.extend(started_tasks)
     if config.quality_worker_enabled and not _test_mode():
         quality_service = QualityEvaluationService(

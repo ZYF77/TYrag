@@ -233,7 +233,7 @@ class GatewayConfig:
     )
     transient_attachments_enabled: bool = field(
         default_factory=lambda: os.getenv(
-            "ENTERPRISE_TRANSIENT_ATTACHMENTS_ENABLED", "false"
+            "ENTERPRISE_TRANSIENT_ATTACHMENTS_ENABLED", "true"
         ).lower()
         in ("1", "true", "yes", "on")
     )

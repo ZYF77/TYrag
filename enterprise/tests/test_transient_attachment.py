@@ -197,38 +197,7 @@ def storage_env(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_attachment_post_is_501_by_default_without_reading_or_resolving_dependencies(
-    monkeypatch,
-):
-    monkeypatch.setattr(config, "transient_attachments_enabled", False)
-
-    async def fail_dependency():
-        raise AssertionError("attachment dependency must not run when disabled")
-
-    monkeypatch.setitem(app_module.app.dependency_overrides, app_module.get_db, fail_dependency)
-    monkeypatch.setitem(app_module.app.dependency_overrides, get_storage, fail_dependency)
-    monkeypatch.setitem(
-        app_module.app.dependency_overrides,
-        require_user_principal,
-        fail_dependency,
-    )
-
-    status, body, receive_calls = await _asgi_request(
-        app_module.app,
-        "/enterprise/api/v2/conversations/conversation-a/attachments",
-        [b"this body must not be read"],
-    )
-
-    assert status == 501
-    assert body["code"] == "ATTACHMENT_NOT_IMPLEMENTED"
-    assert body["message"] == "Transient attachment is planned but not enabled"
-    assert body["retryable"] is False
-    assert isinstance(body["requestId"], str) and body["requestId"]
-    assert receive_calls == 0
-
-
-@pytest.mark.asyncio
-async def test_disabled_feature_gates_ticket_and_download_before_dependencies(
+async def test_explicit_disable_returns_stable_unavailable_before_dependencies(
     monkeypatch,
 ):
     monkeypatch.setattr(config, "transient_attachments_enabled", False)
@@ -253,6 +222,14 @@ async def test_disabled_feature_gates_ticket_and_download_before_dependencies(
     async with AsyncClient(
         transport=ASGITransport(app=app_module.app), base_url="http://gateway.test"
     ) as client:
+        create = await client.post(
+            "/enterprise/api/v2/conversations/conversation-a/attachments",
+            json={
+                "fileName": "manual.pdf",
+                "mediaType": "application/pdf",
+                "content": base64.b64encode(b"disabled").decode("ascii"),
+            },
+        )
         ticket = await client.post(
             "/enterprise/api/v2/attachments/attachment-a/ticket"
         )
@@ -260,14 +237,15 @@ async def test_disabled_feature_gates_ticket_and_download_before_dependencies(
             "/enterprise/api/v2/attachments/attachment-a/download/ticket-a"
         )
 
-    for response in (ticket, download):
-        assert response.status_code == 501
-        assert response.json()["code"] == "ATTACHMENT_NOT_IMPLEMENTED"
+    for response in (create, ticket, download):
+        assert response.status_code == 503
+        assert response.json()["code"] == "ATTACHMENT_STORAGE_UNAVAILABLE"
+        assert response.json()["retryable"] is True
 
 
 @pytest.mark.asyncio
-async def test_enabled_attachment_post_keeps_201(storage_env, monkeypatch):
-    monkeypatch.setattr(config, "transient_attachments_enabled", True)
+async def test_attachment_post_is_reachable_by_default(storage_env, monkeypatch):
+    assert config.transient_attachments_enabled is True
     db = await init_db(":memory:")
     storage = MemoryObjectStorage()
     owner = _principal()
@@ -300,6 +278,79 @@ async def test_enabled_attachment_post_keeps_201(storage_env, monkeypatch):
 
     assert response.status_code == 201, response.text
     assert response.json()["indexPolicy"] == "never"
+    assert response.json()["maxDownloads"] == 1
+    await db.close()
+
+
+def test_formal_attachment_routes_are_visible_in_openapi():
+    application = FastAPI()
+    application.include_router(router)
+    paths = application.openapi()["paths"]
+
+    assert "/enterprise/api/v2/conversations/{conversation_id}/attachments" in paths
+    assert "/enterprise/api/v2/attachments/{attachment_id}/ticket" in paths
+    assert "/enterprise/api/v2/attachments/{attachment_id}/download/{ticket}" in paths
+    assert "post" in paths[
+        "/enterprise/api/v2/conversations/{conversation_id}/attachments"
+    ]
+    assert paths[
+        "/enterprise/api/v2/conversations/{conversation_id}/attachments"
+    ]["post"]["operationId"] == "v2CreateConversationAttachment"
+    assert paths[
+        "/enterprise/api/v2/attachments/{attachment_id}/ticket"
+    ]["post"]["operationId"] == "v2IssueAttachmentTicket"
+    assert paths[
+        "/enterprise/api/v2/attachments/{attachment_id}/download/{ticket}"
+    ]["get"]["operationId"] == "v2DownloadAttachment"
+
+
+@pytest.mark.asyncio
+async def test_create_rejects_missing_and_archived_conversation_with_error_envelope(
+    storage_env,
+):
+    db = await init_db(":memory:")
+    storage = MemoryObjectStorage()
+    owner = _principal()
+    application = FastAPI()
+    application.include_router(router)
+    application.dependency_overrides[get_db] = lambda: db
+    application.dependency_overrides[get_storage] = lambda: storage
+    application.dependency_overrides[require_user_principal] = lambda: owner
+
+    payload = {
+        "fileName": "manual.pdf",
+        "mediaType": "application/pdf",
+        "content": base64.b64encode(b"envelope-bytes").decode("ascii"),
+    }
+    await _conversation(db, owner)
+    await v2_store.archive_conversation(
+        db,
+        conversation_id="conversation-a",
+        tenant_id=owner.tenant_id,
+        business_user_id=owner.business_user_id,
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=application), base_url="http://gateway.test"
+    ) as client:
+        missing = await client.post(
+            "/enterprise/api/v2/conversations/missing/attachments", json=payload
+        )
+        archived = await client.post(
+            "/enterprise/api/v2/conversations/conversation-a/attachments",
+            json=payload,
+        )
+
+    assert missing.status_code == 404
+    assert missing.json() == {
+        "code": "CONVERSATION_NOT_FOUND",
+        "message": "Conversation not found",
+        "requestId": missing.json()["requestId"],
+        "retryable": False,
+    }
+    assert archived.status_code == 409
+    assert archived.json()["code"] == "CONVERSATION_ARCHIVED"
+    assert archived.json()["retryable"] is False
     await db.close()
 
 
@@ -464,12 +515,95 @@ async def test_attachment_validation_rejects_mime_extension_and_size(storage_env
 
 
 @pytest.mark.asyncio
+async def test_upload_failure_is_retryable_and_scheduled_for_cleanup(storage_env):
+    db = await init_db(":memory:")
+    storage = MemoryObjectStorage()
+    owner = _principal()
+    await _conversation(db, owner)
+    storage.put_failures = 3
+    service = TransientAttachmentService(db, storage)
+
+    with pytest.raises(TransientAttachmentError) as unavailable:
+        await service.create(
+            tenant_id=owner.tenant_id,
+            conversation_id="conversation-a",
+            business_user_id=owner.business_user_id,
+            file_name="manual.pdf",
+            media_type="application/pdf",
+            content=b"upload-failure",
+        )
+
+    assert unavailable.value.code == "ATTACHMENT_STORAGE_UNAVAILABLE"
+    assert unavailable.value.status_code == 503
+    assert unavailable.value.retryable is True
+    conversation = await v2_store.get_conversation(
+        db,
+        conversation_id="conversation-a",
+        tenant_id=owner.tenant_id,
+        business_user_id=owner.business_user_id,
+    )
+    assert conversation["status"] == "active"
+
+    async with db.execute(
+        "SELECT status, next_retry_at FROM ext_transient_attachment"
+    ) as cursor:
+        pending = await cursor.fetchone()
+    assert pending["status"] == "delete_retry"
+    assert pending["next_retry_at"]
+
+    cleaned = await service.cleanup_expired()
+    assert cleaned["deleted"] == 1
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_storage_integrity_failure_is_stable_and_ticket_can_retry(storage_env):
+    db = await init_db(":memory:")
+    storage = MemoryObjectStorage()
+    owner = _principal()
+    await _conversation(db, owner)
+    service = TransientAttachmentService(db, storage)
+    record, ticket = await service.create(
+        tenant_id=owner.tenant_id,
+        conversation_id="conversation-a",
+        business_user_id=owner.business_user_id,
+        file_name="manual.pdf",
+        media_type="application/pdf",
+        content=b"integrity-bytes",
+    )
+    object_key = next(
+        key for key in storage.objects if key[0] == "attachment-test-bucket"
+    )
+    storage.objects[object_key] = (b"tampered", "application/pdf")
+
+    with pytest.raises(TransientAttachmentError) as corrupt:
+        await service.download(
+            attachment_id=record.attachment_id,
+            token=ticket.token,
+            principal=owner,
+        )
+    assert corrupt.value.code == "ATTACHMENT_STORAGE_CORRUPT"
+    assert corrupt.value.status_code == 502
+    assert corrupt.value.retryable is False
+
+    storage.objects[object_key] = (b"integrity-bytes", "application/pdf")
+    downloaded = await service.download(
+        attachment_id=record.attachment_id,
+        token=ticket.token,
+        principal=owner,
+    )
+    assert downloaded.content == b"integrity-bytes"
+    await db.close()
+
+
+@pytest.mark.asyncio
 async def test_ticket_is_tenant_bound_and_repeated_download_is_denied(storage_env):
     db = await init_db(":memory:")
     storage = MemoryObjectStorage()
     service = TransientAttachmentService(db, storage)
     owner = _principal()
     other_tenant = _principal("tenant-b", "user-b")
+    other_user = _principal("tenant-a", "user-b")
     await _conversation(db, owner)
     record, ticket = await service.create(
         tenant_id=owner.tenant_id,
@@ -484,9 +618,33 @@ async def test_ticket_is_tenant_bound_and_repeated_download_is_denied(storage_en
         await service.download(
             attachment_id=record.attachment_id,
             token=ticket.token,
-            principal=other_tenant,
+            principal=other_user,
         )
     assert forbidden.value.code == "ATTACHMENT_FORBIDDEN"
+
+    with pytest.raises(TransientAttachmentError) as cross_tenant:
+        await service.download(
+            attachment_id=record.attachment_id,
+            token=ticket.token,
+            principal=other_tenant,
+        )
+    assert cross_tenant.value.code == "ATTACHMENT_FORBIDDEN"
+
+    second_record, _ = await service.create(
+        tenant_id=owner.tenant_id,
+        conversation_id="conversation-a",
+        business_user_id=owner.business_user_id,
+        file_name="second.pdf",
+        media_type="application/pdf",
+        content=b"second-attachment",
+    )
+    with pytest.raises(TransientAttachmentError) as wrong_attachment:
+        await service.download(
+            attachment_id=second_record.attachment_id,
+            token=ticket.token,
+            principal=owner,
+        )
+    assert wrong_attachment.value.code == "ATTACHMENT_TICKET_INVALID"
 
     downloaded = await service.download(
         attachment_id=record.attachment_id,
@@ -705,11 +863,42 @@ async def test_expired_cleanup_retries_delete_and_records_metadata(storage_env, 
 
 
 @pytest.mark.asyncio
+async def test_cleanup_recovers_already_expired_rows(storage_env, monkeypatch):
+    db = await init_db(":memory:")
+    storage = MemoryObjectStorage()
+    monkeypatch.setenv("ENTERPRISE_ATTACHMENT_TTL_SECONDS", "1")
+    clock = [datetime(2026, 8, 10, tzinfo=timezone.utc)]
+    service = TransientAttachmentService(db, storage, now_fn=lambda: clock[0])
+    await _conversation(db, _principal())
+    record, _ = await service.create(
+        tenant_id="tenant-a",
+        conversation_id="conversation-a",
+        business_user_id="user-a",
+        file_name="manual.pdf",
+        media_type="application/pdf",
+        content=b"expired-row-bytes",
+    )
+    clock[0] += timedelta(seconds=2)
+    await db.execute(
+        "UPDATE ext_transient_attachment SET status='expired' WHERE attachment_id=?",
+        (record.attachment_id,),
+    )
+    await db.commit()
+
+    result = await service.cleanup_expired()
+
+    assert result["deleted"] == 1
+    assert storage.objects == {}
+    await db.close()
+
+
+@pytest.mark.asyncio
 async def test_gateway_contract_validates_permissions_and_hides_storage_url(storage_env):
     db = await init_db(":memory:")
     storage = MemoryObjectStorage()
     owner = _principal()
     other = _principal("tenant-b", "user-b")
+    same_tenant_other_user = _principal("tenant-a", "user-b")
     await _conversation(db, owner)
 
     application = FastAPI()
@@ -736,6 +925,34 @@ async def test_gateway_contract_validates_permissions_and_hides_storage_url(stor
         assert body["indexPolicy"] == "never"
         assert "minio.internal" not in body["downloadUrl"]
         assert "S3_ENDPOINT" not in json.dumps(body)
+        object_key = next(
+            key for key in storage.objects if key[0] == "attachment-test-bucket"
+        )
+        assert object_key[1].startswith("transient-attachments/")
+        async with db.execute("SELECT COUNT(*) AS count FROM ext_document_map") as cursor:
+            assert (await cursor.fetchone())["count"] == 0
+        async with db.execute("SELECT COUNT(*) AS count FROM sync_outbox") as cursor:
+            assert (await cursor.fetchone())["count"] == 0
+
+        async with db.execute(
+            "SELECT created_at, expires_at FROM ext_transient_attachment "
+            "WHERE attachment_id=?",
+            (body["attachmentId"],),
+        ) as cursor:
+            timestamps = await cursor.fetchone()
+        assert (
+            datetime.fromisoformat(timestamps["expires_at"])
+            - datetime.fromisoformat(timestamps["created_at"])
+            == timedelta(hours=24)
+        )
+
+        issued = await client.post(
+            f"/enterprise/api/v2/attachments/{body['attachmentId']}/ticket"
+        )
+        assert issued.status_code == 200, issued.text
+        issued_body = issued.json()
+        assert issued_body["indexPolicy"] == "never"
+        issued_url = issued_body["downloadUrl"]
 
         wrong_mime = await client.post(
             "/enterprise/api/v2/conversations/conversation-a/attachments",
@@ -744,16 +961,29 @@ async def test_gateway_contract_validates_permissions_and_hides_storage_url(stor
         assert wrong_mime.status_code == 422
         assert wrong_mime.json()["code"] == "ATTACHMENT_MIME_NOT_ALLOWED"
 
-        application.dependency_overrides[optional_user_principal] = lambda: other
-        unauthorized = await client.get(body["downloadUrl"])
+        application.dependency_overrides[require_user_principal] = lambda: same_tenant_other_user
+        same_user_create = await client.post(
+            "/enterprise/api/v2/conversations/conversation-a/attachments",
+            json=payload,
+        )
+        assert same_user_create.status_code == 404
+        assert same_user_create.json()["code"] == "CONVERSATION_NOT_FOUND"
+        same_user_ticket = await client.post(
+            f"/enterprise/api/v2/attachments/{body['attachmentId']}/ticket"
+        )
+        assert same_user_ticket.status_code == 403
+        assert same_user_ticket.json()["code"] == "ATTACHMENT_FORBIDDEN"
+
+        application.dependency_overrides[optional_user_principal] = lambda: same_tenant_other_user
+        unauthorized = await client.get(issued_url)
         assert unauthorized.status_code == 403
         assert unauthorized.json()["code"] == "ATTACHMENT_FORBIDDEN"
 
         application.dependency_overrides[optional_user_principal] = lambda: None
-        downloaded = await client.get(body["downloadUrl"])
+        downloaded = await client.get(issued_url)
         assert downloaded.status_code == 200
         assert downloaded.content == b"gateway-bytes"
-        repeated = await client.get(body["downloadUrl"])
+        repeated = await client.get(issued_url)
         assert repeated.status_code == 410
         assert repeated.json()["code"] == "ATTACHMENT_DOWNLOAD_LIMIT"
 
@@ -769,7 +999,7 @@ async def test_gateway_contract_validates_permissions_and_hides_storage_url(stor
 
 
 @pytest.mark.asyncio
-async def test_disabled_feature_does_not_start_cleanup_worker(tmp_path, monkeypatch):
+async def test_explicit_disable_keeps_cleanup_worker_running(tmp_path, monkeypatch):
     monkeypatch.setenv("ENTERPRISE_TEST_MODE", "0")
     monkeypatch.setenv("RAGFLOW_API_KEY", "test-key")
     monkeypatch.setenv("ENTERPRISE_SYNC_DB_PATH", str(tmp_path / "lifespan.db"))
@@ -786,7 +1016,7 @@ async def test_disabled_feature_does_not_start_cleanup_worker(tmp_path, monkeypa
 
     cleanup_constructions = 0
 
-    class ForbiddenCleanupWorker:
+    class CountingCleanupWorker(IdleWorker):
         def __init__(self, *args, **kwargs):
             nonlocal cleanup_constructions
             cleanup_constructions += 1
@@ -796,11 +1026,11 @@ async def test_disabled_feature_does_not_start_cleanup_worker(tmp_path, monkeypa
     monkeypatch.setattr(
         app_module,
         "TransientAttachmentCleanupWorker",
-        ForbiddenCleanupWorker,
+        CountingCleanupWorker,
     )
 
     async with app_module.lifespan(app_module.app):
-        assert len(app_module._background_tasks) == 2
-        assert cleanup_constructions == 0
+        assert len(app_module._background_tasks) == 3
+        assert cleanup_constructions == 1
 
     assert app_module._background_tasks == []

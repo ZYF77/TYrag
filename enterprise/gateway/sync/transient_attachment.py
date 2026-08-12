@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import PurePath
 from typing import Any, Awaitable, Callable, Protocol
+from urllib.parse import quote
 
 import aiosqlite
 from fastapi import APIRouter, Depends, Request
@@ -39,6 +40,7 @@ from enterprise.gateway.query import v2_store
 from enterprise.gateway.sync.source_adapter import (
     S3SourceAdapter,
     SourceFile,
+    SourceHashMismatch,
     SourceTooLarge,
 )
 
@@ -51,9 +53,7 @@ DEFAULT_MAX_DOWNLOADS = 1
 DEFAULT_RETRY_ATTEMPTS = 3
 DEFAULT_CLEANUP_INTERVAL_SECONDS = 60
 DEFAULT_REQUEST_OVERHEAD_BYTES = 64 * 1024
-ATTACHMENT_NOT_IMPLEMENTED_MESSAGE = (
-    "Transient attachment is planned but not enabled"
-)
+ATTACHMENT_DISABLED_MESSAGE = "Transient attachment storage is unavailable"
 
 ALLOWED_MEDIA_TYPES: dict[str, frozenset[str]] = {
     ".csv": frozenset({"text/csv"}),
@@ -327,6 +327,7 @@ def _safe_file_name(file_name: str) -> tuple[str, str]:
         or file_name in {".", ".."}
         or "/" in file_name
         or "\\" in file_name
+        or any(ord(char) < 0x20 or ord(char) == 0x7F for char in file_name)
         or PurePath(file_name).name != file_name
     ):
         raise TransientAttachmentError(
@@ -613,12 +614,44 @@ class TransientAttachmentService:
         )
         await self.db.commit()
         record = await self._record_or_not_found(attachment_id)
-        ticket = await self.issue_download_ticket(
-            attachment_id=attachment_id,
-            tenant_id=tenant_id,
-            business_user_id=business_user_id,
-            request_id=request_id,
-        )
+        try:
+            ticket = await self.issue_download_ticket(
+                attachment_id=attachment_id,
+                tenant_id=tenant_id,
+                business_user_id=business_user_id,
+                request_id=request_id,
+            )
+        except TransientAttachmentError as exc:
+            try:
+                await self._schedule_cleanup(
+                    attachment_id=attachment_id,
+                    tenant_id=tenant_id,
+                    conversation_id=conversation_id,
+                    business_user_id=business_user_id,
+                    error_code=exc.code,
+                    request_id=request_id,
+                )
+            except Exception:
+                logger.warning("Transient attachment cleanup scheduling failed")
+            raise
+        except Exception as exc:
+            try:
+                await self._schedule_cleanup(
+                    attachment_id=attachment_id,
+                    tenant_id=tenant_id,
+                    conversation_id=conversation_id,
+                    business_user_id=business_user_id,
+                    error_code="CONVERSATION_UNAVAILABLE",
+                    request_id=request_id,
+                )
+            except Exception:
+                logger.warning("Transient attachment cleanup scheduling failed")
+            raise TransientAttachmentError(
+                "CONVERSATION_UNAVAILABLE",
+                503,
+                "Conversation history is temporarily unavailable",
+                retryable=True,
+            ) from exc
         return record, ticket
 
     async def _mark_upload_failed(
@@ -630,16 +663,18 @@ class TransientAttachmentService:
         error_code: str,
         request_id: str | None,
     ) -> None:
+        now = self._now().isoformat()
         await self.db.execute(
             """UPDATE ext_transient_attachment
-               SET status='upload_failed', upload_attempts=?,
+               SET status='delete_retry', upload_attempts=?, next_retry_at=?,
                    last_error_code=?, last_error_message=?, updated_at=?
                WHERE attachment_id=?""",
             (
                 attachment_retry_attempts(),
+                now,
                 error_code,
                 "Object storage operation failed",
-                utc_now().isoformat(),
+                now,
                 attachment_id,
             ),
         )
@@ -656,6 +691,43 @@ class TransientAttachmentService:
                 "errorCode": error_code,
                 "attempts": attachment_retry_attempts(),
             },
+        )
+        await self.db.commit()
+
+    async def _schedule_cleanup(
+        self,
+        *,
+        attachment_id: str,
+        tenant_id: str,
+        conversation_id: str,
+        business_user_id: str,
+        error_code: str,
+        request_id: str | None,
+    ) -> None:
+        now = self._now().isoformat()
+        await self.db.execute(
+            """UPDATE ext_transient_attachment
+               SET status='delete_retry', next_retry_at=?,
+                   last_error_code=?, last_error_message=?, updated_at=?
+               WHERE attachment_id=?""",
+            (
+                now,
+                error_code,
+                "Attachment cleanup is scheduled",
+                now,
+                attachment_id,
+            ),
+        )
+        await _audit(
+            self.db,
+            attachment_id=attachment_id,
+            tenant_id=tenant_id,
+            conversation_id=conversation_id,
+            business_user_id=business_user_id,
+            action="cleanup",
+            outcome="scheduled",
+            request_id=request_id,
+            metadata={"errorCode": error_code},
         )
         await self.db.commit()
 
@@ -864,11 +936,21 @@ class TransientAttachmentService:
                     "ATTACHMENT_STORAGE_CORRUPT",
                     502,
                     "Attachment storage content failed validation",
-                    retryable=True,
+                    retryable=False,
                 )
         except TransientAttachmentError:
             await self._release_claim(row, claim_time, request_id, "ATTACHMENT_STORAGE_CORRUPT")
             raise
+        except (SourceHashMismatch, SourceTooLarge) as exc:
+            await self._release_claim(
+                row, claim_time, request_id, "ATTACHMENT_STORAGE_CORRUPT"
+            )
+            raise TransientAttachmentError(
+                "ATTACHMENT_STORAGE_CORRUPT",
+                502,
+                "Attachment storage content failed validation",
+                retryable=False,
+            ) from exc
         except Exception as exc:
             await self._release_claim(
                 row, claim_time, request_id, "ATTACHMENT_STORAGE_UNAVAILABLE"
@@ -1106,9 +1188,10 @@ class TransientAttachmentService:
         now_iso = now.isoformat()
         async with self.db.execute(
             """SELECT * FROM ext_transient_attachment
-               WHERE (expires_at<=? AND status IN ('active', 'uploading', 'upload_failed'))
-                  OR (status='delete_retry' AND
-                      (next_retry_at IS NULL OR next_retry_at<=?))
+               WHERE (expires_at<=? AND status IN
+                      ('active', 'uploading', 'upload_failed', 'expired'))
+                   OR (status='delete_retry' AND
+                       (next_retry_at IS NULL OR next_retry_at<=?))
                ORDER BY expires_at ASC LIMIT ?""",
             (now_iso, now_iso, max(1, min(limit, 1000))),
         ) as cursor:
@@ -1259,7 +1342,7 @@ async def optional_user_principal(request: Request) -> UserPrincipal | None:
     )
 
 
-router = APIRouter(prefix="/enterprise/api/v2", tags=["transient-attachments"])
+router = APIRouter(prefix="/enterprise/api/v2", tags=["attachments"])
 
 
 def _error(exc: TransientAttachmentError, request_id: str) -> JSONResponse:
@@ -1274,12 +1357,13 @@ def _error(exc: TransientAttachmentError, request_id: str) -> JSONResponse:
     )
 
 
-def _not_implemented(request_id: str) -> JSONResponse:
+def _disabled(request_id: str) -> JSONResponse:
     return _error(
         TransientAttachmentError(
-            "ATTACHMENT_NOT_IMPLEMENTED",
-            501,
-            ATTACHMENT_NOT_IMPLEMENTED_MESSAGE,
+            "ATTACHMENT_STORAGE_UNAVAILABLE",
+            503,
+            ATTACHMENT_DISABLED_MESSAGE,
+            retryable=True,
         ),
         request_id,
     )
@@ -1344,7 +1428,7 @@ class TransientAttachmentBodyLimitMiddleware:
 
         request_id = str(uuid.uuid4())
         if not config.transient_attachments_enabled:
-            response = _not_implemented(request_id)
+            response = _disabled(request_id)
             await response(scope, receive, send)
             return
 
@@ -1410,7 +1494,19 @@ class TransientAttachmentBodyLimitMiddleware:
 
 
 def _safe_download_name(file_name: str) -> str:
-    return PurePath(file_name).name.replace('"', "_")
+    name = PurePath(file_name).name.replace('"', "_").replace("\\", "_")
+    if not name or any(ord(char) < 0x20 or ord(char) == 0x7F for char in name):
+        return "attachment"
+    return name
+
+
+def _content_disposition(file_name: str) -> str:
+    safe_name = _safe_download_name(file_name)
+    ascii_name = "".join(char if ord(char) < 0x80 else "_" for char in safe_name)
+    return (
+        f'attachment; filename="{ascii_name or "attachment"}"; '
+        f"filename*=UTF-8''{quote(safe_name, safe='')}"
+    )
 
 
 def _attachment_payload(
@@ -1443,7 +1539,7 @@ def _attachment_payload(
 @router.post(
     "/conversations/{conversation_id}/attachments",
     status_code=201,
-    include_in_schema=False,
+    operation_id="v2CreateConversationAttachment",
 )
 async def create_transient_attachment(
     conversation_id: str,
@@ -1462,22 +1558,18 @@ async def create_transient_attachment(
         business_user_id=principal.business_user_id,
     )
     if not conversation:
-        return JSONResponse(
-            status_code=404,
-            content={
-                "code": "CONVERSATION_NOT_FOUND",
-                "message": "Conversation not found",
-                "requestId": request_id,
-            },
+        return _error(
+            TransientAttachmentError(
+                "CONVERSATION_NOT_FOUND", 404, "Conversation not found"
+            ),
+            request_id,
         )
     if conversation["status"] == "archived":
-        return JSONResponse(
-            status_code=409,
-            content={
-                "code": "CONVERSATION_ARCHIVED",
-                "message": "Conversation is archived",
-                "requestId": request_id,
-            },
+        return _error(
+            TransientAttachmentError(
+                "CONVERSATION_ARCHIVED", 409, "Conversation is archived"
+            ),
+            request_id,
         )
     try:
         service = TransientAttachmentService(db, storage)
@@ -1495,7 +1587,10 @@ async def create_transient_attachment(
     return _attachment_payload(request, record, ticket)
 
 
-@router.post("/attachments/{attachment_id}/ticket", include_in_schema=False)
+@router.post(
+    "/attachments/{attachment_id}/ticket",
+    operation_id="v2IssueAttachmentTicket",
+)
 async def issue_transient_attachment_ticket(
     attachment_id: str,
     request: Request,
@@ -1530,8 +1625,8 @@ async def issue_transient_attachment_ticket(
 
 @router.get(
     "/attachments/{attachment_id}/download/{ticket}",
-    include_in_schema=False,
     name="download_transient_attachment",
+    operation_id="v2DownloadAttachment",
 )
 async def download_transient_attachment(
     attachment_id: str,
@@ -1556,9 +1651,7 @@ async def download_transient_attachment(
         media_type=downloaded.record.media_type,
         headers={
             "Content-Length": str(downloaded.record.size_bytes),
-            "Content-Disposition": (
-                f'attachment; filename="{_safe_download_name(downloaded.record.file_name)}"'
-            ),
+            "Content-Disposition": _content_disposition(downloaded.record.file_name),
             "Cache-Control": "private, no-store",
             "ETag": downloaded.record.sha256,
             "X-Attachment-Id": downloaded.record.attachment_id,
