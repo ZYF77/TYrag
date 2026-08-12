@@ -30,6 +30,9 @@
     ["/conversations/{conversationId}/messages", "get"],
     ["/conversations/{conversationId}/messages", "post"],
     ["/conversations/{conversationId}/suggestions", "get"],
+    ["/conversations/{conversationId}/attachments", "post"],
+    ["/attachments/{attachmentId}/ticket", "post"],
+    ["/attachments/{attachmentId}/download/{ticket}", "get"],
     ["/citations/{citationId}", "get"],
     ["/citations/{citationId}/source", "get"]
   ]

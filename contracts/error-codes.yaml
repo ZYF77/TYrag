@@ -168,3 +168,39 @@ errors:
   - code: NO_RELIABLE_EVIDENCE
     http_status: 200
     retryable: false
+  - code: ATTACHMENT_EXTENSION_INVALID
+    http_status: 422
+    retryable: false
+  - code: ATTACHMENT_MIME_NOT_ALLOWED
+    http_status: 422
+    retryable: false
+  - code: ATTACHMENT_EMPTY
+    http_status: 422
+    retryable: false
+  - code: ATTACHMENT_CONTENT_INVALID
+    http_status: 422
+    retryable: false
+  - code: ATTACHMENT_TOO_LARGE
+    http_status: 413
+    retryable: false
+  - code: ATTACHMENT_NOT_FOUND
+    http_status: 404
+    retryable: false
+  - code: ATTACHMENT_FORBIDDEN
+    http_status: 403
+    retryable: false
+  - code: ATTACHMENT_EXPIRED
+    http_status: 410
+    retryable: false
+  - code: ATTACHMENT_DOWNLOAD_LIMIT
+    http_status: 410
+    retryable: false
+  - code: ATTACHMENT_TICKET_INVALID
+    http_status: 404
+    retryable: false
+  - code: ATTACHMENT_STORAGE_CORRUPT
+    http_status: 502
+    retryable: false
+  - code: ATTACHMENT_STORAGE_UNAVAILABLE
+    http_status: 503
+    retryable: true

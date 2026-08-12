@@ -1,4 +1,4 @@
-# P0 External Integration Contract Rebaseline v2 候选基线
+# External Integration Contract v2.1 候选基线
 
 ## 1. Preflight
 
@@ -70,7 +70,7 @@ P0 为 server-side rule suggestions。GET 返回 `suggestionId,label,displayProm
 ## 11. P0 / P1 / P2 Freeze
 
 - P0：document ingestion/status/lifecycle、credential binding/HMAC/replay、idempotency A-D、conversation list/detail/messages/context/archive、retrieval context、clientMessageId、SSE/JSON、rule suggestions、strict DTO、server prompt、citation snapshot。
-- P1：outbound callback、transient attachment (`indexPolicy=never`、conversation scoped、TTL)、只读 Business PG/TimeSeries adapter、hybrid fusion。
+- P1：outbound callback、transient attachment (`indexPolicy=never`、conversation scoped、TTL)、只读 Business PG/TimeSeries adapter、hybrid fusion；v2.1 仅将 transient attachment 提升为本阶段正式公开能力，其余 P1 项仍为 planned。
 - P2：LLM suggestions、advanced memory、advanced agent behavior。
 
 唯一持久向量入口是 Document Ingestion Pipeline。attachments、DB/TimeSeries records、messages、summary 禁止持久 embedding。DB/TimeSeries 只允许 query-time read-only 白名单 adapter，不做 Text-to-SQL。
@@ -83,7 +83,10 @@ dead-letter。callback 失败只影响 delivery 状态，绝不回滚已经成�
 
 P1 attachment 固定 conversation scoped、`indexPolicy=never`、TTL 24 小时；过期后物理
 删除临时对象和提取文本。它不得调用 Document Ingestion Pipeline，不创建持久
-embedding，也不得跨会话复用。
+embedding，也不得跨会话复用。v2.1 正式公开 create、ticket、download 三个接口；
+create/ticket 必须使用 User JWT，download ticket 是有界 bearer capability，可选 JWT
+一旦提供就必须与 tenant/business user 一致。所有权、会话状态、TTL、下载次数、对象
+完整性和失败清理均由 Gateway 服务端校验。
 
 ## 12. Current vs Required Matrix
 
@@ -99,12 +102,13 @@ embedding，也不得跨会话复用。
 | context retrieval filter | MISSING | IMPLEMENTED（无 context 不发送） |
 | clientMessageId | MISSING | IMPLEMENTED |
 | rule suggestions | MISSING | IMPLEMENTED |
-| callback/attachment/adapters | PLANNED | PLANNED (P1) |
+| callback/adapters | PLANNED | PLANNED (P1) |
+| transient attachment | PLANNED | IMPLEMENTED（v2.1；conversation scoped、TTL、`indexPolicy=never`） |
 | LLM suggestions/advanced memory | OUT_OF_SCOPE | PLANNED (P2) |
 
 ## 13. OpenAPI Delta
 
-新增 `integration-openapi-v2.yaml` 与 `/enterprise/api/v2` server；删除 v2 外部内部 ID；添加 HMAC headers、安全 binding 语义、document status scope、conversation list/context/messages/archive/suggestions、strict oneOf、cursor objects；P1 attachments 明确 planned。
+新增 `integration-openapi-v2.yaml` 与 `/enterprise/api/v2` server；删除 v2 外部内部 ID；添加 HMAC headers、安全 binding 语义、document status scope、conversation list/context/messages/archive/suggestions、strict oneOf、cursor objects。v2.1 保持 `/enterprise/api/v2` 路径不变，以 additive minor version 正式公开 transient attachment create/ticket/download；callback 与其他 P1 项仍为 planned。
 
 ## 14. Docs / Task Rebaseline
 
@@ -138,6 +142,6 @@ Contract/P0/Integration/All profiles 和 C-01..C-20、E-01..E-16 见任务文档
 
 ## 18. Remaining Open Questions
 
-无影响 P0 接口实现的契约问题；本文件冻结 wire contract v2.0.0，但当前实现只是一体化候选基线，不是生产验收。候选仍需真实 Redis/Valkey 跨实例测试；真实设备管理系统 Asset Registry 和 RAGFlow 环境缺失时 Integration Gate 保持 exit 3。Gateway run/conversation 状态仍使用 Enterprise 自有 SQLite，支持单 Gateway/多 worker 的候选部署；生产多副本 PostgreSQL repository、迁移、连接池和恢复机制另立任务，绝不使用客户业务 PG 或 RAGFlow 官方 DB 承载 Gateway 状态。
+无影响本阶段接口实现的契约问题；本文件冻结 wire contract v2.1.0，但当前实现只是一体化候选基线，不是生产验收。候选仍需真实 Redis/Valkey 跨实例测试；真实设备管理系统 Asset Registry、对象存储和 RAGFlow 环境缺失时 Integration Gate 保持 exit 3。Gateway run/conversation/attachment metadata 状态仍使用 Enterprise 自有 SQLite，支持单 Gateway/多 worker 的候选部署；生产多副本 PostgreSQL repository、迁移、连接池和恢复机制另立任务，绝不使用客户业务 PG 或 RAGFlow 官方 DB 承载 Gateway 状态。
 
 CONTRACT FROZEN

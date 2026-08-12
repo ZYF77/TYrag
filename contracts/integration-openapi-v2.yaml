@@ -1,16 +1,19 @@
 openapi: 3.1.0
 info:
   title: TYrag External Integration API
-  version: 2.0.0
+  version: 2.1.0
   description: >-
-    Frozen P0 contract for the Equipment Management System. Version 1 remains
-    wire compatible; new consumers use this API and never receive integration
-    engine internal identifiers.
+    Frozen external contract for the Equipment Management System. Version 2.1
+    additively promotes conversation-scoped transient attachments while keeping
+    the v2 path and all v2.0 operations wire compatible. Version 1 remains wire
+    compatible; external consumers never receive integration engine internal
+    identifiers.
 servers:
   - url: /enterprise/api/v2
 tags:
   - name: documents
   - name: conversations
+  - name: attachments
   - name: citations
 paths:
   /documents:
@@ -348,11 +351,15 @@ paths:
         '404': { $ref: '#/components/responses/Error' }
   /conversations/{conversationId}/attachments:
     post:
-      tags: [conversations]
+      tags: [attachments]
       summary: Add a transient conversation-scoped attachment
-      description: P1 only; indexPolicy is always never and no persistent embedding is created.
+      description: >-
+        Creates a short-lived attachment owned by the authenticated tenant,
+        business user, and conversation. indexPolicy is always never; the object
+        never enters Document Ingestion and no persistent embedding is created.
+        The response includes a bounded download ticket.
       operationId: v2CreateConversationAttachment
-      x-status: planned
+      x-status: implemented
       security:
         - BearerAuth: []
       parameters:
@@ -362,15 +369,92 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              additionalProperties: false
-              required: [fileName, mediaType, content]
-              properties:
-                fileName: { type: string, minLength: 1, maxLength: 255 }
-                mediaType: { type: string, minLength: 1, maxLength: 128 }
-                content: { type: string, contentEncoding: base64 }
+              $ref: '#/components/schemas/CreateAttachmentRequest'
       responses:
-        '501': { $ref: '#/components/responses/Error' }
+        '201':
+          description: Transient attachment created with a bounded download ticket
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransientAttachment'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '413': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /attachments/{attachmentId}/ticket:
+    post:
+      tags: [attachments]
+      summary: Issue a bounded download ticket for an owned attachment
+      description: >-
+        Revalidates tenant, business-user, conversation, expiry, and download
+        limits before returning a new bounded ticket. The attachment remains
+        conversation scoped and indexPolicy remains never.
+      operationId: v2IssueAttachmentTicket
+      x-status: implemented
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AttachmentIdPath'
+      responses:
+        '200':
+          description: Attachment metadata with a newly issued download ticket
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransientAttachment'
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '410': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /attachments/{attachmentId}/download/{ticket}:
+    get:
+      tags: [attachments]
+      summary: Download an attachment through a bounded capability ticket
+      description: >-
+        The ticket is a bearer capability bound to the attachment owner and
+        conversation. A JWT is optional; when supplied it must resolve to the
+        same tenant and business user. Tickets and download limits are enforced
+        server side, and responses are never cacheable.
+      operationId: v2DownloadAttachment
+      x-status: implemented
+      security:
+        - {}
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AttachmentIdPath'
+        - name: ticket
+          in: path
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 256 }
+      responses:
+        '200':
+          description: Attachment bytes in the media type recorded at creation
+          headers:
+            Content-Length:
+              schema: { type: integer, minimum: 1 }
+            Content-Disposition:
+              schema: { type: string }
+            Cache-Control:
+              schema: { type: string, const: 'private, no-store' }
+            ETag:
+              schema: { type: string, pattern: '^[0-9a-f]{64}$' }
+            X-Attachment-Id:
+              schema: { type: string }
+          content:
+            '*/*':
+              schema: { type: string, format: binary }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '410': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /citations/{citationId}:
     get:
       tags: [citations]
@@ -474,6 +558,11 @@ components:
       schema: { type: string, minLength: 1, maxLength: 128 }
     ConversationIdPath:
       name: conversationId
+      in: path
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 128 }
+    AttachmentIdPath:
+      name: attachmentId
       in: path
       required: true
       schema: { type: string, minLength: 1, maxLength: 128 }
@@ -812,6 +901,57 @@ components:
         displayPrompt: { type: string }
         contextVersion: { type: integer, minimum: 0 }
         expiresAt: { type: [string, 'null'], format: date-time }
+    CreateAttachmentRequest:
+      type: object
+      additionalProperties: false
+      required: [fileName, mediaType, content]
+      properties:
+        fileName:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Basename only; extension must match the declared mediaType.
+        mediaType:
+          type: string
+          enum:
+            - application/json
+            - application/pdf
+            - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+            - application/vnd.openxmlformats-officedocument.wordprocessingml.document
+            - image/jpeg
+            - image/png
+            - text/csv
+            - text/plain
+        content: { type: string, minLength: 1, contentEncoding: base64 }
+    TransientAttachment:
+      type: object
+      additionalProperties: false
+      required:
+        - attachmentId
+        - conversationId
+        - fileName
+        - mediaType
+        - sizeBytes
+        - sha256
+        - expiresAt
+        - indexPolicy
+        - maxDownloads
+        - downloadCount
+        - downloadUrl
+        - ticketExpiresAt
+      properties:
+        attachmentId: { type: string, minLength: 1, maxLength: 128 }
+        conversationId: { type: string, minLength: 1, maxLength: 128 }
+        fileName: { type: string, minLength: 1, maxLength: 255 }
+        mediaType: { type: string, minLength: 1, maxLength: 128 }
+        sizeBytes: { type: integer, minimum: 1 }
+        sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+        expiresAt: { type: string, format: date-time }
+        indexPolicy: { type: string, const: never }
+        maxDownloads: { type: integer, minimum: 1, maximum: 100 }
+        downloadCount: { type: integer, minimum: 0, maximum: 100 }
+        downloadUrl: { type: string, format: uri }
+        ticketExpiresAt: { type: string, format: date-time }
     CredentialBinding:
       type: object
       additionalProperties: false

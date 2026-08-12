@@ -324,15 +324,11 @@ def test_v2_wire_names_are_camel_case_except_metadata():
     )
 
 
-def test_p0_operations_are_implemented_and_p1_attachment_is_planned():
+def test_required_operations_are_implemented():
     _, spec = _contract()
     paths = spec["paths"]
     for path, method in _expectations()["requiredOperations"]:
         assert paths[path][method]["x-status"] == "implemented", f"{method} {path}"
-    assert (
-        paths["/conversations/{conversationId}/attachments"]["post"]["x-status"]
-        == "planned"
-    )
     source = paths["/citations/{citationId}/source"]["get"]
     assert set(source["responses"]) >= {"200", "206", "404", "409", "416"}
     assert {item["name"] for item in source["parameters"]} >= {
@@ -414,6 +410,32 @@ def test_p1_callback_and_attachment_invariants_are_explicit():
     assert "indexPolicy is always never" in attachment["description"]
 
 
+def test_v21_attachment_surface_and_security_are_frozen():
+    _, spec = _contract()
+    assert spec["info"]["version"] == "2.1.0"
+    paths = spec["paths"]
+    create = paths["/conversations/{conversationId}/attachments"]["post"]
+    ticket = paths["/attachments/{attachmentId}/ticket"]["post"]
+    download = paths["/attachments/{attachmentId}/download/{ticket}"]["get"]
+    assert create["security"] == [{"BearerAuth": []}]
+    assert ticket["security"] == [{"BearerAuth": []}]
+    assert download["security"] == [{}, {"BearerAuth": []}]
+    assert set(create["responses"]) >= {
+        "201", "401", "403", "404", "409", "413", "422", "503"
+    }
+    assert set(ticket["responses"]) >= {
+        "200", "401", "403", "404", "409", "410", "503"
+    }
+    assert set(download["responses"]) >= {
+        "200", "401", "403", "404", "409", "410", "502", "503"
+    }
+    response = spec["components"]["schemas"]["TransientAttachment"]
+    assert response["properties"]["indexPolicy"]["const"] == "never"
+    assert {"downloadUrl", "ticketExpiresAt", "expiresAt", "sha256"} <= set(
+        response["required"]
+    )
+
+
 def test_error_code_http_statuses_match_the_v2_freeze():
     errors = _load_document(ROOT / "contracts" / "error-codes.yaml")["errors"]
     by_code = {item["code"]: item["http_status"] for item in errors}
@@ -426,6 +448,12 @@ def test_error_code_http_statuses_match_the_v2_freeze():
         "SUGGESTION_STALE",
     ):
         assert by_code[code] == 409
+    assert by_code["ATTACHMENT_FORBIDDEN"] == 403
+    assert by_code["ATTACHMENT_NOT_FOUND"] == 404
+    assert by_code["ATTACHMENT_EXPIRED"] == 410
+    assert by_code["ATTACHMENT_DOWNLOAD_LIMIT"] == 410
+    assert by_code["ATTACHMENT_TOO_LARGE"] == 413
+    assert by_code["ATTACHMENT_STORAGE_UNAVAILABLE"] == 503
 
 
 def test_freeze_has_no_p0_open_question_and_ends_with_the_verdict():
@@ -438,4 +466,4 @@ def test_freeze_has_no_p0_open_question_and_ends_with_the_verdict():
     ]
     assert lines[-1] == "CONTRACT FROZEN"
     assert "## 18. Remaining Open Questions" in lines
-    assert any("无影响 P0 接口实现的契约问题" in line for line in lines)
+    assert any("无影响本阶段接口实现的契约问题" in line for line in lines)
