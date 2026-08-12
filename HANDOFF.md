@@ -2,21 +2,22 @@
 
 > 检查点日期：2026-08-12（Asia/Shanghai）
 >
-> 本文件用于让新的 Codex Agent 在看不到原对话时恢复当前任务。它记录的是当前仓库、Git 状态和已暂停并行 worktree 的事实，不代表本阶段已经封版验收。
+> 本文件用于让新的 Codex Agent 在看不到原对话时恢复当前任务。2026-08-12 已恢复并完成 W1-W4 代码集成；真实外部依赖联调仍未完成，因此不代表客户 Integration Gate 已通过。
 
 ## 1. 恢复结论
 
 - 当前主工作树：`C:\CodingProgram\WAES\TYrag`。
 - 当前分支：`codex/device-integration-plan`。
-- 当前 HEAD：`d306e11`。
-- 相对 `origin/codex/device-integration-plan`：ahead 4 commits。
+- 最新实施提交：`83ed2dc`；若本文件已单独提交，实际 HEAD 会再多一个文档 commit，请以 `git rev-parse HEAD` 为准。
+- 在提交本次 HANDOFF 更新前，相对 `origin/codex/device-integration-plan` ahead 10 commits；本文件提交后应为 ahead 11。
 - `master` / `origin/master` 仍在 `ae47e86`；不要把当前执行分支误认为 master。
 - 主工作树的 tracked 文件没有未提交修改；当前只有未跟踪目录 `output/` 和 `tmp/`。
 - `output/`、`tmp/` 是测试/验收运行产物，包含无效或临时内容，当前不得加入提交，也不要批量删除。
-- 本轮 checkpoint 没有执行 commit、push、reset、checkout 或丢弃修改。
-- W1、W2、W3、W4 四个相关子任务已经由用户暂停，状态为 `interrupted/idle`；它们的未提交修改仍保留在各自 worktree，尚未合并到当前主工作树。
+- 已创建交接 checkpoint `008ecab chore: checkpoint current implementation before codex handoff`。
+- W1、W2、W3、W4 均已由 Luna max 完成、自审、测试并由 Lead 集成；相关 worktree 当前无未提交修改。
+- 本轮没有 push、reset、checkout 或丢弃已有修改。
 
-当前最重要的事实：主分支已经冻结了 v2.1.0 Attachment 契约和 Asset Registry Stub 的一对一测试边界，但 W1/W2/W3/W4 的运行时代码和 Console 仍未由 Lead 审核、提交、合并。因此，当前不能宣称“固定 profile、正式 Attachment、formal 查询一对一、Console 或完整联调已完成”。
+当前最重要的事实：固定 profile、formal 一对一身份、正式 Attachment runtime 和 Console 已进入当前分支并通过离线/Stub/构建 Gate；但 preflight 显示真实 FILE_SHARE、共享数据库、HMAC、RAGFlow、Asset Registry、Gateway、Redis 均未配置，所以不能宣称 E2E-01/E2E-02 或客户正式 Integration Gate 已通过。
 
 ## 2. 本轮任务原始目标
 
@@ -102,87 +103,22 @@
 - 更新 `enterprise/scripts/wp04_phase2_e2e.py`。
 - 让两个 fixture 使用不同且明确的一对一设备身份，避免违反新冻结关系。
 
-## 5. 部分完成内容：已暂停的并行 worktree
+## 5. 已完成并集成的并行工作包
 
-以下修改均来自基线 `501dde7`，不是当前主工作树的未提交修改。恢复时必须先逐个审查 diff、运行测试、由 Lead 创建聚焦 commit，再按顺序 cherry-pick/合并；不要直接复制目录，也不要假设它们互相兼容。
-
-### W1：固定 parsing profile
-
-- worktree：`C:\Users\Lemon\.codex\worktrees\369e\TYrag`
-- HEAD：`501dde7`，detached HEAD；未提交修改仍在现场。
-- 修改范围：
-  - `enterprise/gateway/parsing/historical_import.py`
-  - `enterprise/gateway/quality/gate.py`
-  - `enterprise/gateway/quality/router.py`
-  - `enterprise/gateway/quality/routing.py`
-  - `enterprise/gateway/quality/worker.py`
-  - `enterprise/gateway/sync/readiness.py`
-  - `enterprise/gateway/sync/sync_service.py`
-  - 4 个同主题测试文件：`test_file_share_v3_status.py`、`test_m3e_historical_import.py`、`test_wp03_parser_application.py`、`test_wp03_phase2.py`
-- 已实现方向：服务端选择并持久化 profile/version；客户端 override 不生效；SyncService、quality worker/API、readiness、promotion 使用 parser evidence；RAGFlow terminal 配置 readback mismatch 不通过；warn mode 不能绕过 parser 硬门。
-- 现场规模：11 个文件，约 350 行净变化（以当前 worktree status/diff 为准）。
-- 已报告测试：定向回归 143 项通过；`compileall` 通过；`git diff --check` 通过。
-- 未完成：最终自审和聚焦 commit 未完成；尚未在当前主分支集成后做 Lead 统一回归。
-- 审查重点：profile 版本在首次入库/重处理间是否稳定；旧数据 `legacy_unverified` 是否会被错误放行；与 W2/W3 的调用边界是否无冲突；是否有任何不必要的上游/契约影响。
-
-### W2：Gateway equipment/fixed asset 一对一
-
-- worktree：`C:\Users\Lemon\.codex\worktrees\2f5d\TYrag`
-- HEAD：`501dde7`，detached HEAD；未提交修改仍在现场。
-- 修改范围：
-  - `enterprise/gateway/asset_registry.py`
-  - `enterprise/gateway/query/formal_router.py`
-  - `enterprise/tests/test_formal_query.py`
-  - 新增但尚未提交：`enterprise/tests/test_w2_asset_registry.py`
-- 已实现方向：统一验证 tenant/identifier；equipment-only、fixed-only 和双标识一致解析；跨 tenant/冲突/歧义/漂移 fail closed；formal conversation 创建时 canonicalize，问询前重解析；检索 scope 只接受 canonical identity 精确匹配。
-- 已报告测试：formal v1 定向回归 39 项通过；新增 Registry 边界测试在暂停前正在补充，不能视为已通过。
-- 未完成：新增 Registry 测试最终运行、diff 自审、聚焦 commit、与主分支集成均未完成。
-- 审查重点：不引入 migration；不改变主契约；确认错误码映射与既有 formal v2/v1 调用方一致；确认 candidate identity 过滤不会误伤合法历史 fixture；确认 Registry unavailable/not found/ambiguous/tenant mismatch 的状态码稳定。
-
-### W3：Transient Attachment 运行时
-
-- worktree：`C:\Users\Lemon\.codex\worktrees\955b\TYrag`
-- 分支：`codex/w3-transient-attachment`；HEAD `501dde7`；未提交修改仍在现场。
-- 修改范围：
-  - `enterprise/gateway/app.py`
-  - `enterprise/gateway/config.py`
-  - `enterprise/gateway/sync/transient_attachment.py`
-  - `enterprise/tests/test_config.py`
-  - `enterprise/tests/test_transient_attachment.py`
-- 已实现方向：默认启用正式三路由；保留显式运维熔断时的 503 `ATTACHMENT_STORAGE_UNAVAILABLE` 且 `retryable=true`；统一 create 错误 envelope；ticket/匿名 download/owner binding；对象完整性错误；上传/ticket 失败清理 retry；文件名响应头安全处理；后台 cleanup worker 无需依赖默认 flag 才启动。
-- 已报告测试：定向 Attachment 链路 32 passed；`git diff --check` 通过。
-- 未完成：会话和 FILE_SHARE 回归在暂停时仍未完成；最终 self-review、聚焦 commit、主分支合并均未完成。
-- 审查重点：运行时响应字段必须与 `0008ce8` 契约一致；正式接口不能返回旧的 501/`ATTACHMENT_NOT_IMPLEMENTED`；attachment 故障隔离不能影响主链；确认默认启用的配置行为与现有部署环境兼容；确认下载 ticket 的单次/次数/TTL/owner 约束。
-
-### W4：Enterprise Console
-
-- worktree：`C:\Users\Lemon\.codex\worktrees\bf38\TYrag`
-- HEAD：`501dde7`，detached HEAD；未提交修改仍在现场。
-- 修改范围：
-  - 已修改：`enterprise/web/src/App.tsx`、`enterprise/web/src/__tests__/V2Client.test.ts`、`enterprise/web/src/api/mocks/handlers.ts`、`enterprise/web/src/api/v2Client.ts`、`enterprise/web/src/api/v2Types.ts`、`enterprise/web/src/components/demo/DemoSidebar.tsx`、`enterprise/web/src/components/harness/TransientAttachmentPanel.tsx`、`enterprise/web/src/components/layout/Sidebar.tsx`、`enterprise/web/src/test-setup.ts`
-  - 新增但尚未提交：`enterprise/web/pnpm-workspace.yaml`、`enterprise/web/src/api/consoleTypes.ts`、`enterprise/web/src/pages/EnterpriseConsolePage.tsx`、`enterprise/web/src/pages/enterprise-console.css`
-- 已实现方向：`/console`/`VITE_UI_MODE=console` 入口；公开 health/auth/v3 FILE_SHARE client；conversation/history/citation 与 Attachment 诊断入口；模块局部错误隔离；只展示安全摘要，不展示 ticket、download URL、附件内容、secret 或内部 RAGFlow ID。
-- 未完成/受阻：worktree 无项目 `node_modules`；离线安装曾生成临时 `pnpm-lock.yaml`，该文件已由子任务移除；TypeScript、Vitest、build 未形成可采信通过证据；最终 self-review、commit、主分支合并未完成。
-- 审查重点：生产请求不能把 HMAC secret 放入浏览器；FILE_SHARE HMAC-only 路由若浏览器无签名应明确显示 unauthorized，不能伪造 healthy；检查 Console 是否只调用公开 Gateway；检查新增 `pnpm-workspace.yaml` 是否确属必要且不能替代根锁文件。
+- W2 `8af3cd1 fix: enforce tenant-scoped canonical asset identity`：Asset Registry 一对一 canonical identity、旧会话缺失字段补全、映射漂移/冲突/跨 tenant fail closed；工作包 79 passed。
+- W3 `7b0cf45 feat: enable formal transient attachment runtime`：正式三路由默认可见、TTL/票据/ownership/清理/完整性/错误 envelope；工作包 105 passed。
+- W1 `3b518ed fix: enforce stable parser profile evidence gate`：首次选定 profile/version 在重处理时保持稳定，客户端 override 无效，FILE_SHARE parser evidence/readback 是硬门，非 FILE_SHARE 保留兼容；工作包 180 passed。
+- W4 `368fb7d feat(web): add enterprise gateway console`：新增 `/console`，公开 Gateway 服务、FILE_SHARE、会话/history/citation、Attachment 独立诊断；TypeScript、129 项 Vitest 和 production build 通过。
+- W3 follow-up `83ed2dc fix: normalize attachment JWT error envelope`：JWT 401 补齐稳定 `retryable:false`；相关回归 63 passed。
+- Lead 已逐项审查并按 W2、W3、W1、W4 顺序集成；`app.py` 的 W1/W3 改动自动合并后已回归。
 
 ## 6. 尚未开始或尚未完成的工作
 
-### 尚未开始
-
-- W5：联调材料和最终验收报告。
-- Lead 对 W1-W4 的逐 commit 审查、冲突解决和统一集成。
-- 集成后的全量 Contract/P0/Enterprise/Console 回归。
-- 真实或明确标注的本地服务 preflight、FILE_SHARE E2E-01、formal v2 E2E-02。
-- Postman Collection/Environment 与最终代码、错误码、状态字段的一致性校对。
-- 最终设备对接协议、非敏感验收 artifact 和 deferred/blocked 清单的封版。
-
-### 部分完成但不能宣称通过
-
-- 主链当前只具备历史基线和已提交契约/Stub 修订，没有本轮 W1/W2 Gateway runtime 集成证据。
-- v2.1.0 Attachment 契约已冻结，但 W3 runtime 未合并；当前主工作树不能依据该契约宣称 Attachment 可运行。
-- 一对一 Stub/fixture 已提交，但 W2 formal query runtime 未合并。
-- Console 代码在独立 worktree 中，但没有可采信的 TypeScript/Vitest/build 结果。
-- 已有定向测试通过只代表各 worktree 某个中间现场，不代表当前 HEAD 的集成结果。
+- 真实 Integration preflight 当前 blocked：`fileShare`、`database`、`auth`、`ragflow`、`assetRegistry`、`gateway`、`redis` 均为 `missing`。
+- 因上述依赖未配置，E2E-01 FILE_SHARE 真实解析/索引/召回/citation 和 E2E-02 两轮问询/重启恢复/权限隔离尚未执行。
+- 真实 S3/MinIO Attachment 联调尚未执行；当前只有内存/Stub/ASGI 测试证据。
+- W5 尚需在环境就绪后校对 Postman/Environment、运行真实 E2E，并生成不含 secret 的最终验收 artifact；现有 `tmp/`、`output/` 不可作为最终证据提交。
+- 客户正式 Asset Registry 的实际响应字段、可用性和一对一数据质量仍需现场验证。
 
 ## 7. 关键架构、接口和数据模型决策
 
@@ -199,54 +135,44 @@
 
 ## 8. 当前已知问题和风险
 
-- 主分支和四个 worktree 基于不同的提交状态；直接合并可能产生契约、测试 fixture 或调用边界冲突，必须由 Lead 审查后集成。
-- W1/W2/W3/W4 都没有形成可直接 cherry-pick 的最终 commit；worktree 中的未提交修改是恢复材料，不能当作已经纳入 Git 历史。
-- 当前主分支的 Attachment route runtime 仍可能是旧的隐藏/501 行为，直到 W3 被审查并合并；契约和实现暂时不一致是已知风险。
-- 当前主分支的 formal Gateway 仍未接入 W2 严格 canonical identity；已提交的 Stub 约束不能替代 runtime 约束。
-- 固定 profile 的 readback 硬门仍未进入主分支；真实 RAGFlow parser/chunk/index/retrieval 尚未在本轮集成 commit 上验证。
-- Console 的前端依赖环境未准备好；不能把静态源码存在当作 build 通过。
-- 尚未执行本轮集成后的真实 FILE_SHARE、RAGFlow、Redis/Valkey、Enterprise DB、Asset Registry、对象存储和正式 JWT/HMAC 联调；外部依赖缺失时必须记录 blocked，不能伪造 pass。
+- 当前代码 Gate 通过不等于真实 Integration Gate；RAGFlow、Redis、Gateway、共享 DB、FILE_SHARE、Asset Registry、HMAC 环境缺失是当前唯一已证实的主阻塞。
+- 固定 profile 的真实 parser/chunk/index/readback、真实检索和 citation 尚未在当前 HEAD 上连接 RAGFlow 验证。
+- Attachment 尚未连接真实 S3/MinIO 验证对象一致性、清理与票据并发行为。
+- Console 在无服务侧 HMAC 时会如实显示 FILE_SHARE unauthorized；这不是 Console 故障，也不得把 HMAC secret 下放浏览器。
 - `output/`、`tmp/` 存在不可提交运行产物，并且部分路径权限可能导致递归枚举失败；不要为生成 checkpoint 而删除或移动它们。
 - 仓库里还有多个历史 worktree/分支（M1/M3/T3 等），不属于本轮 W1-W4；除非新的任务明确要求，不要清理或改写它们。
-- GitHub/PR 发布尚未执行；后续推送前需要重新确认远端认证和待推送 commit 范围，但本 checkpoint 不授权 push。
+- 本文件提交后当前分支应 ahead 11，尚未 push；推送前必须再次核对提交范围和远端认证。
 
 ## 9. 测试证据和未执行测试
 
 ### 本轮已有证据
 
-- v2.1.0 contract static/profile：此前 23 passed。
-- W2B Asset Registry Stub：8 passed；Python compile 检查通过。
-- W1 固定 profile：143 项定向回归通过；`compileall` 与 `git diff --check` 通过，但尚未 commit/集成。
-- W2 formal query：39 项定向回归通过；新增独立 Registry 边界测试在暂停时尚未完成最终运行。
-- W3 Attachment：32 项定向回归通过；`git diff --check` 通过，但 session/FILE_SHARE 回归尚未完成。
-- 在本轮 W1-W4 修改前，曾有旧基线 Enterprise/backend 与 web 测试通过记录；这些历史结果不能替代当前 HEAD 集成回归。
+- 当前 HEAD 定向 Contract/P0/profile/formal/Attachment 集合：284 passed，唯一失败是缺少 RAGFlow live 环境。
+- 当前 HEAD 全量 `enterprise/tests`：590 passed，3 failed；失败仅为两项 RAGFlow Integration 环境缺失和一项 Redis Integration 环境缺失。
+- W2+W3 首轮集成回归：102 passed。
+- W3 JWT envelope follow-up：63 passed。
+- Console：`tsc --noEmit` 通过；Vitest 18 files / 129 tests passed；Vite production build 通过。
+- `git diff --check` 通过；相对 `master` 没有修改 `ragflow/**`。
+- 变更 secret 扫描命中 5 处，均位于测试文件且含明确 test/fixture 标记；未发现真实凭据、私钥或生产 Token。
 
 ### 尚未执行或当前不能采信
 
-- W1-W4 合并到当前 HEAD 后的统一 pytest/compileall/diff check。
-- W2 新增 `test_w2_asset_registry.py` 的最终运行结果。
-- W3 的会话和 FILE_SHARE 相关回归。
-- W4 TypeScript、Vitest、build；当前缺少项目 `node_modules`。
-- 当前修改集上的完整 Contract/P0 profile。
-- 本阶段真实 preflight、E2E-01 文件入库/解析/检索、E2E-02 问询/重启恢复/权限隔离。
-- 最终 Postman/Newman smoke、secret scan、upstream change guard 和验收报告。
+- RAGFlow live contract 两项、Redis Integration 一项。
+- E2E-01、E2E-02、真实 S3/MinIO Attachment、真实客户 Asset Registry。
+- 最终 Postman/Newman smoke 和非敏感验收 artifact。
 
 ## 10. 恢复后的推荐执行顺序
 
-1. 先读取本文件、`AGENTS.md`、`docs/设备管理系统联调优先分阶段实施计划.md` 和 v2.1.0 契约；确认仍在 `codex/device-integration-plan`，不要切到 master。
-2. 对 W1、W2、W3、W4 分别执行 `git status`、`git diff --check`、定向测试和 diff 范围审查；不要先修改代码。
-3. 先完成 W1/W2/W3/W4 各自最终 self-review 和单一聚焦 commit。W1/W2/W3 属后端，W4 属 web；遇到跨范围需求先停下。
-4. Lead 按依赖集成：先 W1/W2/W3 的后端运行时，再 W4 Console；每次只集成一个可回滚 commit，并处理基线 `501dde7` 与当前 `d306e11` 的差异。
-5. 集成后运行契约静态测试、W1/W2/W3 定向测试、既有 FILE_SHARE/formal/session 回归、compileall 和 `git diff --check`；失败必须修复或明确 blocked，不能删测试。
-6. 重新核对 OpenAPI v2.1.0 与运行时 route visibility、auth、response/error envelope、`retryable` 和字段命名。
-7. 运行 W4 的 TypeScript/Vitest/build；若依赖缺失，只记录环境 blocked，不生成或提交新的 lock 文件。
-8. 再执行 preflight；区分 configured/healthy/unavailable/unauthorized。只有真实依赖可用时才执行 E2E-01/E2E-02；否则保留 blocked 证据。
-9. 最后由 W5/Lead 更新 Postman、runbook、验收报告和 deferred 项；检查无 secret、无无效 artifact，确认 Console 不阻塞后端。
-10. 仅在 Lead 统一审核和所有必要 Gate 结果可解释后，再讨论是否提交本 checkpoint、推送分支或创建 PR。本文件当前不授权这些操作。
+1. 读取本文件、`AGENTS.md`、实施计划和 OpenAPI v2.1.0；确认仍在 `codex/device-integration-plan`，不要切到 master。
+2. 不再重复 W1-W4 实现；先准备非敏感 Integration 环境，让 preflight 的七个依赖由 `missing` 变为 `healthy` 或可解释的 `unavailable`。
+3. 环境就绪后执行 E2E-01，再执行 E2E-02；Attachment 真实 S3/MinIO 可并行，但不得阻塞 FILE_SHARE/formal 主链。
+4. 对真实失败只修最短链路；若涉及认证模型、主契约、migration、RAGFlow upstream、根锁文件或 Compose，立即停止并请求用户决策。
+5. E2E 通过后再校对 Postman/Environment、设备对接协议和最终验收报告；只保存非敏感、可复现证据。
+6. 推送前再次执行 `git status`、`git diff --check`、secret scan 和提交范围审计；不得提交 `tmp/`、`output/`。
 
 ## 11. 恢复时的安全边界
 
 - 不读取、复制或写入 `.env`、API Key、Token、密码、Cookie、JWT、HMAC secret 或其他敏感值到本文件、日志、测试 artifact 或 Git。
-- 不执行 `git reset --hard`、`git checkout --`、批量删除或递归清理；四个 worktree 的未提交修改必须保留，除非用户另行明确授权。
+- 不执行 `git reset --hard`、`git checkout --`、批量删除或递归清理；现有 worktree 和提交历史不得擅自改写或清理。
 - 不把 `output/`、`tmp/`、PDF/CSV/SQL/日志等测试产物加入提交；只提交源码、测试、契约和必要文档。
 - 任何需要修改主契约、数据库 migration、RAGFlow upstream、根锁文件、Compose 或认证模型的请求，先停止并报告决策点。
