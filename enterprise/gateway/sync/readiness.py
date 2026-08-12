@@ -9,6 +9,7 @@ import aiosqlite
 
 from enterprise.gateway.quality.gate import enforce_quality_gate
 from enterprise.gateway.quality.models import get_latest_evaluation
+from enterprise.gateway.quality.routing import parser_application_readback_match
 from enterprise.gateway.sync.models import ExtDocumentMap
 
 
@@ -62,7 +63,9 @@ def document_candidate_readiness(
     active = doc.business_status == "active"
     sync_ready = doc.sync_status == "ready"
     parser_readback = (
-        not is_file_share or doc.parser_application_status == "executed"
+        parser_application_readback_match(doc)
+        if is_file_share
+        else True
     )
     ragflow_ids_present = bool(doc.ragflow_dataset_id and doc.ragflow_document_id)
 
@@ -73,7 +76,7 @@ def document_candidate_readiness(
         blocking_reason = "DOCUMENT_NOT_ACTIVE"
     elif not sync_ready:
         blocking_reason = "SYNC_NOT_READY"
-    elif is_file_share and not parser_readback:
+    elif not parser_readback:
         blocking_reason = "PARSER_READBACK_NOT_READY"
     elif is_file_share and str(doc.pipeline_status or "").upper() not in _FILE_SHARE_PIPELINE_DONE:
         blocking_reason = "RAGFLOW_READBACK_NOT_READY"

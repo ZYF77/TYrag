@@ -15,6 +15,7 @@ from enterprise.gateway.auth.user_principal import UserPrincipal
 from enterprise.gateway.app import app
 from enterprise.gateway.query import v2_router
 from enterprise.gateway.quality import models as quality_models
+from enterprise.gateway.quality.routing import route_document
 from enterprise.gateway.quality.worker import _quality_expectations
 from enterprise.gateway.sync import v3_router
 from enterprise.gateway.sync.models import (
@@ -391,7 +392,35 @@ async def _insert_file_share_document(
         error_message=error_message,
     )
     if parser_status != "legacy_unverified":
-        await update_parser_application(db, doc, status=parser_status)
+        routing = route_document(
+            media_type=doc.media_type,
+            file_name=doc.file_name,
+            document_type=doc.document_type,
+            source_system=doc.source_system,
+        )
+        parser_evidence = {
+            "profile": routing["selected_parser_profile"],
+            "profile_version": routing["parser_version"],
+            "policy_version": routing["routing_policy_version"],
+            "chunk_method": routing["chunk_method"],
+            "owned_parser_config": routing["parser_config"],
+        }
+        await update_parser_application(
+            db,
+            doc,
+            status=parser_status,
+            profile=routing["selected_parser_profile"],
+            profile_version=routing["parser_version"],
+            expected_json=json.dumps(
+                parser_evidence, sort_keys=True, separators=(",", ":")
+            ),
+            configured_json=json.dumps(
+                parser_evidence, sort_keys=True, separators=(",", ":")
+            ),
+            executed_json=json.dumps(
+                parser_evidence, sort_keys=True, separators=(",", ":")
+            ),
+        )
     return doc
 
 
@@ -452,6 +481,12 @@ def _user(*, groups: tuple[str, ...]) -> UserPrincipal:
         (
             "DOC-PARSER-BLOCKED",
             {"parser_status": "mismatch"},
+            "passed",
+            "PARSER_READBACK_NOT_READY",
+        ),
+        (
+            "DOC-PARSER-LEGACY",
+            {"parser_status": "legacy_unverified"},
             "passed",
             "PARSER_READBACK_NOT_READY",
         ),

@@ -81,7 +81,9 @@ def _expected_parser_json(routing: dict[str, Any]) -> str:
 def _actual_parser_json(
     routing: dict[str, Any], ragflow_doc: dict[str, Any],
 ) -> str:
-    parser_config = ragflow_doc.get("parser_config") or {}
+    parser_config = ragflow_doc.get("parser_config")
+    if not isinstance(parser_config, dict):
+        parser_config = {}
     full = _canonical_json(parser_config)
     owned = {
         key: parser_config.get(key)
@@ -100,15 +102,9 @@ def _actual_parser_json(
 def _parser_matches(
     routing: dict[str, Any], ragflow_doc: dict[str, Any],
 ) -> bool:
-    if str(ragflow_doc.get("chunk_method") or "").lower() != str(
-        routing["chunk_method"]
-    ).lower():
-        return False
-    parser_config = ragflow_doc.get("parser_config") or {}
-    return all(
-        parser_config.get(key) == value
-        for key, value in routing["parser_config"].items()
-    )
+    from enterprise.gateway.quality.routing import parser_configuration_matches
+
+    return parser_configuration_matches(routing, ragflow_doc)
 
 
 def _validate_ragflow_response(
@@ -144,7 +140,9 @@ def _validate_ragflow_response(
 
 
 def _require_executed_parser(doc: ExtDocumentMap) -> None:
-    if doc.parser_application_status != "executed":
+    from enterprise.gateway.quality.routing import parser_application_readback_match
+
+    if not parser_application_readback_match(doc):
         raise TerminalDocumentSyncError(
             "PARSER_APPLICATION_MISMATCH",
             "RAGFlow terminal parser readback does not match the selected profile",
@@ -158,9 +156,11 @@ async def promote_quality_passed_version(
     parse_quality_status: str,
 ) -> bool:
     """Promote only a verified, quality-passed version without an outage."""
+    from enterprise.gateway.quality.routing import parser_application_readback_match
+
     if (
         parse_quality_status != "passed"
-        or doc.parser_application_status != "executed"
+        or not parser_application_readback_match(doc)
         or doc.sync_status != "ready"
         or doc.business_status in {"disabled", "deleted", "superseded"}
         or not doc.ragflow_dataset_id
@@ -730,14 +730,9 @@ class SyncService:
         dataset_id: str,
         event: OutboxEvent,
     ) -> dict[str, Any]:
-        from enterprise.gateway.quality.routing import route_document
+        from enterprise.gateway.quality.routing import route_document_for_mapping
 
-        routing = route_document(
-            media_type=doc.media_type,
-            file_name=doc.file_name,
-            document_type=doc.document_type,
-            source_system=doc.source_system,
-        )
+        routing = route_document_for_mapping(doc)
         expected = _expected_parser_json(routing)
         await update_parser_application(
             self.db,
@@ -822,7 +817,7 @@ class SyncService:
         doc: ExtDocumentMap,
         ragflow_doc: dict[str, Any] | None = None,
     ) -> None:
-        from enterprise.gateway.quality.routing import route_document
+        from enterprise.gateway.quality.routing import route_document_for_mapping
 
         if not doc.ragflow_dataset_id or not doc.ragflow_document_id:
             return
@@ -840,12 +835,7 @@ class SyncService:
             ragflow_doc = docs[0]
         if str(ragflow_doc.get("run") or "").upper() not in RAGFLOW_TERMINAL:
             return
-        routing = route_document(
-            media_type=doc.media_type,
-            file_name=doc.file_name,
-            document_type=doc.document_type,
-            source_system=doc.source_system,
-        )
+        routing = route_document_for_mapping(doc)
         executed = _actual_parser_json(routing, ragflow_doc)
         await update_parser_application(
             self.db,
@@ -880,14 +870,9 @@ class SyncService:
     async def _ensure_quality_evaluation(self, doc: ExtDocumentMap) -> None:
         from enterprise.gateway.config import config
         from enterprise.gateway.quality.models import get_or_create_evaluation
-        from enterprise.gateway.quality.routing import route_document
+        from enterprise.gateway.quality.routing import route_document_for_mapping
 
-        routing = route_document(
-            media_type=doc.media_type,
-            file_name=doc.file_name,
-            document_type=doc.document_type,
-            source_system=doc.source_system,
-        )
+        routing = route_document_for_mapping(doc)
         try:
             await get_or_create_evaluation(
                 self.db,

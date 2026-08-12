@@ -121,15 +121,26 @@ async def _success_processor(db, calls: list[str], failures: int = 0):
             business_status="active",
             current_version=0,
         )
+        parser_evidence = json.dumps(
+            {
+                "profile": "pdf_deepdoc_v1",
+                "profile_version": "1",
+                "policy_version": "2",
+                "chunk_method": "naive",
+                "owned_parser_config": {"layout_recognize": "DeepDOC"},
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
         await update_parser_application(
             db,
             doc,
             status="executed",
             profile="pdf_deepdoc_v1",
             profile_version="1",
-            expected_json='{"profile":"pdf_deepdoc_v1"}',
-            configured_json='{"profile":"pdf_deepdoc_v1"}',
-            executed_json='{"profile":"pdf_deepdoc_v1"}',
+            expected_json=parser_evidence,
+            configured_json=parser_evidence,
+            executed_json=parser_evidence,
         )
         return doc, False
 

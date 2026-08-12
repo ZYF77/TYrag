@@ -30,7 +30,10 @@ from enterprise.gateway.models.ext_user_map import (  # noqa: E402
 from enterprise.gateway.quality import models as quality_models  # noqa: E402
 from enterprise.gateway.quality.gate import enforce_quality_gate  # noqa: E402
 from enterprise.gateway.quality.metrics import metrics  # noqa: E402
-from enterprise.gateway.quality.routing import route_document  # noqa: E402
+from enterprise.gateway.quality.routing import (  # noqa: E402
+    route_document,
+    route_document_for_mapping,
+)
 from enterprise.gateway.quality.worker import (  # noqa: E402
     QualityEvaluationService,
     QualityReconciler,
@@ -50,6 +53,9 @@ from enterprise.gateway.sync.models import (  # noqa: E402
 from enterprise.gateway.sync.ragflow_document_client import (  # noqa: E402
     RAGFlowAPIError,
     RAGFlowDocumentStub,
+)
+from enterprise.gateway.sync.readiness import (  # noqa: E402
+    document_candidate_readiness,
 )
 from enterprise.gateway.sync.source_adapter import SourceStub  # noqa: E402
 from enterprise.gateway.sync.sync_service import SyncService  # noqa: E402
@@ -311,14 +317,61 @@ def test_routing_is_deterministic_and_auditable():
     assert first["api_application_status"] == "selected"
     override = route_document(
         media_type="application/pdf", file_name="manual.pdf",
-        manual_profile="pdf_deepdoc_v1",
+        manual_profile="tabular_table_v1",
     )
-    assert override["whether_manual_override"] is True
-    with pytest.raises(ValueError, match="PDF documents must use"):
-        route_document(
-            media_type="application/pdf", file_name="manual.pdf",
-            manual_profile="tabular_table_v1",
-        )
+    assert override["whether_manual_override"] is False
+    assert override["client_override_ignored"] is True
+    assert override["selected_parser_profile"] == "pdf_deepdoc_v1"
+    assert "CLIENT_PROFILE_OVERRIDE_IGNORED" in override["routing_reasons"]
+
+
+def test_persisted_profile_version_is_reused_for_reprocessing():
+    doc = SimpleNamespace(
+        media_type="application/pdf",
+        file_name="manual.pdf",
+        document_type="manual",
+        source_system="EAM",
+        parser_profile="pdf_deepdoc_v1",
+        parser_profile_version="1",
+    )
+    routing = route_document_for_mapping(doc)
+    assert routing["selected_parser_profile"] == "pdf_deepdoc_v1"
+    assert routing["parser_version"] == "1"
+    assert "PERSISTED_PROFILE_VERSION" in routing["routing_reasons"]
+
+
+def test_persisted_profile_wins_over_changed_classification():
+    doc = SimpleNamespace(
+        media_type="text/csv",
+        file_name="manual.csv",
+        document_type="table",
+        source_system="EAM",
+        parser_profile="pdf_deepdoc_v1",
+        parser_profile_version="1",
+    )
+    routing = route_document_for_mapping(doc)
+    assert routing["selected_parser_profile"] == "pdf_deepdoc_v1"
+    assert routing["parser_version"] == "1"
+    assert routing["chunk_method"] == "naive"
+
+
+def test_non_file_readiness_keeps_legacy_query_compatibility():
+    doc = SimpleNamespace(
+        source_kind="S3",
+        current_version=1,
+        business_status="active",
+        sync_status="ready",
+        pipeline_status="DONE",
+        event_status="completed",
+        source_state="AVAILABLE",
+        ragflow_dataset_id="dataset-1",
+        ragflow_document_id="document-1",
+    )
+    readiness = document_candidate_readiness(
+        doc, quality_allowed=True, quality_required=False,
+    )
+    assert readiness.retrievable is True
+    assert readiness.parser_readback is True
 
 
 @pytest.mark.asyncio
@@ -401,6 +454,11 @@ def test_quality_gate_fail_closed():
         False,
         "DOCUMENT_REVIEW_REQUIRED",
     )
+    assert enforce_quality_gate(
+        passed_without_evidence,
+        strict_mode=False,
+        demo_warn_mode=True,
+    ) == (False, "DOCUMENT_REVIEW_REQUIRED")
     assert enforce_quality_gate(review, strict_mode=False, demo_warn_mode=True) == (
         True,
         "DOCUMENT_QUALITY_WARN",
@@ -524,6 +582,27 @@ async def test_worker_parser_mismatch_cannot_pass():
     )
     assert evaluation.parse_quality_status == "review_required"
     assert "PARSER_APPLICATION_NOT_EXECUTED" in evaluation.quality_reasons
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_worker_actual_parser_readback_mismatch_cannot_pass():
+    db = await init_db(":memory:")
+    client = PassStub()
+    client.run_status = "DONE"
+    doc = await _ready_with_client(db, client)
+    client._documents[doc.ragflow_document_id]["data"][0]["parser_config"][
+        "layout_recognize"
+    ] = "Plain Text"
+
+    quality = QualityEvaluationService(db, client)
+    await QualityEvaluationWorker(quality).run_once()
+    evaluation = await quality_models.get_latest_evaluation(
+        db, doc.tenant_id, doc.source_system,
+        doc.external_document_id, doc.source_version_id,
+    )
+    assert evaluation.parse_quality_status == "review_required"
+    assert "PARSER_APPLICATION_READBACK_MISMATCH" in evaluation.quality_reasons
     await db.close()
 
 

@@ -157,8 +157,9 @@ def enforce_quality_gate(
         if not _parser_application_verified(
             getattr(evaluation, "metrics_json", None)
         ):
-            if not strict_mode and demo_warn_mode:
-                return True, "DOCUMENT_QUALITY_WARN"
+            # Parser application evidence is a hard safety boundary.  Warn
+            # mode may relax metric completeness, but it must never make an
+            # unverified or mismatched parser result retrievable.
             return False, "DOCUMENT_REVIEW_REQUIRED"
         required, declaration_valid = required_quality_dimensions(
             getattr(evaluation, "metrics_json", None)

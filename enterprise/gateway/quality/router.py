@@ -16,7 +16,10 @@ from enterprise.gateway.acl.policy import evaluate_document_acl
 from enterprise.gateway.acl.schema import DocumentAclFacts
 from enterprise.gateway.quality import models as quality_models
 from enterprise.gateway.quality.gate import quality_dimensions, safe_metric_summary
-from enterprise.gateway.quality.routing import route_document
+from enterprise.gateway.quality.routing import (
+    parser_application_readback_match,
+    route_document_for_mapping,
+)
 from enterprise.gateway.sync.models import get_mapping, get_versions_for_document
 
 logger = logging.getLogger(__name__)
@@ -115,13 +118,21 @@ def _parser_application(doc, metrics: dict) -> dict | None:
         return value.get("profile") if isinstance(value, dict) else None
 
     state = doc.parser_application_status or "legacy_unverified"
+    readback_match = parser_application_readback_match(doc)
+    reason_code = None
+    if not readback_match:
+        reason_code = (
+            f"PARSER_APPLICATION_{state.upper()}"
+            if state != "executed"
+            else "PARSER_APPLICATION_READBACK_MISMATCH"
+        )
     return {
         "state": state,
         "selectedProfile": doc.parser_profile,
         "configuredProfile": _profile(doc.parser_configured_json),
         "executedProfile": _profile(doc.parser_executed_json),
-        "readbackMatch": state == "executed",
-        "reasonCode": None if state == "executed" else "PARSER_APPLICATION_" + state.upper(),
+        "readbackMatch": readback_match,
+        "reasonCode": reason_code,
     }
 
 
@@ -231,12 +242,7 @@ async def reevaluate_document_quality(
     )
     if doc is None:
         return _error(404, "DOCUMENT_NOT_FOUND", "Document not found", request_id)
-    routing = route_document(
-        media_type=doc.media_type,
-        file_name=doc.file_name,
-        document_type=doc.document_type,
-        source_system=doc.source_system,
-    )
+    routing = route_document_for_mapping(doc)
     version = await quality_models.next_evaluation_version(
         db, doc.tenant_id, doc.source_system,
         doc.external_document_id, doc.source_version_id,

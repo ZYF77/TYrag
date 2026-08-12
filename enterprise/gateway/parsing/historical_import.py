@@ -21,6 +21,7 @@ import aiosqlite
 from enterprise.gateway.auth.service_principal import ServicePrincipal
 from enterprise.gateway.auth.user_principal import UserPrincipal
 from enterprise.gateway.quality.models import get_latest_evaluation
+from enterprise.gateway.quality.routing import parser_application_readback_match
 from enterprise.gateway.sync.models import (
     OutboxEvent,
     get_mapping,
@@ -1398,6 +1399,9 @@ class HistoricalImportService:
             "parser_application_status": getattr(
                 doc, "parser_application_status", None,
             ),
+            "parser_profile": getattr(doc, "parser_profile", None),
+            "parser_profile_version": getattr(doc, "parser_profile_version", None),
+            "parser_readback_match": parser_application_readback_match(doc),
             "quality_status": getattr(evaluation, "parse_quality_status", None),
             "source_version_id": getattr(doc, "source_version_id", None),
         }
@@ -1408,6 +1412,7 @@ class HistoricalImportService:
             doc.business_status == "review_required"
             or doc.sync_status == "review_required"
             or doc.parser_application_status in {"mismatch", "legacy_unverified"}
+            or not parser_application_readback_match(doc)
         ):
             return True
         return bool(
@@ -1427,6 +1432,8 @@ class HistoricalImportService:
                 reasons.append(
                     f"PARSER_APPLICATION_{doc.parser_application_status.upper()}"
                 )
+            elif not parser_application_readback_match(doc):
+                reasons.append("PARSER_APPLICATION_NOT_VERIFIED")
         if evaluation and evaluation.parse_quality_status in {"review_required", "failed"}:
             reasons.append(
                 f"PARSE_QUALITY_{evaluation.parse_quality_status.upper()}"

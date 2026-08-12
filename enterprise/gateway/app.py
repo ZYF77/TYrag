@@ -51,6 +51,7 @@ from enterprise.gateway.quality.worker import (
     QualityEvaluationWorker,
     QualityReconciler,
 )
+from enterprise.gateway.quality.routing import parser_application_readback_match
 from enterprise.gateway.config import config, require_ragflow_api_key
 
 logger = logging.getLogger(__name__)
@@ -405,21 +406,27 @@ def make_status_response(doc: ExtDocumentMap, deduplicated: bool = False,
         stage=enterprise_stage(doc.sync_status),
         deduplicated=deduplicated,
     )
+    state = doc.parser_application_status or "legacy_unverified"
+    readback_match = parser_application_readback_match(doc)
     extra = {
         "businessStatus": doc.business_status,
         "currentVersion": bool(doc.current_version),
         "eventStatus": doc.event_status,
         "updatedAt": doc.updated_at,
         "parserApplication": {
-            "state": doc.parser_application_status,
+            "state": state,
             "selectedProfile": doc.parser_profile,
             "configuredProfile": _parser_profile(doc.parser_configured_json),
             "executedProfile": _parser_profile(doc.parser_executed_json),
-            "readbackMatch": doc.parser_application_status == "executed",
+            "readbackMatch": readback_match,
             "reasonCode": (
                 None
-                if doc.parser_application_status == "executed"
-                else "PARSER_APPLICATION_" + doc.parser_application_status.upper()
+                if readback_match
+                else (
+                    f"PARSER_APPLICATION_{state.upper()}"
+                    if state != "executed"
+                    else "PARSER_APPLICATION_READBACK_MISMATCH"
+                )
             ),
         },
     }

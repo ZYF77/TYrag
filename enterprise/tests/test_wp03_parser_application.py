@@ -1,6 +1,11 @@
 import pytest
+from types import SimpleNamespace
 
-from enterprise.gateway.quality.routing import route_document
+from enterprise.gateway.app import make_status_response
+from enterprise.gateway.quality.routing import (
+    parser_application_readback_match,
+    route_document,
+)
 from enterprise.gateway.sync.models import (
     get_mapping,
     init_db,
@@ -32,6 +37,18 @@ def test_safe_parser_profiles():
     )["chunk_method"] == "table"
 
 
+def test_client_profile_override_is_ignored_by_server_routing():
+    route = route_document(
+        media_type="application/pdf",
+        file_name="manual.pdf",
+        manual_profile="tabular_table_v1",
+    )
+    assert route["selected_parser_profile"] == "pdf_deepdoc_v1"
+    assert route["parser_version"] == "1"
+    assert route["client_override_ignored"] is True
+    assert route["whether_manual_override"] is False
+
+
 @pytest.mark.asyncio
 async def test_profile_is_read_back_before_parse_and_not_activated():
     db = await init_db(":memory:")
@@ -52,6 +69,81 @@ async def test_profile_is_read_back_before_parse_and_not_activated():
         client._operation_log.index("patch") + 1:client._operation_log.index("parse")
     ]
     await db.close()
+
+
+@pytest.mark.asyncio
+async def test_reindex_preserves_persisted_profile_version():
+    db = await init_db(":memory:")
+    client = RAGFlowDocumentStub()
+    client.run_status = "DONE"
+    service = SyncService(db, SourceStub(b"manual"), client)
+
+    doc, _ = await service.process_event(make_event(b"manual"))
+    assert doc.parser_profile == "pdf_deepdoc_v1"
+    assert doc.parser_profile_version == "1"
+
+    await service.reindex_document("tenant-1", "EAM", "DOC-1", "v1")
+    current = await get_mapping(db, "tenant-1", "EAM", "DOC-1", "v1")
+    assert current.parser_profile == "pdf_deepdoc_v1"
+    assert current.parser_profile_version == "1"
+    assert current.parser_application_status == "executed"
+    assert client._documents[current.ragflow_document_id]["data"][0][
+        "chunk_method"
+    ] == "naive"
+    await db.close()
+
+
+def test_parser_readback_requires_executed_state_and_matching_evidence():
+    doc = type(
+        "Doc",
+        (),
+        {
+            "parser_application_status": "executed",
+            "parser_profile": "pdf_deepdoc_v1",
+            "parser_profile_version": "1",
+            "parser_expected_json": (
+                '{"profile":"pdf_deepdoc_v1","profile_version":"1",'
+                '"policy_version":"2","chunk_method":"naive",'
+                '"owned_parser_config":{"layout_recognize":"DeepDOC"}}'
+            ),
+            "parser_executed_json": (
+                '{"profile":"pdf_deepdoc_v1","profile_version":"1",'
+                '"policy_version":"2","chunk_method":"naive",'
+                '"owned_parser_config":{"layout_recognize":"DeepDOC"}}'
+            ),
+        },
+    )()
+    assert parser_application_readback_match(doc) is True
+    doc.parser_executed_json = '{"profile":"tabular_table_v1","profile_version":"1"}'
+    assert parser_application_readback_match(doc) is False
+    doc.parser_executed_json = (
+        '{"profile":"pdf_deepdoc_v1","profile_version":"1"}'
+    )
+    assert parser_application_readback_match(doc) is False
+
+
+def test_status_response_does_not_trust_executed_state_alone():
+    doc = SimpleNamespace(
+        external_document_id="DOC-1",
+        source_version_id="v1",
+        ragflow_dataset_id="dataset-1",
+        ragflow_document_id="document-1",
+        sync_status="ready",
+        business_status="active",
+        current_version=1,
+        event_status="completed",
+        updated_at="",
+        parser_application_status="executed",
+        parser_profile="pdf_deepdoc_v1",
+        parser_configured_json=None,
+        parser_executed_json=None,
+        parser_expected_json=None,
+    )
+    parser_application = make_status_response(doc)["parserApplication"]
+    assert parser_application["readbackMatch"] is False
+    assert parser_application["reasonCode"] == (
+        "PARSER_APPLICATION_READBACK_MISMATCH"
+    )
 
 
 class MismatchStub(RAGFlowDocumentStub):
@@ -158,6 +250,31 @@ async def test_terminal_parser_readback_mismatch_cannot_become_ready():
     assert doc.business_status == "review_required"
     assert doc.current_version == 0
     assert doc.parser_application_status == "mismatch"
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_parser_requires_persisted_evidence_before_ready():
+    db = await init_db(":memory:")
+    client = RAGFlowDocumentStub()
+    client.run_status = "DONE"
+    service = SyncService(db, SourceStub(b"manual"), client)
+
+    doc, _ = await service.process_event(make_event(b"manual"))
+    await db.execute(
+        "UPDATE ext_document_map SET parser_expected_json=NULL WHERE id=?",
+        (doc.id,),
+    )
+    await db.commit()
+    doc.parser_expected_json = None
+
+    with pytest.raises(TerminalDocumentSyncError) as error:
+        await service.refresh_status(doc)
+
+    assert error.value.code == "PARSER_APPLICATION_MISMATCH"
+    current = await get_mapping(db, "tenant-1", "EAM", "DOC-1", "v1")
+    assert current.sync_status == "review_required"
+    assert current.business_status == "review_required"
     await db.close()
 
 
