@@ -21,6 +21,14 @@ from enterprise.gateway.acl.context import AclContext
 from enterprise.gateway.acl.policy import evaluate_document_acl
 from enterprise.gateway.acl.schema import AclScope, DocumentAclFacts
 from enterprise.gateway.acl.scope import ScopeResolver, compile_scope
+from enterprise.gateway.asset_registry import (
+    AssetRegistryConflict,
+    AssetRegistryError,
+    AssetRegistryInvalid,
+    AssetRegistryUnavailable,
+    ResolvedAsset,
+    resolve_asset,
+)
 from enterprise.gateway.auth.middleware import require_capability
 from enterprise.gateway.auth.user_principal import UserPrincipal
 from enterprise.gateway.config import require_ragflow_api_key
@@ -151,6 +159,71 @@ class _FormalQueryError(Exception):
         self.code = code
         self.status_code = status_code
         self.message = message
+
+
+async def _resolve_formal_asset(
+    db,
+    principal: UserPrincipal,
+    *,
+    equipment_id: str | None,
+    fixed_asset_no: str | None,
+    existing_context: bool = False,
+) -> ResolvedAsset:
+    """Resolve a formal conversation identity through the Asset Registry."""
+    try:
+        resolved = await resolve_asset(
+            db,
+            tenant_id=principal.tenant_id,
+            equipment_id=equipment_id,
+            fixed_asset_no=fixed_asset_no,
+        )
+        if resolved.tenant_id != principal.tenant_id:
+            raise AssetRegistryConflict("Asset Registry tenant mismatch")
+        for supplied, canonical in (
+            (equipment_id, resolved.equipment_id),
+            (fixed_asset_no, resolved.fixed_asset_no),
+        ):
+            if supplied is not None and supplied != canonical:
+                raise AssetRegistryConflict("Asset identifiers do not agree")
+        return resolved
+    except AssetRegistryConflict:
+        code = (
+            "CONVERSATION_CONTEXT_STALE"
+            if existing_context
+            else "CONVERSATION_CONTEXT_CONFLICT"
+        )
+        message = (
+            "Conversation context no longer matches the Asset Registry"
+            if existing_context
+            else "Equipment identifiers do not resolve to the same Asset Registry identity"
+        )
+        raise _FormalQueryError(code, 409, message) from None
+    except AssetRegistryInvalid:
+        code = (
+            "CONVERSATION_CONTEXT_STALE"
+            if existing_context
+            else "CONVERSATION_CONTEXT_INVALID"
+        )
+        message = (
+            "Conversation context no longer resolves in the Asset Registry"
+            if existing_context
+            else "Equipment identifier was not found in the Asset Registry"
+        )
+        raise _FormalQueryError(
+            code, 409 if existing_context else 422, message
+        ) from None
+    except AssetRegistryUnavailable:
+        raise _FormalQueryError(
+            "ASSET_REGISTRY_UNAVAILABLE",
+            503,
+            "Asset Registry is temporarily unavailable",
+        ) from None
+    except AssetRegistryError:
+        raise _FormalQueryError(
+            "ASSET_REGISTRY_UNAVAILABLE",
+            503,
+            "Asset Registry is temporarily unavailable",
+        ) from None
 
 
 def _sse(event: str, data: dict) -> str:
@@ -311,9 +384,15 @@ def _resolve_run_outcome(
 class FormalScopeResolver(ScopeResolver):
     """Resolve the authorized retrieval scope from document ACL facts."""
 
-    def __init__(self, db, source_system: str = _SOURCE_SYSTEM):
+    def __init__(
+        self,
+        db,
+        source_system: str = _SOURCE_SYSTEM,
+        identity: ResolvedAsset | None = None,
+    ):
         self.db = db
         self.source_system = source_system
+        self.identity = identity
         self._docs: dict[str, ExtDocumentMap] = {}
 
     async def resolve(self, context: AclContext) -> AclScope:
@@ -339,9 +418,16 @@ class FormalScopeResolver(ScopeResolver):
             quality_required = (
                 os.environ.get("ENTERPRISE_QUERY_QUALITY_REQUIRED", "false").lower()
                 in ("1", "true", "yes", "on")
-            )
+        )
         for doc in docs:
             if not doc.ragflow_dataset_id or not doc.ragflow_document_id:
+                continue
+            if self.identity is not None and (
+                doc.equipment_id != self.identity.equipment_id
+                or doc.fixed_asset_no != self.identity.fixed_asset_no
+            ):
+                # Asset Registry identity is authoritative.  A document with
+                # missing or mismatched metadata cannot become an alias.
                 continue
             if doc.source_kind == "FILE_SHARE" and not doc.current_version:
                 # A new external version may be parsed while the previously
@@ -416,11 +502,79 @@ async def _resolve_scope(
     db,
     principal: UserPrincipal,
     request_id: str,
+    *,
+    identity: ResolvedAsset | None = None,
 ) -> tuple[AclScope, dict[str, ExtDocumentMap]]:
     context = AclContext(principal=principal)
-    resolver = FormalScopeResolver(db)
+    resolver = FormalScopeResolver(db, identity=identity)
     scope = await compile_scope(context, resolver)
     return scope, resolver._docs
+
+
+async def _ensure_formal_context(
+    db,
+    principal: UserPrincipal,
+    conversation: dict,
+    req: AskRequest,
+) -> tuple[dict, ResolvedAsset]:
+    """Validate the persisted context before any ACL scope is compiled."""
+    stored_equipment = conversation.get("equipment_id")
+    stored_fixed = conversation.get("fixed_asset_no")
+    if req.equipmentId is not None and stored_equipment is not None:
+        if req.equipmentId != stored_equipment:
+            raise _FormalQueryError(
+                "CONVERSATION_CONTEXT_CONFLICT",
+                409,
+                "Request equipmentId does not match the conversation context",
+            )
+
+    candidate_equipment = stored_equipment or req.equipmentId
+    if not candidate_equipment and not stored_fixed:
+        raise _FormalQueryError(
+            "CONVERSATION_CONTEXT_REQUIRED",
+            422,
+            "A canonical equipment context is required before sending a message",
+        )
+    resolved = await _resolve_formal_asset(
+        db,
+        principal,
+        equipment_id=candidate_equipment,
+        fixed_asset_no=stored_fixed,
+        existing_context=bool(stored_equipment or stored_fixed),
+    )
+    if (
+        stored_equipment is not None
+        and resolved.equipment_id != stored_equipment
+    ) or (
+        stored_fixed is not None
+        and resolved.fixed_asset_no != stored_fixed
+    ):
+        raise _FormalQueryError(
+            "CONVERSATION_CONTEXT_STALE",
+            409,
+            "Conversation context no longer matches the Asset Registry",
+        )
+
+    if stored_equipment is None or stored_fixed is None:
+        await db.execute(
+            """UPDATE ext_conversation
+               SET equipment_id=?, fixed_asset_no=?
+               WHERE conversation_id=? AND tenant_id=? AND business_user_id=?""",
+            (
+                resolved.equipment_id,
+                resolved.fixed_asset_no,
+                conversation["conversation_id"],
+                principal.tenant_id,
+                principal.business_user_id,
+            ),
+        )
+        await db.commit()
+        conversation = {
+            **conversation,
+            "equipment_id": resolved.equipment_id,
+            "fixed_asset_no": resolved.fixed_asset_no,
+        }
+    return conversation, resolved
 
 
 async def _ensure_chat(
@@ -873,14 +1027,25 @@ async def create_conversation(
 ):
     request_id = str(uuid.uuid4())
     await conversation_store.ensure_schema(db)
+    try:
+        canonical = None
+        if req.equipmentId is not None or req.fixedAssetNo is not None:
+            canonical = await _resolve_formal_asset(
+                db,
+                principal,
+                equipment_id=req.equipmentId,
+                fixed_asset_no=req.fixedAssetNo,
+            )
+    except _FormalQueryError as error:
+        return _error(error.status_code, error.code, error.message, request_id)
     conversation_id = str(uuid.uuid4())
     conversation = await conversation_store.create_conversation(
         db,
         tenant_id=principal.tenant_id,
         business_user_id=principal.business_user_id,
         conversation_id=conversation_id,
-        equipment_id=req.equipmentId,
-        fixed_asset_no=req.fixedAssetNo,
+        equipment_id=canonical.equipment_id if canonical else None,
+        fixed_asset_no=canonical.fixed_asset_no if canonical else None,
         current_fault_code=req.faultCode,
     )
     return ConversationCreated(
@@ -909,11 +1074,22 @@ async def ask_message(
     )
     if error:
         return error
-    scope, docs_by_ragflow = await _resolve_scope(
-        db, principal, request_id
-    )
     lock = await _conversation_lock(conversation_id)
     async with lock:
+        conversation, error = await _load_conversation(
+            db, principal, conversation_id, request_id
+        )
+        if error:
+            return error
+        try:
+            conversation, identity = await _ensure_formal_context(
+                db, principal, conversation, req
+            )
+        except _FormalQueryError as e:
+            return _error(e.status_code, e.code, e.message, request_id)
+        scope, docs_by_ragflow = await _resolve_scope(
+            db, principal, request_id, identity=identity
+        )
         if scope.is_empty:
             message_id = str(uuid.uuid4())
             await _persist_pair(

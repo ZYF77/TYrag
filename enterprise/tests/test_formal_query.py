@@ -109,6 +109,12 @@ async def isolated_db(demo_env):
         app_module._db = None
 
     db = await init_db(demo_env)
+    await db.execute(
+        """INSERT INTO ext_asset_registry
+           (tenant_id, equipment_id, fixed_asset_no, asset_id)
+           VALUES ('customer-a', 'EQ-1', 'FA-1', 'ASSET-1')"""
+    )
+    await db.commit()
     repo = ExtUserMapRepo(db_path=demo_env)
     await repo.ensure_table()
     for tenant, subject, business_user in (
@@ -144,6 +150,8 @@ async def _insert_document(
     dataset_id: str = "ds-1",
     sync_status: str = "ready",
     asset_id: str = "FA-DOC-001",
+    equipment_id: str = "EQ-1",
+    fixed_asset_no: str | None = "FA-1",
     version_id: str = "v1",
     department_id: str = "d10",
     security_level: int = 2,
@@ -162,6 +170,8 @@ async def _insert_document(
         ragflow_dataset_id=dataset_id,
         ragflow_document_id=ragflow_doc_id,
         asset_id=asset_id,
+        equipment_id=equipment_id,
+        fixed_asset_no=fixed_asset_no,
         department_id=department_id,
         security_level=security_level,
         allow_group_ids=json.dumps(list(allow_groups)),
@@ -1124,3 +1134,219 @@ class TestSchemaMigration:
         assert row["citations_json"] is None
         assert row["ragflow_message_id"] is None
         await db.close()
+
+
+@pytest.mark.usefixtures("isolated_db")
+class TestW2AssetIdentity:
+    @pytest.mark.asyncio
+    async def test_single_identifiers_persist_the_same_canonical_pair(
+        self, isolated_db
+    ):
+        token = _make_token()
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            equipment_only = await client.post(
+                "/enterprise/api/v1/conversations",
+                headers=_headers(token),
+                json={"equipmentId": "EQ-1"},
+            )
+            fixed_only = await client.post(
+                "/enterprise/api/v1/conversations",
+                headers=_headers(token),
+                json={"fixedAssetNo": "FA-1"},
+            )
+
+        assert equipment_only.status_code == 201
+        assert fixed_only.status_code == 201
+        async with isolated_db.execute(
+            """SELECT equipment_id, fixed_asset_no
+               FROM ext_conversation
+               WHERE conversation_id IN (?, ?)
+               ORDER BY conversation_id""",
+            (
+                equipment_only.json()["conversationId"],
+                fixed_only.json()["conversationId"],
+            ),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        assert {(row["equipment_id"], row["fixed_asset_no"]) for row in rows} == {
+            ("EQ-1", "FA-1")
+        }
+
+    @pytest.mark.asyncio
+    async def test_conflicting_and_cross_tenant_fixed_identifiers_are_denied(
+        self, isolated_db
+    ):
+        await isolated_db.execute(
+            """INSERT INTO ext_asset_registry
+               (tenant_id, equipment_id, fixed_asset_no, asset_id)
+               VALUES ('customer-a', 'EQ-2', 'FA-2', 'ASSET-2')"""
+        )
+        await isolated_db.execute(
+            """INSERT INTO ext_asset_registry
+               (tenant_id, equipment_id, fixed_asset_no, asset_id)
+               VALUES ('customer-b', 'EQ-B', 'FA-1', 'ASSET-B')"""
+        )
+        await isolated_db.commit()
+        token = _make_token()
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            conflict = await client.post(
+                "/enterprise/api/v1/conversations",
+                headers=_headers(token),
+                json={"equipmentId": "EQ-1", "fixedAssetNo": "FA-2"},
+            )
+            cross_tenant = await client.post(
+                "/enterprise/api/v1/conversations",
+                headers=_headers(token),
+                json={"equipmentId": "EQ-CROSS", "fixedAssetNo": "FA-1"},
+            )
+
+        assert conflict.status_code == 409
+        assert conflict.json()["code"] == "CONVERSATION_CONTEXT_CONFLICT"
+        assert cross_tenant.status_code == 409
+        assert cross_tenant.json()["code"] == "CONVERSATION_CONTEXT_CONFLICT"
+
+    @pytest.mark.asyncio
+    async def test_context_mapping_drift_is_denied_before_second_retrieval(
+        self, isolated_db
+    ):
+        await _insert_document(isolated_db, doc_id="DOC-W2-DRIFT")
+        token = _make_token()
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            conversation = await _create_conversation(client, token)
+            conversation_id = conversation.json()["conversationId"]
+            first = await client.post(
+                f"/enterprise/api/v1/conversations/{conversation_id}/messages:stream",
+                headers=_headers(token),
+                json={"question": "first"},
+            )
+            await isolated_db.execute(
+                """UPDATE ext_asset_registry
+                   SET fixed_asset_no='FA-DRIFT', asset_id='ASSET-DRIFT'
+                   WHERE tenant_id='customer-a' AND equipment_id='EQ-1'"""
+            )
+            await isolated_db.commit()
+            second = await client.post(
+                f"/enterprise/api/v1/conversations/{conversation_id}/messages:stream",
+                headers=_headers(token),
+                json={"question": "second"},
+            )
+
+        assert first.status_code == 200
+        assert second.status_code == 409
+        assert second.json()["code"] == "CONVERSATION_CONTEXT_STALE"
+
+    @pytest.mark.asyncio
+    async def test_legacy_equipment_only_context_is_completed_from_registry(
+        self, isolated_db
+    ):
+        await _insert_document(isolated_db, doc_id="DOC-W2-LEGACY")
+        token = _make_token()
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            conversation = await _create_conversation(client, token)
+            conversation_id = conversation.json()["conversationId"]
+            await isolated_db.execute(
+                """UPDATE ext_conversation
+                   SET fixed_asset_no=NULL
+                   WHERE conversation_id=?""",
+                (conversation_id,),
+            )
+            await isolated_db.commit()
+
+            response = await client.post(
+                f"/enterprise/api/v1/conversations/{conversation_id}/messages:stream",
+                headers=_headers(token),
+                json={"question": "legacy context"},
+            )
+
+        assert response.status_code == 200
+        async with isolated_db.execute(
+            """SELECT equipment_id, fixed_asset_no
+               FROM ext_conversation WHERE conversation_id=?""",
+            (conversation_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert (row["equipment_id"], row["fixed_asset_no"]) == (
+            "EQ-1",
+            "FA-1",
+        )
+
+    @pytest.mark.asyncio
+    async def test_unexpected_registry_error_is_not_masked_as_503(
+        self, isolated_db, monkeypatch
+    ):
+        from enterprise.gateway.query import formal_router
+
+        async def broken_resolver(*args, **kwargs):
+            raise RuntimeError("local programming error")
+
+        monkeypatch.setattr(formal_router, "resolve_asset", broken_resolver)
+        with pytest.raises(RuntimeError, match="local programming error"):
+            await formal_router._resolve_formal_asset(
+                isolated_db,
+                _principal(),
+                equipment_id="EQ-1",
+                fixed_asset_no=None,
+            )
+
+    @pytest.mark.asyncio
+    async def test_retrieval_requires_exact_canonical_document_identity(
+        self, isolated_db
+    ):
+        await _insert_document(isolated_db, doc_id="DOC-W2-EXACT")
+        await _insert_document(
+            isolated_db,
+            doc_id="DOC-W2-ALIAS",
+            ragflow_doc_id="doc-alias",
+            equipment_id="EQ-ALIAS",
+            fixed_asset_no="FA-ALIAS",
+        )
+        await isolated_db.execute(
+            """UPDATE ext_document_map
+               SET equipment_id='FA-1', fixed_asset_no='FA-1'
+               WHERE external_document_id='DOC-W2-ALIAS'"""
+        )
+        await isolated_db.commit()
+        token = _make_token()
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            conversation = await _create_conversation(client, token)
+            response = await client.post(
+                f"/enterprise/api/v1/conversations/{conversation.json()['conversationId']}/messages:stream",
+                headers=_headers(token),
+                json={"question": "exact"},
+            )
+
+        assert response.status_code == 200
+        from enterprise.gateway.query import formal_router
+
+        assert formal_router._query_stub._last_completion_body["doc_ids"] == "doc-1"
+
+    @pytest.mark.asyncio
+    async def test_draft_cannot_retrieve_without_a_canonical_context(self, isolated_db):
+        token = _make_token()
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            conversation = await client.post(
+                "/enterprise/api/v1/conversations",
+                headers=_headers(token),
+                json={},
+            )
+            response = await client.post(
+                f"/enterprise/api/v1/conversations/{conversation.json()['conversationId']}/messages:stream",
+                headers=_headers(token),
+                json={"question": "without context"},
+            )
+
+        assert conversation.status_code == 201
+        assert response.status_code == 422
+        assert response.json()["code"] == "CONVERSATION_CONTEXT_REQUIRED"

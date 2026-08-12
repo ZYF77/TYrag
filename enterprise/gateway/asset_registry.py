@@ -32,6 +32,10 @@ class AssetRegistryConflict(AssetRegistryError):
     code = "CONVERSATION_CONTEXT_CONFLICT"
 
 
+class AssetRegistryAmbiguous(AssetRegistryConflict):
+    """The supplied identifier maps to more than one registry identity."""
+
+
 class AssetRegistryInvalid(AssetRegistryError):
     code = "CONVERSATION_CONTEXT_INVALID"
 
@@ -61,6 +65,90 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _validate_lookup(
+    *,
+    tenant_id: str,
+    equipment_id: str | None,
+    fixed_asset_no: str | None,
+    asset_id: str | None,
+) -> tuple[str, str | None, str | None, str | None]:
+    values = {
+        "tenant_id": tenant_id,
+        "equipment_id": equipment_id,
+        "fixed_asset_no": fixed_asset_no,
+        "asset_id": asset_id,
+    }
+    for name, value in values.items():
+        if value is not None and (
+            not isinstance(value, str) or not value.strip()
+        ):
+            raise AssetRegistryInvalid(f"{name} must be a non-empty string")
+    if not isinstance(tenant_id, str) or not tenant_id.strip():
+        raise AssetRegistryInvalid("tenant_id must be a non-empty string")
+    if not any(value is not None for value in (equipment_id, fixed_asset_no, asset_id)):
+        raise AssetRegistryInvalid("An equipment identifier is required")
+    return tenant_id, equipment_id, fixed_asset_no, asset_id
+
+
+def _row_identity(row) -> tuple[str, str, str | None, str | None]:
+    tenant_id = row["tenant_id"]
+    equipment_id = row["equipment_id"]
+    fixed_asset_no = row["fixed_asset_no"]
+    asset_id = row["asset_id"]
+    if not isinstance(tenant_id, str) or not tenant_id:
+        raise AssetRegistryUnavailable("Asset Registry returned an invalid tenant")
+    if not isinstance(equipment_id, str) or not equipment_id:
+        raise AssetRegistryUnavailable("Asset Registry omitted equipmentId")
+    for name, value in (
+        ("fixedAssetNo", fixed_asset_no),
+        ("assetId", asset_id),
+    ):
+        if value is not None and (not isinstance(value, str) or not value):
+            raise AssetRegistryUnavailable(f"Asset Registry returned an invalid {name}")
+    return tenant_id, equipment_id, fixed_asset_no, asset_id
+
+
+def _identity_set(rows) -> set[tuple[str, str, str | None, str | None]]:
+    return {_row_identity(row) for row in rows}
+
+
+def _validate_resolved(
+    resolved: ResolvedAsset,
+    *,
+    tenant_id: str,
+    equipment_id: str | None,
+    fixed_asset_no: str | None,
+    asset_id: str | None,
+) -> ResolvedAsset:
+    if not isinstance(resolved, ResolvedAsset):
+        raise AssetRegistryUnavailable("Asset Registry returned an invalid identity")
+    if not isinstance(resolved.tenant_id, str) or not resolved.tenant_id:
+        raise AssetRegistryUnavailable("Asset Registry omitted tenantId")
+    if resolved.tenant_id != tenant_id:
+        raise AssetRegistryConflict("Asset Registry tenant mismatch")
+    if not isinstance(resolved.equipment_id, str) or not resolved.equipment_id:
+        raise AssetRegistryUnavailable("Asset Registry omitted equipmentId")
+    for name, value in (
+        ("fixedAssetNo", resolved.fixed_asset_no),
+        ("assetId", resolved.asset_id),
+        ("registryVersion", resolved.registry_version),
+    ):
+        if value is not None and (not isinstance(value, str) or not value):
+            raise AssetRegistryUnavailable(
+                f"Asset Registry returned an invalid {name}"
+            )
+    if not isinstance(resolved.resolved_at, str) or not resolved.resolved_at:
+        raise AssetRegistryUnavailable("Asset Registry omitted resolvedAt")
+    for supplied, canonical in (
+        (equipment_id, resolved.equipment_id),
+        (fixed_asset_no, resolved.fixed_asset_no),
+        (asset_id, resolved.asset_id),
+    ):
+        if supplied is not None and supplied != canonical:
+            raise AssetRegistryConflict("Asset identifiers do not agree")
+    return resolved
+
+
 class SQLiteAssetRegistryAdapter:
     """Explicit offline fixture adapter backed by the gateway test DB."""
 
@@ -75,46 +163,63 @@ class SQLiteAssetRegistryAdapter:
         fixed_asset_no: str | None = None,
         asset_id: str | None = None,
     ) -> ResolvedAsset | None:
-        identifiers = [
-            value
-            for value in (equipment_id, fixed_asset_no, asset_id)
-            if value
-        ]
-        if not identifiers:
-            return None
-        clauses = " OR ".join(
-            "equipment_id=? OR fixed_asset_no=? OR asset_id=?"
-            for _ in identifiers
+        tenant_id, equipment_id, fixed_asset_no, asset_id = _validate_lookup(
+            tenant_id=tenant_id,
+            equipment_id=equipment_id,
+            fixed_asset_no=fixed_asset_no,
+            asset_id=asset_id,
         )
-        params: list[object] = []
-        for value in identifiers:
-            params.extend((value, value, value))
         async with self.db.execute(
-            f"""SELECT equipment_id, fixed_asset_no, asset_id
+            """SELECT tenant_id, equipment_id, fixed_asset_no, asset_id
                 FROM ext_asset_registry
-                WHERE tenant_id=? AND ({clauses})
-                ORDER BY equipment_id
-                LIMIT 100""",
-            (tenant_id, *params),
+                WHERE tenant_id=?
+                ORDER BY equipment_id""",
+            (tenant_id,),
         ) as cursor:
-            rows = await cursor.fetchall()
-        if not rows:
+            tenant_rows = await cursor.fetchall()
+
+        fields = (
+            ("equipment_id", equipment_id),
+            ("fixed_asset_no", fixed_asset_no),
+            ("asset_id", asset_id),
+        )
+        match_sets = [
+            {
+                index
+                for index, row in enumerate(tenant_rows)
+                if row[field] == value
+            }
+            for field, value in fields
+            if value is not None
+        ]
+
+        if not match_sets:
+            return None
+        if any(not matches for matches in match_sets):
+            if any(match_sets):
+                raise AssetRegistryConflict("Asset identifiers do not agree")
             return None
 
-        matches = {
-            (row["equipment_id"], row["fixed_asset_no"], row["asset_id"])
-            for row in rows
-        }
-        if len(matches) > 1:
-            raise AssetRegistryConflict("Asset identifiers resolve to multiple assets")
-        equipment, fixed, canonical_asset = next(iter(matches))
-        for supplied, expected in (
-            (equipment_id, equipment),
-            (fixed_asset_no, fixed),
-            (asset_id, canonical_asset),
+        for (field, value), matches in zip(
+            (item for item in fields if item[1] is not None), match_sets
         ):
-            if supplied and supplied not in {equipment, fixed, canonical_asset}:
-                raise AssetRegistryConflict("Asset identifiers do not agree")
+            identities = _identity_set([tenant_rows[index] for index in matches])
+            if len(identities) > 1:
+                raise AssetRegistryAmbiguous(
+                    f"{field} resolves to multiple assets"
+                )
+
+        candidate_indexes = set.intersection(*match_sets)
+        if not candidate_indexes:
+            raise AssetRegistryConflict("Asset identifiers do not agree")
+        candidate_rows = [tenant_rows[index] for index in candidate_indexes]
+
+        identities = _identity_set(candidate_rows)
+        if len(identities) != 1:
+            raise AssetRegistryAmbiguous(
+                "Asset identifiers resolve to multiple assets"
+            )
+        _, equipment, fixed, canonical_asset = next(iter(identities))
         return ResolvedAsset(
             tenant_id=tenant_id,
             equipment_id=equipment,
@@ -173,7 +278,7 @@ class HTTPAssetRegistryAdapter:
             return None
         if response.status_code == 409:
             raise AssetRegistryConflict("Asset identifiers conflict")
-        if response.status_code >= 500:
+        if response.status_code in (408, 425, 429) or response.status_code >= 500:
             raise AssetRegistryUnavailable("Asset Registry service unavailable")
         if response.status_code >= 400:
             raise AssetRegistryInvalid("Asset identifier was rejected")
@@ -183,16 +288,29 @@ class HTTPAssetRegistryAdapter:
             raise AssetRegistryUnavailable("Asset Registry returned malformed JSON") from exc
         if not isinstance(payload, dict):
             raise AssetRegistryUnavailable("Asset Registry returned malformed JSON")
+        response_tenant = payload.get("tenantId", payload.get("tenant_id"))
+        if not isinstance(response_tenant, str) or not response_tenant:
+            raise AssetRegistryUnavailable("Asset Registry omitted tenantId")
+        if response_tenant != tenant_id:
+            raise AssetRegistryConflict("Asset Registry tenant mismatch")
         equipment = payload.get("equipmentId", payload.get("equipment_id"))
         if not isinstance(equipment, str) or not equipment:
             raise AssetRegistryUnavailable("Asset Registry omitted equipmentId")
+        fixed = payload.get("fixedAssetNo", payload.get("fixed_asset_no"))
+        canonical_asset = payload.get("assetId", payload.get("asset_id"))
+        registry_version = payload.get(
+            "registryVersion", payload.get("registry_version")
+        )
+        resolved_at = payload.get("resolvedAt", payload.get("resolved_at"))
+        if resolved_at is None:
+            raise AssetRegistryUnavailable("Asset Registry omitted resolvedAt")
         return ResolvedAsset(
             tenant_id=tenant_id,
             equipment_id=equipment,
-            fixed_asset_no=payload.get("fixedAssetNo", payload.get("fixed_asset_no")),
-            asset_id=payload.get("assetId", payload.get("asset_id")),
-            registry_version=payload.get("registryVersion", payload.get("registry_version")),
-            resolved_at=utc_now(),
+            fixed_asset_no=fixed,
+            asset_id=canonical_asset,
+            registry_version=registry_version,
+            resolved_at=resolved_at,
         )
 
 
@@ -232,8 +350,12 @@ async def resolve_asset(
     fixed_asset_no: str | None = None,
     asset_id: str | None = None,
 ) -> ResolvedAsset:
-    if not any((equipment_id, fixed_asset_no, asset_id)):
-        raise AssetRegistryInvalid("An equipment identifier is required")
+    tenant_id, equipment_id, fixed_asset_no, asset_id = _validate_lookup(
+        tenant_id=tenant_id,
+        equipment_id=equipment_id,
+        fixed_asset_no=fixed_asset_no,
+        asset_id=asset_id,
+    )
     resolved = await asset_registry_adapter(db).resolve(
         tenant_id=tenant_id,
         equipment_id=equipment_id,
@@ -242,4 +364,10 @@ async def resolve_asset(
     )
     if resolved is None:
         raise AssetRegistryInvalid("Asset identifier was not found")
-    return resolved
+    return _validate_resolved(
+        resolved,
+        tenant_id=tenant_id,
+        equipment_id=equipment_id,
+        fixed_asset_no=fixed_asset_no,
+        asset_id=asset_id,
+    )
