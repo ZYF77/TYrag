@@ -26,6 +26,7 @@ import type {
   ConsoleUserPrincipal,
   FileShareDocumentStatusPage,
   GatewayHealth,
+  GatewayHttpLogPage,
 } from './consoleTypes';
 
 const V1_BASE = '/enterprise/api/v1';
@@ -281,6 +282,10 @@ export function streamMessage(
 export const v2Api = {
   getHealth(): Promise<GatewayHealth> {
     return request<GatewayHealth>('/health', {}, V1_BASE);
+  },
+
+  listHttpLog(limit = 100): Promise<GatewayHttpLogPage> {
+    return request<GatewayHttpLogPage>(`/diagnostics/http-log?limit=${limit}`, {}, V1_BASE);
   },
 
   async getAuthMe(): Promise<ConsoleUserPrincipal> {

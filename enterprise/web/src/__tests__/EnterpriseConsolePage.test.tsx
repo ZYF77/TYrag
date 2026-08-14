@@ -32,8 +32,9 @@ describe('EnterpriseConsolePage', () => {
     expect(serviceCard.textContent).toContain('HMAC secret 不进入浏览器');
     expect(serviceCard.textContent).toContain('sessionStorage 生命周期');
     expect(serviceCard.textContent).not.toContain('console-test-token');
-    await screen.findByText('FILE-SHARE-READY');
     await screen.findByText(/用户映射：active/);
+    await userEvent.setup().click(screen.getByRole('button', { name: '文档状态' }));
+    await screen.findByText('FILE-SHARE-READY');
   });
 
   it('isolates a FILE_SHARE outage while service and session cards remain', async () => {
@@ -44,12 +45,15 @@ describe('EnterpriseConsolePage', () => {
       ),
     );
 
+    const user = userEvent.setup();
     render(<EnterpriseConsolePage />);
 
-    await screen.findByText(/FILE_STATUS_UNAVAILABLE/);
     expect(screen.getByTestId('console-service-card')).toBeTruthy();
-    expect(screen.getByTestId('console-conversation-card')).toBeTruthy();
     expect(screen.getByText('Gateway liveness')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: '文档状态' }));
+    await screen.findByText(/FILE_STATUS_UNAVAILABLE/);
+    await user.click(screen.getByRole('button', { name: '会话历史' }));
+    expect(screen.getByTestId('console-conversation-card')).toBeTruthy();
   });
 
   it('shows unauthorized modules without exposing credentials', async () => {
@@ -59,11 +63,18 @@ describe('EnterpriseConsolePage', () => {
       http.get('/enterprise/api/v2/conversations', () => errorResponse('AUTH_TOKEN_INVALID', 'Authentication token is invalid')),
     );
 
+    const user = userEvent.setup();
     render(<EnterpriseConsolePage />);
 
     await waitFor(() => {
       expect(screen.getByTestId('console-service-card').textContent).toContain('unauthorized');
+    });
+    await user.click(screen.getByRole('button', { name: '文档状态' }));
+    await waitFor(() => {
       expect(screen.getByTestId('console-document-card').textContent).toContain('unauthorized');
+    });
+    await user.click(screen.getByRole('button', { name: '会话历史' }));
+    await waitFor(() => {
       expect(screen.getByTestId('console-conversation-card').textContent).toContain('unauthorized');
     });
     expect(screen.queryByText(/console-test-token|mock-ticket|cookie\s*[:=]|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/i)).toBeNull();
@@ -81,6 +92,7 @@ describe('EnterpriseConsolePage', () => {
 
     const user = userEvent.setup();
     render(<EnterpriseConsolePage />);
+    await user.click(screen.getByRole('button', { name: '会话历史' }));
     await user.click(screen.getByRole('button', { name: '刷新会话列表' }));
     const session = await screen.findByRole('button', { name: /console citation trace/ });
     await user.click(session);
@@ -95,7 +107,9 @@ describe('EnterpriseConsolePage', () => {
     const user = userEvent.setup();
     render(<EnterpriseConsolePage />);
 
+    await user.click(screen.getByRole('button', { name: '会话历史' }));
     await user.click(screen.getByRole('button', { name: '新建诊断会话' }));
+    await user.click(screen.getByRole('button', { name: '临时附件' }));
     const input = await screen.findByLabelText('transient attachment file');
     await waitFor(() => expect((input as HTMLInputElement).disabled).toBe(false));
     await user.upload(input, new File(['console fixture'], 'console.pdf', { type: 'application/pdf' }));
@@ -106,5 +120,24 @@ describe('EnterpriseConsolePage', () => {
     await user.click(screen.getByRole('button', { name: '验证下载路由' }));
     await screen.findByText(/download route verified/);
     expect(screen.getAllByText('retrievable').length).toBeGreaterThan(0);
+  });
+
+  it('injects runtime Bearer without displaying the token and refreshes identity', async () => {
+    const user = userEvent.setup();
+    render(<EnterpriseConsolePage />);
+
+    expect(screen.getByText('无 Bearer（可测试 401）')).toBeTruthy();
+    const input = screen.getByLabelText('运行期 Bearer（不写入源码）');
+    expect((input as HTMLInputElement).type).toBe('password');
+    expect(screen.getByRole('link', { name: '返回 Harness' }).getAttribute('href')).toBe('/');
+
+    await user.type(input, 'console-test-token');
+    await user.click(screen.getByRole('button', { name: '保存运行期凭据' }));
+
+    expect(sessionStorage.getItem('enterprise.harness.jwt')).toBe('console-test-token');
+    expect((input as HTMLInputElement).value).toBe('');
+    expect(screen.getByText('Bearer 已注入')).toBeTruthy();
+    expect(screen.queryByText('console-test-token')).toBeNull();
+    await screen.findByText(/用户映射：active/);
   });
 });

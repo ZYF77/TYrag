@@ -83,7 +83,7 @@ export interface CreateConversationRequest {
 export interface ConversationSummary {
   conversationId: string;
   title: string;
-  status: 'active' | 'archived';
+  status: '进行中' | '已归档';
   equipmentId: string | null;
   fixedAssetNo: string | null;
   faultCode: string | null;
@@ -129,7 +129,7 @@ export interface ConversationAttachmentResponse {
   ticketExpiresAt: string;
 }
 
-export type MessageStatus = 'completed' | 'no_reliable_evidence' | 'failed';
+export type MessageStatus = '已完成' | '无可靠依据' | '失败';
 
 export interface Citation {
   citationId: string;
@@ -190,7 +190,7 @@ export interface MessageRunPending {
   conversationId: string;
   clientMessageId: string;
   runId: string;
-  status: 'running';
+  status: '处理中';
   replayed: true;
 }
 

@@ -63,3 +63,24 @@ export interface FileShareDocumentStatus {
 export interface FileShareDocumentStatusPage {
   items: FileShareDocumentStatus[];
 }
+
+export interface GatewayHttpLogEvent {
+  id: string;
+  ts: string;
+  direction: 'inbound' | 'outbound' | string;
+  kind: string;
+  method: string;
+  path: string;
+  query?: string;
+  http_status: number | null;
+  duration_ms?: number;
+  body?: unknown;
+  response_body?: unknown;
+  streamed?: boolean;
+  outcome?: string | null;
+  error?: string | null;
+}
+
+export interface GatewayHttpLogPage {
+  items: GatewayHttpLogEvent[];
+}

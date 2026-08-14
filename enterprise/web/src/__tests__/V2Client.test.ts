@@ -135,7 +135,7 @@ describe('v2 API client', () => {
 
     const history = await v2Api.listMessages(conversation.conversationId);
     const assistant = history.items.find((item) => item.role === 'assistant');
-    expect(assistant?.status).toBe('failed');
+    expect(assistant?.status).toBe('失败');
     expect(assistant?.citations).toHaveLength(1);
     expect(assistant?.citations[0].assetId).toBe('ASSET-HARNESS-001');
   });

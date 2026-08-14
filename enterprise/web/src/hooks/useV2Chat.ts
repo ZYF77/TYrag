@@ -36,7 +36,11 @@ function readJson(data: string): Record<string, unknown> | null {
 }
 
 function isMessageStatus(value: unknown): value is MessageStatus {
-  return value === 'completed' || value === 'no_reliable_evidence' || value === 'failed';
+  return value === '已完成' || value === '无可靠依据' || value === '失败';
+}
+
+function isFailedStatus(status: string): boolean {
+  return status === '失败' || status === 'failed';
 }
 
 function isCitation(value: unknown): value is Citation {
@@ -162,7 +166,7 @@ export function useV2Chat(conversationId: string | null) {
         }
 
         if (event.event === 'answer.completed') {
-          const status = isMessageStatus(data.status) ? data.status : 'failed';
+          const status = isMessageStatus(data.status) ? data.status : '失败';
           const citations = Array.isArray(data.citations)
             ? data.citations.filter(isCitation)
             : [];
@@ -174,7 +178,7 @@ export function useV2Chat(conversationId: string | null) {
             citations: Array.isArray(data.citations) ? citations : message.citations,
             runId: typeof data.runId === 'string' ? data.runId : message.runId,
           }));
-          if (status !== 'failed') retryRef.current = null;
+          if (!isFailedStatus(status)) retryRef.current = null;
           return;
         }
 
@@ -184,7 +188,7 @@ export function useV2Chat(conversationId: string | null) {
           retryRef.current = request;
           updateReply(request.replyId, (message) => ({
             ...message,
-            status: 'failed',
+            status: '失败',
             error: displayError,
             runId: typeof data.runId === 'string' ? data.runId : message.runId,
           }));
@@ -205,7 +209,7 @@ export function useV2Chat(conversationId: string | null) {
           retryRef.current = request;
           updateReply(request.replyId, (message) => ({
             ...message,
-            status: 'failed',
+            status: '失败',
             error: displayError,
           }));
         })

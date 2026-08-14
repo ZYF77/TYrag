@@ -7,6 +7,8 @@ import { DocumentProducerNotice } from '../components/harness/DocumentProducerNo
 import { HarnessChat } from '../components/harness/HarnessChat';
 import { HarnessCitationPanel } from '../components/harness/HarnessCitationPanel';
 import { TransientAttachmentPanel } from '../components/harness/TransientAttachmentPanel';
+import { GatewayRuntimeLog } from '../components/harness/GatewayRuntimeLog';
+import { WorkbenchShell, useWorkbenchTab } from '../components/layout/WorkbenchShell';
 import { toDisplayError, getHarnessToken, setHarnessToken, v2Api } from '../api/v2Client';
 import { API_MODE } from '../api/mode';
 import { browserDocumentSyncEnabled } from '../api/documentSyncPolicy';
@@ -20,6 +22,7 @@ import type {
   PatchConversationContextRequest,
 } from '../api/v2Types';
 import { useV2Chat } from '../hooks/useV2Chat';
+import './enterprise-console.css';
 
 function isDocumentTerminal(status: string): boolean {
   return ['ready', 'failed', 'cancelled', 'superseded', 'disabled', 'deleted', 'review_required'].includes(status);
@@ -58,8 +61,29 @@ async function encodeAttachment(file: File): Promise<string> {
   });
 }
 
+const HARNESS_TABS = ['ask', 'attachment', 'documents', 'runtime'] as const;
+type HarnessTab = (typeof HARNESS_TABS)[number];
+
+const HARNESS_NAV = [
+  {
+    id: 'integration',
+    label: '联调',
+    items: [
+      { id: 'ask', label: '问答会话' },
+      { id: 'attachment', label: '临时附件' },
+      { id: 'documents', label: '文档' },
+    ],
+  },
+  {
+    id: 'ops',
+    label: '运行',
+    items: [{ id: 'runtime', label: 'HTTP 日志' }],
+  },
+];
+
 export function IntegrationHarnessPage() {
   const browserDocumentSync = browserDocumentSyncEnabled(API_MODE);
+  const [tab, setTab] = useWorkbenchTab<HarnessTab>('ask', HARNESS_TABS);
   const [documentQuery, setDocumentQuery] = useState<DocumentQuery | null>(null);
   const [documentOperation, setDocumentOperation] = useState<DocumentOperation | null>(null);
   const [documentLoading, setDocumentLoading] = useState(false);
@@ -270,92 +294,155 @@ export function IntegrationHarnessPage() {
   );
 
   return (
-    <main data-testid="harness-page" className="min-h-screen bg-slate-100 text-slate-900">
-      <div className="mx-auto max-w-[1500px] px-4 py-5 sm:px-6">
-        <header className="mb-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-indigo-600">M1-E / T5 / WP-05</p>
-              <h1 className="mt-1 text-xl font-semibold tracking-tight text-slate-900">TYrag v2 Integration Test Harness</h1>
-              <p className="mt-1 max-w-3xl text-xs leading-5 text-slate-500">仅用于用户 JWT 会话、真 SSE、历史状态回放和契约诊断；不构成正式业务 UI。mock 模式文档区域仅用于 UI contract test，Gateway/demo 模式的文档同步由服务侧 producer 负责。</p>
-            </div>
-            <div className="flex items-center gap-2 text-xs">
-              <span className="rounded-full bg-emerald-50 px-2.5 py-1 font-medium text-emerald-700">external contract v2.0.0</span>
-              <span data-testid="harness-api-mode" className="rounded-full bg-slate-100 px-2.5 py-1 font-medium text-slate-600">
-                {API_MODE === 'gateway' ? 'Gateway v2 用户 Harness · 文档 producer 独立' : `UI contract ${API_MODE}（非 Integration）`}
-              </span>
-              <span className={`rounded-full px-2.5 py-1 font-medium ${tokenConfigured ? 'bg-slate-100 text-slate-700' : 'bg-amber-50 text-amber-700'}`}>{tokenConfigured ? 'Bearer 已注入' : '无 Bearer（可测试 401）'}</span>
-            </div>
-          </div>
-          <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-3">
-            <label className="text-xs text-slate-500" htmlFor="harness-token">运行期 Bearer（不写入源码）</label>
-            <input id="harness-token" type="password" value={tokenDraft} onChange={(event) => setTokenDraft(event.target.value)} placeholder={tokenConfigured ? '已配置，可留空' : '仅本地联调注入'} className="w-64 rounded-md border border-slate-200 px-2.5 py-1.5 text-xs" />
-            <button type="button" onClick={() => { setHarnessToken(tokenDraft); setTokenDraft(''); setTokenConfigured(Boolean(getHarnessToken())); }} className="rounded-md border border-slate-200 px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50">保存运行期凭据</button>
-            <span className="text-[11px] text-slate-400">不显示、不记录 Token。</span>
-          </div>
-        </header>
+    <WorkbenchShell
+      testId="harness-page"
+      shellClass="harness-shell"
+      brand="Harness"
+      subtitle="M1-E / T5 / WP-05"
+      groups={HARNESS_NAV}
+      activeId={tab}
+      onSelect={(id) => setTab(id as HarnessTab)}
+      actions={(
+        <>
+          <span className="console-mode-badge">external contract v2.0.0</span>
+          <span data-testid="harness-api-mode" className="console-mode-badge">
+            {API_MODE === 'gateway' ? 'Gateway v2 用户 Harness · 文档 producer 独立' : `UI contract ${API_MODE}（非 Integration）`}
+          </span>
+          <span className="console-mode-badge">{tokenConfigured ? 'Bearer 已注入' : '无 Bearer（可测试 401）'}</span>
+          <a href="/console" className="console-secondary-button">打开联调 Console</a>
+        </>
+      )}
+      tokenRow={(
+        <div className="console-token-row">
+          <label htmlFor="harness-token">运行期 Bearer（不写入源码）</label>
+          <input id="harness-token" type="password" value={tokenDraft} onChange={(event) => setTokenDraft(event.target.value)} placeholder={tokenConfigured ? '已配置，可留空' : '仅本地联调注入'} />
+          <button type="button" onClick={() => { setHarnessToken(tokenDraft); setTokenDraft(''); setTokenConfigured(Boolean(getHarnessToken())); }} className="console-primary-button">保存运行期凭据</button>
+          <span className="console-route">不显示、不记录 Token。</span>
+        </div>
+      )}
+      footer={(
+        <footer className="console-footer">
+          <span>Active session: {activeConversation ? activeConversation.title : 'no conversation selected'}</span>
+          <span className="console-route">route / · Attachment contract v2.1.0</span>
+        </footer>
+      )}
+    >
+      {visibleError && <ErrorBanner error={visibleError} onDismiss={() => {}} />}
 
-        {visibleError && <ErrorBanner error={visibleError} onDismiss={() => {}} />}
-
-        <div data-testid="harness-layout" className="grid grid-cols-1 gap-4 xl:grid-cols-[360px_minmax(0,1fr)_300px]">
-          <aside className="space-y-4">
-            <section aria-label="Asset Registry 设备选择" className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-              <div className="flex items-center justify-between gap-2">
-                <div><h2 className="text-sm font-semibold text-slate-800">Asset Registry 设备选择</h2><p className="mt-1 text-[11px] text-slate-500">v2 cursor page · owned sessions</p></div>
-                <button type="button" onClick={() => void loadConversations()} className="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">刷新</button>
+      {tab === 'ask' && (
+        <div data-testid="harness-layout" className="harness-layout">
+          <aside className="harness-stack">
+            <section aria-label="Asset Registry 设备选择" className="console-card">
+              <div className="console-card-head">
+                <div>
+                  <p className="console-eyebrow">Sessions</p>
+                  <h2>Asset Registry 设备选择</h2>
+                  <p>v2 cursor page · owned sessions</p>
+                </div>
+                <div className="console-card-actions">
+                  <button type="button" onClick={() => void loadConversations()} className="console-secondary-button">刷新</button>
+                </div>
               </div>
-              <div className="mt-3 space-y-1.5">
-                {conversationLoading && <p className="text-xs text-slate-400">加载中…</p>}
-                {!conversationLoading && conversations.length === 0 && <p className="text-xs text-slate-400">暂无会话</p>}
+              <div className="console-card-body">
+                {conversationLoading && <p className="console-empty">加载中…</p>}
+                {!conversationLoading && conversations.length === 0 && <p className="console-empty">暂无会话</p>}
                 {conversations.map((conversation) => (
-                  <button type="button" key={conversation.conversationId} onClick={() => selectConversation(conversation.conversationId)} className={`w-full rounded-lg border px-3 py-2 text-left ${conversation.conversationId === activeId ? 'border-indigo-300 bg-indigo-50' : 'border-slate-100 hover:bg-slate-50'}`}>
-                    <p className="truncate text-xs font-medium text-slate-800">{conversation.title}</p>
-                    <p className="mt-1 text-[10px] text-slate-500">{conversation.equipmentId ?? '未绑定 Asset'} · v{conversation.contextVersion}</p>
+                  <button type="button" key={conversation.conversationId} onClick={() => selectConversation(conversation.conversationId)} className={`console-list-btn ${conversation.conversationId === activeId ? 'is-active' : ''}`}>
+                    <p>{conversation.title}</p>
+                    <p className="console-route">{conversation.equipmentId ?? '未绑定 Asset'} · v{conversation.contextVersion}</p>
                   </button>
                 ))}
-              </div>
-              <div className="mt-4 border-t border-slate-100 pt-3">
-                <p className="mb-1 text-xs font-medium text-slate-700">选择设备并创建会话</p>
-                <p className="mb-2 text-[11px] leading-5 text-slate-500">equipmentId/fixedAssetNo 仅作为 Registry 查询键；canonical snapshot 由 Gateway 返回。本地联调请使用 <code>EQ-GD01250002</code> + <code>GD01250002</code>（或 <code>EQ-GR01220020</code> + <code>GR01220020</code>）。</p>
-                <div className="space-y-2">
-                  <input aria-label="new equipmentId" value={newEquipmentId} onChange={(event) => setNewEquipmentId(event.target.value)} placeholder="equipmentId，例如 EQ-GD01250002" className="w-full rounded-md border border-slate-200 px-2.5 py-2 text-xs" />
-                  <input aria-label="new fixedAssetNo" value={newFixedAssetNo} onChange={(event) => setNewFixedAssetNo(event.target.value)} placeholder="fixedAssetNo，例如 GD01250002" className="w-full rounded-md border border-slate-200 px-2.5 py-2 text-xs" />
-                  <input aria-label="new faultCode" value={newFaultCode} onChange={(event) => setNewFaultCode(event.target.value)} placeholder="faultCode，例如 E-104" className="w-full rounded-md border border-slate-200 px-2.5 py-2 text-xs" />
-                  <button type="button" onClick={() => void createConversation()} disabled={conversationLoading} className="w-full rounded-md bg-slate-800 px-3 py-2 text-xs font-medium text-white hover:bg-slate-900 disabled:opacity-50">创建并选择</button>
+                <div className="console-note">
+                  <p><strong>选择设备并创建会话</strong></p>
+                  <p>equipmentId/fixedAssetNo 仅作为 Registry 查询键；canonical snapshot 由 Gateway 返回。本地联调请使用 <code>EQ-GD01250002</code> + <code>GD01250002</code>（或 <code>EQ-GR01220020</code> + <code>GR01220020</code>）。</p>
+                </div>
+                <div className="console-pad">
+                  <div className="harness-stack">
+                    <input aria-label="new equipmentId" value={newEquipmentId} onChange={(event) => setNewEquipmentId(event.target.value)} placeholder="equipmentId，例如 EQ-GD01250002" className="diag-input" />
+                    <input aria-label="new fixedAssetNo" value={newFixedAssetNo} onChange={(event) => setNewFixedAssetNo(event.target.value)} placeholder="fixedAssetNo，例如 GD01250002" className="diag-input" />
+                    <input aria-label="new faultCode" value={newFaultCode} onChange={(event) => setNewFaultCode(event.target.value)} placeholder="faultCode，例如 E-104" className="diag-input" />
+                    <button type="button" onClick={() => void createConversation()} disabled={conversationLoading} className="console-primary-button is-full">创建并选择</button>
+                  </div>
                 </div>
               </div>
             </section>
-            <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-              <h2 className="text-sm font-semibold text-slate-800">Asset context 切换</h2>
-              <p className="mt-1 mb-3 text-[11px] text-slate-500">PATCH /conversations/{activeId ?? '…'}/context</p>
-              <ContextEditor conversation={activeConversation} saving={contextSaving} error={contextError} onSave={(context) => void saveContext(context)} />
+            <section className="console-card">
+              <div className="console-card-head">
+                <div>
+                  <p className="console-eyebrow">Context</p>
+                  <h2>Asset context 切换</h2>
+                  <p>PATCH /conversations/{activeId ?? '…'}/context</p>
+                </div>
+              </div>
+              <div className="console-card-body">
+                <div className="console-pad">
+                  <ContextEditor conversation={activeConversation} saving={contextSaving} error={contextError} onSave={(context) => void saveContext(context)} />
+                </div>
+              </div>
             </section>
           </aside>
 
-          <div className="space-y-4">
+          <div className="harness-stack">
             <HarnessChat conversation={activeConversation} messages={chat.messages} isStreaming={chat.isStreaming} error={chat.error} onSend={chat.sendMessage} onRetry={chat.retry} onCancel={chat.cancelStream} onCitation={(citation) => void selectCitation(citation)} />
-            <TransientAttachmentPanel conversationId={activeId} loading={attachmentLoading} error={attachmentError} notice={attachmentNotice} onUpload={(file) => void uploadAttachment(file)} />
-            {browserDocumentSync && <DocumentDiagnostics operation={documentOperation} loading={documentLoading} error={documentError} onRefresh={() => void pollDocument()} />}
           </div>
 
-          <aside className="space-y-4">
-             {browserDocumentSync ? <>
-               <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-                 <div className="mb-3 flex items-center justify-between gap-2"><div><h2 className="text-sm font-semibold text-slate-800">文件事件</h2><p className="mt-1 text-[11px] text-slate-500">mock POST /documents · 非 Integration 证据</p></div><button type="button" onClick={() => void refreshDocumentList()} className="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">{documentListLoading ? '查询中…' : '列表'}</button></div>
-                 <DocumentEventForm loading={documentLoading} onSubmit={(command) => void submitDocument(command)} />
-               </section>
-               <section aria-label="文件操作列表" className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-                 <h2 className="text-sm font-semibold text-slate-800">最近文件操作（mock）</h2>
-                 <div className="mt-3 space-y-2">
-                   {documentItems.length === 0 && <p className="text-xs text-slate-400">尚未加载列表。</p>}
-                   {documentItems.map((item) => <button type="button" key={item.operationId} onClick={() => { setDocumentOperation(item); setDocumentQuery({ externalDocumentId: item.externalDocumentId, sourceVersionId: item.sourceVersionId }); }} className="w-full rounded-md border border-slate-100 px-2.5 py-2 text-left text-xs hover:bg-slate-50"><span className="font-medium text-slate-800">{item.externalDocumentId}</span><span className="ml-2 text-slate-500">{item.status} · {item.stage}</span></button>)}
-                 </div>
-               </section>
-             </> : <DocumentProducerNotice />}
+          <aside className="harness-stack">
             <HarnessCitationPanel citation={selectedCitation} loading={citationLoading} error={citationError} onClose={() => { setSelectedCitation(null); setCitationError(null); }} />
           </aside>
         </div>
-      </div>
-    </main>
+      )}
+
+      {tab === 'attachment' && (
+        <TransientAttachmentPanel conversationId={activeId} loading={attachmentLoading} error={attachmentError} notice={attachmentNotice} onUpload={(file) => void uploadAttachment(file)} />
+      )}
+
+      {tab === 'documents' && (
+        <div className="harness-stack">
+          {browserDocumentSync ? (
+            <>
+              <section className="console-card">
+                <div className="console-card-head">
+                  <div>
+                    <p className="console-eyebrow">Documents</p>
+                    <h2>文件事件</h2>
+                    <p>mock POST /documents · 非 Integration 证据</p>
+                  </div>
+                  <div className="console-card-actions">
+                    <button type="button" onClick={() => void refreshDocumentList()} className="console-secondary-button">{documentListLoading ? '查询中…' : '列表'}</button>
+                  </div>
+                </div>
+                <div className="console-card-body">
+                  <div className="console-pad">
+                    <DocumentEventForm loading={documentLoading} onSubmit={(command) => void submitDocument(command)} />
+                  </div>
+                </div>
+              </section>
+              <section aria-label="文件操作列表" className="console-card">
+                <div className="console-card-head">
+                  <div>
+                    <p className="console-eyebrow">Recent</p>
+                    <h2>最近文件操作（mock）</h2>
+                  </div>
+                </div>
+                <div className="console-card-body">
+                  {documentItems.length === 0 && <p className="console-empty">尚未加载列表。</p>}
+                  {documentItems.map((item) => (
+                    <button type="button" key={item.operationId} onClick={() => { setDocumentOperation(item); setDocumentQuery({ externalDocumentId: item.externalDocumentId, sourceVersionId: item.sourceVersionId }); }} className="console-list-btn">
+                      <p>{item.externalDocumentId}</p>
+                      <p className="console-route">{item.status} · {item.stage}</p>
+                    </button>
+                  ))}
+                </div>
+              </section>
+              <DocumentDiagnostics operation={documentOperation} loading={documentLoading} error={documentError} onRefresh={() => void pollDocument()} />
+            </>
+          ) : (
+            <DocumentProducerNotice />
+          )}
+        </div>
+      )}
+
+      {tab === 'runtime' && <GatewayRuntimeLog />}
+    </WorkbenchShell>
   );
 }

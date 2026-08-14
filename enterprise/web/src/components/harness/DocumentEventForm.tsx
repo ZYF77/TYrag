@@ -63,14 +63,14 @@ function Field({
   required?: boolean;
 }) {
   return (
-    <label className="block text-xs text-slate-600">
-      <span className="mb-1 block font-medium">{label}</span>
+    <label className="diag-field">
+      <span>{label}</span>
       <input
         value={value}
         type={type}
         required={required}
         onChange={(event) => onChange(event.target.value)}
-        className="w-full rounded-md border border-slate-200 bg-white px-2.5 py-2 text-sm text-slate-800 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100"
+        className="diag-input"
       />
     </label>
   );
@@ -114,15 +114,15 @@ export function DocumentEventForm({ loading, onSubmit }: DocumentEventFormProps)
   };
 
   return (
-    <form onSubmit={submit} className="space-y-3" aria-label="文件事件提交">
-      <div className="grid gap-3 sm:grid-cols-2">
+    <form onSubmit={submit} className="harness-stack" aria-label="文件事件提交">
+      <div className="console-grid-2">
         <Field label="eventId" value={state.eventId} onChange={(value) => set('eventId', value)} />
-        <label className="block text-xs text-slate-600">
-          <span className="mb-1 block font-medium">eventType</span>
+        <label className="diag-field">
+          <span>eventType</span>
           <select
             value={state.eventType}
             onChange={(event) => set('eventType', event.target.value as DocumentCommand['eventType'])}
-            className="w-full rounded-md border border-slate-200 bg-white px-2.5 py-2 text-sm"
+            className="diag-select"
           >
             <option value="upsert">upsert</option>
             <option value="reindex">reindex</option>
@@ -143,12 +143,12 @@ export function DocumentEventForm({ loading, onSubmit }: DocumentEventFormProps)
         <Field label="metadata.document_type" value={state.documentType} onChange={(value) => set('documentType', value)} />
         <Field label="metadata.department_id" value={state.departmentId} onChange={(value) => set('departmentId', value)} />
         <Field label="metadata.security_level" value={state.securityLevel} onChange={(value) => set('securityLevel', value)} type="number" />
-        <label className="block text-xs text-slate-600">
-          <span className="mb-1 block font-medium">metadata.business_status</span>
+        <label className="diag-field">
+          <span>metadata.business_status</span>
           <select
             value={state.businessStatus}
             onChange={(event) => set('businessStatus', event.target.value as FormState['businessStatus'])}
-            className="w-full rounded-md border border-slate-200 bg-white px-2.5 py-2 text-sm"
+            className="diag-select"
           >
             <option value="active">active</option>
             <option value="review_required">review_required</option>
@@ -158,13 +158,13 @@ export function DocumentEventForm({ loading, onSubmit }: DocumentEventFormProps)
           </select>
         </label>
       </div>
-      <p className="text-[11px] leading-5 text-slate-500">
+      <p className="diag-help">
         仅提交 v2 外部文件事件；浏览器不会访问对象存储。生产 HMAC 凭据应由服务端注入，本 Harness 不保存真实密钥。
       </p>
       <button
         type="submit"
         disabled={loading}
-        className="rounded-md bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+        className="console-primary-button"
       >
         {loading ? '提交中…' : '提交文件事件'}
       </button>

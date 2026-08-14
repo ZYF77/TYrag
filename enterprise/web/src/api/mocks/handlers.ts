@@ -196,6 +196,41 @@ export const handlers = [
     HttpResponse.json({ status: 'healthy', version: '1.0.0' }),
   ),
 
+  http.get(`${BASE}/diagnostics/http-log`, () =>
+    HttpResponse.json({
+      items: [
+        {
+          id: '2',
+          ts: new Date().toISOString(),
+          direction: 'inbound',
+          kind: 'inquiry.http',
+          method: 'GET',
+          path: '/enterprise/api/v2/conversations',
+          query: '',
+          http_status: 200,
+          duration_ms: 18,
+          body: null,
+          response_body: { items: [], nextCursor: null, hasMore: false },
+          streamed: false,
+        },
+        {
+          id: '1',
+          ts: new Date(Date.now() - 8_000).toISOString(),
+          direction: 'inbound',
+          kind: 'feed.register.inbound',
+          method: 'POST',
+          path: '/enterprise/api/v3/documents',
+          query: '',
+          http_status: 202,
+          duration_ms: 41,
+          body: { eventId: 'evt-mock-1', fileName: 'manual.pdf', token: '<redacted>' },
+          response_body: { status: 'accepted' },
+          streamed: false,
+        },
+      ],
+    }),
+  ),
+
   // GET /auth/me - demo identity probe
   http.get(`${BASE}/auth/me`, ({ request }) => {
     if (!bearerToken(request)) {
@@ -629,7 +664,7 @@ interface V2MessageRunResult {
   runId: string;
   messageId: string;
   answer: string;
-  status: 'completed' | 'no_reliable_evidence' | 'failed';
+  status: '已完成' | '无可靠依据' | '失败';
   citations: V2Citation[];
   replayed: boolean;
 }
@@ -678,7 +713,7 @@ function v2ConversationDetail(id: string, body: { equipmentId?: string | null; f
   return {
     conversationId: id,
     title: 'Harness 会话',
-    status: 'active',
+    status: '进行中',
     equipmentId: body.equipmentId ?? null,
     fixedAssetNo: body.fixedAssetNo ?? null,
     faultCode: body.faultCode ?? null,
@@ -896,7 +931,7 @@ const v2Handlers = [
       }
       if (existing.pending) {
         existing.pending = false;
-        return HttpResponse.json({ ...existing.result, status: 'running', replayed: true }, { status: 202 });
+        return HttpResponse.json({ ...existing.result, status: '处理中', replayed: true }, { status: 202 });
       }
       const replayed = { ...existing.result, replayed: true };
       if ((request.headers.get('accept') ?? '').includes('text/event-stream')) return v2Stream(replayed, false);
@@ -912,18 +947,18 @@ const v2Handlers = [
       runId: `run-${Date.now()}`,
       messageId: `message-${Date.now()}`,
       answer,
-      status: streamFailure ? 'failed' : noEvidence ? 'no_reliable_evidence' : 'completed',
+      status: streamFailure ? '失败' : noEvidence ? '无可靠依据' : '已完成',
       citations,
       replayed: false,
     };
-    const userMessage: Message = { messageId: `${result.messageId}-user`, role: 'user', content: question, status: 'completed', citations: [], createdAt: v2Now() };
+    const userMessage: Message = { messageId: `${result.messageId}-user`, role: 'user', content: question, status: '已完成', citations: [], createdAt: v2Now() };
     const assistantMessage: Message = { messageId: result.messageId, role: 'assistant', content: answer, status: result.status, citations, createdAt: v2Now() };
     const storedMessages = [...record.messages, userMessage, assistantMessage];
     record.messages = storedMessages;
     record.detail = { ...record.detail, lastMessageAt: v2Now(), title: question.slice(0, 40) || record.detail.title };
     const pending = question.toLowerCase().includes('pending');
     v2Runs.set(runKey, { result, messages: storedMessages, question, pending });
-    if (pending) return HttpResponse.json({ conversationId: id, clientMessageId: body.clientMessageId, runId: result.runId, status: 'running', replayed: true }, { status: 202 });
+    if (pending) return HttpResponse.json({ conversationId: id, clientMessageId: body.clientMessageId, runId: result.runId, status: '处理中', replayed: true }, { status: 202 });
     if ((request.headers.get('accept') ?? '').includes('text/event-stream')) return v2Stream(result, question.includes('sse-error'));
     return HttpResponse.json(result);
   }),
@@ -1001,7 +1036,7 @@ const v2Handlers = [
     }
     v2AttachmentTickets.delete(ticket);
     stored.response = { ...stored.response, downloadCount: stored.response.downloadCount + 1 };
-    return new Response(stored.content, {
+    return new Response(stored.content as unknown as BodyInit, {
       headers: {
         'Content-Type': stored.response.mediaType,
         'Content-Length': String(stored.content.byteLength),

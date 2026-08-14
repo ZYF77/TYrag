@@ -4,13 +4,40 @@ import { describe, expect, it } from 'vitest';
 import { IntegrationHarnessPage } from '../pages/IntegrationHarnessPage';
 
 describe('IntegrationHarnessPage', () => {
+  it('links to /console after JWT can be injected on this page', () => {
+    render(<IntegrationHarnessPage />);
+
+    expect((screen.getByLabelText('运行期 Bearer（不写入源码）') as HTMLInputElement).type).toBe('password');
+    expect(screen.getByRole('button', { name: '保存运行期凭据' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: '打开联调 Console' }).getAttribute('href')).toBe('/console');
+  });
+
   it('keeps the harness reachable on mobile and uses the desktop three-column breakpoint', () => {
     render(<IntegrationHarnessPage />);
 
+    const page = screen.getByTestId('harness-page');
     const layout = screen.getByTestId('harness-layout');
-    expect(layout.className).toContain('grid-cols-1');
-    expect(layout.className).toContain('xl:grid-cols-[360px_minmax(0,1fr)_300px]');
+    expect(page.className).toContain('harness-shell');
+    expect(page.querySelector('.console-nav')).toBeTruthy();
+    expect(layout.className).toContain('harness-layout');
+    expect(screen.getByLabelText('功能菜单')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '问答会话' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'HTTP 日志' })).toBeTruthy();
     expect(screen.getByLabelText('Asset Registry 设备选择')).toBeTruthy();
+    expect(screen.queryByLabelText('transient attachment 边界')).toBeNull();
+    expect(screen.queryByLabelText('运行')).toBeNull();
+  });
+
+  it('shows only the selected menu panel', async () => {
+    const user = userEvent.setup();
+    render(<IntegrationHarnessPage />);
+
+    expect(screen.getByTestId('harness-layout')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'HTTP 日志' }));
+    expect(screen.queryByTestId('harness-layout')).toBeNull();
+    expect(screen.getByTestId('harness-runtime-log')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: '临时附件' }));
+    expect(screen.queryByTestId('harness-runtime-log')).toBeNull();
     expect(screen.getByLabelText('transient attachment 边界')).toBeTruthy();
   });
 
@@ -27,10 +54,12 @@ describe('IntegrationHarnessPage', () => {
     const user = userEvent.setup();
     render(<IntegrationHarnessPage />);
 
+    await user.click(screen.getByRole('button', { name: '文档' }));
     await user.click(screen.getByRole('button', { name: '提交文件事件' }));
     await screen.findByText('未声明 ready（received）');
     expect(screen.getByText('文档状态与质量诊断')).toBeTruthy();
 
+    await user.click(screen.getByRole('button', { name: '问答会话' }));
     await user.click(screen.getByRole('button', { name: '创建并选择' }));
     await screen.findAllByText('Harness 会话');
     expect(await screen.findByText('FA-2001')).toBeTruthy();
@@ -49,7 +78,7 @@ describe('IntegrationHarnessPage', () => {
     await user.type(input, 'how to inspect?');
     await user.click(screen.getByRole('button', { name: '发送' }));
     await screen.findByText(/Harness answer/);
-    await screen.findByText('业务状态：completed');
+    await screen.findByText('业务状态：已完成');
     expect(screen.getByText(/citations: 1/)).toBeTruthy();
 
     await user.click(screen.getByRole('button', { name: /Harness maintenance manual/ }));
@@ -66,7 +95,7 @@ describe('IntegrationHarnessPage', () => {
     const input = await screen.findByLabelText('问题输入');
     await user.type(input, 'noevidence');
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
-    await screen.findByText('业务状态：no_reliable_evidence');
+    await screen.findByText('业务状态：无可靠依据');
     expect(screen.getByText('citations: 0')).toBeTruthy();
   });
 
@@ -77,12 +106,12 @@ describe('IntegrationHarnessPage', () => {
     const input = await screen.findByLabelText('问题输入');
     await user.type(input, 'sse-error replay status');
     await user.click(screen.getByRole('button', { name: '发送' }));
-    await screen.findByText('业务状态：failed');
+    await screen.findByText('业务状态：失败');
 
     first.unmount();
     render(<IntegrationHarnessPage />);
     await user.click(await screen.findByRole('button', { name: /sse-error replay status/ }));
-    await screen.findByText('业务状态：failed');
+    await screen.findByText('业务状态：失败');
     expect(screen.getByText('citations: 1')).toBeTruthy();
     expect(screen.getByText(/ASSET-HARNESS-001/)).toBeTruthy();
   });
@@ -115,10 +144,23 @@ describe('IntegrationHarnessPage', () => {
     expect(screen.queryByText('Gateway 已返回的 Asset Registry snapshot')).toBeNull();
   });
 
+  it('shows gateway HTTP request and response logs in the runtime panel', async () => {
+    const user = userEvent.setup();
+    render(<IntegrationHarnessPage />);
+    await user.click(screen.getByRole('button', { name: 'HTTP 日志' }));
+    const panel = screen.getByTestId('harness-runtime-log');
+    expect(panel.textContent).toContain('运行');
+    await screen.findByText('/enterprise/api/v2/conversations');
+    expect(panel.textContent).toContain('POST');
+    expect(panel.textContent).toContain('/enterprise/api/v3/documents');
+    expect(panel.textContent).not.toContain('should-not-appear');
+  });
+
   it('shows the transient attachment expiry returned by Gateway', async () => {
     const user = userEvent.setup();
     render(<IntegrationHarnessPage />);
     await user.click(screen.getByRole('button', { name: '创建并选择' }));
+    await user.click(screen.getByRole('button', { name: '临时附件' }));
     const input = await screen.findByLabelText('transient attachment file');
     await waitFor(() => expect((input as HTMLInputElement).disabled).toBe(false));
     const file = new File(['expired attachment'], 'expired-manual.pdf', { type: 'application/pdf' });
