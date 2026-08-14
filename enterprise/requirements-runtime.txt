@@ -1,0 +1,9 @@
+# Runtime dependencies for the standalone Enterprise Gateway image.
+aiosqlite==0.22.1
+boto3==1.42.25
+fastapi==0.141.1
+httpx==0.28.1
+jsonschema==4.26.0
+PyJWT==2.13.0
+pydantic==2.12.5
+uvicorn==0.40.0

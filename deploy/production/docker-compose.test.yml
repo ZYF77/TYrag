@@ -1,0 +1,11 @@
+# Test-only override for the controlled server pilot.
+# Never use this file for formal production / EAM RS256 traffic.
+# IMPORTANT: do NOT clear JWT_JWKS_URL. Keep EAM JWKS reachable; HS256 is
+# an additional probe algorithm only (JWT_ALLOWED_ALGS should include RS256).
+
+services:
+  enterprise-gateway:
+    environment:
+      JWT_ENABLE_HS: "true"
+      JWT_SHARED_SECRET: ${JWT_SHARED_SECRET:?set JWT_SHARED_SECRET}
+      ENTERPRISE_QUERY_SOURCE_SYSTEM: ${ENTERPRISE_QUERY_SOURCE_SYSTEM:-EAM}
