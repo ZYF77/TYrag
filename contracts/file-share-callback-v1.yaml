@@ -1,0 +1,114 @@
+openapi: 3.0.3
+info:
+  title: TYRAG FILE_SHARE terminal callback (Gateway outbound)
+  version: 1.0.0
+  description: >-
+    Outbound callback contract for FILE_SHARE document terminal states.
+    The device system (for example EAM) hosts the HTTPS endpoint. Gateway
+    posts a signed terminal event after processing completes. Callback URL
+    comes only from server-side sourceSystem configuration; registration
+    request bodies must not include callbackUrl.
+servers:
+  - url: /
+tags:
+  - name: file-share-callback
+paths:
+  /{callbackPath}:
+    post:
+      tags: [file-share-callback]
+      summary: Receive one FILE_SHARE terminal processing result
+      description: >-
+        Implemented by the device system. Gateway retries on transient
+        failures using the fixed backoff schedule 1/5/30/120/600 seconds and
+        at most 8 attempts, then dead-letters the delivery. Callback delivery
+        failures never roll back a successful ingestion state.
+      operationId: receiveFileShareTerminalCallback
+      parameters:
+        - name: X-TY-Timestamp
+          in: header
+          required: true
+          schema: { type: string, pattern: '^\d{10}$' }
+        - name: X-TY-Signature
+          in: header
+          required: true
+          schema:
+            type: string
+            pattern: '^sha256=[0-9a-f]{64}$'
+            description: >-
+              HMAC-SHA256 over `{timestamp}.{canonical_json_body}` using the
+              outbound callback secret configured on Gateway.
+        - name: X-TY-Key-Id
+          in: header
+          required: false
+          schema: { type: string, minLength: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FileShareTerminalCallback'
+      responses:
+        '200':
+          description: Accepted; Gateway marks delivery delivered
+        '201':
+          description: Accepted
+        '204':
+          description: Accepted with empty body
+        '408':
+          description: Transient; Gateway retries
+        '429':
+          description: Rate limited; Gateway retries
+        '5XX':
+          description: Transient; Gateway retries
+        '4XX':
+          description: Permanent client error; Gateway dead-letters
+components:
+  schemas:
+    CallbackError:
+      type: object
+      additionalProperties: false
+      required: [code, message, retryable]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        retryable: { type: boolean }
+    FileShareTerminalCallback:
+      type: object
+      additionalProperties: false
+      required:
+        - deliveryId
+        - eventType
+        - originatingEventId
+        - externalDocumentId
+        - sourceVersionId
+        - status
+        - timestamp
+        - payloadVersion
+        - tenantId
+        - sourceSystem
+        - qualityStatus
+        - retrievable
+      properties:
+        deliveryId: { type: string, minLength: 1 }
+        eventType:
+          type: string
+          const: document.terminal
+        originatingEventId: { type: string, minLength: 1 }
+        externalDocumentId: { type: string, minLength: 1 }
+        sourceVersionId: { type: string, minLength: 1 }
+        status:
+          type: string
+          enum: [retrievable, failed, review_required]
+        timestamp: { type: string, format: date-time }
+        payloadVersion: { type: string, const: '1' }
+        tenantId: { type: string, minLength: 1 }
+        sourceSystem: { type: string, minLength: 1 }
+        qualityStatus:
+          type: string
+          nullable: true
+          enum: [passed, review_required, failed, unknown, null]
+        retrievable: { type: boolean }
+        error:
+          allOf:
+            - $ref: '#/components/schemas/CallbackError'
+          nullable: true

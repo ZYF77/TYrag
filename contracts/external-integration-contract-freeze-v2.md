@@ -41,11 +41,11 @@ API envelope 固定 camelCase；`metadata` 固定 snake_case。`tenantId/sourceS
 
 创建会话可携带 initial context；创建后唯一持久 mutation 为 `PATCH /conversations/{id}/context`。context 字段为 `equipmentId/fixedAssetNo/faultCode`。省略=不变，null=清除；有效变化令 `contextVersion` +1。初始无 context 为 0，有 context 为 1。
 
-`equipmentId` 的唯一权威来源是设备管理系统 Asset Registry。`fixedAssetNo/assetId` 只能作为 Registry 查询键；文档 metadata 仅是非权威参考，不能创建或裁决 alias。多个标识必须由 Registry 解析为同一 canonical identity，否则 409 `CONVERSATION_CONTEXT_CONFLICT`；不存在映射则 422 `CONVERSATION_CONTEXT_INVALID`；Registry 不可用则 503 `ASSET_REGISTRY_UNAVAILABLE`。Gateway 持久化解析后的 canonical snapshot，并在消息路径按 5 分钟 TTL 惰性刷新。
+`equipmentId` / `fixedAssetNo` 由 EAM 提交或从用户问题命中的文档 metadata 绑定，Gateway 原样保存，不调用 Asset Registry。文档 metadata 是问询筛选键，不是跨系统身份回查。
 
-实际检索集合固定为 `ACL scope ∩ canonical equipment snapshot ∩ active/current version ∩ quality passed`。没有 canonical equipment 的 draft conversation 禁止发送消息，返回 422 `CONVERSATION_CONTEXT_REQUIRED`，不得退化为全库召回。禁止先全库召回再删除。`faultCode` 只进入 server-side prompt/suggestion rules，不作为文档身份。
+实际检索集合为 `ACL scope ∩（若已绑定则再交设备 metadata）∩ active/current version ∩ quality passed`。没有 canonical equipment 的 draft conversation 可以发送消息：能从问题抽出唯一已投喂设备号则绑定并筛选；否则在当前用户 ACL 可见文档内全局检索，并在回答末尾建议补充设备号。禁止先全库召回再删除。`faultCode` 只进入 server-side prompt/suggestion rules，不作为文档身份。
 
-消息请求不接受 equipmentId/fixedAssetNo/faultCode override，不修改持久 context。首条消息后 canonical equipmentId 不可变；fixedAssetNo 只有在 Registry 仍解析到同一 equipment 时可更新，否则 409 `CONVERSATION_CONTEXT_STALE`；切换设备必须新建 conversation。
+消息请求不接受 equipmentId/fixedAssetNo/faultCode override。一旦会话已绑定 equipmentId，首条消息后不可改绑；切换设备必须新建 conversation。尚未绑定前允许首句/后续句或 PATCH 完成首次绑定。
 
 ## 7. Pagination / Lifecycle Decision
 

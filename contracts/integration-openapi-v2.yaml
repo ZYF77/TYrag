@@ -1,13 +1,15 @@
 openapi: 3.1.0
 info:
   title: TYrag External Integration API
-  version: 2.1.0
+  version: 2.2.0
   description: >-
-    Frozen external contract for the Equipment Management System. Version 2.1
-    additively promotes conversation-scoped transient attachments while keeping
-    the v2 path and all v2.0 operations wire compatible. Version 1 remains wire
-    compatible; external consumers never receive integration engine internal
-    identifiers.
+    Frozen external contract for the Equipment Management System. Version 2.2
+    additively includes starter suggestion chips on ConversationDetail while
+    keeping the v2 path and prior operations wire compatible for clients that
+    ignore unknown fields. Inquiry conversation and message `status` values are
+    Chinese labels: 进行中/已归档, 已完成/无可靠依据/失败, and 处理中 for a
+    pending run. Version 1 remains wire compatible; external consumers
+    never receive integration engine internal identifiers.
 servers:
   - url: /enterprise/api/v2
 tags:
@@ -761,7 +763,7 @@ components:
       properties:
         conversationId: { type: string }
         title: { type: string, maxLength: 80 }
-        status: { type: string, enum: [active, archived] }
+        status: { type: string, enum: [进行中, 已归档] }
         equipmentId: { type: [string, 'null'] }
         fixedAssetNo: { type: [string, 'null'] }
         faultCode: { type: [string, 'null'] }
@@ -782,10 +784,12 @@ components:
         - lastMessageAt
         - createdAt
         - context
+        - suggestions
+        - contextCompacted
       properties:
         conversationId: { type: string }
         title: { type: string, maxLength: 80 }
-        status: { type: string, enum: [active, archived] }
+        status: { type: string, enum: [进行中, 已归档] }
         equipmentId: { type: [string, 'null'] }
         fixedAssetNo: { type: [string, 'null'] }
         faultCode: { type: [string, 'null'] }
@@ -793,6 +797,18 @@ components:
         lastMessageAt: { type: string, format: date-time }
         createdAt: { type: string, format: date-time }
         context: { $ref: '#/components/schemas/ConversationContext' }
+        suggestions:
+          type: array
+          items: { $ref: '#/components/schemas/Suggestion' }
+          description: >
+            Server-defined starter chips for the current contextVersion.
+            Clients must send suggestionId with matching contextVersion;
+            do not invent prompts client-side.
+        contextCompacted:
+          type: boolean
+          description: >
+            True when Gateway has stored a rolling conversation summary.
+            Summary text is never exposed to clients.
     ConversationPage:
       type: object
       additionalProperties: false
@@ -851,7 +867,7 @@ components:
         messageId: { type: string }
         role: { type: string, enum: [user, assistant] }
         content: { type: string }
-        status: { type: string, enum: [completed, no_reliable_evidence, failed] }
+        status: { type: string, enum: [已完成, 无可靠依据, 失败] }
         citations:
           type: array
           items: { $ref: '#/components/schemas/Citation' }
@@ -876,7 +892,7 @@ components:
         runId: { type: string }
         messageId: { type: string }
         answer: { type: string }
-        status: { type: string, enum: [completed, no_reliable_evidence, failed] }
+        status: { type: string, enum: [已完成, 无可靠依据, 失败] }
         citations:
           type: array
           items: { $ref: '#/components/schemas/Citation' }
@@ -889,7 +905,7 @@ components:
         conversationId: { type: string }
         clientMessageId: { type: string }
         runId: { type: string }
-        status: { type: string, enum: [running] }
+        status: { type: string, enum: [处理中] }
         replayed: { type: boolean, const: true }
     Suggestion:
       type: object

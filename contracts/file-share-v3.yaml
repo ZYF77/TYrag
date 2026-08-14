@@ -1,11 +1,15 @@
 openapi: 3.0.3
 info:
   title: TYRAG FILE_SHARE document integration
-  version: 3.0.0
+  version: 3.1.0
   description: >-
     Frozen local-integration contract for registering immutable PDFs already
     stored on an external file share. Device systems use only the public v3
     document routes and never call RAGFlow or the internal source-ticket route.
+    Registration HTTP 202 is an acceptance receipt only; terminal processing
+    results are delivered by the outbound FILE_SHARE callback contract
+    (file-share-callback-v1.yaml). GET status remains available for console
+    and operations diagnostics and is not the EAM primary integration path.
 servers:
   - url: /
 tags:
@@ -17,9 +21,11 @@ paths:
       tags: [documents-v3]
       summary: Register an immutable external FILE_SHARE PDF version
       description: >-
-        The Gateway stores source coordinates and metadata, not PDF bytes. A
-        successful response includes the server-owned relative statusUrl that
-        the caller must sign and poll without reconstructing it.
+        The Gateway stores source coordinates and metadata, not PDF bytes.
+        HTTP 202 means the event was accepted (or idempotently replayed). The
+        response is a slim acceptance receipt without statusUrl or progress
+        fields. Terminal results are pushed via the server-configured outbound
+        callback endpoint. Request bodies must not include callbackUrl.
       operationId: v3RegisterFileShareDocument
       security:
         - HmacSignature: []
@@ -38,7 +44,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/DocumentStatus'
+                $ref: '#/components/schemas/DocumentAccepted'
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
@@ -288,9 +294,30 @@ components:
         code: { type: string }
         message: { type: string }
         retryable: { type: boolean }
+    DocumentAccepted:
+      type: object
+      additionalProperties: false
+      description: >-
+        Slim registration acceptance receipt. Progress and terminal readiness
+        are not included; device systems consume the outbound terminal callback.
+      required:
+        - operationId
+        - externalDocumentId
+        - sourceVersionId
+        - deduplicated
+        - updatedAt
+      properties:
+        operationId: { type: string }
+        externalDocumentId: { type: string }
+        sourceVersionId: { type: string }
+        deduplicated: { type: boolean }
+        updatedAt: { type: string, format: date-time }
     DocumentStatus:
       type: object
       additionalProperties: false
+      description: >-
+        Full processing and readiness facts for console/ops diagnostics via
+        GET status. Not the primary EAM integration path after 3.1.0.
       required:
         - operationId
         - externalDocumentId
@@ -320,7 +347,9 @@ components:
         sourceVersionId: { type: string }
         statusUrl:
           type: string
-          description: Server-owned relative polling URL; sign and use it unchanged.
+          description: >-
+            Server-owned relative diagnostic URL for console/ops. Formal EAM
+            integration uses the outbound terminal callback instead of polling.
           pattern: '^/enterprise/api/v3/documents/.+/status\?'
         sourceKind: { type: string, enum: [FILE_SHARE] }
         status: { type: string }
