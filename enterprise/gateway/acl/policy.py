@@ -1,16 +1,17 @@
 """Frozen ACL safety rules for document access (WP-01 Phase 2 M2).
 
 Only rules marked FROZEN in the ACL Design Freeze are implemented as
-enforceable decisions. PENDING inputs (missing department/security/allow
-rule) produce UNRESOLVED, which callers must treat as deny. Tenant, status
+enforceable decisions. PENDING inputs (missing security/allow rule)
+produce UNRESOLVED, which callers must treat as deny. Tenant, status
 and deny-group checks are always applied and are never relaxed.
+Department is not a hard rule; see ADR acl-department-not-hard-deny.
 """
 from __future__ import annotations
 
 from enterprise.gateway.acl.schema import AclDecision, DocumentAclFacts
 from enterprise.gateway.auth.user_principal import UserPrincipal
 
-ACL_POLICY_VERSION = "1"
+ACL_POLICY_VERSION = "1.1"
 
 
 def _deny(rule: str, reason: str) -> AclDecision:
@@ -41,10 +42,6 @@ def evaluate_document_acl(
     if deny_hit:
         return _deny("DENY_GROUP_HIT", "deny group matched")
 
-    if not facts.department_id or not principal.department_ids:
-        return _deny("UNRESOLVED", "department rule has no usable input")
-    if facts.department_id not in principal.department_ids:
-        return _deny("DEPARTMENT_DENIED", "document department is not granted")
     if facts.security_level is None:
         return _deny("UNRESOLVED", "document security level is not set")
     if principal.security_level < facts.security_level:

@@ -1,8 +1,9 @@
 # ACL Design Freeze
 
 - 状态：Frozen
-- 日期：2026-08-05
+- 日期：2026-08-05（部门硬规则于 2026-08-13 经 ADR 放宽）
 - 基线：`d12f0a2` / RAGFlow `v0.26.4`
+- 策略版本：`ACL_POLICY_VERSION=1.1`
 - 范围：WP-01 Phase 2 M1/M2（AclScope、compile_scope、document ACL 决策）
 
 ## 1. 冻结规则
@@ -14,12 +15,12 @@
 | 租户 | 文档 tenant 缺失或不等于 principal tenant | deny |
 | 文档状态 | `business_status != active` | deny |
 | deny group | principal group 命中文档 deny group | deny（优先于 allow） |
-| department | 文档 department 或 principal department 任一为空 | UNRESOLVED → deny |
-| department | 双方都存在但不匹配 | deny |
 | security level | 文档 security_level 缺失 | UNRESOLVED → deny |
 | security level | principal 等级低于文档等级 | deny |
 | allow group | 文档 allow_group_ids 为空 | UNRESOLVED → deny |
 | allow group | 文档有 allow 规则但 principal 无命中 | deny |
+
+部门（JWT `department` / 文档 `department_id`）**不参与硬决策**。空值或不匹配不得单独 deny。问询范围由会话 `equipmentId` 与上表规则约束。见 [`docs/adr/acl-department-not-hard-deny.md`](../docs/adr/acl-department-not-hard-deny.md)。
 
 ## 2. 已收回的 PENDING 开关
 

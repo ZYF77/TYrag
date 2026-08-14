@@ -11,7 +11,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from enterprise.gateway.acl.context import AclContext
-from enterprise.gateway.acl.policy import evaluate_document_acl
+from enterprise.gateway.acl.policy import ACL_POLICY_VERSION, evaluate_document_acl
 from enterprise.gateway.acl.schema import (
     SCOPE_MODE_MATERIALIZED,
     SCOPE_MODE_METADATA_PREDICATE,
@@ -57,6 +57,10 @@ def _facts(**kwargs) -> DocumentAclFacts:
 
 
 # -- acl-policy-examples.json --
+
+
+def test_policy_version_is_1_1():
+    assert ACL_POLICY_VERSION == "1.1"
 
 
 def test_policy_example_department_and_security_allowed():
@@ -159,23 +163,23 @@ def test_empty_allow_groups_unresolved():
     assert decision.rule == "UNRESOLVED"
 
 
-def test_missing_user_department_unresolved():
+def test_missing_user_department_is_allowed():
     principal = _principal(department_ids=())
     decision = evaluate_document_acl(principal, _facts())
-    assert decision.allowed is False
-    assert decision.rule == "UNRESOLVED"
+    assert decision.allowed is True
+    assert decision.rule == "ALLOWED"
 
 
-def test_document_department_mismatch_denied():
+def test_document_department_mismatch_is_allowed():
     decision = evaluate_document_acl(_principal(), _facts(department_id="d99"))
-    assert decision.allowed is False
-    assert decision.rule == "DEPARTMENT_DENIED"
+    assert decision.allowed is True
+    assert decision.rule == "ALLOWED"
 
 
-def test_missing_document_department_unresolved():
+def test_missing_document_department_is_allowed():
     decision = evaluate_document_acl(_principal(), _facts(department_id=None))
-    assert decision.allowed is False
-    assert decision.rule == "UNRESOLVED"
+    assert decision.allowed is True
+    assert decision.rule == "ALLOWED"
 
 
 def test_security_level_insufficient_denied():

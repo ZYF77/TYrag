@@ -67,7 +67,7 @@ RAGFlow metadata 和 dataset/team 权限是执行载体，不是全部权威。
 
 - allowed dataset IDs；
 - document IDs（仅数量可控时）；
-- metadata filters：tenant、department、equipment、security level、status；
+- metadata filters：tenant、equipment、security level、status、allow/deny group；department 不作为硬过滤；
 - 禁止先全库召回再后删。
 
 ### 防线 C：返回前复核
@@ -76,8 +76,9 @@ RAGFlow metadata 和 dataset/team 权限是执行载体，不是全部权威。
 
 ## 6. deny 优先规则
 
-P0 冻结的 ACL 决策规则见 [`contracts/acl-design-freeze.md`](../contracts/acl-design-freeze.md)，
-空部门/密级/allow 组等未决输入一律按 `UNRESOLVED` 拒绝，不构成公开访问。
+P0 冻结的 ACL 决策规则见 [`contracts/acl-design-freeze.md`](../contracts/acl-design-freeze.md)。
+密级 / allow 组等未决输入一律按 `UNRESOLVED` 拒绝，不构成公开访问。
+部门不是硬 deny，见 [`docs/adr/acl-department-not-hard-deny.md`](adr/acl-department-not-hard-deny.md)。
 
 默认：
 
@@ -86,7 +87,8 @@ P0 冻结的 ACL 决策规则见 [`contracts/acl-design-freeze.md`](../contracts
 3. security_level 超出用户等级拒绝；
 4. `deny_group_ids` 命中优先于 allow；
 5. 有 allow 规则时至少命中一项；
-6. 无规则文档不得默认全员可见，除非知识库明确 public。
+6. 无规则文档不得默认全员可见，除非知识库明确 public；
+7. 用户部门与文档 `department_id` 不一致不单独拒绝；问询范围由会话设备上下文约束。
 
 ## 7. 必测越权路径
 
