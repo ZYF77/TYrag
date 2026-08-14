@@ -35,6 +35,21 @@ class TestGatewayConfig:
         monkeypatch.setenv("ENTERPRISE_TRANSIENT_ATTACHMENTS_ENABLED", "false")
         assert GatewayConfig().transient_attachments_enabled is False
 
+    def test_context_compress_defaults_and_override(self, monkeypatch):
+        monkeypatch.delenv("ENTERPRISE_CONTEXT_COMPRESS_ENABLED", raising=False)
+        monkeypatch.delenv("ENTERPRISE_CONTEXT_COMPRESS_TURNS", raising=False)
+        monkeypatch.delenv("ENTERPRISE_CONTEXT_SUMMARY_MAX_CHARS", raising=False)
+        cfg = GatewayConfig()
+        assert cfg.context_compress_enabled is True
+        assert cfg.context_compress_turns == 20
+        assert cfg.context_summary_max_chars == 1500
+
+        monkeypatch.setenv("ENTERPRISE_CONTEXT_COMPRESS_ENABLED", "false")
+        monkeypatch.setenv("ENTERPRISE_CONTEXT_COMPRESS_TURNS", "8")
+        overridden = GatewayConfig()
+        assert overridden.context_compress_enabled is False
+        assert overridden.context_compress_turns == 8
+
     def test_pg_defaults(self):
         cfg = GatewayConfig()
         assert cfg.pg_host == "localhost"

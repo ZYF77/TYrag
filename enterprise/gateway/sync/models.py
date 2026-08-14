@@ -408,8 +408,10 @@ async def migrate_schema(db: aiosqlite.Connection) -> None:
     await db.executescript(CREATE_DOCUMENT_EVENT_RECEIPT)
     await db.executescript(CREATE_SOURCE_TICKET)
     from enterprise.gateway.sync.transient_attachment import ensure_attachment_schema
+    from enterprise.gateway.callback_delivery import ensure_callback_delivery_schema
 
     await ensure_attachment_schema(db)
+    await ensure_callback_delivery_schema(db)
     await db.commit()
 
 
@@ -1028,6 +1030,35 @@ async def mark_outbox_done(db: aiosqlite.Connection, event: OutboxEvent) -> None
     )
     await db.commit()
     event.status = "done"
+
+
+async def reset_outbox_to_pending(
+    db: aiosqlite.Connection, event_id: str,
+) -> OutboxEvent | None:
+    """Re-queue a completed/failed outbox row so ingest can run again."""
+    existing = await get_outbox_by_event_id(db, event_id)
+    if not existing or not existing.id:
+        return existing
+    now = utc_now()
+    await db.execute(
+        """UPDATE sync_outbox
+           SET status='pending', locked_at=NULL, worker_id=NULL,
+               attempts=0, next_retry_at=NULL,
+               last_error_code=NULL, last_error_message=NULL,
+               updated_at=?
+           WHERE id=?""",
+        (now, existing.id),
+    )
+    await db.commit()
+    existing.status = "pending"
+    existing.attempts = 0
+    existing.locked_at = None
+    existing.worker_id = None
+    existing.next_retry_at = None
+    existing.last_error_code = None
+    existing.last_error_message = None
+    existing.updated_at = now
+    return existing
 
 
 async def mark_outbox_retry(

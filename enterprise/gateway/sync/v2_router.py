@@ -354,7 +354,7 @@ async def _seed_test_registry_fixture(
     """Populate only the explicit offline registry fixture used by tests."""
     if os.environ.get("ENTERPRISE_TEST_MODE") != "1":
         return
-    if os.environ.get("ENTERPRISE_ASSET_REGISTRY_MODE", "").strip():
+    if os.environ.get("ENTERPRISE_EAM_ASSET_RESOLVER_MODE", "").strip():
         return
     equipment_id = req.metadata.get("equipment_id")
     fixed_asset_no = req.metadata.get("fixed_asset_no")

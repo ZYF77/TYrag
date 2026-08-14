@@ -19,13 +19,6 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from enterprise.gateway.asset_registry import (
-    AssetRegistryConflict,
-    AssetRegistryError,
-    AssetRegistryInvalid,
-    AssetRegistryUnavailable,
-    resolve_asset,
-)
 from enterprise.gateway.auth.service_principal import ServicePrincipal
 from enterprise.gateway.sync.document_catalog import validate_document_classification
 from enterprise.gateway.sync.models import (
@@ -158,6 +151,22 @@ def _status_error(doc: ExtDocumentMap) -> dict | None:
         "code": safe_code,
         "message": _STATUS_ERROR_MESSAGES[safe_code],
         "retryable": safe_code in _STATUS_ERROR_RETRYABLE,
+    }
+
+
+def _accept_payload(
+    doc: ExtDocumentMap,
+    *,
+    deduplicated: bool = False,
+    operation_id: str | None = None,
+) -> dict:
+    """Slim registration acceptance receipt (FILE_SHARE 3.1.0)."""
+    return {
+        "operationId": operation_id or doc.event_id,
+        "externalDocumentId": doc.external_document_id,
+        "sourceVersionId": doc.source_version_id,
+        "deduplicated": deduplicated,
+        "updatedAt": doc.updated_at,
     }
 
 
@@ -375,7 +384,10 @@ async def upsert_document(
                 return _sync_error(exc, request_id)
             outcome = "reindex_accepted"
         else:
-            outcome = "deduplicated"
+            existing, requeued = await _sync_service(db).ensure_present_or_requeue(
+                existing,
+            )
+            outcome = "accepted" if requeued else "deduplicated"
         await _record_receipt(
             db,
             event_id=req.eventId,
@@ -390,34 +402,15 @@ async def upsert_document(
             return _error(409, outcome, request_id)
         return JSONResponse(
             status_code=202,
-            content=await _status_payload_for_db(
-                db,
+            content=_accept_payload(
                 existing,
                 deduplicated=outcome == "deduplicated",
-                operation_id=req.eventId if outcome == "reindex_accepted" else None,
+                operation_id=req.eventId if outcome != "deduplicated" else None,
             ),
         )
 
     if req.eventType == "reindex":
         return _error(404, "DOCUMENT_NOT_FOUND", request_id)
-
-    await v2._seed_test_registry_fixture(db, req, req.tenantId)
-    try:
-        canonical_asset = await resolve_asset(
-            db,
-            tenant_id=req.tenantId,
-            equipment_id=metadata.get("equipment_id"),
-            fixed_asset_no=metadata.get("fixed_asset_no"),
-            asset_id=metadata.get("asset_id"),
-        )
-    except AssetRegistryUnavailable:
-        return _error(503, "ASSET_REGISTRY_UNAVAILABLE", request_id)
-    except AssetRegistryConflict:
-        return _error(409, "CONVERSATION_CONTEXT_CONFLICT", request_id)
-    except AssetRegistryInvalid:
-        return _error(422, "CONVERSATION_CONTEXT_INVALID", request_id)
-    except AssetRegistryError:
-        return _error(503, "ASSET_REGISTRY_UNAVAILABLE", request_id)
 
     mapping = ExtDocumentMap(
         tenant_id=req.tenantId,
@@ -437,9 +430,9 @@ async def upsert_document(
         relative_path=req.source.relativePath,
         source_size=req.source.size,
         source_etag=req.source.etag,
-        asset_id=canonical_asset.asset_id,
-        equipment_id=canonical_asset.equipment_id,
-        fixed_asset_no=canonical_asset.fixed_asset_no,
+        asset_id=metadata.get("asset_id"),
+        equipment_id=metadata["equipment_id"],
+        fixed_asset_no=metadata.get("fixed_asset_no"),
         department_id=metadata.get("department_id"),
         security_level=metadata.get("security_level"),
         allow_group_ids=json.dumps(metadata.get("allow_group_ids") or [], ensure_ascii=False),
@@ -485,7 +478,7 @@ async def upsert_document(
         )
         return JSONResponse(
             status_code=202,
-            content=await _status_payload_for_db(db, doc, deduplicated=True),
+            content=_accept_payload(doc, deduplicated=True),
         )
 
     await _record_receipt(
@@ -500,7 +493,7 @@ async def upsert_document(
     )
     return JSONResponse(
         status_code=202,
-        content=await _status_payload_for_db(db, doc),
+        content=_accept_payload(doc),
     )
 
 
@@ -523,12 +516,14 @@ async def _replay_receipt(
     )
     if not doc:
         return _error(404, "DOCUMENT_NOT_FOUND", request_id)
+    requeued = False
+    if receipt.outcome_code != "reindex_accepted":
+        doc, requeued = await _sync_service(db).ensure_present_or_requeue(doc)
     return JSONResponse(
         status_code=202,
-        content=await _status_payload_for_db(
-            db,
+        content=_accept_payload(
             doc,
-            deduplicated=True,
+            deduplicated=not requeued,
             operation_id=receipt.event_id,
         ),
     )

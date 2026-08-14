@@ -14,7 +14,9 @@ from enterprise.gateway.sync.models import (
     get_mapping_by_event_id,
     get_versions_for_document,
     insert_mapping,
+    list_all_mappings,
     promote_version_if_latest,
+    reset_outbox_to_pending,
     update_mapping_status,
     update_parser_application,
 )
@@ -254,7 +256,11 @@ class SyncService:
         existing = await get_mapping_by_event_id(self.db, event.event_id)
         deduplicated = False
         if existing:
-            if existing.event_status == "completed" and existing.sync_status in TERMINAL_DONE:
+            if (
+                existing.event_status == "completed"
+                and existing.sync_status in TERMINAL_DONE
+                and existing.sync_status != "deleted"
+            ):
                 return existing, True
             doc = existing
             if not doc.document_type and metadata.get("document_type"):
@@ -334,6 +340,7 @@ class SyncService:
                     **failure_fields,
                 )
                 await self._ensure_quality_evaluation(doc)
+                await self._emit_terminal_failed_if_no_quality(doc)
             raise
         except RetryableDocumentSyncError as e:
             if doc.sync_status != "ready" and not is_terminal_document_status(doc.sync_status):
@@ -429,10 +436,11 @@ class SyncService:
                 source_state="AVAILABLE" if external_ticket else None,
                 source_state_reason="" if external_ticket else None,
             )
-        elif doc.sync_status == "cancelled":
+        elif doc.sync_status in ("cancelled", "deleted"):
             await self._set_status(
                 doc, "registered", event_status="transferring",
                 attempt_count=event.attempts,
+                business_status="active",
             )
 
         dataset = await self._ensure_dataset(doc.tenant_id)
@@ -484,6 +492,7 @@ class SyncService:
                 failure_fields["business_status"] = "review_required"
             await self._set_status(doc, "failed", **failure_fields)
             await self._ensure_quality_evaluation(doc)
+            await self._emit_terminal_failed_if_no_quality(doc)
         else:
             await self._set_status(
                 doc, mapped, event_status="completed",
@@ -505,6 +514,8 @@ class SyncService:
 
     async def _mark_parser_mismatch(self, doc: ExtDocumentMap) -> None:
         """Prevent parser evidence drift from leaving a document falsely ready."""
+        from enterprise.gateway.callback_delivery import emit_terminal_callback_safe
+
         target_status = (
             "review_required"
             if transition_allowed(doc.sync_status, "review_required", "document")
@@ -519,6 +530,38 @@ class SyncService:
                 "RAGFlow terminal parser readback does not match the selected profile"
             ),
             business_status="review_required",
+        )
+        await emit_terminal_callback_safe(
+            self.db,
+            doc,
+            "review_required" if target_status == "review_required" else "failed",
+            quality_status=None,
+            retrievable=False,
+            error={
+                "code": "PARSER_APPLICATION_MISMATCH",
+                "message": (
+                    "RAGFlow terminal parser readback does not match the selected profile"
+                ),
+                "retryable": False,
+            },
+        )
+
+    async def _emit_terminal_failed_if_no_quality(self, doc: ExtDocumentMap) -> None:
+        """Emit failed only when the quality worker will not produce a terminal."""
+        from enterprise.gateway.callback_delivery import emit_terminal_callback_safe
+        from enterprise.gateway.config import config
+
+        if config.quality_worker_enabled and doc.ragflow_document_id:
+            return
+        code = doc.last_error_code or "DOCUMENT_SYNC_FAILED"
+        message = doc.last_error_message or "Document synchronization failed"
+        await emit_terminal_callback_safe(
+            self.db,
+            doc,
+            "failed",
+            quality_status=None,
+            retrievable=False,
+            error={"code": code, "message": message, "retryable": False},
         )
 
     async def _ensure_dataset(self, tenant_id: str) -> dict:
@@ -935,6 +978,12 @@ class SyncService:
                         business_status="active",
                     )
                     await self._ensure_quality_evaluation(doc)
+                else:
+                    await update_mapping_status(
+                        self.db, doc, "ready",
+                        pipeline_status=run,
+                        event_status="completed",
+                    )
             elif mapped == "failed":
                 failure_fields = {
                     "pipeline_status": run,
@@ -946,6 +995,7 @@ class SyncService:
                     failure_fields["business_status"] = "review_required"
                 await self._set_status(doc, "failed", **failure_fields)
                 await self._ensure_quality_evaluation(doc)
+                await self._emit_terminal_failed_if_no_quality(doc)
             elif (
                 doc.sync_status != mapped
                 and transition_allowed(doc.sync_status, mapped, "document")
@@ -955,10 +1005,148 @@ class SyncService:
                 )
             break
         if not readback_found:
+            return await self.mark_ragflow_document_missing(doc)
+        return await get_mapping(
+            self.db, doc.tenant_id, doc.source_system,
+            doc.external_document_id, doc.source_version_id,
+        ) or doc
+
+    async def mark_ragflow_document_missing(
+        self, doc: ExtDocumentMap,
+    ) -> ExtDocumentMap:
+        """Mirror a RAGFlow UI/API deletion into Gateway mapping state."""
+        if doc.sync_status in ("superseded", "disabled", "deleted"):
+            if doc.sync_status == "deleted" and doc.ragflow_document_id:
+                await self._clear_ragflow_binding(doc)
+            return await get_mapping(
+                self.db, doc.tenant_id, doc.source_system,
+                doc.external_document_id, doc.source_version_id,
+            ) or doc
+        if transition_allowed(doc.sync_status, "deleted", "document"):
+            target = "deleted"
+            business_status = "deleted"
+        elif transition_allowed(doc.sync_status, "failed", "document"):
+            target = "failed"
+            business_status = doc.business_status
+        else:
             raise RetryableDocumentSyncError(
                 "RAGFLOW_UNAVAILABLE",
                 "RAGFlow document readback is empty",
             )
+        await self._set_status(
+            doc,
+            target,
+            event_status="completed",
+            business_status=business_status,
+            error_code="RAGFLOW_DOCUMENT_MISSING",
+            error_message="Document was removed from RAGFlow",
+        )
+        await self._clear_ragflow_binding(doc)
+        return await get_mapping(
+            self.db, doc.tenant_id, doc.source_system,
+            doc.external_document_id, doc.source_version_id,
+        ) or doc
+
+    async def _clear_ragflow_binding(self, doc: ExtDocumentMap) -> None:
+        await self.db.execute(
+            """UPDATE ext_document_map
+                  SET ragflow_document_id=NULL,
+                      ragflow_task_id=NULL,
+                      parser_application_status='selected',
+                      parser_configured_json=NULL,
+                      parser_executed_json=NULL
+                WHERE id=?""",
+            (doc.id,),
+        )
+        await self.db.commit()
+        doc.ragflow_document_id = None
+        doc.ragflow_task_id = None
+        doc.parser_application_status = "selected"
+        doc.parser_configured_json = None
+        doc.parser_executed_json = None
+
+    async def reconcile_missing_ragflow_documents(self) -> int:
+        mappings = await list_all_mappings(
+            self.db, statuses=["ready", "review_required"],
+        )
+        by_dataset: dict[str, list[ExtDocumentMap]] = {}
+        for doc in mappings:
+            if doc.ragflow_dataset_id and doc.ragflow_document_id:
+                by_dataset.setdefault(doc.ragflow_dataset_id, []).append(doc)
+        marked = 0
+        for dataset_id, docs in by_dataset.items():
+            try:
+                present = await self._ragflow_document_ids(dataset_id)
+            except RAGFlowAPIError:
+                continue
+            for doc in docs:
+                if doc.ragflow_document_id not in present:
+                    await self.mark_ragflow_document_missing(doc)
+                    marked += 1
+        return marked
+
+    async def _ragflow_document_ids(self, dataset_id: str) -> set[str]:
+        ids: set[str] = set()
+        page = 1
+        while True:
+            docs = await self.ragflow_client.list_documents(
+                dataset_id, page=page, page_size=100,
+            )
+            for item in docs:
+                doc_id = item.get("id")
+                if doc_id:
+                    ids.add(doc_id)
+            if len(docs) < 100:
+                return ids
+            page += 1
+
+    def _needs_ragflow_reingest(self, doc: ExtDocumentMap) -> bool:
+        if doc.sync_status == "deleted":
+            return True
+        return (
+            doc.sync_status in {"ready", "review_required", "failed"}
+            and not doc.ragflow_document_id
+        )
+
+    async def ensure_present_or_requeue(
+        self, doc: ExtDocumentMap,
+    ) -> tuple[ExtDocumentMap, bool]:
+        """If RAGFlow no longer has the doc, mark deleted and re-queue ingest."""
+        if (
+            doc.sync_status in {"ready", "review_required"}
+            and doc.ragflow_dataset_id
+            and doc.ragflow_document_id
+        ):
+            try:
+                docs = await self.ragflow_client.list_documents(
+                    doc.ragflow_dataset_id,
+                    document_id=doc.ragflow_document_id,
+                )
+            except RAGFlowAPIError:
+                docs = None
+            if docs is not None and not any(
+                item.get("id") == doc.ragflow_document_id for item in docs
+            ):
+                doc = await self.mark_ragflow_document_missing(doc)
+        if not self._needs_ragflow_reingest(doc):
+            return doc, False
+        return await self.requeue_after_ragflow_delete(doc), True
+
+    async def requeue_after_ragflow_delete(
+        self, doc: ExtDocumentMap,
+    ) -> ExtDocumentMap:
+        if doc.sync_status != "deleted":
+            doc = await self.mark_ragflow_document_missing(doc)
+        if doc.sync_status == "deleted":
+            await self._set_status(
+                doc,
+                "registered",
+                event_status="received",
+                business_status="active",
+                error_code=None,
+                error_message=None,
+            )
+        await reset_outbox_to_pending(self.db, doc.event_id)
         return await get_mapping(
             self.db, doc.tenant_id, doc.source_system,
             doc.external_document_id, doc.source_version_id,

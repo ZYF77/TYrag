@@ -406,6 +406,48 @@ class TestMetrics:
         assert status == "review_required"
         assert "POSITION_PAGE_OUT_OF_RANGE" in reasons
 
+    def test_unknown_source_page_count_infers_from_positions(self):
+        """EAM often omits page_count; RAGFlow may also omit it.
+
+        When the declared source page count is 0/unknown, positions on page 1
+        must not be treated as out-of-range solely because the denominator is 0.
+        """
+        chunks = [
+            {
+                "id": "c1",
+                "content": "invoice line EQ-2026-0001",
+                "positions": [[1, 0.1, 0.2, 0.8, 0.4]],
+            },
+            {
+                "id": "c2",
+                "content": "more text TYR-5001-A E-101",
+                "positions": [[1, 0.2, 0.3, 0.9, 0.5]],
+            },
+        ]
+        metrics = compute_document_metrics(_good_doc(), chunks, 0)
+        assert metrics["page_count_basis"] == "inferred_from_positions"
+        assert metrics["page_count_declared"] == 0
+        assert metrics["page_count_source"] == 1
+        assert metrics["page_count_observed"] == 1
+        assert metrics["page_coverage"] == 1.0
+        assert metrics["out_of_range_page_count"] == 0
+        assert metrics["out_of_range_pages"] == []
+        status, reasons = evaluate_document_quality(metrics)
+        assert status == "passed"
+        assert reasons == ["PASSED"]
+
+    def test_unknown_source_page_count_covers_all_observed_pages(self):
+        chunks = [
+            {"id": "p1", "content": "page one", "positions": [[1, 0, 0, 1, 1]]},
+            {"id": "p2", "content": "page two", "positions": [[2, 0, 0, 1, 1]]},
+        ]
+        metrics = compute_document_metrics(_good_doc(), chunks, 0)
+        assert metrics["page_count_basis"] == "inferred_from_positions"
+        assert metrics["page_count_source"] == 2
+        assert metrics["page_count_observed"] == 2
+        assert metrics["page_coverage"] == 1.0
+        assert metrics["out_of_range_page_count"] == 0
+
 
 class TestManifestValidation:
     def test_valid_manifest(self):

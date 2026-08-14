@@ -1,23 +1,6 @@
-"""Stable document classification codes for the v3 FILE_SHARE contract."""
+"""Normalize source-owned document classification values for FILE_SHARE."""
 
 from __future__ import annotations
-
-DOCUMENT_TYPE_CODES = frozenset(
-    {
-        "ACCEPTANCE",
-        "PRODUCT_MANUAL",
-        "OPM_MANUAL",
-        "CERTIFICATE",
-        "DRAWING",
-        "GLASS_INTEGRITY",
-        "COMMISSIONING",
-        "URS",
-        "REPAIR_RECORD",
-        "MAINTENANCE_RECORD",
-        "ASSET_LIFECYCLE",
-        "OTHER",
-    }
-)
 
 
 def _optional_code(metadata: dict, key: str) -> str | None:
@@ -30,14 +13,16 @@ def _optional_code(metadata: dict, key: str) -> str | None:
 
 
 def validate_document_classification(metadata: dict) -> tuple[str, str | None, str | None]:
-    """Validate explicit classification; this function never performs AI classification."""
+    """Validate and preserve the source-owned document type value."""
 
     document_type = metadata.get("document_type")
     if not isinstance(document_type, str):
         raise ValueError("document_type is required")
-    document_type = document_type.strip().upper()
-    if document_type not in DOCUMENT_TYPE_CODES:
-        raise ValueError("document_type is not a supported catalog code")
+    document_type = document_type.strip()
+    if not document_type:
+        raise ValueError("document_type is required")
+    if len(document_type) > 64:
+        raise ValueError("document_type must be at most 64 characters")
     return (
         document_type,
         _optional_code(metadata, "document_subtype"),

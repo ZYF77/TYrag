@@ -21,6 +21,11 @@ IN_PROGRESS_STATUSES = {
     "registered", "queued", "parsing", "indexing", "validating",
     "review_required", "tracking",
 }
+_TERMINAL_PIPELINE = frozenset({"DONE", "3", "FAIL", "4", "CANCEL", "2"})
+
+
+def _pipeline_incomplete(pipeline_status: str | None) -> bool:
+    return str(pipeline_status or "").upper() not in _TERMINAL_PIPELINE
 
 
 class OutboxWorker:
@@ -71,14 +76,28 @@ class StatusReconciler:
             limit=limit,
             ascending=True,
         )
-        updated = 0
-        for doc in mappings:
-            if doc.sync_status not in IN_PROGRESS_STATUSES:
+        ready_rows = await list_mappings(
+            self.service.db,
+            statuses=["ready"],
+            limit=limit,
+            ascending=True,
+        )
+        to_refresh = list(mappings)
+        seen = {doc.id for doc in to_refresh if doc.id is not None}
+        for doc in ready_rows:
+            if doc.id in seen:
                 continue
+            if _pipeline_incomplete(doc.pipeline_status):
+                to_refresh.append(doc)
+                if doc.id is not None:
+                    seen.add(doc.id)
+        updated = 0
+        for doc in to_refresh:
             before = doc.sync_status
             await self.service.refresh_status(doc)
             if doc.sync_status != before:
                 updated += 1
+        updated += await self.service.reconcile_missing_ragflow_documents()
         return updated
 
     async def run_forever(self, interval_seconds: float = 10.0) -> None:

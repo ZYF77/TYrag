@@ -11,7 +11,7 @@ from typing import Any
 
 import aiosqlite
 import jsonschema
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -52,7 +52,10 @@ from enterprise.gateway.quality.worker import (
     QualityReconciler,
 )
 from enterprise.gateway.quality.routing import parser_application_readback_match
+from enterprise.gateway.audit_log import configure_gateway_file_logging, list_http_events
+from enterprise.gateway.callback_delivery import CallbackDeliveryWorker
 from enterprise.gateway.config import config, require_ragflow_api_key
+from enterprise.gateway.feed_audit_middleware import FeedRegisterAuditMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +105,7 @@ async def get_db() -> aiosqlite.Connection:
 async def lifespan(app: FastAPI):
     global _db
     _db = await get_db()
+    configure_gateway_file_logging()
     if not _test_mode():
         require_ragflow_api_key()
     started_tasks: list[asyncio.Task] = []
@@ -139,6 +143,12 @@ async def lifespan(app: FastAPI):
         )
         started_tasks.extend([quality_worker_task, quality_reconciler_task])
         _background_tasks.extend([quality_worker_task, quality_reconciler_task])
+    if config.callback_enabled and not _test_mode():
+        callback_worker_task = asyncio.create_task(
+            CallbackDeliveryWorker(_db).run_forever(config.callback_poll_seconds)
+        )
+        started_tasks.append(callback_worker_task)
+        _background_tasks.append(callback_worker_task)
     try:
         yield
     finally:
@@ -158,6 +168,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Enterprise RAGFlow Gateway", version="1.0.0", lifespan=lifespan)
+app.add_middleware(FeedRegisterAuditMiddleware)
 app.add_middleware(TransientAttachmentBodyLimitMiddleware)
 
 
@@ -312,48 +323,49 @@ ERROR_CODES = {
 }
 
 SAFE_ERROR_MESSAGES = {
-    "AUTH_TOKEN_INVALID": "Invalid authentication token",
-    "AUTH_TOKEN_MISSING": "Authentication token is required",
-    "AUTH_USER_DISABLED": "User account is disabled",
-    "AUTH_USER_MAPPING_MISSING": "User mapping not found",
-    "ACL_DENIED": "Access denied",
-    "DOCUMENT_EVENT_DUPLICATE": "Document event already processed",
-    "EVENT_ID_CONFLICT": "Event id was already used with a different payload",
-    "DOCUMENT_VERSION_CONFLICT": "Document version content conflicts with the accepted version",
-    "DOCUMENT_METADATA_INVALID": "Metadata validation failed",
-    "DOCUMENT_HASH_MISMATCH": "Invalid SHA256 format",
-    "DOCUMENT_SOURCE_NOT_FOUND": "Source file could not be retrieved",
-    "DOCUMENT_NOT_FOUND": "Document not found",
-    "DOCUMENT_SYNC_FAILED": "Document synchronization failed",
-    "DOCUMENT_REVIEW_REQUIRED": "Document quality review is required",
-    "DOCUMENT_QUALITY_FAILED": "Document quality check failed",
-    "DOCUMENT_QUALITY_PENDING": "Document quality evaluation is pending",
-    "RAGFLOW_UNAVAILABLE": "RAGFlow service is temporarily unavailable",
-    "RAGFLOW_API_INCOMPATIBLE": "RAGFlow API is not compatible with the gateway",
-    "AUTH_REPLAY_STORE_UNAVAILABLE": "Replay protection store is unavailable",
-    "ASSET_REGISTRY_UNAVAILABLE": "Asset Registry is temporarily unavailable",
-    "CONVERSATION_UNAVAILABLE": "Conversation history is temporarily unavailable",
-    "CONVERSATION_CONTEXT_CONFLICT": "Conversation context identifiers conflict",
-    "CONVERSATION_CONTEXT_INVALID": "Conversation context is not recognized",
-    "CONVERSATION_CONTEXT_REQUIRED": "A canonical equipment context is required before sending a message",
-    "CONVERSATION_CONTEXT_STALE": "Conversation context no longer matches the Asset Registry",
-    "CONVERSATION_ARCHIVED": "Conversation is archived",
-    "CLIENT_MESSAGE_ID_CONFLICT": "Client message id conflicts with an earlier request",
-    "SUGGESTION_STALE": "Suggestion context is stale",
-    "SUGGESTION_NOT_FOUND": "Suggestion not found",
-    "CITATION_NOT_FOUND": "Citation not found",
-    "DOCUMENT_NOT_READY": "Document is not ready",
-    "RAGFLOW_SCOPE_VIOLATION": "RAGFlow retrieval returned an out-of-scope document",
-    "NO_RELIABLE_EVIDENCE": "No reliable evidence was returned",
-    "VALIDATION_ERROR": "Request validation failed",
-    "INTERNAL_ERROR": "Internal service error",
-    "REQUEST_FAILED": "Request could not be completed",
-    "RUN_INTERRUPTED": "Message run lease expired before completion",
+    "AUTH_TOKEN_INVALID": "登录已失效，请重新进入后再试。",
+    "AUTH_TOKEN_MISSING": "缺少认证信息，请重新进入后再试。",
+    "AUTH_USER_DISABLED": "账号已停用，请联系管理员。",
+    "AUTH_USER_MAPPING_MISSING": "找不到用户映射，请联系管理员。",
+    "ACL_DENIED": "没有权限查看该内容。",
+    "DOCUMENT_EVENT_DUPLICATE": "该文档事件已经处理过。",
+    "EVENT_ID_CONFLICT": "该事件编号已用于不同内容，请更换后重试。",
+    "DOCUMENT_VERSION_CONFLICT": "文档版本内容与已接受版本冲突。",
+    "DOCUMENT_METADATA_INVALID": "文档信息不完整，请检查后重试。",
+    "DOCUMENT_HASH_MISMATCH": "文件校验值格式不正确。",
+    "DOCUMENT_SOURCE_NOT_FOUND": "找不到源文件。",
+    "DOCUMENT_NOT_FOUND": "找不到该文档。",
+    "DOCUMENT_SYNC_FAILED": "文档同步失败，请稍后重试。",
+    "DOCUMENT_REVIEW_REQUIRED": "文档需要人工复核后才能使用。",
+    "DOCUMENT_QUALITY_FAILED": "文档质检未通过。",
+    "DOCUMENT_QUALITY_PENDING": "文档质检尚未完成，请稍后再试。",
+    "RAGFLOW_UNAVAILABLE": "问答服务暂时不可用，请稍后重试。",
+    "RAGFLOW_API_INCOMPATIBLE": "问答服务暂时不可用，请稍后重试。",
+    "AUTH_REPLAY_STORE_UNAVAILABLE": "安全校验暂时不可用，请稍后重试。",
+    "ASSET_REGISTRY_UNAVAILABLE": "设备信息暂时不可用，请稍后重试。",
+    "CONVERSATION_UNAVAILABLE": "会话记录暂时不可用，请稍后重试。",
+    "CONVERSATION_NOT_FOUND": "找不到这个会话。",
+    "CONVERSATION_CONTEXT_CONFLICT": "设备号与固定资产号不一致。",
+    "CONVERSATION_CONTEXT_INVALID": "无法识别该设备号或固定资产号。",
+    "CONVERSATION_CONTEXT_REQUIRED": "请先指定设备号或固定资产号后再提问。",
+    "CONVERSATION_CONTEXT_STALE": "会话设备已变化，请刷新后再试。",
+    "CONVERSATION_ARCHIVED": "这个会话已归档，不能再提问。",
+    "CLIENT_MESSAGE_ID_CONFLICT": "这条消息编号已经用过，请换一个再发送。",
+    "SUGGESTION_STALE": "推荐问题已过期，请刷新后再选。",
+    "SUGGESTION_NOT_FOUND": "找不到该推荐问题。",
+    "CITATION_NOT_FOUND": "找不到该引用。",
+    "DOCUMENT_NOT_READY": "文档还不能用于问答，请稍后再试。",
+    "RAGFLOW_SCOPE_VIOLATION": "检索结果超出授权范围，已拒绝返回。",
+    "NO_RELIABLE_EVIDENCE": "未找到可靠依据，无法回答。",
+    "VALIDATION_ERROR": "请求内容不符合要求，请检查后重试。",
+    "INTERNAL_ERROR": "服务开小差了，请稍后重试。",
+    "REQUEST_FAILED": "请求无法完成。",
+    "RUN_INTERRUPTED": "回答未完成，请稍后重试。",
 }
 
 
 def safe_error_message(code: str, fallback: str = "") -> str:
-    return SAFE_ERROR_MESSAGES.get(code, fallback or "Request failed")
+    return SAFE_ERROR_MESSAGES.get(code, fallback or "请求失败，请稍后重试。")
 
 
 def error_response(code: str, request_id: str,
@@ -744,6 +756,15 @@ async def delete_document(
 @app.get("/enterprise/api/v1/health")
 async def health():
     return {"status": "healthy", "version": "1.0.0"}
+
+
+@app.get("/enterprise/api/v1/diagnostics/http-log", include_in_schema=False)
+async def http_log(
+    limit: int = Query(100, ge=1, le=200),
+    principal: UserPrincipal = Depends(require_user_principal),
+):
+    _ = principal
+    return {"items": list_http_events(limit)}
 
 
 @app.get("/")

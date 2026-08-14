@@ -376,6 +376,7 @@ class QualityEvaluationService:
                 time.monotonic() - started,
             )
             await mark_quality_job_done(self.db, job)
+            await self._emit_terminal_callback(doc, result)
         except QualityRetryableError as exc:
             metrics.inc("quality_evaluation_retry_total")
             logger.warning(
@@ -397,6 +398,11 @@ class QualityEvaluationService:
             else:
                 metrics.inc("quality_evaluation_failed_total")
                 await mark_quality_job_failed(self.db, job, exc.code, exc.message)
+                await self._emit_terminal_failed(
+                    doc,
+                    code=exc.code,
+                    message=exc.message,
+                )
         except Exception:
             logger.exception(
                 "Quality evaluation failed evaluation_id=%s job_id=%s",
@@ -409,6 +415,11 @@ class QualityEvaluationService:
             metrics.inc("quality_evaluation_failed_total")
             await mark_quality_job_failed(
                 self.db, job, "INTERNAL_ERROR", "Quality evaluation failed"
+            )
+            await self._emit_terminal_failed(
+                doc,
+                code="INTERNAL_ERROR",
+                message="Quality evaluation failed",
             )
 
     async def _evaluate(self, doc, evaluation) -> dict[str, Any]:
@@ -636,6 +647,72 @@ class QualityEvaluationService:
             separators=(",", ":"),
         )
         return hashlib.sha256(stable.encode("utf-8")).hexdigest()
+
+    async def _emit_terminal_callback(self, doc, result: dict[str, Any]) -> None:
+        from enterprise.gateway.callback_delivery import emit_terminal_callback_safe
+        from enterprise.gateway.sync.readiness import document_candidate_readiness_from_db
+
+        quality_status = str(result.get("parse_quality_status") or "")
+        fresh = await get_mapping(
+            self.db,
+            doc.tenant_id,
+            doc.source_system,
+            doc.external_document_id,
+            doc.source_version_id,
+        ) or doc
+        if quality_status == "passed":
+            readiness, _ = await document_candidate_readiness_from_db(self.db, fresh)
+            if readiness.retrievable:
+                await emit_terminal_callback_safe(
+                    self.db,
+                    fresh,
+                    "retrievable",
+                    quality_status="passed",
+                    retrievable=True,
+                )
+            else:
+                # Quality passed but version was not promoted; notify EAM.
+                await emit_terminal_callback_safe(
+                    self.db,
+                    fresh,
+                    "review_required",
+                    quality_status="passed",
+                    retrievable=False,
+                )
+            return
+        if quality_status == "review_required":
+            await emit_terminal_callback_safe(
+                self.db,
+                fresh,
+                "review_required",
+                quality_status="review_required",
+                retrievable=False,
+            )
+            return
+        if quality_status == "failed":
+            await self._emit_terminal_failed(
+                fresh,
+                code="DOCUMENT_QUALITY_FAILED",
+                message="Document quality evaluation failed",
+            )
+
+    async def _emit_terminal_failed(
+        self,
+        doc,
+        *,
+        code: str,
+        message: str,
+    ) -> None:
+        from enterprise.gateway.callback_delivery import emit_terminal_callback_safe
+
+        await emit_terminal_callback_safe(
+            self.db,
+            doc,
+            "failed",
+            quality_status="failed",
+            retrievable=False,
+            error={"code": code, "message": message, "retryable": False},
+        )
 
 
 class QualityEvaluationWorker:

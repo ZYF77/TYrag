@@ -136,7 +136,11 @@ async def test_v3_file_share_worker_registers_virtual_document_without_upload(
     finally:
         app_module.app.dependency_overrides.pop(require_service_principal, None)
     assert response.status_code == 202
-    assert response.json()["sourceKind"] == "FILE_SHARE"
+    accept = response.json()
+    assert "statusUrl" not in accept
+    assert accept["externalDocumentId"] == "DOC-FS"
+    assert accept["sourceVersionId"] == "v1"
+    assert accept["deduplicated"] is False
 
     ragflow = RAGFlowDocumentStub()
     service = SyncService(
@@ -298,14 +302,24 @@ def test_file_share_contract_is_strict_and_matches_the_registered_routes():
         "/enterprise/api/v3/documents/{externalDocumentId}/status",
         "/enterprise/internal/source-tickets/{ticket}",
     }
+    assert contract["info"]["version"] == "3.1.0"
     register = contract["paths"]["/enterprise/api/v3/documents"]["post"]
     assert register["security"] == [{"HmacSignature": []}]
     assert register["responses"]["202"]["content"]["application/json"]["schema"] == {
-        "$ref": "#/components/schemas/DocumentStatus"
+        "$ref": "#/components/schemas/DocumentAccepted"
     }
     request_schema = contract["components"]["schemas"]["DocumentUpsertRequest"]
     assert request_schema["additionalProperties"] is False
     assert request_schema["properties"]["mediaType"]["enum"] == ["application/pdf"]
+    accept_schema = contract["components"]["schemas"]["DocumentAccepted"]
+    assert set(accept_schema["required"]) == {
+        "operationId",
+        "externalDocumentId",
+        "sourceVersionId",
+        "deduplicated",
+        "updatedAt",
+    }
+    assert "statusUrl" not in accept_schema["properties"]
     status_schema = contract["components"]["schemas"]["DocumentStatus"]
     assert {
         "statusUrl",
@@ -317,3 +331,18 @@ def test_file_share_contract_is_strict_and_matches_the_registered_routes():
         "errorCode",
     } <= set(status_schema["required"])
     assert "ragflowDocumentId" not in status_schema["properties"]
+    callback = yaml.safe_load(
+        (REPO_ROOT / "contracts/file-share-callback-v1.yaml").read_text(encoding="utf-8")
+    )
+    assert callback["info"]["version"] == "1.0.0"
+    callback_schema = callback["components"]["schemas"]["FileShareTerminalCallback"]
+    assert {
+        "deliveryId",
+        "eventType",
+        "originatingEventId",
+        "externalDocumentId",
+        "sourceVersionId",
+        "status",
+        "timestamp",
+        "payloadVersion",
+    } <= set(callback_schema["required"])

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -247,7 +247,7 @@ def _assert_status_url(
 
 
 @pytest.mark.asyncio
-async def test_every_v3_202_acceptance_path_returns_the_same_status_url(
+async def test_every_v3_202_acceptance_path_returns_slim_accept_receipt(
     v3_app, isolated_gateway_db, monkeypatch
 ):
     db, _ = isolated_gateway_db
@@ -286,21 +286,46 @@ async def test_every_v3_202_acceptance_path_returns_the_same_status_url(
     assert existing is not None
     responses = [first, replay, duplicate, reindex, reindex_replay]
     assert [response.status_code for response in responses] == [202] * 5
-    status_urls = {response.json()["statusUrl"] for response in responses}
-    assert len(status_urls) == 1
-    _assert_status_url(
-        first.json()["statusUrl"],
-        tenant_id="tenant-a",
-        source_system="DEMO",
-        document_id="DOC-V3-001",
-        source_version_id="v1",
-    )
+    for response in responses:
+        body = response.json()
+        assert set(body) == {
+            "operationId",
+            "externalDocumentId",
+            "sourceVersionId",
+            "deduplicated",
+            "updatedAt",
+        }
+        assert "statusUrl" not in body
+        assert body["externalDocumentId"] == "DOC-V3-001"
+        assert body["sourceVersionId"] == "v1"
     assert reindex.json()["operationId"] == "evt-v3-reindex"
     assert reindex_replay.json()["deduplicated"] is True
 
 
 @pytest.mark.asyncio
-async def test_status_url_encodes_identity_and_points_to_exact_status_resource(
+async def test_v3_preserves_source_owned_document_type(v3_app, isolated_gateway_db):
+    db, _ = isolated_gateway_db
+    payload = _payload(
+        event_id="evt-v3-source-document-type",
+        document_id="DOC-V3-SOURCE-TYPE",
+    )
+    payload["metadata"]["document_type"] = "Unpack Acceptance"
+
+    async with AsyncClient(
+        transport=ASGITransport(app=v3_app), base_url="http://test"
+    ) as client:
+        response = await client.post("/enterprise/api/v3/documents", json=payload)
+
+    stored = await get_mapping(
+        db, "tenant-a", "DEMO", "DOC-V3-SOURCE-TYPE", "v1"
+    )
+    assert response.status_code == 202
+    assert stored is not None
+    assert stored.document_type == "Unpack Acceptance"
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_status_url_encodes_identity_and_points_to_exact_status_resource(
     v3_app,
 ):
     payload = _payload(
@@ -310,24 +335,32 @@ async def test_status_url_encodes_identity_and_points_to_exact_status_resource(
         document_id="DOC / 001?x",
         source_version_id="version / 1?x",
     )
+    status_url = (
+        "/enterprise/api/v3/documents/"
+        f"{quote('DOC / 001?x', safe='')}/status?"
+        f"tenantId={quote('tenant / A', safe='')}&"
+        f"sourceSystem={quote('EAM / North', safe='')}&"
+        f"sourceVersionId={quote('version / 1?x', safe='')}"
+    )
     async with AsyncClient(
         transport=ASGITransport(app=v3_app), base_url="http://test"
     ) as client:
         response = await client.post("/enterprise/api/v3/documents", json=payload)
-        status_response = await client.get(response.json()["statusUrl"])
+        status_response = await client.get(status_url)
 
     assert response.status_code == 202
+    assert "statusUrl" not in response.json()
     assert status_response.status_code == 200
     assert status_response.json()["externalDocumentId"] == "DOC / 001?x"
     _assert_status_url(
-        response.json()["statusUrl"],
+        status_response.json()["statusUrl"],
         tenant_id="tenant / A",
         source_system="EAM / North",
         document_id="DOC / 001?x",
         source_version_id="version / 1?x",
     )
-    assert "%2F" in response.json()["statusUrl"].split("?")[1]
-    assert "%2F" in response.json()["statusUrl"]
+    assert "%2F" in status_response.json()["statusUrl"].split("?")[1]
+    assert "%2F" in status_response.json()["statusUrl"]
 
 
 async def _insert_file_share_document(

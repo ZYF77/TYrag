@@ -163,6 +163,27 @@ class GatewayConfig:
         )
     )
 
+    # --- FILE_SHARE outbound terminal callbacks ---
+    callback_enabled: bool = field(
+        default_factory=lambda: os.getenv(
+            "ENTERPRISE_CALLBACK_ENABLED", "false"
+        ).lower()
+        in ("1", "true", "yes", "on")
+    )
+    callback_hmac_secret: str = field(
+        default_factory=lambda: os.getenv("ENTERPRISE_CALLBACK_HMAC_SECRET", "")
+    )
+    callback_max_attempts: int = field(
+        default_factory=lambda: int(
+            os.getenv("ENTERPRISE_CALLBACK_MAX_ATTEMPTS", "8")
+        )
+    )
+    callback_poll_seconds: float = field(
+        default_factory=lambda: float(
+            os.getenv("ENTERPRISE_CALLBACK_POLL_SECONDS", "2.0")
+        )
+    )
+
     @property
     def demo_routes_enabled(self) -> bool:
         default = (
@@ -236,6 +257,27 @@ class GatewayConfig:
             "ENTERPRISE_TRANSIENT_ATTACHMENTS_ENABLED", "true"
         ).lower()
         in ("1", "true", "yes", "on")
+    )
+    context_compress_enabled: bool = field(
+        default_factory=lambda: os.getenv(
+            "ENTERPRISE_CONTEXT_COMPRESS_ENABLED", "true"
+        ).lower()
+        in ("1", "true", "yes", "on")
+    )
+    context_compress_turns: int = field(
+        default_factory=lambda: int(
+            os.getenv("ENTERPRISE_CONTEXT_COMPRESS_TURNS", "20")
+        )
+    )
+    context_summary_max_chars: int = field(
+        default_factory=lambda: int(
+            os.getenv("ENTERPRISE_CONTEXT_SUMMARY_MAX_CHARS", "1500")
+        )
+    )
+    context_compress_keep_recent: int = field(
+        default_factory=lambda: int(
+            os.getenv("ENTERPRISE_CONTEXT_COMPRESS_KEEP_RECENT", "4")
+        )
     )
 
     # --- JWT / User Auth (WP-01A) ---
