@@ -32,6 +32,7 @@ class TokenValidationError(Exception):
     def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = code
+        self.message = message
 
 
 @dataclass
@@ -44,6 +45,7 @@ class JWTValidatorConfig:
     claim_map: dict[str, str] = field(default_factory=dict)
     jwks_cache_ttl: int = 300
     jwks_timeout: float = 5.0
+    leeway_seconds: int = 120
 
     @classmethod
     def from_env(cls) -> "JWTValidatorConfig":
@@ -67,6 +69,10 @@ class JWTValidatorConfig:
             }
         raw_algs = os.environ.get("JWT_ALLOWED_ALGS", "RS256,ES256")
         algs = tuple(a.strip() for a in raw_algs.split(",") if a.strip())
+        try:
+            leeway = int(os.environ.get("JWT_LEEWAY_SECONDS", "120"))
+        except (TypeError, ValueError):
+            leeway = 120
         return cls(
             issuer=os.environ.get("JWT_ISSUER", ""),
             audience=os.environ.get("JWT_AUDIENCE", ""),
@@ -76,6 +82,7 @@ class JWTValidatorConfig:
             claim_map=claim_map,
             jwks_cache_ttl=int(os.environ.get("JWT_JWKS_CACHE_TTL", "300")),
             jwks_timeout=float(os.environ.get("JWT_JWKS_TIMEOUT", "5.0")),
+            leeway_seconds=max(0, min(leeway, 300)),
         )
 
 
@@ -126,7 +133,11 @@ class JWTValidator:
         if alg in _HMAC_ALGS and not self._config.enable_hs_algorithms:
             raise TokenValidationError("AUTH_TOKEN_INVALID", f"Algorithm '{alg}' is not allowed")
 
-        if self._config.jwks_url:
+        if alg in _HMAC_ALGS and self._config.enable_hs_algorithms:
+            signing_key = os.environ.get("JWT_SHARED_SECRET", "")
+            if not signing_key:
+                raise TokenValidationError("CONFIG_ERROR", "JWT shared secret not configured")
+        elif self._config.jwks_url:
             try:
                 jwks_client = self._get_jwks_client()
                 signing_key = jwks_client.get_signing_key_from_jwt(token).key
@@ -150,6 +161,7 @@ class JWTValidator:
                 algorithms=algorithms,
                 issuer=self._config.issuer,
                 audience=self._config.audience or None,
+                leeway=self._config.leeway_seconds,
                 options={
                     "require": ["exp", "sub"],
                     "verify_exp": True,
@@ -159,6 +171,10 @@ class JWTValidator:
         except jwt.ExpiredSignatureError as e:
             raise TokenValidationError("AUTH_TOKEN_EXPIRED", "Token has expired") from e
         except jwt.ImmatureSignatureError as e:
+            logger.warning(
+                "JWT nbf not yet valid leeway_seconds=%s",
+                self._config.leeway_seconds,
+            )
             raise TokenValidationError("AUTH_TOKEN_INVALID", "Token is not yet valid (nbf)") from e
         except jwt.InvalidIssuerError as e:
             raise TokenValidationError("AUTH_TOKEN_INVALID", "Invalid token issuer") from e

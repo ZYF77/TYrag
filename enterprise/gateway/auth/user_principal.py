@@ -45,8 +45,12 @@ class UserPrincipal:
 
         def _claim_list(key: str) -> tuple[str, ...]:
             value = _claim(key, [])
+            if isinstance(value, bool):
+                return ()
             if isinstance(value, str):
                 return (value,) if value else ()
+            if isinstance(value, int):
+                return (str(value),)
             if isinstance(value, list):
                 return tuple(str(v) for v in value)
             return ()

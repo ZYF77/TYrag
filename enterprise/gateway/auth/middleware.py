@@ -12,7 +12,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from enterprise.gateway.auth.token_validator import JWTValidator, TokenValidationError
 from enterprise.gateway.auth.user_principal import UserPrincipal
-from enterprise.gateway.models.ext_user_map import ExtUserMapRepo
+from enterprise.gateway.models.ext_user_map import ExtUserMap, ExtUserMapRepo
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +42,7 @@ async def require_user_principal(
     """FastAPI dependency: validate end-user JWT and return UserPrincipal.
 
     Uses configurable claim mapping - never trusts request body for identity fields.
+    Missing ext_user_map rows are JIT-provisioned as active on first valid JWT.
     If ext_user_map has status=disabled, returns 403.
     """
     if credentials is None or not credentials.credentials:
@@ -57,10 +58,11 @@ async def require_user_principal(
     try:
         claims = validator.validate(token)
     except TokenValidationError as e:
+        logger.warning("user JWT rejected code=%s reason=%s", e.code, e.message)
         raise UserAuthError(
             401,
             e.code,
-            _AUTH_ERROR_MESSAGES.get(e.code, "Authentication token is invalid"),
+            _AUTH_ERROR_MESSAGES.get(e.code, e.message or "Authentication token is invalid"),
         ) from e
 
     principal = UserPrincipal.from_validated_claims(
@@ -72,6 +74,17 @@ async def require_user_principal(
     try:
         await repo.ensure_table()
         mapping = await repo.get_mapping(principal.tenant_id, principal.subject)
+        if mapping is None:
+            await repo.insert_mapping(
+                ExtUserMap(
+                    tenant_id=principal.tenant_id,
+                    business_subject=principal.subject,
+                    business_user_id=principal.business_user_id,
+                    status="active",
+                    mapping_strategy="B",
+                )
+            )
+            mapping = await repo.get_mapping(principal.tenant_id, principal.subject)
         if mapping is None:
             raise UserAuthError(
                 403,

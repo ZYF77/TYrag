@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import httpx
 import pytest
 
 from enterprise.gateway.asset_registry import (
@@ -7,6 +8,7 @@ from enterprise.gateway.asset_registry import (
     AssetRegistryConflict,
     AssetRegistryInvalid,
     AssetRegistryUnavailable,
+    EAMAssetResolverAdapter,
     ResolvedAsset,
     resolve_asset,
     set_asset_registry_adapter,
@@ -188,7 +190,7 @@ async def test_registry_unavailable_and_wrong_tenant_fail_closed(
     isolated_gateway_db, monkeypatch
 ):
     db, _ = isolated_gateway_db
-    monkeypatch.setenv("ENTERPRISE_ASSET_REGISTRY_MODE", "unconfigured")
+    monkeypatch.setenv("ENTERPRISE_EAM_ASSET_RESOLVER_MODE", "unconfigured")
     with pytest.raises(AssetRegistryUnavailable):
         await resolve_asset(db, tenant_id="tenant-a", equipment_id="EQ-1")
 
@@ -211,3 +213,59 @@ async def test_registry_unavailable_and_wrong_tenant_fail_closed(
             )
     finally:
         set_asset_registry_adapter(None)
+
+
+@pytest.mark.asyncio
+async def test_eam_asset_resolver_uses_three_identifiers_without_tenant_query(
+    monkeypatch,
+):
+    calls: list[dict] = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {
+                "equipmentId": "EQ-1",
+                "fixedAssetNo": "FA-1",
+                "assetId": "ASSET-1",
+            }
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            assert kwargs["timeout"] == 5
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url, *, params, headers):
+            calls.append({"url": url, "params": params, "headers": headers})
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    adapter = EAMAssetResolverAdapter(
+        "https://eam.example.test",
+        path="/api/integration/v1/assets/resolve",
+        token="test-token",
+    )
+
+    resolved = await adapter.resolve(
+        tenant_id="wp04e2e",
+        equipment_id="EQ-1",
+        fixed_asset_no="FA-1",
+        asset_id="ASSET-1",
+    )
+
+    assert resolved is not None
+    assert (resolved.tenant_id, resolved.equipment_id) == ("wp04e2e", "EQ-1")
+    assert calls[0]["url"] == "https://eam.example.test/api/integration/v1/assets/resolve"
+    assert calls[0]["params"] == {
+        "equipmentId": "EQ-1",
+        "fixedAssetNo": "FA-1",
+        "assetId": "ASSET-1",
+    }
+    assert calls[0]["headers"]["Authorization"] == "Bearer test-token"
+    assert "tenantId" not in calls[0]["params"]

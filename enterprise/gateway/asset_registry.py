@@ -1,21 +1,28 @@
-"""Read-only Asset Registry boundary used by the external v2 contract.
+"""Read-only EAM asset resolver boundary used by the external v2 contract.
 
-The document map is deliberately not an asset registry.  Production callers
-must provide an adapter through the gateway integration boundary; the SQLite
-adapter is only an explicit test/development fixture so the offline contract
-suite can exercise the same resolution semantics.
+The document map is deliberately not an asset registry. Production deployments
+may call the EAM-owned resolver over HTTP; the SQLite adapter is only an
+explicit test/development fixture. FILE_SHARE v3 ingestion does not require a
+resolver call and persists the identifiers supplied by EAM directly.
 """
 from __future__ import annotations
 
 import os
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Protocol
+from urllib.parse import urlsplit
 
 import httpx
 
 
 ASSET_REGISTRY_TTL_SECONDS = 300
+EAM_ASSET_RESOLVER_DEFAULT_PATH = "/api/integration/v1/assets/resolve"
+EAM_ASSET_RESOLVER_BASE_URL_ENV = "ENTERPRISE_EAM_ASSET_RESOLVER_BASE_URL"
+EAM_ASSET_RESOLVER_MODE_ENV = "ENTERPRISE_EAM_ASSET_RESOLVER_MODE"
+EAM_ASSET_RESOLVER_PATH_ENV = "ENTERPRISE_EAM_ASSET_RESOLVER_PATH"
+EAM_ASSET_RESOLVER_TOKEN_ENV = "ENTERPRISE_EAM_ASSET_RESOLVER_TOKEN"
 
 
 class AssetRegistryError(RuntimeError):
@@ -231,19 +238,36 @@ class SQLiteAssetRegistryAdapter:
 
 
 class UnconfiguredAssetRegistryAdapter:
-    """Fail-closed production adapter until the customer registry is wired."""
+    """Fail-closed resolver for optional canonical asset lookups."""
 
     async def resolve(self, **kwargs) -> ResolvedAsset | None:
         raise AssetRegistryUnavailable(
-            "Asset Registry adapter is not configured"
+            "EAM asset resolver is not configured"
         )
 
 
-class HTTPAssetRegistryAdapter:
-    """Whitelist HTTP resolver for the customer Asset Registry service."""
+class EAMAssetResolverAdapter:
+    """Call the EAM-owned read-only asset resolver over HTTP."""
 
-    def __init__(self, base_url: str, token: str | None = None, timeout: float = 5.0):
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        path: str = EAM_ASSET_RESOLVER_DEFAULT_PATH,
+        token: str | None = None,
+        timeout: float = 5.0,
+    ):
         self.base_url = base_url.rstrip("/")
+        parsed_path = urlsplit(path)
+        if (
+            parsed_path.scheme
+            or parsed_path.netloc
+            or parsed_path.query
+            or parsed_path.fragment
+            or not parsed_path.path.startswith("/")
+        ):
+            raise ValueError("EAM asset resolver path must be an absolute path")
+        self.path = parsed_path.path
         self.token = token
         self.timeout = timeout
 
@@ -255,7 +279,7 @@ class HTTPAssetRegistryAdapter:
         fixed_asset_no: str | None = None,
         asset_id: str | None = None,
     ) -> ResolvedAsset | None:
-        params = {"tenantId": tenant_id}
+        params: dict[str, str] = {}
         if equipment_id:
             params["equipmentId"] = equipment_id
         if fixed_asset_no:
@@ -268,49 +292,46 @@ class HTTPAssetRegistryAdapter:
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.get(
-                    f"{self.base_url}/v1/assets/resolve",
+                    f"{self.base_url}{self.path}",
                     params=params,
-                    headers=headers,
+                    headers={**headers, "X-Request-Id": str(uuid.uuid4())},
                 )
         except httpx.HTTPError as exc:
-            raise AssetRegistryUnavailable("Asset Registry request failed") from exc
+            raise AssetRegistryUnavailable("EAM asset resolver request failed") from exc
         if response.status_code == 404:
             return None
         if response.status_code == 409:
             raise AssetRegistryConflict("Asset identifiers conflict")
         if response.status_code in (408, 425, 429) or response.status_code >= 500:
-            raise AssetRegistryUnavailable("Asset Registry service unavailable")
+            raise AssetRegistryUnavailable("EAM asset resolver service unavailable")
         if response.status_code >= 400:
             raise AssetRegistryInvalid("Asset identifier was rejected")
         try:
             payload = response.json()
         except ValueError as exc:
-            raise AssetRegistryUnavailable("Asset Registry returned malformed JSON") from exc
+            raise AssetRegistryUnavailable(
+                "EAM asset resolver returned malformed JSON"
+            ) from exc
         if not isinstance(payload, dict):
-            raise AssetRegistryUnavailable("Asset Registry returned malformed JSON")
-        response_tenant = payload.get("tenantId", payload.get("tenant_id"))
-        if not isinstance(response_tenant, str) or not response_tenant:
-            raise AssetRegistryUnavailable("Asset Registry omitted tenantId")
-        if response_tenant != tenant_id:
-            raise AssetRegistryConflict("Asset Registry tenant mismatch")
+            raise AssetRegistryUnavailable(
+                "EAM asset resolver returned malformed JSON"
+            )
         equipment = payload.get("equipmentId", payload.get("equipment_id"))
         if not isinstance(equipment, str) or not equipment:
-            raise AssetRegistryUnavailable("Asset Registry omitted equipmentId")
+            raise AssetRegistryUnavailable("EAM asset resolver omitted equipmentId")
         fixed = payload.get("fixedAssetNo", payload.get("fixed_asset_no"))
         canonical_asset = payload.get("assetId", payload.get("asset_id"))
         registry_version = payload.get(
             "registryVersion", payload.get("registry_version")
         )
         resolved_at = payload.get("resolvedAt", payload.get("resolved_at"))
-        if resolved_at is None:
-            raise AssetRegistryUnavailable("Asset Registry omitted resolvedAt")
         return ResolvedAsset(
             tenant_id=tenant_id,
             equipment_id=equipment,
             fixed_asset_no=fixed,
             asset_id=canonical_asset,
             registry_version=registry_version,
-            resolved_at=resolved_at,
+            resolved_at=resolved_at or utc_now(),
         )
 
 
@@ -326,14 +347,20 @@ def set_asset_registry_adapter(adapter: AssetRegistryAdapter | None) -> None:
 def asset_registry_adapter(db) -> AssetRegistryAdapter:
     if _resolver_override is not None:
         return _resolver_override
-    mode = os.environ.get("ENTERPRISE_ASSET_REGISTRY_MODE", "").strip().lower()
-    base_url = os.environ.get("ENTERPRISE_ASSET_REGISTRY_BASE_URL", "").strip()
+    mode = os.environ.get(EAM_ASSET_RESOLVER_MODE_ENV, "").strip().lower()
+    base_url = os.environ.get(EAM_ASSET_RESOLVER_BASE_URL_ENV, "").strip()
     if mode == "http" or (base_url and os.environ.get("ENTERPRISE_TEST_MODE") != "1"):
         if not base_url:
-            raise AssetRegistryUnavailable("Asset Registry base URL is not configured")
-        return HTTPAssetRegistryAdapter(
+            raise AssetRegistryUnavailable(
+                "EAM asset resolver base URL is not configured"
+            )
+        return EAMAssetResolverAdapter(
             base_url,
-            token=os.environ.get("ENTERPRISE_ASSET_REGISTRY_TOKEN", "").strip() or None,
+            path=os.environ.get(
+                EAM_ASSET_RESOLVER_PATH_ENV, EAM_ASSET_RESOLVER_DEFAULT_PATH
+            ).strip()
+            or EAM_ASSET_RESOLVER_DEFAULT_PATH,
+            token=os.environ.get(EAM_ASSET_RESOLVER_TOKEN_ENV, "").strip() or None,
         )
     if mode in {"sqlite", "test", "fixture"} or (
         not mode and os.environ.get("ENTERPRISE_TEST_MODE") == "1"

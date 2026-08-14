@@ -135,8 +135,24 @@ class TestJWTValidation:
         claims = {"nbf": int(time.time()) + 3600}
         token = _make_token(claims)
         v = _validator()
-        with pytest.raises(TokenValidationError):
+        with pytest.raises(TokenValidationError) as exc:
             v.validate(token)
+        assert exc.value.code == "AUTH_TOKEN_INVALID"
+        assert "nbf" in exc.value.message
+
+    def test_nbf_small_clock_skew_is_accepted(self):
+        """EAM JsonWebTokenHandler sets nbf=now; ~78s issuer/gateway skew must pass."""
+        token = _make_token({"nbf": int(time.time()) + 90, "iat": int(time.time())})
+        claims = _validator(leeway_seconds=120).validate(token)
+        assert claims["sub"] == "biz-user-001"
+
+    def test_nbf_beyond_leeway_is_rejected(self):
+        token = _make_token({"nbf": int(time.time()) + 90})
+        v = _validator(leeway_seconds=0)
+        with pytest.raises(TokenValidationError) as exc:
+            v.validate(token)
+        assert exc.value.code == "AUTH_TOKEN_INVALID"
+        assert "nbf" in exc.value.message
 
     def test_missing_subject(self):
         claims = {"sub": None}
@@ -158,6 +174,19 @@ class TestJWTValidation:
         with pytest.raises(TokenValidationError) as exc:
             v.validate(token)
         assert exc.value.code in ("CONFIG_ERROR", "AUTH_TOKEN_INVALID")
+
+    def test_hs_works_even_when_jwks_url_configured(self, monkeypatch):
+        """Dual-alg probe: HS256 must use shared secret, not JWKS kid lookup."""
+        monkeypatch.setenv("JWT_SHARED_SECRET", SHARED_SECRET)
+        token = _make_token()
+        v = _validator(
+            enable_hs_algorithms=True,
+            allowed_algorithms=("RS256", "HS256"),
+            jwks_url="http://127.0.0.1:9/.well-known/jwks.json",
+        )
+        claims = v.validate(token)
+        assert claims["sub"] == "biz-user-001"
+        assert claims["tenant"] == "customer-a"
 
     def test_custom_claim_mapping(self):
         claims_data = {
@@ -226,6 +255,18 @@ class TestUserPrincipal:
                   "iat": 1000, "exp": 2000}
         p = UserPrincipal.from_validated_claims(claims, _CLAIM_MAP)
         assert p.department_ids == ("d1", "d2")
+
+    def test_integer_department_is_coerced_to_string_tuple(self):
+        claims = {"sub": "u", "tenant": "t", "department": 2,
+                  "iat": 1000, "exp": 2000}
+        p = UserPrincipal.from_validated_claims(claims, _CLAIM_MAP)
+        assert p.department_ids == ("2",)
+
+    def test_integer_list_department_is_coerced_to_string_tuple(self):
+        claims = {"sub": "u", "tenant": "t", "department": [2, 3],
+                  "iat": 1000, "exp": 2000}
+        p = UserPrincipal.from_validated_claims(claims, _CLAIM_MAP)
+        assert p.department_ids == ("2", "3")
 
     def test_security_level_boundary(self):
         claims = {"sub": "u", "tenant": "t", "security_level": 0, "iat": 1000, "exp": 2000}
@@ -387,6 +428,7 @@ class TestAuthMeAPI:
             assert body["message"] in (
                 "Authentication is not configured",
                 "Authentication token is invalid",
+                "Unable to parse token header",
             )
             assert "requestId" in body
 
@@ -415,13 +457,14 @@ class TestAuthMeAPI:
                        "JWT_ALLOWED_ALGS", "JWT_JWKS_URL", "ENTERPRISE_DB_PATH"]:
                 os.environ.pop(k, None)
 
-    async def test_missing_mapping_returns_403(self, tmp_path):
+    async def test_missing_mapping_jit_provisions_and_succeeds(self, tmp_path):
         os.environ["JWT_ISSUER"] = "https://auth.example.com"
         os.environ["JWT_AUDIENCE"] = "tyrag-gateway"
         os.environ["JWT_ENABLE_HS"] = "true"
         os.environ["JWT_ALLOWED_ALGS"] = "HS256"
         os.environ["JWT_JWKS_URL"] = ""
-        os.environ["ENTERPRISE_DB_PATH"] = str(tmp_path / "test_missing_mapping.db")
+        db_path = str(tmp_path / "test_missing_mapping.db")
+        os.environ["ENTERPRISE_DB_PATH"] = db_path
         try:
             token = _make_token()
             transport = ASGITransport(app=app)
@@ -430,10 +473,18 @@ class TestAuthMeAPI:
                     "/enterprise/api/v1/auth/me",
                     headers={"Authorization": f"Bearer {token}"},
                 )
-                assert resp.status_code == 403
-                body = resp.json()
-                assert body["code"] == "AUTH_USER_MAPPING_MISSING"
-                assert "requestId" in body
+                assert resp.status_code == 200
+                data = resp.json()
+                assert data["businessUserId"] == "biz-user-001"
+
+            repo = ExtUserMapRepo(db_path=db_path)
+            try:
+                found = await repo.get_mapping("customer-a", "biz-user-001")
+                assert found is not None
+                assert found["status"] == "active"
+                assert found["business_subject"] == "biz-user-001"
+            finally:
+                await repo.close()
         finally:
             for k in ["JWT_ISSUER", "JWT_AUDIENCE", "JWT_ENABLE_HS",
                        "JWT_ALLOWED_ALGS", "JWT_JWKS_URL", "ENTERPRISE_DB_PATH"]:
