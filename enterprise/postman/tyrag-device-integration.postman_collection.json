@@ -2,7 +2,7 @@
   "info": {
     "_postman_id": "tyrag-device-integration",
     "name": "TYRAG device integration · FILE_SHARE v3 + query v2",
-    "description": "P0 local device flow. The v3 poll request uses the statusUrl returned by registration; no live result is implied by this export.",
+    "description": "P0 local device flow. Registration returns a slim 3.1.0 accept receipt (no statusUrl). Formal EAM integration uses the outbound terminal callback; this collection keeps a diagnostic GET status poll for local runner readiness before v2 queries.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -65,8 +65,8 @@
                 "type": "text/javascript",
                 "exec": [
                   "pm.test('registration is accepted', function () { pm.expect(pm.response.code).to.eql(202); });",
-                  "var payload = pm.response.json(); pm.test('registration returns statusUrl', function () { pm.expect(typeof payload.statusUrl).to.eql('string'); pm.expect(payload.statusUrl).to.not.eql(''); });",
-                  "pm.environment.set('statusUrl', payload.statusUrl || ''); pm.environment.set('operationId', payload.operationId || '');"
+                  "var payload = pm.response.json(); pm.test('registration returns slim accept receipt', function () { pm.expect(payload).to.have.keys('operationId', 'externalDocumentId', 'sourceVersionId', 'deduplicated', 'updatedAt'); pm.expect(payload).to.not.have.property('statusUrl'); });",
+                  "pm.environment.set('operationId', payload.operationId || ''); pm.environment.set('statusUrl', '/enterprise/api/v3/documents/' + encodeURIComponent(pm.environment.get('externalDocumentId')) + '/status?tenantId=' + encodeURIComponent(pm.environment.get('tenantId')) + '&sourceSystem=' + encodeURIComponent(pm.environment.get('sourceSystem')) + '&sourceVersionId=' + encodeURIComponent(pm.environment.get('sourceVersionId')));"
                 ]
               }
             }
@@ -102,7 +102,7 @@
           ]
         },
         {
-          "name": "FILE_SHARE v3 · poll response statusUrl",
+          "name": "FILE_SHARE v3 · poll diagnostic status",
           "request": {
             "method": "GET",
             "header": [ { "key": "Accept", "value": "application/json" } ],
@@ -119,7 +119,7 @@
                   "pm.test('status response is successful', function () { pm.expect(pm.response.code).to.eql(200); });",
                   "var payload = pm.response.json(); var attempt = Number(pm.environment.get('pollAttempt') || '0'); var maxAttempts = Number(pm.environment.get('maxPollAttempts') || '10');",
                   "pm.test('status belongs to the registered FILE_SHARE document', function () { pm.expect(payload.externalDocumentId).to.eql(pm.environment.get('externalDocumentId')); pm.expect(payload.sourceKind).to.eql('FILE_SHARE'); });",
-                  "if (payload.retrievable === true) { pm.test('retrievable status contains completed parse and index facts', function () { pm.expect(payload.pipelineStatus).to.be.oneOf(['DONE', '3']); pm.expect(payload.parseCompleted).to.eql(true); pm.expect(payload.indexCompleted).to.eql(true); pm.expect(payload.qualityStatus).to.eql('passed'); pm.expect(payload.errorCode).to.eql(null); }); pm.environment.set('pollAttempt', '0'); } else { var nextAttempt = attempt + 1; pm.environment.set('pollAttempt', String(nextAttempt)); if (nextAttempt < maxAttempts) { pm.execution.setNextRequest('FILE_SHARE v3 · poll response statusUrl'); } else { pm.execution.setNextRequest(null); pm.expect.fail('FILE_SHARE document did not become retrievable within maxPollAttempts'); } }"
+                  "if (payload.retrievable === true) { pm.test('retrievable status contains completed parse and index facts', function () { pm.expect(payload.pipelineStatus).to.be.oneOf(['DONE', '3']); pm.expect(payload.parseCompleted).to.eql(true); pm.expect(payload.indexCompleted).to.eql(true); pm.expect(payload.qualityStatus).to.eql('passed'); pm.expect(payload.errorCode).to.eql(null); }); pm.environment.set('pollAttempt', '0'); } else { var nextAttempt = attempt + 1; pm.environment.set('pollAttempt', String(nextAttempt)); if (nextAttempt < maxAttempts) { pm.execution.setNextRequest('FILE_SHARE v3 · poll diagnostic status'); } else { pm.execution.setNextRequest(null); pm.expect.fail('FILE_SHARE document did not become retrievable within maxPollAttempts'); } }"
                 ]
               }
             }
@@ -272,7 +272,7 @@
                   "pm.test('question round 1 returns a run result', function () { pm.expect(pm.response.code).to.eql(200); });",
                   "var payload = pm.response.json();",
                   "pm.test('question round 1 returns completed cited evidence', function () {",
-                  "  pm.expect(payload.status).to.eql('completed');",
+                  "  pm.expect(payload.status).to.eql('已完成');",
                   "  pm.expect(payload.answer).to.be.a('string').and.not.empty;",
                   "  var answer = payload.answer.trim().toLowerCase();",
                   "  pm.expect(answer).not.to.include(\"i don't have enough information\");",
@@ -311,7 +311,7 @@
                   "pm.test('question round 2 returns a run result', function () { pm.expect(pm.response.code).to.eql(200); });",
                   "var payload = pm.response.json();",
                   "pm.test('question round 2 returns completed cited evidence', function () {",
-                  "  pm.expect(payload.status).to.eql('completed');",
+                  "  pm.expect(payload.status).to.eql('已完成');",
                   "  pm.expect(payload.answer).to.be.a('string').and.not.empty;",
                   "  var answer = payload.answer.trim().toLowerCase();",
                   "  pm.expect(answer).not.to.include(\"i don't have enough information\");",
@@ -341,7 +341,7 @@
                 "type": "text/javascript",
                 "exec": [
                   "pm.test('history is readable', function () { pm.expect(pm.response.code).to.eql(200); });",
-                  "pm.test('history preserves message status and citations independently', function () { var payload = pm.response.json(); pm.expect(payload.items).to.be.an('array'); payload.items.forEach(function (item) { pm.expect(['completed', 'no_reliable_evidence', 'failed']).to.include(item.status); pm.expect(item.citations).to.be.an('array'); }); });"
+                  "pm.test('history preserves message status and citations independently', function () { var payload = pm.response.json(); pm.expect(payload.items).to.be.an('array'); payload.items.forEach(function (item) { pm.expect(['已完成', '无可靠依据', '失败']).to.include(item.status); pm.expect(item.citations).to.be.an('array'); }); });"
                 ]
               }
             }

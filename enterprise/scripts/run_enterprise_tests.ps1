@@ -72,6 +72,7 @@ function Redact-SensitiveText {
     foreach ($name in @(
         'ENTERPRISE_RAGFLOW_API_KEY',
         'ENTERPRISE_ASSET_REGISTRY_TOKEN',
+        'ENTERPRISE_EAM_ASSET_RESOLVER_TOKEN',
         'ENTERPRISE_SYNC_SERVICE_TOKEN',
         'ENTERPRISE_SYNC_HMAC_CREDENTIALS',
         'ENTERPRISE_E2E_HMAC_SECRET',
@@ -534,7 +535,7 @@ function Invoke-RequiredIntegrationE2EStep {
     $report = Join-Path $RunArtifactDir 'file-share-v3-v2-e2e.json'
     $code = Invoke-Logged -FilePath $PythonRuntime.path -Arguments @($script, '--report', $report) -Label 'live-file-share-v3-v2'
     if ($code -eq 0) {
-        Add-Step -Name live-file-share-v3-v2 -Status passed -ExitCode 0 -Detail 'FILE_SHARE v3 registration, server statusUrl polling, and formal v2 conversation E2E passed'
+        Add-Step -Name live-file-share-v3-v2 -Status passed -ExitCode 0 -Detail 'FILE_SHARE v3 registration, diagnostic status polling, and formal v2 conversation E2E passed'
     } elseif ($code -eq 3) {
         Add-Step -Name live-file-share-v3-v2 -Status blocked -ExitCode 3 -Detail 'required FILE_SHARE/v2 E2E environment is unavailable'
         Set-ExitCode 3
@@ -766,6 +767,10 @@ try {
             '--ignore=enterprise/tests/test_enterprise_runner.py'
         )
         Invoke-PytestStep -Name pytest-offline -TestArguments $offlineTests -JUnitName 'pytest-offline.xml'
+
+        Invoke-CommandStep -Name v2-inquiry-smoke -FilePath $PythonRuntime.path -Arguments @(
+            (Join-Path $RepoRoot 'enterprise\scripts\run_v2_inquiry_smoke.py')
+        )
 
         $tsc = Join-Path $WebRoot 'node_modules\typescript\bin\tsc'
         Invoke-CommandStep -Name tsc -FilePath $NodeRuntime.path -Arguments @(

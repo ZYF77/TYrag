@@ -75,7 +75,6 @@ def _integration_env(tmp_path: Path) -> dict[str, str]:
         {
             "ENTERPRISE_RAGFLOW_BASE_URL": "http://127.0.0.1:9380",
             "ENTERPRISE_RAGFLOW_API_KEY": "runner-test-ragflow-key",
-            "ENTERPRISE_ASSET_REGISTRY_BASE_URL": "http://127.0.0.1:9390",
             "ENTERPRISE_REDIS_URL": "redis://127.0.0.1:6379/0",
             "GATEWAY_URL": "http://127.0.0.1:5188",
             "ENTERPRISE_FILE_SHARE_ROOTS": json.dumps(
@@ -102,7 +101,6 @@ def test_missing_integration_environment_returns_exit_three(tmp_path):
     for name in (
         "ENTERPRISE_RAGFLOW_BASE_URL",
         "ENTERPRISE_RAGFLOW_API_KEY",
-        "ENTERPRISE_ASSET_REGISTRY_BASE_URL",
         "ENTERPRISE_REDIS_URL",
         "GATEWAY_URL",
         "ENTERPRISE_FILE_SHARE_ROOTS",
@@ -215,13 +213,13 @@ def test_runner_rejects_skips_and_xpasses_in_test_steps():
     assert "TYRAG_EXTERNAL_SOURCE_INTERNAL_KEY" in source
 
 
-def test_required_live_suite_is_v3_v2_and_has_strict_status_url_path():
+def test_required_live_suite_is_v3_v2_and_has_accept_receipt_plus_diagnostic_status():
     source = LIVE_SUITE.read_text(encoding="utf-8")
     assert "/enterprise/api/v3/documents" in source
     assert "/enterprise/api/v2/conversations" in source
     assert "X-TY-Signature" in source
-    assert "statusUrl" in source
-    assert "statusUrl" in source
+    assert "validate_accept_receipt" in source
+    assert "build_diagnostic_status_url" in source
     assert "status_url" in source
     assert 'status.get("retrievable") is True' in source
     assert 'status.get("pipelineStatus", "")' in source
@@ -283,7 +281,7 @@ def test_live_suite_accepts_asset_scope_citations_but_requires_new_document(tmp_
 def test_preflight_reports_only_states_and_has_no_s3_requirements():
     source = PREFLIGHT.read_text(encoding="utf-8")
     assert "ENTERPRISE_FILE_SHARE_ROOTS" in source
-    assert "ENTERPRISE_ASSET_REGISTRY_BASE_URL" in source
+    assert "ENTERPRISE_EAM_ASSET_RESOLVER_BASE_URL" in source
     assert "ENTERPRISE_RAGFLOW_BASE_URL" in source
     assert "ENTERPRISE_REDIS_URL" in source
     assert "GATEWAY_URL" in source
@@ -355,10 +353,11 @@ def test_unshared_gateway_db_returns_exit_three(tmp_path):
     assert summary["requiredIntegrationEvidence"] is False
 
 
-def test_status_url_fixture_is_server_owned_and_scope_checked():
+def test_accept_receipt_and_diagnostic_status_url_helpers():
     from enterprise.scripts.run_file_share_v3_v2_e2e import (
         LiveAssertionError,
-        validate_status_url,
+        build_diagnostic_status_url,
+        validate_accept_receipt,
     )
 
     scope = {
@@ -367,15 +366,31 @@ def test_status_url_fixture_is_server_owned_and_scope_checked():
         "external_document_id": "DOC-1",
         "source_version_id": "v3-1",
     }
-    server_url = (
+    assert build_diagnostic_status_url(**scope) == (
         "/enterprise/api/v3/documents/DOC-1/status"
         "?tenantId=tyrag-integration&sourceSystem=EAM&sourceVersionId=v3-1"
     )
-    assert validate_status_url({"statusUrl": server_url}, **scope) == server_url
-
+    validate_accept_receipt(
+        {
+            "operationId": "evt-1",
+            "externalDocumentId": "DOC-1",
+            "sourceVersionId": "v3-1",
+            "deduplicated": False,
+            "updatedAt": "2026-01-01T00:00:00+00:00",
+        },
+        external_document_id="DOC-1",
+        source_version_id="v3-1",
+    )
     with pytest.raises(LiveAssertionError):
-        validate_status_url({}, **scope)
-    with pytest.raises(LiveAssertionError):
-        validate_status_url(
-            {"statusUrl": server_url.replace("DOC-1", "OTHER")}, **scope
+        validate_accept_receipt(
+            {
+                "operationId": "evt-1",
+                "externalDocumentId": "DOC-1",
+                "sourceVersionId": "v3-1",
+                "deduplicated": False,
+                "updatedAt": "2026-01-01T00:00:00+00:00",
+                "statusUrl": "/enterprise/api/v3/documents/DOC-1/status",
+            },
+            external_document_id="DOC-1",
+            source_version_id="v3-1",
         )

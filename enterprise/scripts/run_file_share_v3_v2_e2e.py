@@ -1,10 +1,10 @@
 """Required local happy-path E2E for FILE_SHARE v3 and formal v2.
 
 This script is intentionally live-only.  It signs v3 registration requests
-with the configured HMAC credential, reads the server-provided ``statusUrl``
-from the 202 response, and polls that exact relative URL.  It never derives a
-status URL from document identifiers and never falls back to v1, S3, demo, or
-mocked services.
+with the configured HMAC credential, asserts the slim 3.1.0 accept receipt,
+then polls the diagnostic GET status URL built from registration identity.
+Production EAM integration consumes the outbound terminal callback instead of
+polling.  The suite never falls back to v1, S3, demo, or mocked services.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from urllib.parse import parse_qs, quote, urlsplit
+from urllib.parse import quote, urlsplit
 
 import httpx
 import jwt
@@ -213,35 +213,54 @@ def _jwt_token(
     return jwt.encode(claims, secret, algorithm="HS256")
 
 
-def validate_status_url(
-    payload: dict,
+def build_diagnostic_status_url(
     *,
     tenant_id: str,
     source_system: str,
     external_document_id: str,
     source_version_id: str,
 ) -> str:
-    status_url = payload.get("statusUrl")
-    if not isinstance(status_url, str) or not status_url:
-        raise LiveAssertionError("202 response did not contain statusUrl")
-    parsed = urlsplit(status_url)
-    if parsed.scheme or parsed.netloc or not parsed.path.startswith("/"):
-        raise LiveAssertionError("statusUrl must be a relative URL")
-    expected_path = (
+    """Build the ops/diagnostic GET status URL from registration identity.
+
+    FILE_SHARE 3.1.0 registration no longer returns statusUrl. Live suites and
+    console tooling may still poll GET status while EAM consumes callbacks.
+    """
+    path = (
         f"/enterprise/api/v3/documents/"
-        f"{quote(external_document_id, safe='-._~')}/status"
+        f"{quote(external_document_id, safe='')}/status"
     )
-    if parsed.path != expected_path:
-        raise LiveAssertionError("statusUrl document scope is incorrect")
-    query = parse_qs(parsed.query, keep_blank_values=True)
-    expected = {
-        "tenantId": tenant_id,
-        "sourceSystem": source_system,
-        "sourceVersionId": source_version_id,
+    query = "&".join(
+        f"{key}={quote(value, safe='')}"
+        for key, value in (
+            ("tenantId", tenant_id),
+            ("sourceSystem", source_system),
+            ("sourceVersionId", source_version_id),
+        )
+    )
+    return f"{path}?{query}"
+
+
+def validate_accept_receipt(
+    payload: dict,
+    *,
+    external_document_id: str,
+    source_version_id: str,
+) -> None:
+    required = {
+        "operationId",
+        "externalDocumentId",
+        "sourceVersionId",
+        "deduplicated",
+        "updatedAt",
     }
-    if any(query.get(name) != [value] for name, value in expected.items()):
-        raise LiveAssertionError("statusUrl query scope is incorrect")
-    return status_url
+    if not required <= set(payload):
+        raise LiveAssertionError("202 response is missing accept receipt fields")
+    if "statusUrl" in payload:
+        raise LiveAssertionError("202 response must not include statusUrl")
+    if payload.get("externalDocumentId") != external_document_id:
+        raise LiveAssertionError("accept receipt externalDocumentId mismatch")
+    if payload.get("sourceVersionId") != source_version_id:
+        raise LiveAssertionError("accept receipt sourceVersionId mismatch")
 
 
 def matching_ingested_citations(
@@ -368,11 +387,15 @@ def run_live() -> dict[str, bool]:
         if response.status_code != 202:
             raise LiveAssertionError("FILE_SHARE registration did not return 202")
         receipt = _json_response(response)
+        validate_accept_receipt(
+            receipt,
+            external_document_id=external_document_id,
+            source_version_id=source_version_id,
+        )
         operation_id = receipt.get("operationId")
         if not isinstance(operation_id, str) or not operation_id:
             raise LiveAssertionError("202 response did not contain operationId")
-        status_url = validate_status_url(
-            receipt,
+        status_url = build_diagnostic_status_url(
             tenant_id=tenant_id,
             source_system=source_system,
             external_document_id=external_document_id,

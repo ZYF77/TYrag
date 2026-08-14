@@ -165,26 +165,29 @@ async def _probe_services() -> dict[str, dict[str, str]]:
     else:
         results["ragflow"] = _state(UNAVAILABLE, "api_unreachable")
 
-    asset_base = _value("ENTERPRISE_ASSET_REGISTRY_BASE_URL")
-    if not asset_base:
-        results["assetRegistry"] = _state(MISSING, "base_url")
-    elif not _url_is_valid(asset_base, {"http", "https"}):
-        results["assetRegistry"] = _state(UNAVAILABLE, "base_url_invalid")
-    else:
-        asset_headers = {"Accept": "application/json"}
-        asset_token = _value("ENTERPRISE_ASSET_REGISTRY_TOKEN")
-        if asset_token:
-            asset_headers["Authorization"] = f"Bearer {asset_token}"
-        reachable = await _probe_http(
-            base_url=asset_base,
-            path="/v1/assets/resolve?tenantId=tyrag-integration-probe&equipmentId=tyrag-integration-probe",
-            accepted_statuses={200, 404},
-            headers=asset_headers,
-        )
-        results["assetRegistry"] = _state(
-            CONFIGURED if reachable else UNAVAILABLE,
-            "resolver_reachable" if reachable else "resolver_unreachable",
-        )
+    asset_base = _value("ENTERPRISE_EAM_ASSET_RESOLVER_BASE_URL")
+    if asset_base:
+        if not _url_is_valid(asset_base, {"http", "https"}):
+            results["eamAssetResolver"] = _state(UNAVAILABLE, "base_url_invalid")
+        else:
+            asset_headers = {"Accept": "application/json"}
+            asset_token = _value("ENTERPRISE_EAM_ASSET_RESOLVER_TOKEN")
+            if asset_token:
+                asset_headers["Authorization"] = f"Bearer {asset_token}"
+            resolver_path = (
+                _value("ENTERPRISE_EAM_ASSET_RESOLVER_PATH")
+                or "/api/integration/v1/assets/resolve"
+            )
+            reachable = await _probe_http(
+                base_url=asset_base,
+                path=f"{resolver_path}?equipmentId=tyrag-integration-probe",
+                accepted_statuses={200, 404},
+                headers=asset_headers,
+            )
+            results["eamAssetResolver"] = _state(
+                CONFIGURED if reachable else UNAVAILABLE,
+                "resolver_reachable" if reachable else "resolver_unreachable",
+            )
 
     gateway = _value("GATEWAY_URL")
     if not gateway:

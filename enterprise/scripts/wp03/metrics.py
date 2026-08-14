@@ -88,6 +88,25 @@ def out_of_range_page_positions(
     return count, sorted(pages)
 
 
+def resolve_effective_page_count(
+    source_page_count: int, chunks: Iterable[dict[str, Any]]
+) -> tuple[int, str]:
+    """Resolve the page-count denominator used by coverage/range checks.
+
+    EAM FILE_SHARE events frequently omit ``page_count``, and RAGFlow document
+    metadata may also omit it.  A declared count of ``0`` must not treat every
+    real position page as out-of-range.  In that case, infer the effective
+    count from the highest observed position page (>= 1).
+    """
+    declared = int(source_page_count or 0)
+    if declared > 0:
+        return declared, "declared"
+    observed_pages = chunk_page_numbers(chunks)
+    if not observed_pages:
+        return 0, "unknown"
+    return max(observed_pages), "inferred_from_positions"
+
+
 def valid_position_count(chunks: Iterable[dict[str, Any]]) -> int:
     count = 0
     for chunk in chunks:
@@ -239,14 +258,18 @@ def compute_document_metrics(
     if error_code is None and not parse_success:
         error_code = parsing_status
 
-    page_numbers = in_range_page_numbers(chunks, source_page_count)
+    declared_page_count = int(source_page_count or 0)
+    effective_page_count, page_count_basis = resolve_effective_page_count(
+        declared_page_count, chunks
+    )
+    page_numbers = in_range_page_numbers(chunks, effective_page_count)
     out_of_range_count, out_of_range_pages = out_of_range_page_positions(
-        chunks, source_page_count
+        chunks, effective_page_count
     )
     covered_pages = len(page_numbers)
     empty_page_ratio = (
-        max(0.0, 1.0 - covered_pages / source_page_count)
-        if source_page_count > 0
+        max(0.0, 1.0 - covered_pages / effective_page_count)
+        if effective_page_count > 0
         else 0.0
     )
     non_empty = [c for c in chunks if char_length(c.get("content")) > 0]
@@ -259,7 +282,7 @@ def compute_document_metrics(
     )
     lengths = [char_length(c.get("content")) for c in chunks]
     table_pages = detected_table_pages(chunks) & set(
-        range(1, source_page_count + 1)
+        range(1, effective_page_count + 1)
     )
     expected_tables = expected_tables or []
     table_recall = (
@@ -308,14 +331,16 @@ def compute_document_metrics(
         "api_chunk_count": doc_info.get("chunk_count"),
         "chunk_count": len(chunks),
         "token_count": doc_info.get("token_count"),
-        "page_count_source": source_page_count,
+        "page_count_declared": declared_page_count,
+        "page_count_basis": page_count_basis,
+        "page_count_source": effective_page_count,
         "page_count_observed": covered_pages,
         "out_of_range_page_count": out_of_range_count,
         "out_of_range_pages": out_of_range_pages,
         "empty_page_ratio": round(empty_page_ratio, 4),
         "page_coverage": (
-            round(covered_pages / source_page_count, 4)
-            if source_page_count > 0
+            round(covered_pages / effective_page_count, 4)
+            if effective_page_count > 0
             else 0.0
         ),
         "effective_text_coverage": (

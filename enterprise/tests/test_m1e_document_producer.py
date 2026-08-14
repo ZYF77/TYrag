@@ -52,6 +52,18 @@ def _producer() -> DocumentProducer:
     )
 
 
+def _v3_producer() -> DocumentProducer:
+    return DocumentProducer(
+        ProducerConfig(
+            base_url="http://gateway.test/enterprise/api/v3",
+            key_id="m1e-key",
+            secret=TEST_SECRET,
+            tenant_id="demo-tenant",
+            source_system="equipment-system",
+        )
+    )
+
+
 def _headers(request) -> dict[str, str]:
     return {key.lower(): value for key, value in request.header_items()}
 
@@ -120,3 +132,46 @@ def test_get_document_status_signs_canonical_query_and_uses_no_bearer():
         body=b"",
     )
     assert TEST_SECRET not in request.full_url
+
+
+def test_v3_status_poll_uses_server_owned_status_url_without_reconstruction():
+    status_url = (
+        "/enterprise/api/v3/documents/DOC%2F001/status"
+        "?tenantId=demo-tenant&sourceSystem=equipment-system&sourceVersionId=v1"
+    )
+    opener = RecordingOpener(
+        {"externalDocumentId": "DOC/001", "sourceVersionId": "v1", "status": "ready"},
+    )
+
+    result = _v3_producer().get_status_url(
+        status_url,
+        timestamp="1700000002",
+        opener=opener,
+    )
+
+    assert result["status"] == "ready"
+    request = opener.request
+    assert request is not None
+    assert request.full_url == f"http://gateway.test{status_url}"
+    parsed = urlsplit(request.full_url)
+    headers = _headers(request)
+    assert headers["x-ty-signature"] == sign_request(
+        secret=TEST_SECRET,
+        timestamp="1700000002",
+        method="GET",
+        path=parsed.path,
+        query=parsed.query,
+        body=b"",
+    )
+    assert "authorization" not in headers
+
+
+def test_v3_status_poll_rejects_non_server_relative_urls():
+    try:
+        _v3_producer().get_status_url(
+            "https://other.example/enterprise/api/v3/documents/DOC/status?tenantId=t"
+        )
+    except ValueError as exc:
+        assert "server-provided" in str(exc)
+    else:
+        raise AssertionError("absolute status URL must be rejected")

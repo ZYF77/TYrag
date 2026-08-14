@@ -67,7 +67,7 @@ class TestErrorResponseShape:
                 assert resp.status_code == 422
                 body = resp.json()
                 assert body["code"] == "VALIDATION_ERROR"
-                assert body["message"] == "Request validation failed"
+                assert body["message"] == "请求内容不符合要求，请检查后重试。"
                 assert body["requestId"]
                 assert "detail" not in body
         finally:

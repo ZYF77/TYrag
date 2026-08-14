@@ -46,7 +46,7 @@ def test_collection_has_required_p0_examples_and_only_frozen_routes():
     assert {
         "FILE_SHARE v3 · register",
         "FILE_SHARE v3 · duplicate register",
-        "FILE_SHARE v3 · poll response statusUrl",
+        "FILE_SHARE v3 · poll diagnostic status",
         "FILE_SHARE v3 · invalid HMAC",
         "FILE_SHARE v3 · missing source registration",
         "FILE_SHARE v3 · missing document status error",
@@ -87,7 +87,7 @@ def test_local_defaults_and_polling_are_runner_safe():
         item
         for folder in collection["item"]
         for item in folder.get("item", [])
-        if item.get("name") == "FILE_SHARE v3 · poll response statusUrl"
+        if item.get("name") == "FILE_SHARE v3 · poll diagnostic status"
     )
     assert poll["request"]["url"] == "{{baseUrl}}{{statusUrl}}"
     test_script = "\n".join(
@@ -141,7 +141,7 @@ def test_collection_uses_real_page_count_and_strict_query_assertions():
             if event["listen"] == "test"
             for line in event["script"]["exec"]
         )
-        assert "payload.status).to.eql('completed')" in test_script
+        assert "payload.status).to.eql('已完成')" in test_script
         assert "payload.citations" in test_script
         assert "payload.answer" in test_script
         assert "i don't have enough information" in test_script

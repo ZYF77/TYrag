@@ -97,7 +97,7 @@ class ProducerConfig:
 
 
 class DocumentProducer:
-    """Sign and send the two M1-E document operations needed by the Harness."""
+    """Sign and send the M1-E v2/v3 document operations needed by the Harness."""
 
     def __init__(self, config: ProducerConfig):
         self.config = config
@@ -111,11 +111,12 @@ class DocumentProducer:
         body: bytes = b"",
         timestamp: str | None = None,
         opener: Opener | None = None,
+        request_base_url: str | None = None,
     ) -> JsonObject:
         timestamp = str(int(time.time())) if timestamp is None else timestamp
         if len(timestamp) != 10 or not timestamp.isdigit():
             raise ValueError("timestamp must be a ten-digit epoch value")
-        target = f"{self.config.base_url}{path}"
+        target = f"{request_base_url or self.config.base_url}{path}"
         if query:
             target = f"{target}?{query}"
         parsed = urlsplit(target)
@@ -225,14 +226,58 @@ class DocumentProducer:
             opener=opener,
         )
 
+    def get_status_url(
+        self,
+        status_url: str,
+        *,
+        timestamp: str | None = None,
+        opener: Opener | None = None,
+    ) -> JsonObject:
+        """Poll the exact relative ``statusUrl`` returned by FILE_SHARE v3.
+
+        v3 owns the path and query encoding in this URL.  Reconstructing it
+        from an external document ID can change the signed target, so this
+        method deliberately accepts only the server-provided relative URL.
+        """
+        if not isinstance(status_url, str) or not status_url.strip():
+            raise ValueError("status_url is required")
+        parsed = urlsplit(status_url.strip())
+        if (
+            parsed.scheme
+            or parsed.netloc
+            or parsed.fragment
+            or not parsed.path.startswith("/enterprise/api/v3/documents/")
+            or not parsed.path.endswith("/status")
+            or not parsed.query
+        ):
+            raise ValueError("status_url must be a server-provided v3 relative URL")
+        gateway = urlsplit(self.config.base_url)
+        origin = f"{gateway.scheme}://{gateway.netloc}"
+        return self._request(
+            "GET",
+            parsed.path,
+            query=parsed.query,
+            timestamp=timestamp,
+            opener=opener,
+            request_base_url=origin,
+        )
+
 
 def _summary(value: Mapping[str, Any]) -> JsonObject:
     fields = (
         "operationId",
         "externalDocumentId",
         "sourceVersionId",
+        "deduplicated",
+        "statusUrl",
         "status",
         "stage",
+        "pipelineStatus",
+        "parseCompleted",
+        "indexCompleted",
+        "retrievable",
+        "qualityStatus",
+        "errorCode",
         "eventStatus",
         "updatedAt",
     )
@@ -245,7 +290,12 @@ def _parser() -> argparse.ArgumentParser:
     submit = commands.add_parser("submit", help="sign and POST one document command")
     submit.add_argument("--payload-file", required=True, type=Path)
     status = commands.add_parser("status", help="sign and GET one document status")
-    status.add_argument("--external-document-id", required=True)
+    status_target = status.add_mutually_exclusive_group(required=True)
+    status_target.add_argument("--external-document-id")
+    status_target.add_argument(
+        "--status-url",
+        help="exact relative statusUrl returned by FILE_SHARE v3 registration",
+    )
     status.add_argument("--source-version-id")
     return parser
 
@@ -259,6 +309,8 @@ def main(argv: list[str] | None = None) -> int:
             if not isinstance(command, dict):
                 raise ValueError("payload file must contain a JSON object")
             result = producer.submit_document(command)
+        elif args.status_url:
+            result = producer.get_status_url(args.status_url)
         else:
             result = producer.get_document_status(
                 args.external_document_id,

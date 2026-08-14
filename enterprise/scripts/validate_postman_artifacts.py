@@ -187,8 +187,8 @@ def validate_artifacts(collection_path: Path, environment_path: Path) -> list[st
         if "FILE_SHARE v3" in " / ".join(str(parent.get("name", "")) for parent in parents):
             if "pm.vault" not in pre_request or "X-TY-Signature" not in pre_request:
                 errors.append(f"{name}: FILE_SHARE requests must inherit the HMAC pre-request script")
-        if name == "FILE_SHARE v3 · poll response statusUrl" and url.strip() != "{{baseUrl}}{{statusUrl}}":
-            errors.append(f"{name}: polling URL must prefix the response statusUrl with baseUrl")
+        if name == "FILE_SHARE v3 · poll diagnostic status" and url.strip() != "{{baseUrl}}{{statusUrl}}":
+            errors.append(f"{name}: diagnostic polling URL must prefix statusUrl with baseUrl")
 
     if seen_requests == 0:
         errors.append("collection contains no leaf requests")
