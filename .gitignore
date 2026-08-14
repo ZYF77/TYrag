@@ -177,3 +177,7 @@ enterprise/ext_document_map.db*
 # Test and acceptance run outputs
 /tmp/
 /output/
+
+# Local pytest scratch artifacts
+.pytest-tmp/
+
