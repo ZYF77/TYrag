@@ -143,24 +143,31 @@ export function addTenantParams(data: any, url?: string): any {
     return data;
   }
 
-  const llmList = getCachedLlmList();
-  if (!llmList) return data;
-
   // Handle arrays
   if (Array.isArray(data)) {
     return data.map((item) => addTenantParams(item, url));
   }
 
   const newData = { ...data };
+  const llmList = getCachedLlmList();
 
   // Iterate through model parameters and add corresponding tenant parameters
   for (const [paramName, tenantParamName] of Object.entries(modelParamMap)) {
     if (newData[paramName]) {
       try {
-        const { modelName, factoryId } = parseModelUuid(newData[paramName]);
-        const tenantModelId = getTenantModelId(llmList, modelName, factoryId);
-        if (tenantModelId) {
-          newData[tenantParamName] = tenantModelId;
+        const parsed = parseModelValue(newData[paramName]);
+        if (parsed && llmList) {
+          const tenantModelId = getTenantModelId(
+            llmList,
+            parsed.model_name,
+            parsed.model_provider,
+          );
+          if (tenantModelId) {
+            newData[tenantParamName] = tenantModelId;
+          }
+        } else if (!parsed) {
+          // Bare tenant-model id — keep the pair in sync even without LLM cache.
+          newData[tenantParamName] = newData[paramName];
         }
       } catch (error) {
         console.error(`Error processing ${paramName}:`, error);

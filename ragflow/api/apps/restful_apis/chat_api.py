@@ -282,6 +282,18 @@ def _llm_model_type(llm_setting):
     return model_type if isinstance(model_type, str) and model_type in {"chat", "vision"} else "chat"
 
 
+async def _tenant_llm_id_for_override(tenant_id, model_ref, model_type):
+    """Resolve a per-request llm_id override to a tenant_model.id."""
+    try:
+        await thread_pool_exec(get_model_config_by_id, tenant_id, model_type, model_ref)
+        return model_ref
+    except LookupError:
+        try:
+            return await thread_pool_exec(resolve_model_id, tenant_id, model_type, model_ref)
+        except LookupError:
+            return None
+
+
 async def _normalize_model_pair(req, tenant_id, name_field, id_field, model_type):
     """Validate and synchronize a model name with its tenant-model ID."""
     if name_field not in req and id_field not in req:
@@ -300,8 +312,12 @@ async def _normalize_model_pair(req, tenant_id, name_field, id_field, model_type
         try:
             await thread_pool_exec(get_model_config_by_id, tenant_id, model_type, model_id)
         except LookupError as e:
-            logging.error("Fail to get %s config by tenant model id %s: %s", model_type, model_id, e)
-            return f"`{id_field}` must be a valid tenant model id"
+            # Re-imported providers leave dialog.tenant_llm_id pointing at a
+            # deleted tenant_model row. Ignore the stale id and resolve from
+            # llm_id instead of failing apply / chat updates.
+            logging.warning("Ignoring stale %s %s: %s", id_field, model_id, e)
+            model_id = None
+            req[id_field] = None
 
     if model_name:
         if model_type == "rerank" and model_name.split("@")[0] in _DEFAULT_RERANK_MODELS:
@@ -322,7 +338,14 @@ async def _normalize_model_pair(req, tenant_id, name_field, id_field, model_type
 
     if model_id and model_name:
         if resolved_name_id != model_id:
-            return f"`{name_field}` and `{id_field}` must refer to the same model"
+            # The model selector now posts a tenant-model UUID as llm_id. Multi-model
+            # apply also spreads the previous chat, so tenant_llm_id can be stale.
+            # When llm_id itself is a valid tenant model id, treat it as the new
+            # selection and keep the pair in sync.
+            if resolved_name_id == model_name:
+                req[id_field] = resolved_name_id
+            else:
+                return f"`{name_field}` and `{id_field}` must refer to the same model"
     elif model_name:
         req[id_field] = resolved_name_id
     elif model_id:
@@ -335,6 +358,17 @@ async def _normalize_model_pair(req, tenant_id, name_field, id_field, model_type
         # Clearing one side must not leave a stale ID/name on the other side.
         req[id_field] = None
         req[name_field] = ""
+        return None
+
+    # Runtime name-based lookup needs the composite model name. If the selector
+    # posted a tenant-model UUID as llm_id, persist the composite name instead.
+    final_id = req.get(id_field)
+    if final_id and req.get(name_field) == final_id:
+        try:
+            req[name_field] = await thread_pool_exec(get_composite_model_name_by_id, final_id)
+        except LookupError as e:
+            logging.error("Fail to get composite name for %s %s: %s", id_field, final_id, e)
+            return f"`{id_field}` must be a valid tenant model id"
 
     return None
 
@@ -1267,10 +1301,23 @@ async def session_completion(chat_id_in_arg=""):
             conv.reference.append({"chunks": [], "doc_aggs": []})
 
         if chat_model_id:
-            if not await thread_pool_exec(get_api_key, tenant_id=dia.tenant_id, model_name=chat_model_id):
-                return get_data_error_result(message=f"Cannot use specified model {chat_model_id}.")
-            dia.llm_id = chat_model_id
-            dia.llm_setting = chat_model_config
+            try:
+                if not await thread_pool_exec(get_api_key, tenant_id=dia.tenant_id, model_name=chat_model_id):
+                    return get_data_error_result(message=f"Cannot use specified model {chat_model_id}.")
+                model_type = _llm_model_type(chat_model_config or getattr(dia, "llm_setting", None))
+                dia.llm_setting = chat_model_config
+                # Runtime resolution prefers tenant_llm_id. Keep it aligned with the
+                # per-request model override, otherwise the persisted id wins.
+                dia.tenant_llm_id = await _tenant_llm_id_for_override(dia.tenant_id, chat_model_id, model_type)
+                if dia.tenant_llm_id:
+                    try:
+                        dia.llm_id = await thread_pool_exec(get_composite_model_name_by_id, dia.tenant_llm_id)
+                    except LookupError:
+                        dia.llm_id = chat_model_id
+                else:
+                    dia.llm_id = chat_model_id
+            except LookupError:
+                logging.warning("requested llm_id %s not found; using dialog model", chat_model_id)
         elif not dia.llm_id:
             logging.info("empty chat_model_id in req, use default chat model.")
             _, tenant_info = TenantService.get_by_id(dia.tenant_id)

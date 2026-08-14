@@ -1,4 +1,4 @@
-import { buildModelValue, parseModelUuid, parseModelValue } from '../llm-util';
+import { addTenantParams, buildModelValue, parseModelUuid, parseModelValue } from '../llm-util';
 
 // Composite model keys are right-anchored:
 // "model_name@instance_name@provider_name" or "model_name@provider_name".
@@ -115,5 +115,26 @@ describe('parseModelUuid — right-anchored', () => {
       modelName: 'plain-model',
       factoryId: '',
     });
+  });
+});
+
+describe('addTenantParams', () => {
+  const chatUrl = '/api/v1/chats/chat-1';
+
+  test('bare tenant model id overwrites stale tenant_llm_id', () => {
+    const result = addTenantParams(
+      { llm_id: 'doubao-llm-id', tenant_llm_id: 'old-llm-id' },
+      chatUrl,
+    );
+    expect(result.tenant_llm_id).toBe('doubao-llm-id');
+    expect(result.llm_id).toBe('doubao-llm-id');
+  });
+
+  test('leaves non-whitelisted urls unchanged', () => {
+    const result = addTenantParams(
+      { llm_id: 'doubao-llm-id', tenant_llm_id: 'old-llm-id' },
+      '/v1/other',
+    );
+    expect(result.tenant_llm_id).toBe('old-llm-id');
   });
 });

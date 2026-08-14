@@ -170,6 +170,7 @@ const ChatCard = forwardRef(function ChatCard(
       params: {
         ...currentDialog,
         llm_id: llmId,
+        tenant_llm_id: llmId,
         llm_setting: {
           ...omit(values, 'llm_id'),
           model_type: findLlmByUuid(llmId)?.model_type || 'chat',

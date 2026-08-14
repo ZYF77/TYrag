@@ -289,33 +289,44 @@ class DialogService(CommonService):
         return list(objs)
 
 
+def _resolve_dialog_llm_config(dialog):
+    """Resolve the dialog chat/vision model, falling back to the tenant default.
+
+    Dialogs created before a provider re-import can still store a deleted
+    tenant_model.id in llm_id / tenant_llm_id. Name-based fallback then
+    treats the UUID as ``model@provider`` and raises ``Provider not found``.
+    """
+    try:
+        if not dialog.llm_id:
+            return get_tenant_default_model_by_type(dialog.tenant_id, LLMType.CHAT)
+        if dialog.tenant_llm_id:
+            try:
+                llm_types = resolve_model_type(dialog.tenant_id, dialog.llm_id)
+                if "chat" in llm_types:
+                    return get_model_config_by_id(dialog.tenant_id, LLMType.CHAT, dialog.tenant_llm_id)
+                return resolve_model_config(dialog.tenant_id, LLMType.VISION, dialog.llm_id)
+            except LookupError:
+                pass
+        llm_types = resolve_model_type(dialog.tenant_id, dialog.llm_id)
+        if "chat" in llm_types:
+            return resolve_model_config(dialog.tenant_id, LLMType.CHAT, dialog.llm_id)
+        return resolve_model_config(dialog.tenant_id, LLMType.VISION, dialog.llm_id)
+    except LookupError:
+        logging.warning(
+            "dialog chat model missing tenant_id=%s llm_id=%s tenant_llm_id=%s; using tenant default",
+            dialog.tenant_id,
+            getattr(dialog, "llm_id", None),
+            getattr(dialog, "tenant_llm_id", None),
+        )
+        return get_tenant_default_model_by_type(dialog.tenant_id, LLMType.CHAT)
+
+
 async def async_chat_solo(dialog, messages, stream=True, session_id=None):
     attachments = ""
     image_attachments = []
     image_files = []
 
-    if dialog.llm_id:
-        if dialog.tenant_llm_id:
-            try:
-                llm_types = resolve_model_type(dialog.tenant_id, dialog.llm_id)
-                if "chat" in llm_types:
-                    model_config = get_model_config_by_id(dialog.tenant_id, LLMType.CHAT, dialog.tenant_llm_id)
-                else:
-                    model_config = resolve_model_config(dialog.tenant_id, LLMType.VISION, dialog.llm_id)
-            except LookupError:
-                llm_types = resolve_model_type(dialog.tenant_id, dialog.llm_id)
-                if "chat" in llm_types:
-                    model_config = resolve_model_config(dialog.tenant_id, LLMType.CHAT, dialog.llm_id)
-                else:
-                    model_config = resolve_model_config(dialog.tenant_id, LLMType.VISION, dialog.llm_id)
-        else:
-            llm_types = resolve_model_type(dialog.tenant_id, dialog.llm_id)
-            if "chat" in llm_types:
-                model_config = resolve_model_config(dialog.tenant_id, LLMType.CHAT, dialog.llm_id)
-            else:
-                model_config = resolve_model_config(dialog.tenant_id, LLMType.VISION, dialog.llm_id)
-    else:
-        model_config = get_tenant_default_model_by_type(dialog.tenant_id, LLMType.CHAT)
+    model_config = _resolve_dialog_llm_config(dialog)
 
     chat_mdl = LLMBundle(dialog.tenant_id, model_config, langfuse_session_id=session_id)
     factory = model_config.get("llm_factory", "") if model_config else ""
@@ -373,16 +384,7 @@ def get_models(dialog, trace_context=None, langfuse_session_id=None):
         if not embd_mdl:
             raise LookupError("Embedding model(%s) not found" % kbs[0].embd_id)
 
-    if dialog.llm_id:
-        if dialog.tenant_llm_id:
-            try:
-                chat_model_config = get_model_config_by_id(dialog.tenant_id, LLMType.CHAT, dialog.tenant_llm_id)
-            except LookupError:
-                chat_model_config = resolve_model_config(dialog.tenant_id, LLMType.CHAT, dialog.llm_id)
-        else:
-            chat_model_config = resolve_model_config(dialog.tenant_id, LLMType.CHAT, dialog.llm_id)
-    else:
-        chat_model_config = get_tenant_default_model_by_type(dialog.tenant_id, LLMType.CHAT)
+    chat_model_config = _resolve_dialog_llm_config(dialog)
 
     chat_mdl = LLMBundle(dialog.tenant_id, chat_model_config, trace_context=trace_context, langfuse_session_id=langfuse_session_id)
 
@@ -584,28 +586,7 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
         return
 
     chat_start_ts = timer()
-    if dialog.llm_id:
-        if dialog.tenant_llm_id:
-            try:
-                llm_types = resolve_model_type(dialog.tenant_id, dialog.llm_id)
-                if "chat" in llm_types:
-                    llm_model_config = get_model_config_by_id(dialog.tenant_id, LLMType.CHAT, dialog.tenant_llm_id)
-                else:
-                    llm_model_config = resolve_model_config(dialog.tenant_id, LLMType.VISION, dialog.llm_id)
-            except LookupError:
-                llm_types = resolve_model_type(dialog.tenant_id, dialog.llm_id)
-                if "chat" in llm_types:
-                    llm_model_config = resolve_model_config(dialog.tenant_id, LLMType.CHAT, dialog.llm_id)
-                else:
-                    llm_model_config = resolve_model_config(dialog.tenant_id, LLMType.VISION, dialog.llm_id)
-        else:
-            llm_types = resolve_model_type(dialog.tenant_id, dialog.llm_id)
-            if "chat" in llm_types:
-                llm_model_config = resolve_model_config(dialog.tenant_id, LLMType.CHAT, dialog.llm_id)
-            else:
-                llm_model_config = resolve_model_config(dialog.tenant_id, LLMType.VISION, dialog.llm_id)
-    else:
-        llm_model_config = get_tenant_default_model_by_type(dialog.tenant_id, LLMType.CHAT)
+    llm_model_config = _resolve_dialog_llm_config(dialog)
 
     factory = llm_model_config.get("llm_factory", "") if llm_model_config else ""
     max_tokens = llm_model_config.get("max_tokens") or 8192

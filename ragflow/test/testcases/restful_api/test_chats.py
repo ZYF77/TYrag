@@ -660,6 +660,7 @@ def _load_chat_routes_unit_module(monkeypatch):
                     "icon": None,
                     "kb_ids": None,
                     "llm_id": None,
+                    "tenant_llm_id": None,
                     "llm_setting": None,
                     "prompt_config": None,
                     "similarity_threshold": None,
@@ -667,6 +668,7 @@ def _load_chat_routes_unit_module(monkeypatch):
                     "top_n": None,
                     "top_k": None,
                     "rerank_id": None,
+                    "tenant_rerank_id": None,
                     "meta_data_filter": None,
                     "created_by": None,
                     "create_time": None,
@@ -1421,6 +1423,74 @@ def test_patch_chat_merges_prompt_and_llm_settings_unit(monkeypatch):
     assert updated["prompt_config"]["system"] == "Answer with {knowledge}"
     assert updated["prompt_config"]["prologue"] == "updated opener"
     assert updated["llm_setting"]["temperature"] == 0.9
+
+
+@pytest.mark.p2
+def test_normalize_model_pair_syncs_stale_tenant_id_when_llm_id_is_tenant_model_id(monkeypatch):
+    """Multi-model apply sends the new tenant model UUID as llm_id but keeps the
+    previous chat's tenant_llm_id. Treat llm_id as the selected model."""
+    module = _load_chat_routes_unit_module(monkeypatch)
+
+    def _get_model_config_by_id(_tenant_id, _model_type, model_ref):
+        if model_ref in {"old-llm-id", "doubao-llm-id"}:
+            return {}
+        raise LookupError(f"unknown tenant model id: {model_ref}")
+
+    monkeypatch.setattr(module, "get_model_config_by_id", _get_model_config_by_id)
+    req = {"llm_id": "doubao-llm-id", "tenant_llm_id": "old-llm-id"}
+    err = _run(module._normalize_model_pair(req, "tenant-1", "llm_id", "tenant_llm_id", "chat"))
+    assert err is None, err
+    assert req["llm_id"] == "doubao-llm-id"
+    assert req["tenant_llm_id"] == "doubao-llm-id"
+
+
+@pytest.mark.p2
+def test_session_completion_overrides_stale_tenant_llm_id_unit(monkeypatch):
+    """Per-request llm_id must also replace the persisted tenant_llm_id, otherwise
+    dialog_service keeps calling the previous model."""
+    module = _load_chat_routes_unit_module(monkeypatch)
+    dia = SimpleNamespace(
+        id="chat-1",
+        tenant_id="tenant-1",
+        llm_id="old-llm-id",
+        tenant_llm_id="old-llm-id",
+        llm_setting={"temperature": 0.1},
+        prompt_config={"prologue": ""},
+        kb_ids=[],
+    )
+    captured = {}
+
+    async def _fake_rag_agent(captured_dia, _msg, _stream, **_kwargs):
+        captured["llm_id"] = captured_dia.llm_id
+        captured["tenant_llm_id"] = captured_dia.tenant_llm_id
+        yield {"answer": "ok", "reference": {}}
+
+    def _get_model_config_by_id(_tenant_id, _model_type, model_ref):
+        if model_ref in {"old-llm-id", "doubao-llm-id"}:
+            return {}
+        raise LookupError(f"unknown tenant model id: {model_ref}")
+
+    monkeypatch.setattr(module, "rag_agent", _fake_rag_agent)
+    monkeypatch.setattr(module, "get_model_config_by_id", _get_model_config_by_id)
+    monkeypatch.setattr(module, "structure_answer", lambda _conv, ans, _message_id, _session_id: ans)
+    monkeypatch.setattr(module.DialogService, "query", lambda **_kwargs: [dia])
+    monkeypatch.setattr(module.DialogService, "get_by_id", lambda _id: (True, dia))
+    _set_route_unit_request_json(
+        monkeypatch,
+        module,
+        {
+            "chat_id": "chat-1",
+            "stream": False,
+            "store_history_messages": False,
+            "pass_all_history_messages": True,
+            "llm_id": "doubao-llm-id",
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+    )
+    res = _run(module.session_completion.__wrapped__())
+    assert res["code"] == 0, res
+    assert captured["llm_id"] == "doubao-llm-id"
+    assert captured["tenant_llm_id"] == "doubao-llm-id"
 
 
 @pytest.mark.p2
