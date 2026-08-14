@@ -158,10 +158,11 @@ async def _insert_document(
     allow_groups: tuple[str, ...] = ("maintenance",),
     deny_groups: tuple[str, ...] = (),
     quality: str | None = "passed",
+    source_system: str = "DEMO",
 ):
     doc = ExtDocumentMap(
         tenant_id=tenant_id,
-        source_system="DEMO",
+        source_system=source_system,
         external_document_id=doc_id,
         source_version_id=version_id,
         event_id=str(uuid.uuid4()),
@@ -186,7 +187,7 @@ async def _insert_document(
         evaluation = await quality_models.get_or_create_evaluation(
             db,
             tenant_id=tenant_id,
-            source_system="DEMO",
+            source_system=source_system,
             external_document_id=doc_id,
             source_version_id=version_id,
             ragflow_dataset_id=dataset_id,
@@ -1081,6 +1082,27 @@ class TestScopeCompleteness:
         )
         assert len(scope.document_ids) == 105
         assert len(set(scope.document_ids)) == 105
+
+    @pytest.mark.asyncio
+    async def test_scope_resolver_sees_eam_docs_when_query_source_unset(
+        self, isolated_db, monkeypatch
+    ):
+        from enterprise.gateway.acl.context import AclContext
+        from enterprise.gateway.query import formal_router
+
+        monkeypatch.setenv("ENTERPRISE_TEST_MODE", "0")
+        monkeypatch.delenv("ENTERPRISE_QUERY_SOURCE_SYSTEM", raising=False)
+        monkeypatch.setenv("ENTERPRISE_QUERY_QUALITY_REQUIRED", "false")
+        await _insert_document(
+            isolated_db,
+            doc_id="DOC-EAM",
+            ragflow_doc_id="doc-eam",
+            source_system="EAM",
+            quality=None,
+        )
+        resolver = formal_router.FormalScopeResolver(isolated_db)
+        scope = await resolver.resolve(AclContext(principal=_principal()))
+        assert "doc-eam" in scope.document_ids
 
 
 class TestSchemaMigration:

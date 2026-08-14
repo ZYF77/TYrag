@@ -14,7 +14,6 @@ from httpx import ASGITransport, AsyncClient
 
 from enterprise.gateway.auth.middleware import require_user_principal
 from enterprise.gateway.auth.user_principal import UserPrincipal
-from enterprise.gateway.asset_registry import ResolvedAsset
 from enterprise.gateway.query import formal_router, v2_router, v2_store
 from enterprise.gateway.query.ragflow_client import RAGFlowAPIError, RAGFlowQueryStub
 from enterprise.gateway.sync.models import (
@@ -98,6 +97,7 @@ async def _insert_document(
     asset_id: str | None | object = _DEFAULT_ASSET_ID,
     dataset_id: str = "ds-v2",
     version_id: str = "v1",
+    allow_group_ids: list[str] | None = None,
 ) -> ExtDocumentMap:
     return await insert_mapping(
         db,
@@ -114,7 +114,7 @@ async def _insert_document(
             fixed_asset_no=fixed_asset_no,
             department_id="d10",
             security_level=2,
-            allow_group_ids=json.dumps(["maintenance"]),
+            allow_group_ids=json.dumps(allow_group_ids or ["maintenance"]),
             deny_group_ids="[]",
             ragflow_dataset_id=dataset_id,
             ragflow_document_id=ragflow_id,
@@ -124,6 +124,11 @@ async def _insert_document(
             current_version=1,
         ),
     )
+
+
+def _stub_doc_ids(runtime) -> set[str]:
+    raw = (runtime.stub._last_completion_body or {}).get("doc_ids") or ""
+    return {item for item in raw.split(",") if item}
 
 
 @pytest.mark.asyncio
@@ -183,16 +188,213 @@ async def test_create_and_list_use_stable_cursor(runtime):
 
 
 @pytest.mark.asyncio
-async def test_contextless_draft_cannot_send_message(runtime):
+async def test_contextless_draft_uses_acl_global_retrieval(runtime):
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-A",
+        ragflow_id="doc-1",
+        equipment_id="EQ-A",
+        fixed_asset_no="FA-A",
+    )
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-B",
+        ragflow_id="doc-2",
+        equipment_id="EQ-B",
+        fixed_asset_no="FA-B",
+    )
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-DENIED",
+        ragflow_id="doc-denied",
+        equipment_id="EQ-DENIED",
+        fixed_asset_no="FA-DENIED",
+        allow_group_ids=["other-team"],
+    )
     async with _client(runtime) as client:
         conversation = await _create_conversation(client)
         response = await client.post(
             f"{BASE}/conversations/{conversation['conversationId']}/messages",
-            json={"clientMessageId": "draft-message", "question": "where?"},
+            json={"clientMessageId": "draft-message", "question": "离心泵怎么保养"},
+        )
+        detail = await client.get(
+            f"{BASE}/conversations/{conversation['conversationId']}"
         )
 
-    assert response.status_code == 422
-    assert response.json()["code"] == "CONVERSATION_CONTEXT_REQUIRED"
+    assert response.status_code == 200, response.text
+    assert detail.json()["equipmentId"] is None
+    assert _stub_doc_ids(runtime) == {"doc-1", "doc-2"}
+    assert "doc-denied" not in _stub_doc_ids(runtime)
+    question = runtime.stub._last_completion_body["question"]
+    assert question.startswith("当前未指定具体设备")
+    assert "离心泵怎么保养" in question
+    assert response.json()["answer"].endswith(v2_router.EQUIPMENT_ID_HINT)
+
+
+@pytest.mark.asyncio
+async def test_first_message_binds_unique_ingested_equipment(runtime):
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-GD",
+        ragflow_id="doc-gd",
+        equipment_id="GD01250002",
+        fixed_asset_no="FA-GD",
+    )
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-OTHER",
+        ragflow_id="doc-other",
+        equipment_id="EQ-OTHER",
+        fixed_asset_no="FA-OTHER",
+    )
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(client)
+        response = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={
+                "clientMessageId": "bind-unique",
+                "question": "帮我查 GD01250002 的说明书",
+            },
+        )
+        detail = await client.get(
+            f"{BASE}/conversations/{conversation['conversationId']}"
+        )
+
+    assert response.status_code == 200, response.text
+    assert detail.json()["equipmentId"] == "GD01250002"
+    assert detail.json()["fixedAssetNo"] == "FA-GD"
+    assert _stub_doc_ids(runtime) == {"doc-gd"}
+    assert runtime.stub._last_completion_body["question"] == "帮我查 GD01250002 的说明书"
+    assert v2_router.EQUIPMENT_ID_HINT not in response.json()["answer"]
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_or_unknown_equipment_stays_global(runtime):
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-A",
+        ragflow_id="doc-1",
+        equipment_id="EQ-A",
+        fixed_asset_no="FA-A",
+    )
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-B",
+        ragflow_id="doc-2",
+        equipment_id="EQ-B",
+        fixed_asset_no="FA-B",
+    )
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(client)
+        ambiguous = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={
+                "clientMessageId": "ambiguous",
+                "question": "对比 EQ-A 和 EQ-B 的保养要求",
+            },
+        )
+        unknown = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={
+                "clientMessageId": "unknown",
+                "question": "查一下 EQ-MISSING 的图纸",
+            },
+        )
+        detail = await client.get(
+            f"{BASE}/conversations/{conversation['conversationId']}"
+        )
+
+    assert ambiguous.status_code == unknown.status_code == 200
+    assert detail.json()["equipmentId"] is None
+    assert _stub_doc_ids(runtime) == {"doc-1", "doc-2"}
+    assert unknown.json()["answer"].endswith(v2_router.EQUIPMENT_ID_HINT)
+
+
+@pytest.mark.asyncio
+async def test_second_message_can_bind_after_global_search(runtime):
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-GD",
+        ragflow_id="doc-gd",
+        equipment_id="GD01250002",
+        fixed_asset_no="FA-GD",
+    )
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-OTHER",
+        ragflow_id="doc-other",
+        equipment_id="EQ-OTHER",
+        fixed_asset_no="FA-OTHER",
+    )
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(client)
+        first = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={"clientMessageId": "global-first", "question": "这类设备怎么保养"},
+        )
+        second = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={
+                "clientMessageId": "bind-second",
+                "question": "帮我查 GD01250002 的说明书",
+            },
+        )
+        detail = await client.get(
+            f"{BASE}/conversations/{conversation['conversationId']}"
+        )
+
+    assert first.status_code == second.status_code == 200
+    assert detail.json()["equipmentId"] == "GD01250002"
+    assert _stub_doc_ids(runtime) == {"doc-gd"}
+    assert v2_router.EQUIPMENT_ID_HINT not in second.json()["answer"]
+
+
+@pytest.mark.asyncio
+async def test_patch_can_bind_equipment_after_unbound_first_message(runtime):
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-A",
+        ragflow_id="doc-1",
+        equipment_id="EQ-A",
+        fixed_asset_no="FA-A",
+    )
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(client)
+        first = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={"clientMessageId": "unbound-first", "question": "先随便问一下"},
+        )
+        patched = await client.patch(
+            f"{BASE}/conversations/{conversation['conversationId']}/context",
+            json={"equipmentId": "EQ-A"},
+        )
+
+    assert first.status_code == 200
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["equipmentId"] == "EQ-A"
+
+
+@pytest.mark.asyncio
+async def test_empty_acl_draft_returns_no_reliable_evidence(runtime):
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-DENIED",
+        ragflow_id="doc-denied",
+        equipment_id="EQ-DENIED",
+        fixed_asset_no="FA-DENIED",
+        allow_group_ids=["other-team"],
+    )
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(client)
+        response = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={"clientMessageId": "empty-acl", "question": "随便问"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "无可靠依据"
+    assert runtime.stub._last_completion_body is None
+    assert v2_router.EQUIPMENT_ID_HINT not in response.json()["answer"]
 
 
 @pytest.mark.asyncio
@@ -271,7 +473,7 @@ async def test_expired_duplicate_is_stable_run_interrupted(runtime):
 
 
 @pytest.mark.asyncio
-async def test_context_version_and_alias_conflict(runtime):
+async def test_context_version_and_eam_fields_are_persisted_as_submitted(runtime):
     await _insert_document(
         runtime.db,
         external_id="DOC-A",
@@ -297,22 +499,34 @@ async def test_context_version_and_alias_conflict(runtime):
         )
         assert updated.status_code == 200
         assert updated.json()["contextVersion"] == 1
-        assert updated.json()["context"]["fixedAssetNo"] == "FA-A"
+        assert updated.json()["context"]["equipmentId"] == "EQ-A"
+        assert updated.json()["context"]["fixedAssetNo"] is None
+
+        with_fixed = await client.patch(
+            f"{BASE}/conversations/{conversation_id}/context",
+            json={"equipmentId": "EQ-A", "fixedAssetNo": "FA-A"},
+        )
+        assert with_fixed.status_code == 200
+        assert with_fixed.json()["contextVersion"] == 2
+        assert with_fixed.json()["context"]["fixedAssetNo"] == "FA-A"
 
         unchanged = await client.patch(
             f"{BASE}/conversations/{conversation_id}/context",
             json={"equipmentId": "EQ-A", "fixedAssetNo": "FA-A"},
         )
         assert unchanged.status_code == 200
-        assert unchanged.json()["contextVersion"] == 1
+        assert unchanged.json()["contextVersion"] == 2
 
-        conflict = await client.post(
+        # Trust EAM: mismatched pair is accepted and stored as submitted.
+        accepted = await client.post(
             f"{BASE}/conversations",
             json={"equipmentId": "EQ-A", "fixedAssetNo": "FA-B"},
         )
 
-    assert conflict.status_code == 409
-    assert conflict.json()["code"] == "CONVERSATION_CONTEXT_CONFLICT"
+    assert accepted.status_code == 201
+    assert accepted.json()["equipmentId"] == "EQ-A"
+    assert accepted.json()["fixedAssetNo"] == "FA-B"
+    assert accepted.json()["context"]["registryVersion"] is None
 
 
 @pytest.mark.asyncio
@@ -350,29 +564,32 @@ async def test_equipment_identity_is_immutable_after_first_message(runtime):
 
 
 @pytest.mark.asyncio
-async def test_asset_registry_failure_is_retryable_and_fail_closed(runtime, monkeypatch):
-    monkeypatch.setenv("ENTERPRISE_ASSET_REGISTRY_MODE", "http")
+async def test_create_with_equipment_ignores_unconfigured_asset_registry(
+    runtime, monkeypatch
+):
+    monkeypatch.setenv("ENTERPRISE_EAM_ASSET_RESOLVER_MODE", "http")
+    monkeypatch.delenv("ENTERPRISE_EAM_ASSET_RESOLVER_BASE_URL", raising=False)
     async with _client(runtime) as client:
         response = await client.post(
             f"{BASE}/conversations", json={"equipmentId": "EQ-UNAVAILABLE"}
         )
 
-    assert response.status_code == 503
-    assert response.json()["code"] == "ASSET_REGISTRY_UNAVAILABLE"
-    assert response.json()["retryable"] is True
+    assert response.status_code == 201
+    body = response.json()
+    assert body["equipmentId"] == "EQ-UNAVAILABLE"
+    assert body["fixedAssetNo"] is None
+    assert body["context"]["registryVersion"] is None
+    assert body["suggestions"]
+    assert body["contextCompacted"] is False
 
 
 @pytest.mark.asyncio
-async def test_canonical_snapshot_persists_asset_registry_identity(runtime):
-    await runtime.db.execute(
-        "INSERT INTO ext_asset_registry "
-        "(tenant_id, equipment_id, fixed_asset_no, asset_id) "
-        "VALUES ('customer-a', 'EQ-SNAPSHOT', 'FA-SNAPSHOT', 'ASSET-SNAPSHOT')"
-    )
-    await runtime.db.commit()
+async def test_eam_context_snapshot_persists_submitted_identity(runtime):
     async with _client(runtime) as client:
         conversation = await _create_conversation(
-            client, equipmentId="EQ-SNAPSHOT"
+            client,
+            equipmentId="EQ-SNAPSHOT",
+            fixedAssetNo="FA-SNAPSHOT",
         )
 
     async with runtime.db.execute(
@@ -384,8 +601,8 @@ async def test_canonical_snapshot_persists_asset_registry_identity(runtime):
 
     assert snapshot["equipment_id"] == "EQ-SNAPSHOT"
     assert snapshot["fixed_asset_no"] == "FA-SNAPSHOT"
-    assert snapshot["asset_id"] == "ASSET-SNAPSHOT"
-    assert snapshot["registry_version"] == "sqlite-fixture"
+    assert snapshot["asset_id"] is None
+    assert snapshot["registry_version"] is None
     assert snapshot["context_resolved_at"]
 
 
@@ -446,6 +663,7 @@ async def test_context_filters_actual_ragflow_doc_ids(runtime):
 
     assert response.status_code == 200, response.text
     assert runtime.stub._last_completion_body["doc_ids"] == "doc-1"
+    assert v2_router.EQUIPMENT_ID_HINT not in response.json()["answer"]
 
 
 @pytest.mark.asyncio
@@ -484,13 +702,7 @@ async def test_context_scope_does_not_match_equipment_alias_fields(runtime):
 
 
 @pytest.mark.asyncio
-async def test_context_scope_fails_closed_on_missing_asset_fields(runtime):
-    await runtime.db.execute(
-        "INSERT INTO ext_asset_registry "
-        "(tenant_id, equipment_id, fixed_asset_no, asset_id) "
-        "VALUES ('customer-a', 'EQ-STRICT', 'FA-STRICT', 'ASSET-STRICT')"
-    )
-    await runtime.db.commit()
+async def test_context_scope_uses_submitted_eam_fields_only(runtime):
     await _insert_document(
         runtime.db,
         external_id="DOC-MISSING-FIXED",
@@ -501,8 +713,8 @@ async def test_context_scope_fails_closed_on_missing_asset_fields(runtime):
     )
     await _insert_document(
         runtime.db,
-        external_id="DOC-MISSING-ASSET",
-        ragflow_id="doc-missing-asset",
+        external_id="DOC-MATCHING-FIXED",
+        ragflow_id="doc-matching-fixed",
         equipment_id="EQ-STRICT",
         fixed_asset_no="FA-STRICT",
         asset_id=None,
@@ -519,8 +731,9 @@ async def test_context_scope_fails_closed_on_missing_asset_fields(runtime):
         )
 
     assert response.status_code == 200
-    assert response.json()["status"] == "no_reliable_evidence"
-    assert runtime.stub._last_completion_body is None
+    # Conversation has no assetId; docs matching equipment+fixed are in scope.
+    assert runtime.stub._last_completion_body["doc_ids"] == "doc-matching-fixed"
+    assert response.json()["status"] in {"已完成", "无可靠依据"}
 
 
 @pytest.mark.asyncio
@@ -558,7 +771,7 @@ async def test_failed_quality_evaluation_is_not_sent_to_ragflow(runtime):
         )
 
     assert response.status_code == 200
-    assert response.json()["status"] == "no_reliable_evidence"
+    assert response.json()["status"] == "无可靠依据"
     assert runtime.stub._last_completion_body is None
 
 
@@ -686,7 +899,7 @@ async def test_archived_conversation_is_read_only(runtime):
         )
 
     assert archived.status_code == 200
-    assert archived.json()["status"] == "archived"
+    assert archived.json()["status"] == "已归档"
     assert detail.status_code == history.status_code == suggestions.status_code == 200
     assert context_write.status_code == 409
     assert context_write.json()["code"] == "CONVERSATION_ARCHIVED"
@@ -950,7 +1163,7 @@ async def test_v2_stream_keeps_business_state_independent_of_citations(runtime):
         )
 
     assert response.status_code == 200
-    assert '"status": "no_reliable_evidence"' in response.text
+    assert '"status": "无可靠依据"' in response.text
     assert "event: citation" in response.text
 
 
@@ -992,7 +1205,7 @@ async def test_citation_uses_external_fields_and_state_is_independent(runtime):
             f"{BASE}/conversations/{conversation_id}/messages"
         )
 
-    assert body["status"] == "no_reliable_evidence"
+    assert body["status"] == "无可靠依据"
     assert body["citations"]
     assert citation["externalDocumentId"] == "EXT-DOC-1"
     assert citation["sourceVersionId"] == "version-external-1"
@@ -1007,7 +1220,7 @@ async def test_citation_uses_external_fields_and_state_is_independent(runtime):
     assistant = [
         item for item in history.json()["items"] if item["role"] == "assistant"
     ][0]
-    assert assistant["status"] == "no_reliable_evidence"
+    assert assistant["status"] == "无可靠依据"
     assert assistant["citations"] == [citation]
 
 
@@ -1031,7 +1244,7 @@ async def test_completed_state_does_not_require_citations(runtime):
         )
 
     assert response.status_code == 200
-    assert response.json()["status"] == "completed"
+    assert response.json()["status"] == "已完成"
     assert response.json()["citations"] == []
 
 
@@ -1072,48 +1285,249 @@ async def test_history_filters_citations_after_acl_revocation(runtime):
 
 
 @pytest.mark.asyncio
-async def test_ttl_refresh_increments_context_version_when_alias_changes(
-    runtime, monkeypatch
-):
-    await runtime.db.execute(
-        "INSERT INTO ext_asset_registry (tenant_id, equipment_id, fixed_asset_no, asset_id) "
-        "VALUES ('customer-a', 'EQ-TTL', 'FA-OLD', 'FA-OLD')"
+async def test_ask_does_not_refresh_context_via_asset_registry(runtime, monkeypatch):
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-TTL",
+        ragflow_id="doc-ttl",
+        equipment_id="EQ-TTL",
+        fixed_asset_no="FA-OLD",
     )
-    await runtime.db.commit()
+    calls = {"resolve": 0}
 
+    async def boom(*args, **kwargs):
+        calls["resolve"] += 1
+        raise AssertionError("inquiry must not call resolve_asset")
+
+    monkeypatch.setattr(
+        "enterprise.gateway.asset_registry.resolve_asset", boom
+    )
     async with _client(runtime) as client:
-        conversation = await _create_conversation(client, equipmentId="EQ-TTL")
+        conversation = await _create_conversation(
+            client, equipmentId="EQ-TTL", fixedAssetNo="FA-OLD"
+        )
         conversation_id = conversation["conversationId"]
         await runtime.db.execute(
-            "UPDATE ext_v2_conversation SET context_resolved_at=?, registry_version=? "
+            "UPDATE ext_v2_conversation SET context_resolved_at=? "
             "WHERE conversation_id=?",
-            ("2000-01-01T00:00:00+00:00", "registry-old", conversation_id),
+            ("2000-01-01T00:00:00+00:00", conversation_id),
         )
         await runtime.db.commit()
-
-        async def refreshed_asset(*args, **kwargs):
-            return ResolvedAsset(
-                tenant_id="customer-a",
-                equipment_id="EQ-TTL",
-                fixed_asset_no="FA-NEW",
-                asset_id="FA-NEW",
-                registry_version="registry-new",
-                resolved_at=datetime.now(timezone.utc).isoformat(),
-            )
-
-        monkeypatch.setattr(v2_router, "resolve_asset", refreshed_asset)
         response = await client.post(
             f"{BASE}/conversations/{conversation_id}/messages",
             json={"clientMessageId": "ttl-refresh", "question": "question"},
         )
         detail = await client.get(f"{BASE}/conversations/{conversation_id}")
-    async with runtime.db.execute(
-        "SELECT asset_id FROM ext_v2_conversation WHERE conversation_id=?",
-        (conversation_id,),
-    ) as cursor:
-        snapshot = await cursor.fetchone()
 
     assert response.status_code == 200
-    assert detail.json()["contextVersion"] == 2
-    assert detail.json()["fixedAssetNo"] == "FA-NEW"
-    assert snapshot["asset_id"] == "FA-NEW"
+    assert calls["resolve"] == 0
+    assert detail.json()["contextVersion"] == 1
+    assert detail.json()["fixedAssetNo"] == "FA-OLD"
+    assert detail.json()["context"]["registryVersion"] is None
+
+
+@pytest.mark.asyncio
+async def test_create_and_get_include_context_matched_suggestions(runtime):
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-CHIP",
+        ragflow_id="doc-chip",
+        equipment_id="EQ-CHIP",
+        fixed_asset_no="FA-CHIP",
+    )
+    async with _client(runtime) as client:
+        blank = await _create_conversation(client)
+        with_eq = await _create_conversation(client, equipmentId="EQ-CHIP")
+        blank_detail = await client.get(
+            f"{BASE}/conversations/{blank['conversationId']}"
+        )
+        eq_detail = await client.get(
+            f"{BASE}/conversations/{with_eq['conversationId']}"
+        )
+
+    assert blank["contextCompacted"] is False
+    assert [item["suggestionId"] for item in blank["suggestions"]] == [
+        "describe-problem"
+    ]
+    assert blank_detail.json()["suggestions"] == blank["suggestions"]
+
+    assert with_eq["contextCompacted"] is False
+    assert [item["suggestionId"] for item in with_eq["suggestions"]] == [
+        "inspect-fault",
+        "maintenance",
+    ]
+    assert all(
+        item["contextVersion"] == with_eq["contextVersion"]
+        for item in with_eq["suggestions"]
+    )
+    assert eq_detail.json()["suggestions"] == with_eq["suggestions"]
+
+
+@pytest.mark.asyncio
+async def test_patch_context_returns_fresh_suggestions_and_stales_old(runtime):
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-CHIP-PATCH",
+        ragflow_id="doc-chip-patch",
+        equipment_id="EQ-CHIP-PATCH",
+        fixed_asset_no="FA-CHIP-PATCH",
+    )
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(client)
+        conversation_id = conversation["conversationId"]
+        old_suggestion = conversation["suggestions"][0]
+        patched = await client.patch(
+            f"{BASE}/conversations/{conversation_id}/context",
+            json={"equipmentId": "EQ-CHIP-PATCH"},
+        )
+        assert patched.status_code == 200
+        body = patched.json()
+        assert body["contextVersion"] == 1
+        assert [item["suggestionId"] for item in body["suggestions"]] == [
+            "inspect-fault",
+            "maintenance",
+        ]
+        stale = await client.post(
+            f"{BASE}/conversations/{conversation_id}/messages",
+            json={
+                "clientMessageId": "chip-stale",
+                "suggestionId": old_suggestion["suggestionId"],
+                "contextVersion": old_suggestion["contextVersion"],
+            },
+        )
+        accepted = await client.post(
+            f"{BASE}/conversations/{conversation_id}/messages",
+            json={
+                "clientMessageId": "chip-ok",
+                "suggestionId": body["suggestions"][0]["suggestionId"],
+                "contextVersion": body["contextVersion"],
+            },
+        )
+
+    assert stale.status_code == 409
+    assert stale.json()["code"] == "SUGGESTION_STALE"
+    assert accepted.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_same_conversation_followup_reuses_ragflow_session(runtime):
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-FOLLOW",
+        ragflow_id="doc-follow",
+        equipment_id="EQ-FOLLOW",
+        fixed_asset_no="FA-FOLLOW",
+    )
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(
+            client, equipmentId="EQ-FOLLOW"
+        )
+        conversation_id = conversation["conversationId"]
+        first = await client.post(
+            f"{BASE}/conversations/{conversation_id}/messages",
+            json={"clientMessageId": "follow-1", "question": "第一轮问题"},
+        )
+        second = await client.post(
+            f"{BASE}/conversations/{conversation_id}/messages",
+            json={"clientMessageId": "follow-2", "question": "第二轮续问"},
+        )
+        history = await client.get(
+            f"{BASE}/conversations/{conversation_id}/messages"
+        )
+
+    assert first.status_code == second.status_code == 200
+    assert first.json()["conversationId"] == conversation_id
+    assert second.json()["conversationId"] == conversation_id
+    roles = [item["role"] for item in history.json()["items"]]
+    assert roles.count("user") == 2
+    assert roles.count("assistant") == 2
+    async with runtime.db.execute(
+        "SELECT ragflow_session_id FROM ext_v2_conversation WHERE conversation_id=?",
+        (conversation_id,),
+    ) as cursor:
+        row = await cursor.fetchone()
+    assert row["ragflow_session_id"]
+
+
+@pytest.mark.asyncio
+async def test_conversation_is_isolated_across_business_users(runtime):
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-ISO",
+        ragflow_id="doc-iso",
+        equipment_id="EQ-ISO",
+        fixed_asset_no="FA-ISO",
+    )
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(
+            client, equipmentId="EQ-ISO"
+        )
+        conversation_id = conversation["conversationId"]
+
+    other = UserPrincipal(
+        tenant_id="customer-a",
+        business_user_id="biz-user-002",
+        subject="biz-user-002",
+        department_ids=("d10",),
+        role_codes=("end_user",),
+        group_ids=("maintenance",),
+        security_level=2,
+        mapping_status="active",
+        capabilities=("ask", "view_citations", "list_sessions"),
+    )
+    runtime.app.dependency_overrides[require_user_principal] = lambda: other
+    async with _client(runtime) as client:
+        detail = await client.get(f"{BASE}/conversations/{conversation_id}")
+        ask = await client.post(
+            f"{BASE}/conversations/{conversation_id}/messages",
+            json={"clientMessageId": "iso-ask", "question": "不应可见"},
+        )
+        listing = await client.get(f"{BASE}/conversations")
+
+    assert detail.status_code == 404
+    assert detail.json()["code"] == "CONVERSATION_NOT_FOUND"
+    assert ask.status_code == 404
+    assert all(
+        item["conversationId"] != conversation_id
+        for item in listing.json()["items"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_department_mismatch_still_retrieves_same_equipment(runtime):
+    runtime.app.dependency_overrides[require_user_principal] = lambda: UserPrincipal(
+        tenant_id="customer-a",
+        business_user_id="biz-user-001",
+        subject="biz-user-001",
+        department_ids=("3",),
+        role_codes=("end_user",),
+        group_ids=("maintenance",),
+        security_level=2,
+        mapping_status="active",
+        capabilities=("ask", "view_citations", "list_sessions"),
+    )
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-DEPT-MISMATCH",
+        ragflow_id="doc-dept-mismatch",
+        equipment_id="EQ-DEPT-MISMATCH",
+        fixed_asset_no="FA-DEPT-MISMATCH",
+    )
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(
+            client,
+            equipmentId="EQ-DEPT-MISMATCH",
+            fixedAssetNo="FA-DEPT-MISMATCH",
+        )
+        response = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={"clientMessageId": "dept-mismatch", "question": "检查"},
+        )
+
+    assert response.status_code == 200
+    assert runtime.stub._last_completion_body is not None
+    assert "doc-dept-mismatch" in str(
+        runtime.stub._last_completion_body.get("doc_ids") or ""
+    )
+    assert response.json()["status"] in {"已完成", "无可靠依据"}
+    assert response.json().get("citations") is not None

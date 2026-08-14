@@ -20,6 +20,9 @@ CREATE TABLE IF NOT EXISTS ext_v2_conversation (
     status TEXT NOT NULL DEFAULT 'active',
     ragflow_chat_id TEXT,
     ragflow_session_id TEXT,
+    context_summary TEXT,
+    summary_updated_at TEXT,
+    compressed_turn_watermark INTEGER NOT NULL DEFAULT 0,
     registry_version TEXT,
     context_resolved_at TEXT,
     first_message_at TEXT,
@@ -114,6 +117,9 @@ async def ensure_schema(db) -> None:
             "registry_version": "TEXT",
             "context_resolved_at": "TEXT",
             "first_message_at": "TEXT",
+            "context_summary": "TEXT",
+            "summary_updated_at": "TEXT",
+            "compressed_turn_watermark": "INTEGER NOT NULL DEFAULT 0",
         },
         "ext_v2_message_run": {
             "run_id": "TEXT",
@@ -140,11 +146,28 @@ async def ensure_schema(db) -> None:
     await db.commit()
 
 
+PUBLIC_STATUS = {
+    "completed": "已完成",
+    "no_reliable_evidence": "无可靠依据",
+    "failed": "失败",
+    "running": "处理中",
+    "active": "进行中",
+    "archived": "已归档",
+}
+
+
+def public_status(status: str | None) -> str:
+    """Map stored English status codes to the v2 client-facing Chinese labels."""
+    if not status:
+        return ""
+    return PUBLIC_STATUS.get(status, status)
+
+
 def conversation_payload(row) -> dict:
     return {
         "conversationId": row["conversation_id"],
         "title": row["title"],
-        "status": row["status"],
+        "status": public_status(row["status"]),
         "equipmentId": row["equipment_id"],
         "fixedAssetNo": row["fixed_asset_no"],
         "faultCode": row["fault_code"],
@@ -286,6 +309,75 @@ async def update_context(
     await db.commit()
     if cursor.rowcount != 1:
         return None
+    return await get_conversation(
+        db,
+        conversation_id=conversation_id,
+        tenant_id=tenant_id,
+        business_user_id=business_user_id,
+    )
+
+
+async def count_messages(
+    db,
+    *,
+    conversation_id: str,
+    tenant_id: str,
+    business_user_id: str,
+) -> int:
+    async with db.execute(
+        """SELECT COUNT(*) AS n FROM ext_v2_message
+           WHERE conversation_id=? AND tenant_id=? AND business_user_id=?""",
+        (conversation_id, tenant_id, business_user_id),
+    ) as cursor:
+        row = await cursor.fetchone()
+    return int(row["n"] if row else 0)
+
+
+async def list_messages_ordered(
+    db,
+    *,
+    conversation_id: str,
+    tenant_id: str,
+    business_user_id: str,
+) -> list[dict]:
+    async with db.execute(
+        """SELECT message_id, role, content, status, created_at
+           FROM ext_v2_message
+           WHERE conversation_id=? AND tenant_id=? AND business_user_id=?
+           ORDER BY created_at ASC, message_id ASC""",
+        (conversation_id, tenant_id, business_user_id),
+    ) as cursor:
+        rows = await cursor.fetchall()
+    return [dict(row) for row in rows]
+
+
+async def save_context_summary(
+    db,
+    *,
+    conversation_id: str,
+    tenant_id: str,
+    business_user_id: str,
+    context_summary: str,
+    compressed_turn_watermark: int,
+    clear_ragflow_session: bool = True,
+) -> dict | None:
+    now = utc_now()
+    session_clause = ", ragflow_session_id=NULL" if clear_ragflow_session else ""
+    await db.execute(
+        f"""UPDATE ext_v2_conversation
+           SET context_summary=?, summary_updated_at=?,
+               compressed_turn_watermark=?{session_clause}
+           WHERE conversation_id=? AND tenant_id=? AND business_user_id=?""",
+        (
+            context_summary,
+            now,
+            int(compressed_turn_watermark),
+            conversation_id,
+            tenant_id,
+            business_user_id,
+        ),
+    )
+    await db.commit()
     return await get_conversation(
         db,
         conversation_id=conversation_id,
@@ -614,7 +706,7 @@ async def list_messages(
                 "messageId": row["message_id"],
                 "role": row["role"],
                 "content": row["content"],
-                "status": row["status"],
+                "status": public_status(row["status"]),
                 "citations": citations,
                 "createdAt": row["created_at"],
             }

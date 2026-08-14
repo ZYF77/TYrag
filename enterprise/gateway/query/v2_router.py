@@ -4,8 +4,8 @@ from __future__ import annotations
 import hashlib
 import json
 import asyncio
+import re
 import uuid
-from datetime import datetime, timezone
 from typing import AsyncIterator
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -14,15 +14,6 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from enterprise.gateway.acl.schema import AclScope
-from enterprise.gateway.asset_registry import (
-    ASSET_REGISTRY_TTL_SECONDS,
-    AssetRegistryConflict,
-    AssetRegistryError,
-    AssetRegistryInvalid,
-    AssetRegistryUnavailable,
-    ResolvedAsset,
-    resolve_asset,
-)
 from enterprise.gateway.auth.middleware import require_capability
 from enterprise.gateway.auth.user_principal import UserPrincipal
 from enterprise.gateway.query import v2_store
@@ -46,6 +37,14 @@ from enterprise.gateway.sync.readiness import document_candidate_readiness_from_
 
 router = APIRouter(prefix="/enterprise/api/v2", tags=["query-v2"])
 
+IDENTIFIER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._\-]{3,127}")
+EQUIPMENT_ID_HINT = (
+    "建议补充设备号或固定资产号（例如 GD01250002），我可以只查该设备的资料，回答会更准确。"
+)
+GLOBAL_QUESTION_PREFIX = (
+    "当前未指定具体设备，请仅根据检索到的资料回答用户问题。\n用户问题："
+)
+
 
 async def get_db():
     from enterprise.gateway import app as app_module
@@ -55,11 +54,13 @@ async def get_db():
 
 
 def _error(status_code: int, code: str, message: str) -> JSONResponse:
+    from enterprise.gateway.app import safe_error_message
+
     return JSONResponse(
         status_code=status_code,
         content={
             "code": code,
-            "message": message,
+            "message": safe_error_message(code, message),
             "requestId": str(uuid.uuid4()),
             "retryable": code in {
                 "RAGFLOW_UNAVAILABLE",
@@ -68,6 +69,120 @@ def _error(status_code: int, code: str, message: str) -> JSONResponse:
             },
         },
     )
+
+
+def _public_run_payload(result: dict) -> dict:
+    return {
+        key: v2_store.public_status(value) if key == "status" else value
+        for key, value in result.items()
+        if not str(key).startswith("_")
+    }
+
+
+def _candidate_identifiers(question: str) -> list[str]:
+    seen: list[str] = []
+    for match in IDENTIFIER_RE.finditer(question or ""):
+        token = match.group(0)
+        if token not in seen:
+            seen.append(token)
+    return seen
+
+
+async def _lookup_equipment_metadata(
+    db, tenant_id: str, tokens: list[str]
+) -> tuple[str | None, str | None]:
+    if not tokens:
+        return None, None
+    placeholders = ",".join("?" * len(tokens))
+    async with db.execute(
+        f"""SELECT equipment_id, fixed_asset_no
+            FROM ext_document_map
+            WHERE tenant_id=?
+              AND (equipment_id IN ({placeholders})
+                   OR fixed_asset_no IN ({placeholders}))""",
+        (tenant_id, *tokens, *tokens),
+    ) as cursor:
+        rows = await cursor.fetchall()
+    equipment_ids = {row["equipment_id"] for row in rows if row["equipment_id"]}
+    if len(equipment_ids) != 1:
+        return None, None
+    equipment_id = next(iter(equipment_ids))
+    fixed_nos = {
+        row["fixed_asset_no"]
+        for row in rows
+        if row["equipment_id"] == equipment_id and row["fixed_asset_no"]
+    }
+    fixed_asset_no = next(iter(fixed_nos)) if len(fixed_nos) == 1 else None
+    return equipment_id, fixed_asset_no
+
+
+async def _bind_from_question(
+    db, principal: UserPrincipal, conversation: dict, question: str
+) -> dict:
+    equipment_id, fixed_asset_no = await _lookup_equipment_metadata(
+        db, principal.tenant_id, _candidate_identifiers(question)
+    )
+    if not equipment_id:
+        return conversation
+    updated = await v2_store.update_context(
+        db,
+        conversation_id=conversation["conversation_id"],
+        tenant_id=principal.tenant_id,
+        business_user_id=principal.business_user_id,
+        equipment_id=equipment_id,
+        fixed_asset_no=fixed_asset_no,
+        fault_code=conversation.get("fault_code"),
+        context_version=conversation["context_version"] + 1,
+        asset_id=None,
+        registry_version=None,
+        context_resolved_at=v2_store.utc_now(),
+        expected_context_version=conversation["context_version"],
+    )
+    return updated or conversation
+
+
+def _submitted_snapshot(
+    equipment_id: str | None,
+    fixed_asset_no: str | None,
+    *,
+    previous: dict | None = None,
+) -> dict:
+    if not equipment_id and not fixed_asset_no:
+        return {
+            "equipment_id": None,
+            "fixed_asset_no": None,
+            "asset_id": None,
+            "registry_version": None,
+            "context_resolved_at": None,
+        }
+    keep = (
+        previous is not None
+        and previous.get("equipment_id") == equipment_id
+        and previous.get("fixed_asset_no") == fixed_asset_no
+    )
+    return {
+        "equipment_id": equipment_id,
+        "fixed_asset_no": fixed_asset_no,
+        "asset_id": previous.get("asset_id") if keep else None,
+        "registry_version": previous.get("registry_version") if keep else None,
+        "context_resolved_at": (
+            previous.get("context_resolved_at") if keep else v2_store.utc_now()
+        ),
+    }
+
+
+def _ragflow_question(conversation: dict, question: str) -> str:
+    if conversation.get("equipment_id"):
+        return question
+    return f"{GLOBAL_QUESTION_PREFIX}{question}"
+
+
+def _with_equipment_hint(conversation: dict, answer: str, status: str) -> str:
+    if conversation.get("equipment_id") or status != "completed" or not answer.strip():
+        return answer
+    if EQUIPMENT_ID_HINT in answer:
+        return answer
+    return f"{answer.rstrip()}\n\n{EQUIPMENT_ID_HINT}"
 
 
 class StrictModel(BaseModel):
@@ -125,6 +240,8 @@ def _conversation_detail(row: dict) -> dict:
         "contextVersion": row["context_version"],
         "registryVersion": row.get("registry_version"),
     }
+    summary["suggestions"] = _suggestions(row)
+    summary["contextCompacted"] = bool((row.get("context_summary") or "").strip())
     return summary
 
 
@@ -138,57 +255,6 @@ async def _owned_conversation(db, principal: UserPrincipal, conversation_id: str
     )
 
 
-async def _validate_context_response(
-    db,
-    *,
-    tenant_id: str,
-    equipment_id: str | None,
-    fixed_asset_no: str | None,
-    asset_id: str | None = None,
-) -> tuple[ResolvedAsset | None, JSONResponse | None]:
-    if not any((equipment_id, fixed_asset_no, asset_id)):
-        return None, None
-    try:
-        resolved = await resolve_asset(
-            db,
-            tenant_id=tenant_id,
-            equipment_id=equipment_id,
-            fixed_asset_no=fixed_asset_no,
-            asset_id=asset_id,
-        )
-        if resolved.tenant_id != tenant_id:
-            raise AssetRegistryConflict("Asset Registry tenant mismatch")
-        if not isinstance(resolved.equipment_id, str) or not resolved.equipment_id:
-            raise AssetRegistryInvalid("Asset Registry omitted equipmentId")
-        for supplied, canonical in (
-            (equipment_id, resolved.equipment_id),
-            (fixed_asset_no, resolved.fixed_asset_no),
-            (asset_id, resolved.asset_id),
-        ):
-            if supplied is not None and supplied != canonical:
-                raise AssetRegistryConflict("Asset identifiers do not agree")
-        for value in (
-            resolved.fixed_asset_no,
-            resolved.asset_id,
-            resolved.registry_version,
-        ):
-            if value is not None and not isinstance(value, str):
-                raise AssetRegistryInvalid("Asset Registry returned an invalid identity")
-        if not isinstance(resolved.resolved_at, str) or not resolved.resolved_at:
-            raise AssetRegistryUnavailable("Asset Registry omitted resolvedAt")
-        return resolved, None
-    except AssetRegistryConflict:
-        return None, _error(409, "CONVERSATION_CONTEXT_CONFLICT", "Equipment identifiers do not resolve to the same Asset Registry identity")
-    except AssetRegistryInvalid:
-        return None, _error(422, "CONVERSATION_CONTEXT_INVALID", "Equipment identifier was not found in the Asset Registry")
-    except AssetRegistryUnavailable:
-        return None, _error(503, "ASSET_REGISTRY_UNAVAILABLE", "Asset Registry is temporarily unavailable")
-    except AssetRegistryError:
-        return None, _error(503, "ASSET_REGISTRY_UNAVAILABLE", "Asset Registry is temporarily unavailable")
-    except Exception:
-        return None, _error(503, "ASSET_REGISTRY_UNAVAILABLE", "Asset Registry is temporarily unavailable")
-
-
 @router.post("/conversations", status_code=201)
 async def create_conversation(
     req: CreateConversationRequest,
@@ -196,26 +262,18 @@ async def create_conversation(
     principal: UserPrincipal = Depends(require_capability("list_sessions")),
 ):
     await v2_store.ensure_schema(db)
-    canonical, error = await _validate_context_response(
-        db,
-        tenant_id=principal.tenant_id,
-        equipment_id=req.equipmentId,
-        fixed_asset_no=req.fixedAssetNo,
-    )
-    if error:
-        return error
-    resolved = canonical
+    snapshot = _submitted_snapshot(req.equipmentId, req.fixedAssetNo)
     row = await v2_store.create_conversation(
         db,
         conversation_id=str(uuid.uuid4()),
         tenant_id=principal.tenant_id,
         business_user_id=principal.business_user_id,
-        equipment_id=resolved.equipment_id if resolved else None,
-        fixed_asset_no=resolved.fixed_asset_no if resolved else None,
-        asset_id=resolved.asset_id if resolved else None,
+        equipment_id=snapshot["equipment_id"],
+        fixed_asset_no=snapshot["fixed_asset_no"],
+        asset_id=snapshot["asset_id"],
         fault_code=req.faultCode,
-        registry_version=resolved.registry_version if resolved else None,
-        context_resolved_at=resolved.resolved_at if resolved else None,
+        registry_version=snapshot["registry_version"],
+        context_resolved_at=snapshot["context_resolved_at"],
     )
     return _conversation_detail(row)
 
@@ -275,50 +333,28 @@ async def patch_context(
         for field in req.model_fields_set:
             values[field] = getattr(req, field)
         has_started = row.get("first_message_at") is not None
-        if has_started and "equipmentId" in req.model_fields_set:
-            if values["equipmentId"] != row["equipment_id"]:
-                return _error(
-                    409,
-                    "CONVERSATION_CONTEXT_STALE",
-                    "Canonical equipment cannot change after the first message",
-                )
-        if has_started and "fixedAssetNo" in req.model_fields_set:
-            # A fixed asset alias may change only when the registry still
-            # resolves it to the immutable canonical equipment.
-            if values["fixedAssetNo"] != row["fixed_asset_no"]:
-                candidate_equipment = row["equipment_id"]
-            else:
-                candidate_equipment = values["equipmentId"]
-        else:
-            candidate_equipment = values["equipmentId"]
-        if has_started and not candidate_equipment:
+        bound = bool(row["equipment_id"])
+        if has_started and bound and values["equipmentId"] != row["equipment_id"]:
+            return _error(
+                409,
+                "CONVERSATION_CONTEXT_STALE",
+                "Canonical equipment cannot change after the first message",
+            )
+        if has_started and bound and not values["equipmentId"]:
             return _error(
                 409,
                 "CONVERSATION_CONTEXT_STALE",
                 "Canonical equipment cannot be cleared after the first message",
             )
-        canonical, error = await _validate_context_response(
-            db,
-            tenant_id=principal.tenant_id,
-            equipment_id=candidate_equipment,
-            fixed_asset_no=values["fixedAssetNo"],
+        snapshot = _submitted_snapshot(
+            values["equipmentId"],
+            values["fixedAssetNo"],
+            previous=row,
         )
-        if error:
-            return error
-        if canonical:
-            equipment_id, fixed_asset_no, asset_id = (
-                canonical.equipment_id,
-                canonical.fixed_asset_no,
-                canonical.asset_id,
-            )
-            registry_version = canonical.registry_version
-            context_resolved_at = canonical.resolved_at
-        else:
-            equipment_id = fixed_asset_no = asset_id = registry_version = context_resolved_at = None
         changed = (
-            equipment_id,
-            fixed_asset_no,
-            asset_id,
+            snapshot["equipment_id"],
+            snapshot["fixed_asset_no"],
+            snapshot["asset_id"],
             values["faultCode"],
         ) != (
             row["equipment_id"],
@@ -331,13 +367,13 @@ async def patch_context(
             conversation_id=conversation_id,
             tenant_id=principal.tenant_id,
             business_user_id=principal.business_user_id,
-            equipment_id=equipment_id,
-            fixed_asset_no=fixed_asset_no,
+            equipment_id=snapshot["equipment_id"],
+            fixed_asset_no=snapshot["fixed_asset_no"],
             fault_code=values["faultCode"],
             context_version=row["context_version"] + int(changed),
-            asset_id=asset_id,
-            registry_version=registry_version,
-            context_resolved_at=context_resolved_at,
+            asset_id=snapshot["asset_id"],
+            registry_version=snapshot["registry_version"],
+            context_resolved_at=snapshot["context_resolved_at"],
             expected_context_version=row["context_version"],
         )
         if updated is None:
@@ -456,21 +492,13 @@ async def _context_scope(
     equipment = conversation["equipment_id"]
     fixed = conversation["fixed_asset_no"]
     asset_id = conversation.get("asset_id")
-    # A draft conversation is intentionally not a global query.  It can be
-    # displayed and edited, but the first message must establish a canonical
-    # Asset Registry identity.
-    if not equipment:
-        return AclScope.empty(acl_scope.policy_version), {}
     filtered: dict[str, ExtDocumentMap] = {}
     for internal_id, doc in resolver._docs.items():
-        # Asset Registry canonical equipment is the identity boundary.  Do
-        # not treat a fixed-asset or asset alias as an equipment id: that can
-        # turn a metadata field mismatch into an unauthorized retrieval.
-        if doc.equipment_id != equipment:
+        if equipment and doc.equipment_id != equipment:
             continue
-        if fixed and doc.fixed_asset_no != fixed:
+        if equipment and fixed and doc.fixed_asset_no != fixed:
             continue
-        if asset_id and doc.asset_id != asset_id:
+        if equipment and asset_id and doc.asset_id != asset_id:
             continue
         readiness, _quality_status = await document_candidate_readiness_from_db(
             db, doc
@@ -488,105 +516,6 @@ async def _context_scope(
         ),
         filtered,
     )
-
-
-async def _refresh_context_snapshot(
-    db, principal: UserPrincipal, conversation: dict
-) -> dict:
-    """Refresh a stale snapshot and reject silent Asset Registry rebinds."""
-    if not conversation.get("equipment_id"):
-        raise _FormalQueryError(
-            "CONVERSATION_CONTEXT_REQUIRED",
-            422,
-            "A canonical equipment context is required before sending a message",
-        )
-    resolved_at = conversation.get("context_resolved_at")
-    stale = True
-    if resolved_at:
-        try:
-            age = (
-                datetime.now(timezone.utc)
-                - datetime.fromisoformat(resolved_at)
-            ).total_seconds()
-            stale = age >= ASSET_REGISTRY_TTL_SECONDS
-        except (TypeError, ValueError):
-            stale = True
-    if not stale:
-        return conversation
-    try:
-        resolved = await resolve_asset(
-            db,
-            tenant_id=principal.tenant_id,
-            equipment_id=conversation["equipment_id"],
-        )
-        if resolved.tenant_id != principal.tenant_id:
-            raise AssetRegistryConflict("Asset Registry tenant mismatch")
-        if not isinstance(resolved.equipment_id, str) or not resolved.equipment_id:
-            raise AssetRegistryInvalid("Asset Registry omitted equipmentId")
-        if not isinstance(resolved.resolved_at, str) or not resolved.resolved_at:
-            raise AssetRegistryUnavailable("Asset Registry omitted resolvedAt")
-    except AssetRegistryConflict:
-        raise _FormalQueryError(
-            "CONVERSATION_CONTEXT_STALE",
-            409,
-            "Conversation context no longer matches the Asset Registry",
-        ) from None
-    except AssetRegistryInvalid:
-        raise _FormalQueryError(
-            "CONVERSATION_CONTEXT_STALE",
-            409,
-            "Conversation context no longer resolves in the Asset Registry",
-        ) from None
-    except AssetRegistryUnavailable:
-        raise _FormalQueryError(
-            "ASSET_REGISTRY_UNAVAILABLE",
-            503,
-            "Asset Registry is temporarily unavailable",
-        ) from None
-    except AssetRegistryError:
-        raise _FormalQueryError(
-            "ASSET_REGISTRY_UNAVAILABLE",
-            503,
-            "Asset Registry is temporarily unavailable",
-        ) from None
-    except Exception:
-        raise _FormalQueryError(
-            "ASSET_REGISTRY_UNAVAILABLE",
-            503,
-            "Asset Registry is temporarily unavailable",
-        ) from None
-    if resolved.equipment_id != conversation["equipment_id"]:
-        raise _FormalQueryError(
-            "CONVERSATION_CONTEXT_STALE",
-            409,
-            "Canonical equipment cannot change after the first message",
-        )
-    if (
-        resolved.fixed_asset_no != conversation.get("fixed_asset_no")
-        or resolved.asset_id != conversation.get("asset_id")
-        or resolved.registry_version != conversation.get("registry_version")
-    ):
-        conversation = await v2_store.update_context(
-            db,
-            conversation_id=conversation["conversation_id"],
-            tenant_id=principal.tenant_id,
-            business_user_id=principal.business_user_id,
-            equipment_id=resolved.equipment_id,
-            fixed_asset_no=resolved.fixed_asset_no,
-            fault_code=conversation.get("fault_code"),
-            context_version=conversation["context_version"] + 1,
-            asset_id=resolved.asset_id,
-            registry_version=resolved.registry_version,
-            context_resolved_at=resolved.resolved_at,
-            expected_context_version=conversation["context_version"],
-        )
-        if conversation is None:
-            raise _FormalQueryError(
-                "CONVERSATION_CONTEXT_CONFLICT",
-                409,
-                "Conversation context version changed",
-            )
-    return conversation
 
 
 def _external_citations(
@@ -642,7 +571,7 @@ def _pending_response(conversation: dict, req: CreateMessageRequest, run: dict) 
             "conversationId": conversation["conversation_id"],
             "clientMessageId": req.clientMessageId,
             "runId": run["run_id"],
-            "status": run["status"],
+            "status": v2_store.public_status(run["status"]),
             "replayed": True,
         },
     )
@@ -695,7 +624,6 @@ async def _prepare_message_run(
     replay, response = await _replay_or_pending(db, principal, conversation, req)
     if replay is not None or response is not None:
         return conversation, "", replay, response
-    conversation = await _refresh_context_snapshot(db, principal, conversation)
     if req.suggestionId:
         if req.contextVersion != conversation["context_version"]:
             return conversation, "", None, _error(409, "SUGGESTION_STALE", "Suggestion context is stale")
@@ -708,6 +636,8 @@ async def _prepare_message_run(
         question = definition["displayPrompt"]
     else:
         question = req.question or ""
+    if not conversation.get("equipment_id"):
+        conversation = await _bind_from_question(db, principal, conversation, question)
     run = await v2_store.reserve_message_run(
         db,
         conversation_id=conversation["conversation_id"],
@@ -788,7 +718,7 @@ async def _execute_json_run(
             chat_id = await _ensure_chat(client, principal, scope)
             completion = await client.chat_completion(
                 chat_id,
-                question,
+                _ragflow_question(conversation, question),
                 session_id=conversation.get("ragflow_session_id"),
                 doc_ids=list(scope.document_ids),
             )
@@ -800,6 +730,7 @@ async def _execute_json_run(
             citations = _external_citations(chunks, docs_by_internal_id, assistant_message_id)
             if status == "no_reliable_evidence" and not answer:
                 answer = NO_RELIABLE_EVIDENCE_ANSWER
+            answer = _with_equipment_hint(conversation, answer, status)
             await db.execute(
                 """UPDATE ext_v2_conversation
                    SET ragflow_chat_id=?, ragflow_session_id=COALESCE(?, ragflow_session_id)
@@ -883,7 +814,10 @@ async def _stream_run_events(
             session_id = conversation.get("ragflow_session_id")
             ragflow_session_id = session_id
             async for payload in client.chat_completion_stream(
-                chat_id, question, session_id=session_id, doc_ids=list(scope.document_ids)
+                chat_id,
+                _ragflow_question(conversation, question),
+                session_id=session_id,
+                doc_ids=list(scope.document_ids),
             ):
                 data = payload.get("data") if isinstance(payload, dict) else None
                 if data is True:
@@ -918,6 +852,18 @@ async def _stream_run_events(
             answer = accumulated
             if status == "no_reliable_evidence" and not answer:
                 answer = NO_RELIABLE_EVIDENCE_ANSWER
+            hinted = _with_equipment_hint(conversation, answer, status)
+            extra = hinted[len(answer):] if hinted.startswith(answer) else ""
+            if extra:
+                yield _sse(
+                    "answer.delta",
+                    {
+                        "conversationId": conversation_id,
+                        "runId": run["run_id"],
+                        "content": extra,
+                    },
+                )
+            answer = hinted
         await v2_store.add_message(
             db,
             message_id=assistant_message_id,
@@ -952,7 +898,7 @@ async def _stream_run_events(
         )
         for citation in citations:
             yield _sse("citation", citation)
-        yield _sse("answer.completed", {"conversationId": conversation_id, "runId": run["run_id"], "messageId": assistant_message_id, "status": status, "citations": citations})
+        yield _sse("answer.completed", {"conversationId": conversation_id, "runId": run["run_id"], "messageId": assistant_message_id, "status": v2_store.public_status(status), "citations": citations})
     except asyncio.CancelledError:
         await _save_failed_run(
             db, principal, conversation, req, run, assistant_message_id,
@@ -1018,7 +964,7 @@ async def _result_events(result: dict) -> AsyncIterator[str]:
             "conversationId": result["conversationId"],
             "runId": result.get("runId"),
             "messageId": result["messageId"],
-            "status": result["status"],
+            "status": v2_store.public_status(result["status"]),
             "citations": result["citations"],
         },
     )
@@ -1059,7 +1005,7 @@ async def create_message(
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
-        return {key: value for key, value in result.items() if not key.startswith("_")}
+        return _public_run_payload(result)
     run = run_or_result
     if run.get("status") == "running" and not question:
         return _pending_response(conversation, req, run)
@@ -1072,7 +1018,7 @@ async def create_message(
     result, error = await _execute_json_run(
         db, principal, conversation, req, question, run
     )
-    return error or result
+    return error or _public_run_payload(result)
 
 
 @router.get("/citations/{citation_id}")

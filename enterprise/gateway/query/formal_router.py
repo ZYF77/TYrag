@@ -52,7 +52,22 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/enterprise/api/v1", tags=["query"])
 
 NO_RELIABLE_EVIDENCE_ANSWER = "未找到可靠依据，无法回答。"
-_SOURCE_SYSTEM = os.environ.get("ENTERPRISE_QUERY_SOURCE_SYSTEM", "DEMO")
+
+
+def _query_source_system() -> str | None:
+    """Return the configured query source system, or None to include all.
+
+    Tests default to DEMO. Production must not silently drop EAM documents
+    when ENTERPRISE_QUERY_SOURCE_SYSTEM is unset.
+    """
+    explicit = (os.environ.get("ENTERPRISE_QUERY_SOURCE_SYSTEM") or "").strip()
+    if explicit:
+        return explicit
+    if os.environ.get("ENTERPRISE_TEST_MODE") == "1":
+        return "DEMO"
+    return None
+
+
 _query_stub: RAGFlowQueryStub | None = None
 _conversation_locks: dict[str, asyncio.Lock] = {}
 
@@ -387,7 +402,7 @@ class FormalScopeResolver(ScopeResolver):
     def __init__(
         self,
         db,
-        source_system: str = _SOURCE_SYSTEM,
+        source_system: str | None = None,
         identity: ResolvedAsset | None = None,
     ):
         self.db = db
@@ -402,10 +417,15 @@ class FormalScopeResolver(ScopeResolver):
             or not context.principal.is_active
         ):
             return AclScope.empty(context.policy_version if context else "")
+        source_system = (
+            self.source_system
+            if self.source_system is not None
+            else _query_source_system()
+        )
         docs = await list_all_mappings(
             self.db,
             tenant_id=context.principal.tenant_id,
-            source_system=self.source_system,
+            source_system=source_system,
             statuses=["ready"],
         )
         allowed_docs: list[ExtDocumentMap] = []
@@ -1341,12 +1361,13 @@ async def _citation_document_for_principal(
         "externalDocumentId"
     )
     source_version_id = citation.get("versionId") or citation.get("sourceVersionId")
+    source_system = _query_source_system()
     doc = None
-    if external_document_id:
+    if external_document_id and source_system:
         versions = await get_versions_for_document(
             db,
             principal.tenant_id,
-            _SOURCE_SYSTEM,
+            source_system,
             external_document_id,
         )
         for candidate in versions:
@@ -1368,7 +1389,7 @@ async def _citation_document_for_principal(
         docs = await list_all_mappings(
             db,
             tenant_id=principal.tenant_id,
-            source_system=_SOURCE_SYSTEM,
+            source_system=source_system,
         )
         for candidate in docs:
             if source_version_id and candidate.source_version_id != source_version_id:
