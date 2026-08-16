@@ -745,15 +745,16 @@ class SyncService:
 
     @staticmethod
     def _external_meta_fields(doc: ExtDocumentMap, event: OutboxEvent) -> dict:
-        # Asset identifiers are registration metadata, not OCR ground truth.
-        # A scan may legitimately omit both identifiers.  Keep the quality
-        # declaration explicit and scalar so RAGFlow's metadata update API can
-        # preserve it.  The older ``...ground_truth_fields`` key is already
-        # mapped as an object in some RAGFlow indices, so use a new scalar key
-        # instead of changing that field's type.
+        # Asset identifiers are registration metadata (document provenance),
+        # not OCR ground truth. A scan may legitimately omit both identifiers.
+        # Keep the quality declaration explicit and scalar so RAGFlow's
+        # metadata update API can preserve it. The older
+        # ``...ground_truth_fields`` key is already mapped as an object in
+        # some RAGFlow indices, so use a new scalar key instead of changing
+        # that field's type.
         ground_truth_fields = {}
         required_capabilities = ["text", "position"]
-        return {
+        meta = {
             "enterprise_event_id": event.event_id,
             "enterprise_external_document_id": doc.external_document_id,
             "enterprise_source_version_id": doc.source_version_id,
@@ -766,6 +767,13 @@ class SyncService:
             "enterprise_quality_citation_expected": False,
             "enterprise_quality_required_capabilities": required_capabilities,
         }
+        # Gateway canonical identity only — prove document provenance, not
+        # that OCR content contains these values.
+        if doc.equipment_id:
+            meta["equipment_id"] = doc.equipment_id
+        if doc.fixed_asset_no:
+            meta["fixed_asset_no"] = doc.fixed_asset_no
+        return meta
 
     async def _ensure_parser_configured(
         self,
@@ -801,8 +809,14 @@ class SyncService:
             )
         current = docs[0]
         run = str(current.get("run") or "UNSTART").upper()
+        needs_parser_config = doc.parser_application_status not in (
+            "configured",
+            "executed",
+        )
+        needs_identity_meta = bool(doc.equipment_id or doc.fixed_asset_no)
+        meta_fields = self._external_meta_fields(doc, event)
 
-        if doc.parser_application_status not in ("configured", "executed"):
+        if needs_parser_config:
             if run not in RAGFLOW_UNSTARTED:
                 await update_parser_application(
                     self.db,
@@ -814,7 +828,6 @@ class SyncService:
                     "PARSER_APPLICATION_UNVERIFIABLE",
                     "Parser configuration was not verified before parsing started",
                 )
-            meta_fields = self._external_meta_fields(doc, event)
             # RAGFlow's document update schema accepts scalars and scalar
             # arrays, not nested objects. Ground-truth fields are carried in
             # the scalar JSON declaration above and decoded by the worker.
@@ -839,6 +852,25 @@ class SyncService:
                     "RAGFLOW_UNAVAILABLE", "RAGFlow parser readback is empty",
                 )
             current = docs[0]
+        elif needs_identity_meta and run in RAGFLOW_UNSTARTED:
+            # Already configured, but identity must still be upserted once
+            # before parsing starts for new / new-version documents.
+            try:
+                _validate_ragflow_response(
+                    await self.ragflow_client.update_document(
+                        dataset_id,
+                        doc.ragflow_document_id,
+                        meta_fields=meta_fields,
+                    ),
+                    "upsert identity meta_fields",
+                )
+                docs = await self.ragflow_client.list_documents(
+                    dataset_id, document_id=doc.ragflow_document_id,
+                )
+            except RAGFlowAPIError as exc:
+                raise self._ragflow_error(exc) from exc
+            if docs:
+                current = docs[0]
 
         configured = _actual_parser_json(routing, current)
         if not _parser_matches(routing, current):

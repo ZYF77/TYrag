@@ -117,14 +117,18 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
         name: str,
         dataset_ids: list[str],
         request_id: str | None = None,
+        prompt_config: dict | None = None,
     ) -> dict:
         rid = request_id or self._new_request_id()
+        body: dict[str, Any] = {"name": name, "dataset_ids": dataset_ids}
+        if prompt_config is not None:
+            body["prompt_config"] = prompt_config
         result = await self._run_sync(
             self._sync_request,
             "POST",
             "/api/v1/chats",
             rid,
-            json_data={"name": name, "dataset_ids": dataset_ids},
+            json_data=body,
         )
         return self._require_ok(result)
 
@@ -148,11 +152,14 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
         chat_id: str,
         dataset_ids: list[str] | None = None,
         request_id: str | None = None,
+        prompt_config: dict | None = None,
     ) -> dict:
         rid = request_id or self._new_request_id()
         body: dict[str, Any] = {}
         if dataset_ids is not None:
             body["dataset_ids"] = dataset_ids
+        if prompt_config is not None:
+            body["prompt_config"] = prompt_config
         return self._require_ok(
             await self._run_sync(
                 self._sync_request,
@@ -356,12 +363,15 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         name: str,
         dataset_ids: list[str],
         request_id: str | None = None,
+        prompt_config: dict | None = None,
     ) -> dict:
         chat = {
             "id": f"chat-{uuid.uuid4().hex[:12]}",
             "name": name,
-            "dataset_ids": dataset_ids,
+            "dataset_ids": list(dataset_ids),
         }
+        if prompt_config is not None:
+            chat["prompt_config"] = dict(prompt_config)
         self._chats[chat["id"]] = chat
         return {"code": 0, "data": chat}
 
@@ -378,12 +388,15 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         chat_id: str,
         dataset_ids: list[str] | None = None,
         request_id: str | None = None,
+        prompt_config: dict | None = None,
     ) -> dict:
         chat = self._chats.get(chat_id)
         if chat is None:
             raise RAGFlowAPIError("Stub: chat not found", 404)
         if dataset_ids is not None:
-            chat["dataset_ids"] = dataset_ids
+            chat["dataset_ids"] = list(dataset_ids)
+        if prompt_config is not None:
+            chat["prompt_config"] = dict(prompt_config)
         return {"code": 0, "data": chat}
 
     async def delete_dataset(

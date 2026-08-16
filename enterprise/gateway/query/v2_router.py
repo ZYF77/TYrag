@@ -41,6 +41,7 @@ IDENTIFIER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._\-]{3,127}")
 EQUIPMENT_ID_HINT = (
     "建议补充设备号或固定资产号（例如 GD01250002），我可以只查该设备的资料，回答会更准确。"
 )
+# Kept for tests asserting retrieval questions never include this Gateway prefix.
 GLOBAL_QUESTION_PREFIX = (
     "当前未指定具体设备，请仅根据检索到的资料回答用户问题。\n用户问题："
 )
@@ -172,9 +173,13 @@ def _submitted_snapshot(
 
 
 def _ragflow_question(conversation: dict, question: str) -> str:
-    if conversation.get("equipment_id"):
-        return question
-    return f"{GLOBAL_QUESTION_PREFIX}{question}"
+    """Pass the user question through for retrieval scoring.
+
+    Equipment identity is enforced by Gateway doc_ids scope and the enterprise
+    Chat system prompt / document_metadata. Do not prepend Gateway identity
+    text here — RAGFlow uses this same string for Dense/BM25 relevance.
+    """
+    return question
 
 
 def _with_equipment_hint(conversation: dict, answer: str, status: str) -> str:
