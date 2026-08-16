@@ -226,8 +226,10 @@ async def test_contextless_draft_uses_acl_global_retrieval(runtime):
     assert _stub_doc_ids(runtime) == {"doc-1", "doc-2"}
     assert "doc-denied" not in _stub_doc_ids(runtime)
     question = runtime.stub._last_completion_body["question"]
-    assert question.startswith("当前未指定具体设备")
-    assert "离心泵怎么保养" in question
+    # Unbound drafts must not prepend Gateway identity text into the retrieval
+    # query; equipment hint stays on the answer via _with_equipment_hint.
+    assert question == "离心泵怎么保养"
+    assert not question.startswith(v2_router.GLOBAL_QUESTION_PREFIX)
     assert response.json()["answer"].endswith(v2_router.EQUIPMENT_ID_HINT)
 
 

@@ -35,6 +35,10 @@ from enterprise.gateway.config import require_ragflow_api_key
 from enterprise.gateway.quality.gate import enforce_quality_gate
 from enterprise.gateway.quality.models import get_latest_evaluation
 from enterprise.gateway.query import conversation_store
+from enterprise.gateway.query.enterprise_prompt import (
+    enterprise_prompt_config_for_api,
+    needs_enterprise_prompt_upgrade,
+)
 from enterprise.gateway.query.ragflow_client import (
     RAGFlowAPIError,
     RAGFlowQueryClient,
@@ -608,16 +612,27 @@ async def _ensure_chat(
         (c.get("id") for c in chats if c.get("name") == chat_name),
         None,
     )
+    prompt_config = enterprise_prompt_config_for_api()
     if not chat_id:
-        created = await client.create_chat(chat_name, list(scope.dataset_ids))
+        created = await client.create_chat(
+            chat_name,
+            list(scope.dataset_ids),
+            prompt_config=prompt_config,
+        )
         chat_id = (created.get("data") or {}).get("id", "")
         if not chat_id:
             raise RAGFlowAPIError("Chat id missing after create", 502)
         return chat_id
     chat = next((c for c in chats if c.get("id") == chat_id), {})
     existing_datasets = set(chat.get("dataset_ids") or [])
-    if not set(scope.dataset_ids).issubset(existing_datasets):
-        await client.update_chat(chat_id, list(scope.dataset_ids))
+    needs_datasets = not set(scope.dataset_ids).issubset(existing_datasets)
+    needs_prompt = needs_enterprise_prompt_upgrade(chat)
+    if needs_datasets or needs_prompt:
+        await client.update_chat(
+            chat_id,
+            list(scope.dataset_ids) if needs_datasets else None,
+            prompt_config=prompt_config if needs_prompt else None,
+        )
     return chat_id
 
 
