@@ -110,7 +110,8 @@ class FeedRegisterAuditMiddleware:
         headers = _header_map(scope)
         register = _is_register(method, path)
         inquiry = _is_inquiry(path)
-        capture_body = register or inquiry or _should_capture_body(headers)
+        capture_body = register or _should_capture_body(headers)
+        scope.setdefault("state", {})
 
         queued: list[dict] = []
         chunks: list[bytes] = []
@@ -167,6 +168,9 @@ class FeedRegisterAuditMiddleware:
             duration_ms = int((time.perf_counter() - started) * 1000)
             query = (scope.get("query_string") or b"").decode("latin1")
             request_body = b"".join(chunks) if capture_body else None
+            audit_body = (scope.get("state") or {}).get("inquiry_audit_body")
+            if audit_body is not None:
+                request_body = audit_body
             response_body, streamed = _response_payload(content_type, response_chunks)
             if register:
                 write_feed_register_audit(

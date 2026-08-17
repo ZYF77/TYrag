@@ -120,6 +120,8 @@ class AttachmentRecord:
     status: str
     created_at: str
     updated_at: str
+    ragflow_file_id: str | None = None
+    ragflow_file_deleted_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -211,11 +213,27 @@ CREATE INDEX IF NOT EXISTS idx_ext_transient_audit_attachment
 
 async def ensure_attachment_schema(db: aiosqlite.Connection) -> None:
     await db.executescript(CREATE_TRANSIENT_ATTACHMENT)
+    async with db.execute("PRAGMA table_info(ext_transient_attachment)") as cursor:
+        existing = {row[1] for row in await cursor.fetchall()}
+    for column, definition in (
+        ("ragflow_file_id", "TEXT"),
+        ("ragflow_file_deleted_at", "TEXT"),
+    ):
+        if column not in existing:
+            await db.execute(
+                f"ALTER TABLE ext_transient_attachment ADD COLUMN {column} {definition}"
+            )
     await db.commit()
 
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+async def _default_delete_ragflow_file(file_id: str) -> None:
+    from enterprise.gateway.query.formal_router import _query_client
+
+    await _query_client().delete_file(file_id)
 
 
 def _env_int(
@@ -418,7 +436,16 @@ def _row_to_record(row: aiosqlite.Row | dict[str, Any]) -> AttachmentRecord:
         status=row["status"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        ragflow_file_id=_row_value(row, "ragflow_file_id"),
+        ragflow_file_deleted_at=_row_value(row, "ragflow_file_deleted_at"),
     )
+
+
+def _row_value(row: aiosqlite.Row | dict[str, Any], key: str):
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return None
 
 
 async def _get_attachment(db: aiosqlite.Connection, attachment_id: str):
@@ -1183,7 +1210,30 @@ class TransientAttachmentService:
         await self.db.commit()
         return await self._record_or_not_found(row["attachment_id"])
 
-    async def cleanup_expired(self, *, limit: int = 100) -> dict[str, int]:
+    async def set_ragflow_file(self, attachment_id: str, file_id: str) -> None:
+        await self.db.execute(
+            """UPDATE ext_transient_attachment
+               SET ragflow_file_id=?, ragflow_file_deleted_at=NULL, updated_at=?
+               WHERE attachment_id=?""",
+            (file_id, utc_now().isoformat(), attachment_id),
+        )
+        await self.db.commit()
+
+    async def mark_ragflow_file_deleted(self, attachment_id: str) -> None:
+        await self.db.execute(
+            """UPDATE ext_transient_attachment
+               SET ragflow_file_deleted_at=?, updated_at=?
+               WHERE attachment_id=?""",
+            (utc_now().isoformat(), utc_now().isoformat(), attachment_id),
+        )
+        await self.db.commit()
+
+    async def cleanup_expired(
+        self,
+        *,
+        limit: int = 100,
+        delete_ragflow_file=None,
+    ) -> dict[str, int]:
         now = self._now()
         now_iso = now.isoformat()
         async with self.db.execute(
@@ -1192,6 +1242,10 @@ class TransientAttachmentService:
                       ('active', 'uploading', 'upload_failed', 'expired'))
                    OR (status='delete_retry' AND
                        (next_retry_at IS NULL OR next_retry_at<=?))
+                   OR (ragflow_file_id IS NOT NULL
+                       AND (ragflow_file_deleted_at IS NULL
+                            OR ragflow_file_deleted_at='')
+                       AND status IN ('expired', 'deleted', 'delete_retry'))
                ORDER BY expires_at ASC LIMIT ?""",
             (now_iso, now_iso, max(1, min(limit, 1000))),
         ) as cursor:
@@ -1200,6 +1254,25 @@ class TransientAttachmentService:
         deleted = 0
         failed = 0
         for row in rows:
+            file_id = _row_value(row, "ragflow_file_id")
+            if file_id and not _row_value(row, "ragflow_file_deleted_at"):
+                try:
+                    deleter = delete_ragflow_file or _default_delete_ragflow_file
+                    await deleter(file_id)
+                    await self.db.execute(
+                        """UPDATE ext_transient_attachment
+                           SET ragflow_file_deleted_at=?, updated_at=?
+                           WHERE attachment_id=?""",
+                        (now_iso, now_iso, row["attachment_id"]),
+                    )
+                    await self.db.commit()
+                except Exception:
+                    logger.warning(
+                        "RAGFlow orphan file delete failed attachment_id=%s",
+                        row["attachment_id"],
+                    )
+            if row["status"] == "deleted":
+                continue
             if row["status"] in {"active", "uploading", "upload_failed"}:
                 await self.db.execute(
                     """UPDATE ext_transient_attachment

@@ -1,9 +1,11 @@
 openapi: 3.1.0
 info:
   title: TYrag External Integration API
-  version: 2.2.0
+  version: 2.3.0
   description: >-
-    Frozen external contract for the Equipment Management System. Version 2.2
+    Frozen external contract for the Equipment Management System. Version 2.3
+    additively accepts multipart message attachments on the existing messages
+    path while keeping JSON text and chips wire compatible. Version 2.2
     additively includes starter suggestion chips on ConversationDetail while
     keeping the v2 path and prior operations wire compatible for clients that
     ignore unknown fields. Inquiry conversation and message `status` values are
@@ -293,6 +295,10 @@ paths:
         receive JSON. A duplicate request while its durable run is active returns
         the same runId with 202 and never starts a second execution. Message-level
         context overrides and client-controlled prompts are forbidden.
+        JSON remains the text-only and chips path. Attachments use the same URL
+        with multipart/form-data (metadata JSON plus files). suggestionId must
+        not be sent with files. First-wave MIME types are image/jpeg, image/png,
+        text/plain, and application/pdf; at most 5 files, 10MB each.
       operationId: v2CreateConversationMessage
       x-status: implemented
       security:
@@ -305,6 +311,9 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/CreateMessageRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/CreateMessageMultipartRequest'
       responses:
         '200':
           description: JSON result or idempotent replay
@@ -323,6 +332,7 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
+        '413': { $ref: '#/components/responses/Error' }
         '422': { $ref: '#/components/responses/Error' }
         '503': { $ref: '#/components/responses/Error' }
   /conversations/{conversationId}/suggestions:
@@ -838,6 +848,38 @@ components:
       oneOf:
         - $ref: '#/components/schemas/QuestionMessageRequest'
         - $ref: '#/components/schemas/SuggestionMessageRequest'
+    MessageAttachmentMetadata:
+      type: object
+      additionalProperties: false
+      required: [clientMessageId]
+      properties:
+        clientMessageId: { type: string, minLength: 1, maxLength: 128 }
+        question: { type: string, maxLength: 8000 }
+    CreateMessageMultipartRequest:
+      type: object
+      additionalProperties: false
+      required: [metadata]
+      properties:
+        metadata:
+          $ref: '#/components/schemas/MessageAttachmentMetadata'
+        files:
+          type: array
+          maxItems: 5
+          items:
+            type: string
+            format: binary
+    MessageAttachment:
+      type: object
+      additionalProperties: false
+      required: [attachmentId, fileName, mediaType, sizeBytes, sha256]
+      properties:
+        attachmentId: { type: string }
+        fileName: { type: string }
+        mediaType:
+          type: string
+          enum: [image/jpeg, image/png, text/plain, application/pdf]
+        sizeBytes: { type: integer, minimum: 1 }
+        sha256: { type: string, minLength: 64, maxLength: 64 }
     Citation:
       type: object
       additionalProperties: false
@@ -871,6 +913,9 @@ components:
         citations:
           type: array
           items: { $ref: '#/components/schemas/Citation' }
+        attachments:
+          type: array
+          items: { $ref: '#/components/schemas/MessageAttachment' }
         createdAt: { type: string, format: date-time }
     MessagePage:
       type: object
@@ -896,6 +941,9 @@ components:
         citations:
           type: array
           items: { $ref: '#/components/schemas/Citation' }
+        attachments:
+          type: array
+          items: { $ref: '#/components/schemas/MessageAttachment' }
         replayed: { type: boolean }
     MessageRunPending:
       type: object

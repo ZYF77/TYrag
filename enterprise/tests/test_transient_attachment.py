@@ -1065,3 +1065,54 @@ async def test_explicit_disable_keeps_cleanup_worker_running(tmp_path, monkeypat
         assert cleanup_constructions == 1
 
     assert app_module._background_tasks == []
+
+
+@pytest.mark.asyncio
+async def test_cleanup_retries_ragflow_file_delete(storage_env):
+    db = await init_db(":memory:")
+    storage = MemoryObjectStorage()
+    service = TransientAttachmentService(
+        db, storage, now_fn=lambda: datetime(2026, 8, 10, tzinfo=timezone.utc)
+    )
+    await _conversation(db, _principal())
+    record, _ = await service.create(
+        tenant_id="tenant-a",
+        conversation_id="conversation-a",
+        business_user_id="user-a",
+        file_name="photo.png",
+        media_type="image/png",
+        content=b"png-bytes",
+    )
+    await service.set_ragflow_file(record.attachment_id, "rf-orphan")
+    deleted: list[str] = []
+
+    async def boom(file_id: str) -> None:
+        deleted.append(file_id)
+        raise RuntimeError("ragflow down")
+
+    await db.execute(
+        "UPDATE ext_transient_attachment SET expires_at=? WHERE attachment_id=?",
+        ("2020-01-01T00:00:00+00:00", record.attachment_id),
+    )
+    await db.commit()
+    await service.cleanup_expired(delete_ragflow_file=boom)
+    assert deleted == ["rf-orphan"]
+    async with db.execute(
+        "SELECT ragflow_file_deleted_at FROM ext_transient_attachment WHERE attachment_id=?",
+        (record.attachment_id,),
+    ) as cursor:
+        row = await cursor.fetchone()
+    assert row["ragflow_file_deleted_at"] is None
+
+    async def ok(file_id: str) -> None:
+        deleted.append(file_id)
+
+    await service.cleanup_expired(delete_ragflow_file=ok)
+    assert deleted[-1] == "rf-orphan"
+    async with db.execute(
+        "SELECT ragflow_file_deleted_at FROM ext_transient_attachment WHERE attachment_id=?",
+        (record.attachment_id,),
+    ) as cursor:
+        row = await cursor.fetchone()
+    assert row["ragflow_file_deleted_at"]
+    await db.close()

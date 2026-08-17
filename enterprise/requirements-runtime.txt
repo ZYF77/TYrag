@@ -6,4 +6,5 @@ httpx==0.28.1
 jsonschema==4.26.0
 PyJWT==2.13.0
 pydantic==2.12.5
+python-multipart==0.0.20
 uvicorn==0.40.0

@@ -208,6 +208,7 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
         session_id: str | None = None,
         doc_ids: list[str] | None = None,
         request_id: str | None = None,
+        files: list[str] | None = None,
     ) -> dict:
         rid = request_id or self._new_request_id()
         body: dict[str, Any] = {
@@ -221,6 +222,8 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
             # RAGFlow v0.26.4 /chat/completions expects a comma-separated
             # string for doc_ids; a JSON list breaks its attachment parser.
             body["doc_ids"] = ",".join(doc_ids)
+        if files:
+            body["files"] = list(files)
         _trace_doc_ids(rid, doc_ids)
         result = await self._run_sync(
             self._sync_request,
@@ -230,6 +233,75 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
             json_data=body,
         )
         return self._require_ok(result)
+
+    async def upload_chat_file(
+        self,
+        file_name: str,
+        content: bytes,
+        media_type: str,
+        request_id: str | None = None,
+    ) -> str:
+        import io
+
+        rid = request_id or self._new_request_id()
+        files = {"file": (file_name, io.BytesIO(content), media_type)}
+        result = self._require_ok(
+            await self._run_sync(
+                self._sync_request, "POST", "/api/v1/files", rid, files=files
+            )
+        )
+        data = result.get("data")
+        if isinstance(data, list) and data:
+            file_id = data[0].get("id")
+        elif isinstance(data, dict):
+            file_id = data.get("id")
+        else:
+            file_id = None
+        if not file_id:
+            raise RAGFlowAPIError("RAGFlow file upload returned no id", 502, rid)
+        return str(file_id)
+
+    async def delete_file(self, file_id: str, request_id: str | None = None) -> None:
+        rid = request_id or self._new_request_id()
+        self._require_ok(
+            await self._run_sync(
+                self._sync_request,
+                "DELETE",
+                "/api/v1/files",
+                rid,
+                json_data={"ids": [file_id]},
+            )
+        )
+
+    async def understand_file(
+        self,
+        chat_id: str,
+        file_id: str,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        prompt = (
+            "从附件中提取可见短事实。只输出 JSON："
+            '{"errorCodes":[],"equipmentCodes":[],"visibleValues":[],'
+            '"textSpans":[],"confidence":0.0}。这些是观察，不是设备台账。'
+        )
+        result = await self.chat_completion(
+            chat_id, prompt, session_id=None, files=[file_id], request_id=request_id
+        )
+        data = result.get("data", {}) if isinstance(result, dict) else {}
+        answer = str(data.get("answer") or "").strip()
+        try:
+            parsed = json.loads(answer)
+        except json.JSONDecodeError:
+            start = answer.find("{")
+            end = answer.rfind("}")
+            if start >= 0 and end > start:
+                try:
+                    parsed = json.loads(answer[start : end + 1])
+                except json.JSONDecodeError:
+                    parsed = {"textSpans": [answer[:500]]}
+            else:
+                parsed = {"textSpans": [answer[:500]]} if answer else {}
+        return parsed if isinstance(parsed, dict) else {}
 
     async def chat_completion_stream(
         self,
@@ -330,6 +402,16 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         self._stream_fail_after = 0
         self._omit_stream_id = False
         self._chunks_by_id: dict[str, dict] = {}
+        self.uploaded_files: list[str] = []
+        self.deleted_files: list[str] = []
+        self._ragflow_files: dict[str, bytes] = {}
+        self.understand_result: dict[str, Any] = {
+            "errorCodes": ["E07"],
+            "equipmentCodes": [],
+            "visibleValues": [],
+            "textSpans": [],
+            "confidence": 0.8,
+        }
 
     async def start_parsing(
         self,
@@ -407,6 +489,30 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         self._datasets.pop(dataset_id, None)
         return {"code": 0, "data": True}
 
+    async def upload_chat_file(
+        self,
+        file_name: str,
+        content: bytes,
+        media_type: str,
+        request_id: str | None = None,
+    ) -> str:
+        self.uploaded_files.append(file_name)
+        file_id = f"rf-{len(self.uploaded_files)}"
+        self._ragflow_files[file_id] = content
+        return file_id
+
+    async def delete_file(self, file_id: str, request_id: str | None = None) -> None:
+        self.deleted_files.append(file_id)
+        self._ragflow_files.pop(file_id, None)
+
+    async def understand_file(
+        self,
+        chat_id: str,
+        file_id: str,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        return dict(self.understand_result)
+
     async def chat_completion(
         self,
         chat_id: str,
@@ -414,6 +520,7 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         session_id: str | None = None,
         doc_ids: list[str] | None = None,
         request_id: str | None = None,
+        files: list[str] | None = None,
     ) -> dict:
         turn_id = f"msg-{uuid.uuid4().hex[:12]}"
         base_chunk = {
@@ -470,6 +577,7 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
             "question": question,
             "session_id": session_id,
             "doc_ids": ",".join(doc_ids) if doc_ids else None,
+            "files": list(files) if files else [],
         }
         session_id = session_id or "stub-session"
         session = self._sessions.setdefault(

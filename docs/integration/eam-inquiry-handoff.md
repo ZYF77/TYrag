@@ -1,7 +1,7 @@
-# EAM 问询对接说明（Gateway Inquiry v2.2）
+# EAM 问询对接说明（Gateway Inquiry v2.3）
 
 面向：EAM 开发 / 测试 / 运维  
-契约版本：`integration-openapi-v2` **v2.2.0**  
+契约版本：`integration-openapi-v2` **v2.3.0**  
 正式契约文件：
 
 - `contracts/integration-openapi-v2.yaml`
@@ -29,6 +29,7 @@ HMAC secret、JWT 私钥、RAGFlow API key **必须互相独立**，不可混用
 | 长对话上下文 | 未明确压缩策略 | Gateway **透明**滚动摘要；EAM 仍用原 `conversationId` |
 | `assetId` / `registryVersion` | 可能依赖注册表回填 | 问询路径通常为 `null`；勿依赖 |
 | SSE | 有契约描述 | Gateway **已实现**；EAM **首期可不接**（见 §7） |
+| 消息附件 | 无 | 同一 `POST .../messages`；无附件继续 JSON，有附件改 multipart。**不走 HMAC** |
 
 **不变：**
 
@@ -292,6 +293,26 @@ Accept: application/json
 
 若相同 `clientMessageId` 对应的 run 仍在执行，可能返回 `202` + 同一 `runId`（勿再开第二次执行）。
 
+### 4.2.1 带附件提问（multipart，v2.3）
+
+有文件时走**同一 URL**，不要先调 `POST .../attachments`，也不要在 JSON 里塞 `attachments[].content` base64。鉴权仍是问询 JWT，**不要加 HMAC 三头**。
+
+```http
+POST {BASE_URL}/enterprise/api/v2/conversations/{conversationId}/messages
+Authorization: Bearer <JWT>
+Content-Type: multipart/form-data
+```
+
+- `metadata`：JSON，`{ "clientMessageId": "...", "question": "..." }`；`question` 可省略（只发文件合法）
+- `files`：原始字节；最多 **5** 个，单文件 **10MB**
+- 第一波 MIME：`image/jpeg`、`image/png`、`text/plain`、`application/pdf`
+- chips（`suggestionId`）**禁止**带文件；请继续用 JSON
+- 超限：`413`；类型不支持：`422`
+
+历史 `GET .../messages` 只回附件元数据（`attachmentId` / `fileName` / `mediaType` / `sizeBytes` / `sha256`），**不回文件字节、不嵌下载 URL**。
+
+从图/OCR 抽出的短码只用于检索 enrichment，信任级别是观察（`observed`），不是台账字段。回答应写成「从你上传的图片中识别到疑似故障码 E07」，不要写成「设备当前故障码是 E07」。citations 仍只来自已投喂知识库。
+
 | `status` | 含义 |
 |---|---|
 | `已完成` | 问答正常完成 |
@@ -467,4 +488,4 @@ run.started
 | `docs/integration/eam-file-feed-handoff-3.1.md` | 文件投喂 + 终态回调 |
 | `docs/integration/eam-device-integration-guide.md` | 综合对接总册（含问询细节示例） |
 | `docs/设备管理系统—企业知识库对接协议.md` | 协议/验收底稿 |
-| `contracts/integration-openapi-v2.yaml` | 问询正式 OpenAPI（v2.2.0） |
+| `contracts/integration-openapi-v2.yaml` | 问询正式 OpenAPI（v2.3.0） |

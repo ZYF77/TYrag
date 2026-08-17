@@ -6,17 +6,28 @@ import json
 import asyncio
 import re
 import uuid
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
+from pathlib import PurePath
 
 from fastapi import APIRouter, Depends, Query, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from enterprise.gateway.acl.schema import AclScope
 from enterprise.gateway.auth.middleware import require_capability
 from enterprise.gateway.auth.user_principal import UserPrincipal
+from enterprise.gateway.config import config
 from enterprise.gateway.query import v2_store
+from enterprise.gateway.query.attachment_context import (
+    MESSAGE_MEDIA_TYPES,
+    MAX_MESSAGE_FILES,
+    PendingAttachment,
+    any_understood,
+    enrich_question,
+    observe_attachments,
+)
 from enterprise.gateway.query.formal_router import (
     FormalScopeResolver,
     NO_RELIABLE_EVIDENCE_ANSWER,
@@ -33,6 +44,14 @@ from enterprise.gateway.query.ragflow_client import RAGFlowAPIError
 from enterprise.gateway.query.source_access import source_response
 from enterprise.gateway.sync.models import ExtDocumentMap
 from enterprise.gateway.sync.readiness import document_candidate_readiness_from_db
+from enterprise.gateway.sync.transient_attachment import (
+    ATTACHMENT_DISABLED_MESSAGE,
+    TransientAttachmentError,
+    TransientAttachmentService,
+    attachment_max_size_bytes,
+    ensure_attachment_schema,
+    get_storage,
+)
 
 
 router = APIRouter(prefix="/enterprise/api/v2", tags=["query-v2"])
@@ -234,6 +253,13 @@ class CreateMessageRequest(StrictModel):
         if not (question_branch or suggestion_branch):
             raise ValueError("Use exactly one question or suggestion branch")
         return self
+
+
+class MessageAttachmentMetadata(StrictModel):
+    clientMessageId: str = Field(min_length=1, max_length=128)
+    question: str | None = Field(default=None, max_length=8000)
+    suggestionId: str | None = Field(default=None, min_length=1, max_length=128)
+    contextVersion: int | None = Field(default=None, ge=0)
 
 
 def _conversation_detail(row: dict) -> dict:
@@ -545,9 +571,24 @@ def _external_citations(
     ]
 
 
-def _request_hash(req: CreateMessageRequest) -> str:
+def _request_hash(
+    req: CreateMessageRequest, pending: list[PendingAttachment] | None = None
+) -> str:
+    payload = req.model_dump(exclude_none=True)
+    if pending:
+        payload["attachments"] = sorted(
+            (
+                {
+                    "fileName": item.file_name,
+                    "mediaType": item.media_type,
+                    "sha256": item.sha256,
+                }
+                for item in pending
+            ),
+            key=lambda item: (item["fileName"], item["mediaType"], item["sha256"]),
+        )
     raw = json.dumps(
-        req.model_dump(exclude_none=True),
+        payload,
         sort_keys=True,
         ensure_ascii=False,
         separators=(",", ":"),
@@ -583,7 +624,11 @@ def _pending_response(conversation: dict, req: CreateMessageRequest, run: dict) 
 
 
 async def _replay_or_pending(
-    db, principal: UserPrincipal, conversation: dict, req: CreateMessageRequest
+    db,
+    principal: UserPrincipal,
+    conversation: dict,
+    req: CreateMessageRequest,
+    pending: list[PendingAttachment] | None = None,
 ) -> tuple[dict | None, JSONResponse | None]:
     run = await v2_store.get_message_run(
         db,
@@ -594,7 +639,7 @@ async def _replay_or_pending(
     )
     if not run:
         return None, None
-    if run["request_hash"] != _request_hash(req):
+    if run["request_hash"] != _request_hash(req, pending):
         return None, _error(
             409,
             "CLIENT_MESSAGE_ID_CONFLICT",
@@ -625,11 +670,17 @@ async def _prepare_message_run(
     principal: UserPrincipal,
     conversation: dict,
     req: CreateMessageRequest,
+    pending: list[PendingAttachment] | None = None,
 ) -> tuple[dict, str, dict | None, JSONResponse | None]:
-    replay, response = await _replay_or_pending(db, principal, conversation, req)
+    pending = pending or []
+    replay, response = await _replay_or_pending(db, principal, conversation, req, pending)
     if replay is not None or response is not None:
         return conversation, "", replay, response
     if req.suggestionId:
+        if pending:
+            return conversation, "", None, _error(
+                422, "VALIDATION_ERROR", "Suggestions cannot include files"
+            )
         if req.contextVersion != conversation["context_version"]:
             return conversation, "", None, _error(409, "SUGGESTION_STALE", "Suggestion context is stale")
         definition = next(
@@ -643,20 +694,24 @@ async def _prepare_message_run(
         question = req.question or ""
     if not conversation.get("equipment_id"):
         conversation = await _bind_from_question(db, principal, conversation, question)
+    title = " ".join(question.split())[:80] or (
+        pending[0].file_name if pending else "New conversation"
+    )
     run = await v2_store.reserve_message_run(
         db,
         conversation_id=conversation["conversation_id"],
         tenant_id=principal.tenant_id,
         business_user_id=principal.business_user_id,
         client_message_id=req.clientMessageId,
-        request_hash=_request_hash(req),
+        request_hash=_request_hash(req, pending),
         run_id=str(uuid.uuid4()),
         user_message_id=str(uuid.uuid4()),
         assistant_message_id=str(uuid.uuid4()),
         question=question,
+        title=title,
     )
     if run is None:
-        replay, response = await _replay_or_pending(db, principal, conversation, req)
+        replay, response = await _replay_or_pending(db, principal, conversation, req, pending)
         return conversation, "", replay, response or _error(503, "RUN_INTERRUPTED", "Message run could not be reserved")
     return conversation, question, run, None
 
@@ -704,6 +759,32 @@ async def _save_failed_run(
     return error_response
 
 
+async def _retrieval_question(
+    db,
+    principal: UserPrincipal,
+    conversation: dict,
+    question: str,
+    pending: list[PendingAttachment],
+    storage,
+) -> tuple[str, JSONResponse | None, Any]:
+    if not pending:
+        return question, None, None
+    client = _query_client()
+    chat_id = None
+    scope, _docs = await _context_scope(db, principal, conversation)
+    if not scope.is_empty:
+        chat_id = await _ensure_chat(client, principal, scope)
+    service = TransientAttachmentService(db, storage)
+    observations = await observe_attachments(pending, client, chat_id, service)
+    if not question.strip() and not any_understood(observations):
+        return question, _error(
+            422,
+            "VALIDATION_ERROR",
+            "Could not understand the attachment; add a text question",
+        ), client
+    return enrich_question(question, observations), None, client
+
+
 async def _execute_json_run(
     db,
     principal: UserPrincipal,
@@ -711,9 +792,21 @@ async def _execute_json_run(
     req: CreateMessageRequest,
     question: str,
     run: dict,
+    pending: list[PendingAttachment] | None = None,
+    storage=None,
 ) -> tuple[dict | None, JSONResponse | None]:
     assistant_message_id = run.get("assistant_message_id") or str(uuid.uuid4())
     try:
+        pending = pending or []
+        question, observe_error, _client = await _retrieval_question(
+            db, principal, conversation, question, pending, storage
+        )
+        if observe_error:
+            return None, await _save_failed_run(
+                db, principal, conversation, req, run, assistant_message_id,
+                code="VALIDATION_ERROR", status_code=422,
+                message="Could not understand the attachment; add a text question",
+            )
         scope, docs_by_internal_id = await _context_scope(db, principal, conversation)
         answer = NO_RELIABLE_EVIDENCE_ANSWER
         status = "no_reliable_evidence"
@@ -800,6 +893,8 @@ async def _stream_run_events(
     req: CreateMessageRequest,
     question: str,
     run: dict,
+    pending: list[PendingAttachment] | None = None,
+    storage=None,
 ) -> AsyncIterator[str]:
     conversation_id = conversation["conversation_id"]
     assistant_message_id = run.get("assistant_message_id") or str(uuid.uuid4())
@@ -812,6 +907,18 @@ async def _stream_run_events(
     status = "no_reliable_evidence"
     answer = NO_RELIABLE_EVIDENCE_ANSWER
     try:
+        pending = pending or []
+        question, observe_error, _client = await _retrieval_question(
+            db, principal, conversation, question, pending, storage
+        )
+        if observe_error:
+            await _save_failed_run(
+                db, principal, conversation, req, run, assistant_message_id,
+                code="VALIDATION_ERROR", status_code=422,
+                message="Could not understand the attachment; add a text question",
+            )
+            yield _sse("run.failed", {"conversationId": conversation_id, "runId": run["run_id"], "code": "VALIDATION_ERROR", "message": "Could not understand the attachment; add a text question"})
+            return
         scope, docs_by_internal_id = await _context_scope(db, principal, conversation)
         if not scope.is_empty:
             client = _query_client()
@@ -975,16 +1082,170 @@ async def _result_events(result: dict) -> AsyncIterator[str]:
     )
 
 
+def _attachment_public_meta(item: PendingAttachment) -> dict:
+    payload = {
+        "attachmentId": item.attachment_id,
+        "fileName": item.file_name,
+        "mediaType": item.media_type,
+        "sizeBytes": item.size_bytes,
+        "sha256": item.sha256,
+    }
+    return payload
+
+
+def _inquiry_audit_body(req: CreateMessageRequest, pending: list[PendingAttachment]) -> dict:
+    return {
+        "clientMessageId": req.clientMessageId,
+        "hasAttachments": bool(pending),
+        "attachments": [
+            {
+                "fileName": item.file_name,
+                "mediaType": item.media_type,
+                "sizeBytes": item.size_bytes,
+                "sha256": item.sha256[:12],
+                **({"attachmentId": item.attachment_id} if item.attachment_id else {}),
+            }
+            for item in pending
+        ],
+    }
+
+
+async def _read_upload_bytes(upload, max_bytes: int) -> bytes:
+    chunks: list[bytes] = []
+    size = 0
+    while True:
+        chunk = await upload.read(65536)
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > max_bytes:
+            raise TransientAttachmentError(
+                "ATTACHMENT_TOO_LARGE",
+                413,
+                "Attachment exceeds the configured size limit",
+            )
+        chunks.append(chunk)
+    content = b"".join(chunks)
+    if not content:
+        raise ValueError("Attachment content is empty")
+    return content
+
+
+async def _parse_multipart_message(
+    request: Request,
+) -> tuple[CreateMessageRequest, list[PendingAttachment]]:
+    form = await request.form()
+    try:
+        raw_meta = form.get("metadata")
+        if raw_meta is None or raw_meta == "":
+            raise ValueError("metadata is required")
+        if hasattr(raw_meta, "read"):
+            raw_meta = (await raw_meta.read()).decode("utf-8", "replace")
+        meta = MessageAttachmentMetadata.model_validate(json.loads(str(raw_meta)))
+        if meta.suggestionId is not None or meta.contextVersion is not None:
+            raise ValueError("Suggestions cannot include files")
+        uploads = [item for item in form.getlist("files") if item not in (None, "")]
+        if len(uploads) > MAX_MESSAGE_FILES:
+            raise ValueError("At most 5 files are allowed")
+        pending: list[PendingAttachment] = []
+        max_bytes = attachment_max_size_bytes()
+        for upload in uploads:
+            filename = PurePath(getattr(upload, "filename", None) or "attachment").name
+            media_type = (
+                (getattr(upload, "content_type", None) or "").split(";")[0].strip().lower()
+            )
+            if media_type not in MESSAGE_MEDIA_TYPES:
+                raise ValueError("Attachment MIME type is not allowed")
+            content = await _read_upload_bytes(upload, max_bytes)
+            pending.append(
+                PendingAttachment(
+                    file_name=filename,
+                    media_type=media_type,
+                    content=content,
+                    sha256=hashlib.sha256(content).hexdigest(),
+                    size_bytes=len(content),
+                )
+            )
+        question = (meta.question or "").strip() or None
+        if not question and not pending:
+            raise ValueError("question or files is required")
+        req = CreateMessageRequest.model_construct(
+            clientMessageId=meta.clientMessageId,
+            question=question,
+        )
+        return req, pending
+    finally:
+        close = getattr(form, "close", None)
+        if close is not None:
+            await close()
+
+
+async def _persist_pending_attachments(
+    db,
+    storage,
+    principal: UserPrincipal,
+    conversation: dict,
+    run: dict,
+    pending: list[PendingAttachment],
+    request: Request,
+) -> list[dict]:
+    await ensure_attachment_schema(db)
+    service = TransientAttachmentService(db, storage)
+    metas: list[dict] = []
+    for item in pending:
+        record, _ticket = await service.create(
+            tenant_id=principal.tenant_id,
+            conversation_id=conversation["conversation_id"],
+            business_user_id=principal.business_user_id,
+            file_name=item.file_name,
+            media_type=item.media_type,
+            content=item.content,
+            request_id=str(uuid.uuid4()),
+        )
+        item.attachment_id = record.attachment_id
+        metas.append(_attachment_public_meta(item))
+    user_message_id = run.get("user_message_id")
+    if user_message_id and metas:
+        await v2_store.set_message_attachments(
+            db, message_id=user_message_id, attachments=metas
+        )
+    return metas
+
+
 @router.post("/conversations/{conversation_id}/messages")
 async def create_message(
     conversation_id: str,
-    req: CreateMessageRequest,
     request: Request,
     db=Depends(get_db),
+    storage=Depends(get_storage),
     principal: UserPrincipal = Depends(
         require_capability("ask", "view_citations")
     ),
 ):
+    content_type = (request.headers.get("content-type") or "").lower()
+    pending: list[PendingAttachment] = []
+    if "multipart/form-data" in content_type:
+        if not config.transient_attachments_enabled:
+            return _error(
+                503, "ATTACHMENT_STORAGE_UNAVAILABLE", ATTACHMENT_DISABLED_MESSAGE
+            )
+        try:
+            req, pending = await _parse_multipart_message(request)
+        except TransientAttachmentError as exc:
+            return _error(exc.status_code, exc.code, exc.message)
+        except (ValidationError, json.JSONDecodeError, ValueError):
+            return _error(422, "VALIDATION_ERROR", "Invalid multipart message")
+        request.state.inquiry_audit_body = _inquiry_audit_body(req, pending)
+    else:
+        try:
+            payload = await request.json()
+        except Exception:
+            return _error(422, "VALIDATION_ERROR", "Invalid JSON")
+        try:
+            req = CreateMessageRequest.model_validate(payload)
+        except ValidationError as exc:
+            raise RequestValidationError(exc.errors()) from exc
+
     lock = await _conversation_lock(conversation_id)
     async with lock:
         conversation = await _owned_conversation(db, principal, conversation_id)
@@ -994,35 +1255,55 @@ async def create_message(
             return _error(409, "CONVERSATION_ARCHIVED", "Conversation is archived")
         try:
             conversation, question, run_or_result, error = await _prepare_message_run(
-                db, principal, conversation, req
+                db, principal, conversation, req, pending
             )
         except _FormalQueryError as exc:
             return _error(exc.status_code, exc.code, exc.message)
-    if error:
-        return error
-    if run_or_result is None:
-        return _error(503, "RUN_INTERRUPTED", "Message run could not be prepared")
-    if "answer" in run_or_result and "messageId" in run_or_result:
-        result = run_or_result
-        if "text/event-stream" in request.headers.get("accept", "").lower():
-            return StreamingResponse(
-                _result_events(result),
-                media_type="text/event-stream",
-                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-            )
-        return _public_run_payload(result)
-    run = run_or_result
-    if run.get("status") == "running" and not question:
+        if error:
+            return error
+        if run_or_result is None:
+            return _error(503, "RUN_INTERRUPTED", "Message run could not be prepared")
+        if "answer" in run_or_result and "messageId" in run_or_result:
+            result = run_or_result
+            if "text/event-stream" in request.headers.get("accept", "").lower():
+                return StreamingResponse(
+                    _result_events(result),
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                )
+            return _public_run_payload(result)
+        run = run_or_result
+        if pending:
+            try:
+                await _persist_pending_attachments(
+                    db, storage, principal, conversation, run, pending, request
+                )
+                request.state.inquiry_audit_body = _inquiry_audit_body(req, pending)
+            except TransientAttachmentError as exc:
+                await _save_failed_run(
+                    db, principal, conversation, req, run,
+                    run.get("assistant_message_id") or str(uuid.uuid4()),
+                    code=exc.code, status_code=exc.status_code, message=exc.message,
+                )
+                return _error(exc.status_code, exc.code, exc.message)
+    if run.get("status") == "running" and not question and not pending:
         return _pending_response(conversation, req, run)
     if "text/event-stream" in request.headers.get("accept", "").lower():
         return StreamingResponse(
-            _stream_run_events(db, principal, conversation, req, question, run),
+            _stream_run_events(
+                db, principal, conversation, req, question, run, pending, storage
+            ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
     result, error = await _execute_json_run(
-        db, principal, conversation, req, question, run
+        db, principal, conversation, req, question, run, pending, storage
     )
+    if result is not None and pending:
+        result = dict(result)
+        result["attachments"] = [
+            _attachment_public_meta(item) for item in pending if item.attachment_id
+        ]
     return error or _public_run_payload(result)
 
 

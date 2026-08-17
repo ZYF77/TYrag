@@ -412,7 +412,7 @@ def test_p1_callback_and_attachment_invariants_are_explicit():
 
 def test_v21_attachment_surface_and_security_are_frozen():
     _, spec = _contract()
-    assert spec["info"]["version"] == "2.2.0"
+    assert spec["info"]["version"] == "2.3.0"
     detail = spec["components"]["schemas"]["ConversationDetail"]
     assert "suggestions" in detail["required"]
     assert "contextCompacted" in detail["required"]

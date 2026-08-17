@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 from collections import deque
 from datetime import datetime, timezone
@@ -46,6 +47,14 @@ _TEXT_KEYS = {
     "delta",
     "question",
 }
+_B64_RE = re.compile(r"^[A-Za-z0-9+/=\s]+$")
+
+
+def _looks_like_binary_payload(value: str) -> bool:
+    stripped = value.strip()
+    if stripped.startswith("data:") and ";base64," in stripped[:80]:
+        return True
+    return len(stripped) >= 32 and bool(_B64_RE.fullmatch(stripped))
 
 
 def _truncate_text(value: Any) -> Any:
@@ -56,7 +65,10 @@ def _truncate_text(value: Any) -> Any:
     if isinstance(value, dict):
         out = {}
         for key, item in value.items():
-            if str(key).lower() in _TEXT_KEYS and isinstance(item, str):
+            lowered = str(key).lower()
+            if lowered == "content" and isinstance(item, str) and _looks_like_binary_payload(item):
+                out[key] = "<redacted>"
+            elif lowered in _TEXT_KEYS and isinstance(item, str):
                 out[key] = _truncate_text(item)
             else:
                 out[key] = _truncate_text(item)

@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS ext_v2_message (
     content TEXT NOT NULL,
     status TEXT NOT NULL,
     citations_json TEXT NOT NULL DEFAULT '[]',
+    attachments_json TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL
 );
 
@@ -127,6 +128,9 @@ async def ensure_schema(db) -> None:
             "lease_expires_at": "TEXT",
             "user_message_id": "TEXT",
             "assistant_message_id": "TEXT",
+        },
+        "ext_v2_message": {
+            "attachments_json": "TEXT NOT NULL DEFAULT '[]'",
         },
     }
     for table, columns in migrations.items():
@@ -433,6 +437,7 @@ async def reserve_message_run(
     user_message_id: str | None = None,
     assistant_message_id: str | None = None,
     question: str | None = None,
+    title: str | None = None,
     lease_seconds: int = 1800,
 ) -> dict | None:
     run_id = run_id or __import__("uuid").uuid4().hex
@@ -477,7 +482,7 @@ async def reserve_message_run(
                 now,
             ),
         )
-        title = " ".join(question.split())[:80] or "New conversation"
+        title = title or (" ".join((question or "").split())[:80] or "New conversation")
         await db.execute(
             """UPDATE ext_v2_conversation
                SET last_message_at=?, first_message_at=COALESCE(first_message_at, ?),
@@ -671,6 +676,16 @@ async def add_message(
     }
 
 
+async def set_message_attachments(
+    db, *, message_id: str, attachments: list[dict]
+) -> None:
+    await db.execute(
+        "UPDATE ext_v2_message SET attachments_json=? WHERE message_id=?",
+        (json.dumps(attachments, ensure_ascii=False, separators=(",", ":")), message_id),
+    )
+    await db.commit()
+
+
 async def list_messages(
     db,
     *,
@@ -711,6 +726,14 @@ async def list_messages(
                 "createdAt": row["created_at"],
             }
         )
+        keys = set(row.keys())
+        if "attachments_json" in keys:
+            try:
+                attachments = json.loads(row["attachments_json"] or "[]")
+            except json.JSONDecodeError:
+                attachments = []
+            if attachments:
+                items[-1]["attachments"] = attachments
     next_cursor = None
     if has_more and page:
         next_cursor = encode_cursor(page[-1]["created_at"], page[-1]["message_id"])
