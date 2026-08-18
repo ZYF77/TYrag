@@ -132,6 +132,29 @@ def _stub_doc_ids(runtime) -> set[str]:
     return {item for item in raw.split(",") if item}
 
 
+async def _configure_web_stub(runtime) -> None:
+    await runtime.stub.create_chat(
+        "enterprise-formal-customer-a",
+        ["ds-v2"],
+        prompt_config={
+            "web_search_provider": "tavily",
+            "tavily_api_key": "test-key",
+        },
+    )
+    runtime.stub._ignore_doc_scope = True
+    runtime.stub._omit_default_chunk = True
+    runtime.stub._extra_chunks = [
+        {
+            "id": "web-result-1",
+            "document_id": "web-document-1",
+            "document_name": "联网结果",
+            "content": "厂家发布了最新维护公告。",
+            "url": "https://example.com/maintenance",
+        }
+    ]
+    runtime.stub.forced_answer = "厂家维护公告见来源。[ID:0]"
+
+
 def _citation_identity(item: dict) -> dict:
     return {
         key: value
@@ -1363,6 +1386,152 @@ async def test_v2_stream_keeps_business_state_independent_of_citations(runtime):
 
 
 @pytest.mark.asyncio
+async def test_message_level_internet_returns_replayable_web_citation(runtime):
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-WEB",
+        ragflow_id="doc-web",
+        equipment_id="EQ-WEB",
+        fixed_asset_no="FA-WEB",
+    )
+    await _configure_web_stub(runtime)
+    payload = {
+        "clientMessageId": "web-json",
+        "question": "查询厂家最新维护公告",
+        "internetEnabled": True,
+    }
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(client, equipmentId="EQ-WEB")
+        url = f"{BASE}/conversations/{conversation['conversationId']}/messages"
+        response = await client.post(url, json=payload)
+        replay = await client.post(url, json=payload)
+        conflict = await client.post(
+            url,
+            json={
+                "clientMessageId": "web-json",
+                "question": "查询厂家最新维护公告",
+                "internetEnabled": False,
+            },
+        )
+        history = await client.get(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages"
+        )
+        citation = await client.get(
+            f"{BASE}/citations/{response.json()['citations'][0]['citationId']}"
+        )
+
+    assert response.status_code == replay.status_code == 200
+    assert replay.json()["replayed"] is True
+    assert conflict.status_code == 409
+    assert conflict.json()["code"] == "CLIENT_MESSAGE_ID_CONFLICT"
+    assert runtime.stub._last_completion_body["internet"] is True
+    web = response.json()["citations"][0]
+    assert web["sourceType"] == "web"
+    assert web["url"] == "https://example.com/maintenance"
+    assert web["downloadUrl"] is None
+    assert web["downloadExpiresAt"] is None
+    assert citation.status_code == 200
+    assert citation.json() == web
+    assistant = next(
+        item for item in history.json()["items"] if item["role"] == "assistant"
+    )
+    assert assistant["citations"] == [web]
+
+
+@pytest.mark.asyncio
+async def test_message_level_internet_streams_web_citation(runtime):
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-WEB-SSE",
+        ragflow_id="doc-web-sse",
+        equipment_id="EQ-WEB-SSE",
+        fixed_asset_no="FA-WEB-SSE",
+    )
+    await _configure_web_stub(runtime)
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(
+            client, equipmentId="EQ-WEB-SSE"
+        )
+        response = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            headers={"Accept": "text/event-stream"},
+            json={
+                "clientMessageId": "web-sse",
+                "question": "联网查询",
+                "internetEnabled": True,
+            },
+        )
+
+    assert response.status_code == 200
+    assert "event: citation" in response.text
+    assert '"sourceType": "web"' in response.text
+    assert '"url": "https://example.com/maintenance"' in response.text
+    assert runtime.stub._last_completion_body["internet"] is True
+
+
+@pytest.mark.asyncio
+async def test_internet_requires_configured_provider(runtime):
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-WEB-OFF",
+        ragflow_id="doc-web-off",
+        equipment_id="EQ-WEB-OFF",
+        fixed_asset_no="FA-WEB-OFF",
+    )
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(
+            client, equipmentId="EQ-WEB-OFF"
+        )
+        response = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={
+                "clientMessageId": "web-off",
+                "question": "联网查询",
+                "internetEnabled": True,
+            },
+        )
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "WEB_SEARCH_UNAVAILABLE"
+    assert response.json()["message"] == "联网暂不可用，可关闭联网后重试。"
+    assert response.json()["retryable"] is True
+    assert runtime.stub._sessions == {}
+
+
+@pytest.mark.asyncio
+async def test_web_url_does_not_bypass_scope_without_internet(runtime):
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-WEB-SCOPE",
+        ragflow_id="doc-web-scope",
+        equipment_id="EQ-WEB-SCOPE",
+        fixed_asset_no="FA-WEB-SCOPE",
+    )
+    runtime.stub._ignore_doc_scope = True
+    runtime.stub._omit_default_chunk = True
+    runtime.stub._extra_chunks = [
+        {
+            "id": "untrusted-url",
+            "document_id": "outside-scope",
+            "content": "越权内容",
+            "url": "https://example.com/outside",
+        }
+    ]
+    runtime.stub.forced_answer = "越权内容。[ID:0]"
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(
+            client, equipmentId="EQ-WEB-SCOPE"
+        )
+        response = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={"clientMessageId": "web-scope", "question": "普通查询"},
+        )
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "RAGFLOW_SCOPE_VIOLATION"
+
+
+@pytest.mark.asyncio
 async def test_citation_uses_external_fields_and_state_is_independent(runtime):
     document = await _insert_document(
         runtime.db,
@@ -1904,11 +2073,55 @@ async def test_same_conversation_followup_reuses_ragflow_session(runtime):
     assert roles.count("user") == 2
     assert roles.count("assistant") == 2
     async with runtime.db.execute(
-        "SELECT ragflow_session_id FROM ext_v2_conversation WHERE conversation_id=?",
+        "SELECT ragflow_chat_id, ragflow_session_id FROM ext_v2_conversation WHERE conversation_id=?",
         (conversation_id,),
     ) as cursor:
         row = await cursor.fetchone()
     assert row["ragflow_session_id"]
+    sessions = list(runtime.stub._sessions.values())
+    assert len(sessions) == 1
+    assert sessions[0]["id"] == row["ragflow_session_id"]
+    assert sessions[0]["chat_id"] == row["ragflow_chat_id"]
+    assert sessions[0]["name"].startswith("eam-biz-user-001-")
+    assert conversation_id in sessions[0]["name"]
+
+
+@pytest.mark.asyncio
+async def test_cleared_session_is_recreated_with_a_fresh_name(runtime):
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-RESET",
+        ragflow_id="doc-reset",
+        equipment_id="EQ-RESET",
+        fixed_asset_no="FA-RESET",
+    )
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(client, equipmentId="EQ-RESET")
+        conversation_id = conversation["conversationId"]
+        first = await client.post(
+            f"{BASE}/conversations/{conversation_id}/messages",
+            json={"clientMessageId": "reset-1", "question": "第一轮"},
+        )
+        assert first.status_code == 200
+        first_session = next(iter(runtime.stub._sessions))
+        await runtime.db.execute(
+            "UPDATE ext_v2_conversation SET ragflow_session_id=NULL WHERE conversation_id=?",
+            (conversation_id,),
+        )
+        await runtime.db.commit()
+        second = await client.post(
+            f"{BASE}/conversations/{conversation_id}/messages",
+            json={"clientMessageId": "reset-2", "question": "压缩后的新轮次"},
+        )
+
+    assert second.status_code == 200
+    assert len(runtime.stub._sessions) == 2
+    second_session = runtime.stub._last_completion_body["session_id"]
+    assert second_session != first_session
+    assert all(
+        conversation_id in session["name"]
+        for session in runtime.stub._sessions.values()
+    )
 
 
 @pytest.mark.asyncio
@@ -1925,6 +2138,11 @@ async def test_conversation_is_isolated_across_business_users(runtime):
             client, equipmentId="EQ-ISO"
         )
         conversation_id = conversation["conversationId"]
+        first_ask = await client.post(
+            f"{BASE}/conversations/{conversation_id}/messages",
+            json={"clientMessageId": "iso-first", "question": "用户一的问题"},
+        )
+        assert first_ask.status_code == 200
 
     other = UserPrincipal(
         tenant_id="customer-a",
@@ -1944,15 +2162,35 @@ async def test_conversation_is_isolated_across_business_users(runtime):
             f"{BASE}/conversations/{conversation_id}/messages",
             json={"clientMessageId": "iso-ask", "question": "不应可见"},
         )
+        other_conversation = await _create_conversation(
+            client, equipmentId="EQ-ISO"
+        )
+        other_ask = await client.post(
+            f"{BASE}/conversations/{other_conversation['conversationId']}/messages",
+            json={"clientMessageId": "iso-second", "question": "用户二的问题"},
+        )
         listing = await client.get(f"{BASE}/conversations")
 
     assert detail.status_code == 404
     assert detail.json()["code"] == "CONVERSATION_NOT_FOUND"
     assert ask.status_code == 404
+    assert other_ask.status_code == 200
     assert all(
         item["conversationId"] != conversation_id
         for item in listing.json()["items"]
     )
+    async with runtime.db.execute(
+        """SELECT conversation_id, ragflow_session_id
+           FROM ext_v2_conversation
+           WHERE conversation_id IN (?, ?)""",
+        (conversation_id, other_conversation["conversationId"]),
+    ) as cursor:
+        rows = await cursor.fetchall()
+    assert len(rows) == 2
+    assert len({row["ragflow_session_id"] for row in rows}) == 2
+    names = {session["name"] for session in runtime.stub._sessions.values()}
+    assert any(name.startswith("eam-biz-user-001-") for name in names)
+    assert any(name.startswith("eam-biz-user-002-") for name in names)
 
 
 @pytest.mark.asyncio

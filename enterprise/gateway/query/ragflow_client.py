@@ -221,6 +221,22 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
         )
         return self._require_ok(result)
 
+    async def create_session(
+        self,
+        chat_id: str,
+        name: str,
+        request_id: str | None = None,
+    ) -> dict:
+        rid = request_id or self._new_request_id()
+        result = await self._run_sync(
+            self._sync_request,
+            "POST",
+            f"/api/v1/chats/{chat_id}/sessions",
+            rid,
+            json_data={"name": name},
+        )
+        return self._require_ok(result)
+
     async def chat_completion(
         self,
         chat_id: str | None,
@@ -229,6 +245,7 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
         doc_ids: list[str] | None = None,
         request_id: str | None = None,
         files: list[dict[str, Any]] | list[str] | None = None,
+        internet: bool = False,
     ) -> dict:
         rid = request_id or self._new_request_id()
         body: dict[str, Any] = {
@@ -247,6 +264,8 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
             # RAGFlow expects attachment descriptors
             # ({id, name, mime_type, created_by}), not bare file ids.
             body["files"] = list(files)
+        if internet:
+            body["internet"] = True
         _trace_doc_ids(rid, doc_ids)
         result = await self._run_sync(
             self._sync_request,
@@ -405,6 +424,7 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
         doc_ids: list[str] | None = None,
         request_id: str | None = None,
         files: list[dict[str, Any]] | list[str] | None = None,
+        internet: bool = False,
     ):
         """Stream RAGFlow chat completion over the public SSE API.
 
@@ -425,6 +445,8 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
             body["doc_ids"] = ",".join(doc_ids)
         if files:
             body["files"] = list(files)
+        if internet:
+            body["internet"] = True
         _trace_doc_ids(rid, doc_ids)
         timeout = httpx.Timeout(self.timeout, connect=self.timeout)
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -567,6 +589,25 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         self._chats[chat["id"]] = chat
         return {"code": 0, "data": chat}
 
+    async def create_session(
+        self,
+        chat_id: str,
+        name: str,
+        request_id: str | None = None,
+    ) -> dict:
+        del request_id
+        if chat_id not in self._chats:
+            raise RAGFlowAPIError("Stub: chat not found", 404)
+        session = {
+            "id": f"session-{uuid.uuid4().hex[:12]}",
+            "chat_id": chat_id,
+            "name": name,
+            "messages": [],
+            "reference": [],
+        }
+        self._sessions[session["id"]] = session
+        return {"code": 0, "data": dict(session)}
+
     async def delete_chat(
         self,
         chat_id: str,
@@ -649,6 +690,7 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         doc_ids: list[str] | None = None,
         request_id: str | None = None,
         files: list[dict[str, Any]] | list[str] | None = None,
+        internet: bool = False,
     ) -> dict:
         turn_id = f"msg-{uuid.uuid4().hex[:12]}"
         base_chunk = {
@@ -706,6 +748,7 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
             "session_id": session_id,
             "doc_ids": ",".join(doc_ids) if doc_ids else None,
             "files": list(files) if files else [],
+            "internet": internet,
         }
         session_id = session_id or "stub-session"
         session = self._sessions.setdefault(
@@ -760,6 +803,7 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         doc_ids: list[str] | None = None,
         request_id: str | None = None,
         files: list[dict[str, Any]] | list[str] | None = None,
+        internet: bool = False,
     ):
         if self._stream_fail_after == 0:
             completion = await self.chat_completion(
@@ -769,6 +813,7 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
                 doc_ids=doc_ids,
                 request_id=request_id,
                 files=files,
+                internet=internet,
             )
             data = completion.get("data", {})
             if isinstance(data, dict) and data.get("answer"):

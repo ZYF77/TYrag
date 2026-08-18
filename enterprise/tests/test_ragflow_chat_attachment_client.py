@@ -98,7 +98,27 @@ async def test_chat_completion_omits_chat_id_when_none(monkeypatch):
         }],
     )
     assert "chat_id" not in captured["json"]
+    assert "internet" not in captured["json"]
     assert captured["json"]["files"][0]["mime_type"] == "image/png"
+
+
+@pytest.mark.asyncio
+async def test_create_named_session_uses_public_chat_api(monkeypatch):
+    client = RAGFlowQueryClient(base_url="http://ragflow.test", api_key="k")
+    captured: dict = {}
+
+    def fake_sync(method, path, request_id, json_data=None, files=None):
+        captured.update(method=method, path=path, json=json_data)
+        return {"code": 0, "data": {"id": "session-1", "name": json_data["name"]}}
+
+    monkeypatch.setattr(client, "_sync_request", fake_sync)
+    result = await client.create_session("chat-1", "eam-user-conversation-run")
+    assert captured == {
+        "method": "POST",
+        "path": "/api/v1/chats/chat-1/sessions",
+        "json": {"name": "eam-user-conversation-run"},
+    }
+    assert result["data"]["id"] == "session-1"
 
 
 
@@ -119,9 +139,12 @@ async def test_chat_completion_forwards_file_descriptors(monkeypatch):
         "mime_type": "image/png",
         "created_by": "tenant-1",
     }
-    await client.chat_completion("chat-1", "see image", files=[desc])
+    await client.chat_completion(
+        "chat-1", "see image", files=[desc], internet=True
+    )
     assert captured["path"] == "/api/v1/chat/completions"
     assert captured["json"]["files"] == [desc]
+    assert captured["json"]["internet"] is True
     assert not isinstance(captured["json"]["files"][0], str)
 
 
@@ -171,9 +194,10 @@ async def test_chat_completion_stream_forwards_file_descriptors(monkeypatch):
     }
     payloads = []
     async for payload in client.chat_completion_stream(
-        "chat-1", "see image", files=[desc]
+        "chat-1", "see image", files=[desc], internet=True
     ):
         payloads.append(payload)
     assert captured["json"]["files"] == [desc]
+    assert captured["json"]["internet"] is True
     assert captured["json"]["stream"] is True
     assert payloads and payloads[-1]["data"] is True

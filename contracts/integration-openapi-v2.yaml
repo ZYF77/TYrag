@@ -1,9 +1,11 @@
 openapi: 3.1.0
 info:
   title: TYrag External Integration API
-  version: 2.6.0
+  version: 2.7.0
   description: >-
-    Frozen external contract for the Equipment Management System. Version 2.6
+    Frozen external contract for the Equipment Management System. Version 2.7
+    additively accepts per-message `internetEnabled` and returns web results in
+    the existing citations array with `sourceType: web`. Version 2.6
     additively accepts Office Open XML message attachments
     (application/vnd.openxmlformats-officedocument.wordprocessingml.document
     and application/vnd.openxmlformats-officedocument.spreadsheetml.sheet) on
@@ -881,6 +883,7 @@ components:
       properties:
         clientMessageId: { type: string, minLength: 1, maxLength: 128 }
         question: { type: string, minLength: 1, maxLength: 8000 }
+        internetEnabled: { type: boolean, default: false }
     SuggestionMessageRequest:
       type: object
       additionalProperties: false
@@ -889,6 +892,7 @@ components:
         clientMessageId: { type: string, minLength: 1, maxLength: 128 }
         suggestionId: { type: string, minLength: 1, maxLength: 128 }
         contextVersion: { type: integer, minimum: 0 }
+        internetEnabled: { type: boolean, default: false }
     CreateMessageRequest:
       oneOf:
         - $ref: '#/components/schemas/QuestionMessageRequest'
@@ -900,6 +904,7 @@ components:
       properties:
         clientMessageId: { type: string, minLength: 1, maxLength: 128 }
         question: { type: string, maxLength: 8000 }
+        internetEnabled: { type: boolean, default: false }
     CreateMessageMultipartRequest:
       type: object
       additionalProperties: false
@@ -944,7 +949,7 @@ components:
         - downloadExpiresAt
       properties:
         citationId: { type: string }
-        sourceType: { type: string, enum: [document, business_record, timeseries] }
+        sourceType: { type: string, enum: [document, business_record, timeseries, web] }
         title: { type: string }
         externalDocumentId: { type: [string, 'null'] }
         sourceVersionId: { type: [string, 'null'] }
@@ -954,8 +959,12 @@ components:
         excerpt: { type: [string, 'null'] }
         recordType: { type: [string, 'null'] }
         recordId: { type: [string, 'null'] }
-        downloadUrl: { type: string, format: uri }
-        downloadExpiresAt: { type: string, format: date-time }
+        url:
+          type: [string, 'null']
+          format: uri
+          description: Present for web citations; clients must not attach Gateway credentials when opening it.
+        downloadUrl: { type: [string, 'null'], format: uri }
+        downloadExpiresAt: { type: [string, 'null'], format: date-time }
     Message:
       type: object
       additionalProperties: false

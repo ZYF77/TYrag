@@ -1,7 +1,9 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { http, HttpResponse } from 'msw';
 import { describe, expect, it } from 'vitest';
 import { IntegrationHarnessPage } from '../pages/IntegrationHarnessPage';
+import { server } from '../test-setup';
 
 describe('IntegrationHarnessPage', () => {
   it('links to /console after JWT can be injected on this page', () => {
@@ -153,7 +155,53 @@ describe('IntegrationHarnessPage', () => {
     await screen.findByText('/enterprise/api/v2/conversations');
     expect(panel.textContent).toContain('POST');
     expect(panel.textContent).toContain('/enterprise/api/v3/documents');
+    expect(screen.getByTestId('runtime-total').textContent).toBe('3');
+    expect(screen.getByTestId('runtime-failures').textContent).toBe('1');
+    expect(screen.getByLabelText('接口类型')).toBeTruthy();
+    expect(screen.getByLabelText('业务场景')).toBeTruthy();
+    expect(screen.getByLabelText('HTTP 方法')).toBeTruthy();
+    expect(screen.getByLabelText('失败原因或故障码')).toBeTruthy();
+    expect(screen.getByLabelText('请求方或调用方')).toBeTruthy();
+
+    await user.selectOptions(screen.getByLabelText('业务场景'), 'feed');
+    expect(screen.getByTestId('runtime-total').textContent).toBe('1');
+    expect(screen.queryByText('/enterprise/api/v2/conversations')).toBeNull();
+    await user.click(screen.getByRole('button', { name: '重置筛选' }));
+    await user.type(screen.getByLabelText('失败原因或故障码'), 'VALIDATION_ERROR');
+    expect(screen.getByTestId('runtime-total').textContent).toBe('1');
+    expect(screen.getByText('/enterprise/api/v2/conversations/conv-test/messages')).toBeTruthy();
     expect(panel.textContent).not.toContain('should-not-appear');
+  });
+
+  it('pages filtered runtime logs while keeping newest requests first', async () => {
+    server.use(
+      http.get('/enterprise/api/v1/diagnostics/http-log', () => HttpResponse.json({
+        items: Array.from({ length: 21 }, (_, index) => ({
+          id: String(21 - index),
+          ts: new Date(Date.now() - index * 1_000).toISOString(),
+          direction: 'inbound',
+          kind: 'http',
+          method: 'GET',
+          path: `/runtime/${index}`,
+          query: '',
+          caller: 'local-test',
+          http_status: 200,
+          duration_ms: index,
+          body: null,
+          response_body: { ok: true },
+          streamed: false,
+        })),
+      })),
+    );
+    const user = userEvent.setup();
+    render(<IntegrationHarnessPage />);
+    await user.click(screen.getByRole('button', { name: 'HTTP 日志' }));
+    await screen.findByText('/runtime/0');
+    await user.selectOptions(screen.getByLabelText('每页条数'), '10');
+    expect(screen.queryByText('/runtime/10')).toBeNull();
+    await user.click(screen.getByRole('button', { name: '下一页' }));
+    expect(await screen.findByText('/runtime/10')).toBeTruthy();
+    expect(screen.queryByText('/runtime/0')).toBeNull();
   });
 
   it('shows the transient attachment expiry returned by Gateway', async () => {

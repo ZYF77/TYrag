@@ -93,6 +93,9 @@ errors:
   - code: RAGFLOW_UNAVAILABLE
     http_status: 503
     retryable: true
+  - code: WEB_SEARCH_UNAVAILABLE
+    http_status: 503
+    retryable: true
   - code: VALIDATION_ERROR
     http_status: 422
     retryable: false

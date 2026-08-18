@@ -113,7 +113,7 @@ def test_openapi_23_declares_multipart_and_history_metadata():
     spec = yaml.safe_load(
         (ROOT / "contracts" / "integration-openapi-v2.yaml").read_text(encoding="utf-8")
     )
-    assert spec["info"]["version"] == "2.6.0"
+    assert spec["info"]["version"] == "2.7.0"
     post = spec["paths"]["/conversations/{conversationId}/messages"]["post"]
     assert "application/json" in post["requestBody"]["content"]
     assert "multipart/form-data" in post["requestBody"]["content"]
@@ -237,6 +237,14 @@ async def test_multipart_png_only_enriches_and_deletes_ragflow_file(runtime):
 @pytest.mark.asyncio
 async def test_multipart_txt_history_keeps_filename(runtime):
     await _seed_doc(runtime.db)
+    await runtime.stub.create_chat(
+        "enterprise-formal-customer-a",
+        ["ds-v2"],
+        prompt_config={
+            "web_search_provider": "tavily",
+            "tavily_api_key": "test-key",
+        },
+    )
     async with _client(runtime) as client:
         created = await client.post(f"{BASE}/conversations", json={"equipmentId": "EQ-ATT"})
         conversation_id = created.json()["conversationId"]
@@ -244,7 +252,11 @@ async def test_multipart_txt_history_keeps_filename(runtime):
             f"{BASE}/conversations/{conversation_id}/messages",
             data={
                 "metadata": json.dumps(
-                    {"clientMessageId": "txt-1", "question": "看看这个说明"}
+                    {
+                        "clientMessageId": "txt-1",
+                        "question": "看看这个说明",
+                        "internetEnabled": True,
+                    }
                 )
             },
             files={"files": ("note.txt", b"hello txt", "text/plain")},
@@ -256,6 +268,7 @@ async def test_multipart_txt_history_keeps_filename(runtime):
     assert user["attachments"][0]["fileName"] == "note.txt"
     body = runtime.stub._last_completion_body
     assert body is not None
+    assert body["internet"] is True
     files = body.get("files") or []
     assert files
     assert files[0]["mime_type"] == "text/plain"

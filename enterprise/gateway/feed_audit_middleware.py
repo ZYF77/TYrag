@@ -91,6 +91,21 @@ def _response_payload(content_type: str, chunks: list[bytes]) -> tuple[object | 
     return _parse_body(_clip_chunks(chunks)), False
 
 
+def _request_caller(headers: dict[str, str], body: object, client: object) -> str:
+    if isinstance(body, dict):
+        for name in ("sourceSystem", "source_system", "caller", "callerId"):
+            value = body.get(name)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    for name in ("X-TY-Key-Id", "X-Forwarded-For", "X-Real-IP"):
+        value = _header(headers, name).strip()
+        if value:
+            return value.split(",", 1)[0].strip()
+    if isinstance(client, (tuple, list)) and client:
+        return str(client[0])
+    return ""
+
+
 class FeedRegisterAuditMiddleware:
     """Kept name for existing imports; audits register + inquiry + live HTTP log."""
 
@@ -172,6 +187,7 @@ class FeedRegisterAuditMiddleware:
             if audit_body is not None:
                 request_body = audit_body
             response_body, streamed = _response_payload(content_type, response_chunks)
+            parsed_request_body = _parse_body(request_body) if request_body else None
             if register:
                 write_feed_register_audit(
                     method="POST",
@@ -210,7 +226,8 @@ class FeedRegisterAuditMiddleware:
                     "query": query,
                     "http_status": status_code,
                     "duration_ms": duration_ms,
-                    "body": _parse_body(request_body) if request_body else None,
+                    "caller": _request_caller(headers, parsed_request_body, scope.get("client")),
+                    "body": parsed_request_body,
                     "response_body": response_body,
                     "streamed": streamed,
                 }

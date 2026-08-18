@@ -412,7 +412,7 @@ def test_p1_callback_and_attachment_invariants_are_explicit():
 
 def test_v21_attachment_surface_and_security_are_frozen():
     _, spec = _contract()
-    assert spec["info"]["version"] == "2.6.0"
+    assert spec["info"]["version"] == "2.7.0"
     detail = spec["components"]["schemas"]["ConversationDetail"]
     assert "suggestions" in detail["required"]
     assert "contextCompacted" in detail["required"]
@@ -441,7 +441,7 @@ def test_v21_attachment_surface_and_security_are_frozen():
 
 def test_v24_citation_file_ticket_download_is_frozen():
     _, spec = _contract()
-    assert spec["info"]["version"] == "2.6.0"
+    assert spec["info"]["version"] == "2.7.0"
     citation = spec["components"]["schemas"]["Citation"]
     assert {"downloadUrl", "downloadExpiresAt"} <= set(citation["required"])
     assert "imageId" not in citation["properties"]
@@ -456,7 +456,7 @@ def test_v24_citation_file_ticket_download_is_frozen():
 
 def test_v25_reasoning_is_optional_on_message_and_run():
     _, spec = _contract()
-    assert spec["info"]["version"] == "2.6.0"
+    assert spec["info"]["version"] == "2.7.0"
     message = spec["components"]["schemas"]["Message"]
     run = spec["components"]["schemas"]["MessageRunResult"]
     assert message["properties"]["reasoning"]["type"] == ["string", "null"]
@@ -468,7 +468,7 @@ def test_v25_reasoning_is_optional_on_message_and_run():
 
 def test_v26_message_attachment_office_mime_types_are_declared():
     _, spec = _contract()
-    assert spec["info"]["version"] == "2.6.0"
+    assert spec["info"]["version"] == "2.7.0"
     attachment = spec["components"]["schemas"]["MessageAttachment"]
     assert set(attachment["properties"]["mediaType"]["enum"]) == {
         "image/jpeg",
@@ -485,6 +485,26 @@ def test_v26_message_attachment_office_mime_types_are_declared():
     assert ".doc/.xls" in description or "PowerPoint" in description
 
 
+def test_v27_message_level_internet_and_web_citations_are_declared():
+    _, spec = _contract()
+    assert spec["info"]["version"] == "2.7.0"
+    schemas = spec["components"]["schemas"]
+    for name in (
+        "QuestionMessageRequest",
+        "SuggestionMessageRequest",
+        "MessageAttachmentMetadata",
+    ):
+        assert schemas[name]["properties"]["internetEnabled"] == {
+            "type": "boolean",
+            "default": False,
+        }
+    citation = schemas["Citation"]
+    assert "web" in citation["properties"]["sourceType"]["enum"]
+    assert citation["properties"]["url"]["type"] == ["string", "null"]
+    assert citation["properties"]["downloadUrl"]["type"] == ["string", "null"]
+    assert citation["properties"]["downloadExpiresAt"]["type"] == ["string", "null"]
+
+
 def test_error_code_http_statuses_match_the_v2_freeze():
     errors = _load_document(ROOT / "contracts" / "error-codes.yaml")["errors"]
     by_code = {item["code"]: item["http_status"] for item in errors}
@@ -498,6 +518,7 @@ def test_error_code_http_statuses_match_the_v2_freeze():
     ):
         assert by_code[code] == 409
     assert by_code["ATTACHMENT_FORBIDDEN"] == 403
+    assert by_code["WEB_SEARCH_UNAVAILABLE"] == 503
     assert by_code["ATTACHMENT_NOT_FOUND"] == 404
     assert by_code["ATTACHMENT_EXPIRED"] == 410
     assert by_code["ATTACHMENT_DOWNLOAD_LIMIT"] == 410

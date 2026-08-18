@@ -200,6 +200,21 @@ export const handlers = [
     HttpResponse.json({
       items: [
         {
+          id: '3',
+          ts: new Date(Date.now() + 1_000).toISOString(),
+          direction: 'inbound',
+          kind: 'inquiry.http',
+          method: 'POST',
+          path: '/enterprise/api/v2/conversations/conv-test/messages',
+          query: '',
+          caller: 'demo-user',
+          http_status: 422,
+          duration_ms: 12,
+          body: { clientMessageId: 'msg-invalid', faultCode: 'E-104' },
+          response_body: { code: 'VALIDATION_ERROR', message: '问题内容不能为空' },
+          streamed: false,
+        },
+        {
           id: '2',
           ts: new Date().toISOString(),
           direction: 'inbound',
@@ -207,6 +222,7 @@ export const handlers = [
           method: 'GET',
           path: '/enterprise/api/v2/conversations',
           query: '',
+          caller: 'demo-user',
           http_status: 200,
           duration_ms: 18,
           body: null,
@@ -221,6 +237,7 @@ export const handlers = [
           method: 'POST',
           path: '/enterprise/api/v3/documents',
           query: '',
+          caller: 'equipment-system',
           http_status: 202,
           duration_ms: 41,
           body: { eventId: 'evt-mock-1', fileName: 'manual.pdf', token: '<redacted>' },

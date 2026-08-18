@@ -7,6 +7,7 @@ import asyncio
 import re
 import uuid
 from typing import Any, AsyncIterator
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -52,9 +53,9 @@ from enterprise.gateway.query.formal_router import (
     FormalScopeResolver,
     NO_RELIABLE_EVIDENCE_ANSWER,
     _FormalQueryError,
-    _build_citations,
     _citation_document_allowed,
     _citation_document_for_principal,
+    _chunk_to_citation,
     _conversation_lock,
     _ensure_chat,
     _ensure_chat_info,
@@ -102,6 +103,7 @@ def _error(status_code: int, code: str, message: str) -> JSONResponse:
             "requestId": str(uuid.uuid4()),
             "retryable": code in {
                 "RAGFLOW_UNAVAILABLE",
+                "WEB_SEARCH_UNAVAILABLE",
                 "ASSET_REGISTRY_UNAVAILABLE",
                 "AUTH_REPLAY_STORE_UNAVAILABLE",
             },
@@ -130,6 +132,25 @@ def _citation_download_url(request: Request, citation_id: str, token: str) -> st
     )
 
 
+def _valid_web_url(value: Any) -> str | None:
+    url = str(value or "").strip()
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return None
+    return url if parsed.scheme in {"http", "https"} and parsed.hostname else None
+
+
+async def _citation_allowed(
+    db,
+    principal: UserPrincipal,
+    citation: dict,
+) -> bool:
+    if citation.get("sourceType") == "web":
+        return _valid_web_url(citation.get("url")) is not None
+    return await _citation_document_allowed(db, principal, citation)
+
+
 async def _project_citations(
     db,
     citations: list[dict],
@@ -138,6 +159,27 @@ async def _project_citations(
 ) -> list[dict]:
     projected: list[dict] = []
     for item in citations:
+        if item.get("sourceType") == "web":
+            if _valid_web_url(item.get("url")):
+                projected.append(
+                    {
+                        "citationId": item["citationId"],
+                        "sourceType": "web",
+                        "title": item.get("title") or "",
+                        "externalDocumentId": None,
+                        "sourceVersionId": None,
+                        "pageNo": None,
+                        "bbox": None,
+                        "assetId": None,
+                        "excerpt": item.get("excerpt"),
+                        "recordType": None,
+                        "recordId": None,
+                        "url": item["url"],
+                        "downloadUrl": None,
+                        "downloadExpiresAt": None,
+                    }
+                )
+            continue
         ticket = await issue_citation_file_ticket(
             db, citation=item, principal=principal
         )
@@ -288,6 +330,7 @@ class CreateMessageRequest(StrictModel):
     question: str | None = Field(default=None, min_length=1, max_length=8000)
     suggestionId: str | None = Field(default=None, min_length=1, max_length=128)
     contextVersion: int | None = Field(default=None, ge=0)
+    internetEnabled: bool = False
 
     @model_validator(mode="after")
     def exactly_one_branch(self):
@@ -312,6 +355,7 @@ class MessageAttachmentMetadata(StrictModel):
     question: str | None = Field(default=None, max_length=8000)
     suggestionId: str | None = Field(default=None, min_length=1, max_length=128)
     contextVersion: int | None = Field(default=None, ge=0)
+    internetEnabled: bool = False
 
 
 def _conversation_detail(row: dict) -> dict:
@@ -518,7 +562,7 @@ async def list_messages(
         citations = [
             citation
             for citation in item.get("citations", [])
-            if await _citation_document_allowed(db, principal, citation)
+            if await _citation_allowed(db, principal, citation)
         ]
         authorized_items.append(
             {
@@ -615,9 +659,119 @@ def _external_citations(
     message_id: str,
     answer: str = "",
     status: str = "completed",
+    internet_enabled: bool = False,
 ) -> list[dict]:
     cited = select_cited_chunks(answer, chunks, status)
-    return _build_citations(cited, docs_by_internal_id, message_id)
+    citations: list[dict] = []
+    for index, chunk in enumerate(cited):
+        document_id = chunk.get("document_id")
+        doc = docs_by_internal_id.get(document_id)
+        if doc is not None:
+            citations.append(_chunk_to_citation(chunk, index, doc, message_id))
+            continue
+        url = _valid_web_url(chunk.get("url")) if internet_enabled else None
+        if not url:
+            raise _FormalQueryError(
+                "RAGFLOW_SCOPE_VIOLATION",
+                502,
+                "RAGFlow retrieval returned an out-of-scope document",
+            )
+        chunk_id = str(chunk.get("id") or chunk.get("chunk_id") or "")
+        citation_id = chunk_id or f"web-{index}"
+        if message_id:
+            citation_id = f"{citation_id}-{message_id[:8]}"
+        citations.append(
+            {
+                "citationId": citation_id,
+                "sourceType": "web",
+                "title": str(
+                    chunk.get("document_name")
+                    or chunk.get("docnm_kwd")
+                    or chunk.get("title")
+                    or url
+                ),
+                "externalDocumentId": None,
+                "sourceVersionId": None,
+                "pageNo": None,
+                "bbox": None,
+                "assetId": None,
+                "excerpt": chunk.get("content") or chunk.get("content_with_weight"),
+                "recordType": None,
+                "recordId": None,
+                "url": url,
+                "downloadUrl": None,
+                "downloadExpiresAt": None,
+            }
+        )
+    return citations
+
+
+def _web_search_configured(chat: dict) -> bool:
+    prompt_config = chat.get("prompt_config") or {}
+    provider = prompt_config.get("web_search_provider", "tavily")
+    key_name = {
+        "tavily": "tavily_api_key",
+        "querit": "querit_api_key",
+    }.get(provider)
+    value = prompt_config.get(key_name) if key_name else None
+    return isinstance(value, str) and bool(value.strip())
+
+
+async def _ensure_ragflow_session(
+    db,
+    principal: UserPrincipal,
+    conversation: dict,
+    client,
+    chat_id: str,
+    run_id: str,
+) -> str:
+    existing = conversation.get("ragflow_session_id")
+    if existing:
+        return str(existing)
+    lock = await _conversation_lock(conversation["conversation_id"])
+    async with lock:
+        current = await _owned_conversation(
+            db, principal, conversation["conversation_id"]
+        )
+        existing = current.get("ragflow_session_id") if current else None
+        if existing:
+            conversation.update(current)
+            return str(existing)
+        name = (
+            f"eam-{principal.business_user_id[:128]}-"
+            f"{conversation['conversation_id']}-{run_id}"
+        )
+        created = await client.create_session(chat_id, name)
+        data = created.get("data") if isinstance(created, dict) else None
+        session_id = str(data.get("id") or "") if isinstance(data, dict) else ""
+        if not session_id:
+            raise RAGFlowAPIError("Session id missing after create", 502)
+        cursor = await db.execute(
+            """UPDATE ext_v2_conversation
+               SET ragflow_chat_id=?, ragflow_session_id=?
+               WHERE conversation_id=? AND tenant_id=? AND business_user_id=?
+                 AND ragflow_session_id IS NULL""",
+            (
+                chat_id,
+                session_id,
+                conversation["conversation_id"],
+                principal.tenant_id,
+                principal.business_user_id,
+            ),
+        )
+        await db.commit()
+        if cursor.rowcount != 1:
+            # ponytail: the conditional write prevents split history; add a
+            # durable creation claim only if parallel first writes are supported.
+            current = await _owned_conversation(
+                db, principal, conversation["conversation_id"]
+            )
+            session_id = str((current or {}).get("ragflow_session_id") or "")
+            if not session_id:
+                raise RAGFlowAPIError("Session mapping could not be saved", 502)
+        conversation["ragflow_chat_id"] = chat_id
+        conversation["ragflow_session_id"] = session_id
+        return session_id
 
 
 def _request_hash(
@@ -866,16 +1020,32 @@ async def _execute_json_run(
             if not scope.is_empty:
                 client = client or _query_client()
                 chat_id, chat = await _ensure_chat_info(client, principal, scope)
+                if req.internetEnabled and not _web_search_configured(chat):
+                    raise _FormalQueryError(
+                        "WEB_SEARCH_UNAVAILABLE",
+                        503,
+                        "Web search is not configured",
+                    )
+                session_id = await _ensure_ragflow_session(
+                    db,
+                    principal,
+                    conversation,
+                    client,
+                    chat_id,
+                    run["run_id"],
+                )
                 files = completion_files(
                     pending, vision=chat_is_vision_capable(chat)
                 )
                 completion_kwargs: dict[str, Any] = {}
                 if files:
                     completion_kwargs["files"] = files
+                if req.internetEnabled:
+                    completion_kwargs["internet"] = True
                 completion = await client.chat_completion(
                     chat_id,
                     _ragflow_question(conversation, question),
-                    session_id=conversation.get("ragflow_session_id"),
+                    session_id=session_id,
                     doc_ids=list(scope.document_ids),
                     **completion_kwargs,
                 )
@@ -892,17 +1062,11 @@ async def _execute_json_run(
                     assistant_message_id,
                     answer=answer,
                     status=status,
+                    internet_enabled=req.internetEnabled,
                 )
                 if status == "no_reliable_evidence" and not answer:
                     answer = NO_RELIABLE_EVIDENCE_ANSWER
                 answer = _with_equipment_hint(conversation, answer, status)
-                await db.execute(
-                    """UPDATE ext_v2_conversation
-                       SET ragflow_chat_id=?, ragflow_session_id=COALESCE(?, ragflow_session_id)
-                       WHERE conversation_id=? AND tenant_id=? AND business_user_id=?""",
-                    (chat_id, data.get("session_id"), conversation["conversation_id"], principal.tenant_id, principal.business_user_id),
-                )
-                await db.commit()
             await v2_store.add_message(
                 db,
                 message_id=assistant_message_id,
@@ -998,14 +1162,28 @@ async def _stream_run_events(
         if not scope.is_empty:
             client = client or _query_client()
             chat_id, chat = await _ensure_chat_info(client, principal, scope)
-            session_id = conversation.get("ragflow_session_id")
-            ragflow_session_id = session_id
+            if req.internetEnabled and not _web_search_configured(chat):
+                raise _FormalQueryError(
+                    "WEB_SEARCH_UNAVAILABLE",
+                    503,
+                    "Web search is not configured",
+                )
+            session_id = await _ensure_ragflow_session(
+                db,
+                principal,
+                conversation,
+                client,
+                chat_id,
+                run["run_id"],
+            )
             files = completion_files(
                 pending, vision=chat_is_vision_capable(chat)
             )
             stream_kwargs: dict[str, Any] = {}
             if files:
                 stream_kwargs["files"] = files
+            if req.internetEnabled:
+                stream_kwargs["internet"] = True
             async for payload in client.chat_completion_stream(
                 chat_id,
                 _ragflow_question(conversation, question),
@@ -1021,7 +1199,6 @@ async def _stream_run_events(
                 explicit_status = data.get("status")
                 if explicit_status in {"completed", "no_reliable_evidence", "failed"}:
                     upstream_status = explicit_status
-                ragflow_session_id = data.get("session_id") or ragflow_session_id
                 reference = data.get("reference") or {}
                 raw_chunks = reference.get("chunks", []) if isinstance(reference, dict) else []
                 chunks.extend(item for item in raw_chunks if isinstance(item, dict))
@@ -1055,13 +1232,6 @@ async def _stream_run_events(
                     split = split_assistant_output(str(delta))
                     accumulated = split.answer
                     accumulated_reasoning = split.reasoning
-                await db.execute(
-                    """UPDATE ext_v2_conversation
-                       SET ragflow_chat_id=?, ragflow_session_id=COALESCE(?, ragflow_session_id)
-                       WHERE conversation_id=? AND tenant_id=? AND business_user_id=?""",
-                    (chat_id, ragflow_session_id, conversation_id, principal.tenant_id, principal.business_user_id),
-                )
-                await db.commit()
             status = force_abstain_outcome(
                 accumulated,
                 upstream_status
@@ -1077,6 +1247,7 @@ async def _stream_run_events(
                 assistant_message_id,
                 answer=accumulated,
                 status=status,
+                internet_enabled=req.internetEnabled,
             )
             answer = accumulated
             reasoning = public_reasoning(accumulated_reasoning)
@@ -1313,6 +1484,7 @@ async def _parse_multipart_message(
         req = CreateMessageRequest.model_construct(
             clientMessageId=meta.clientMessageId,
             question=question,
+            internetEnabled=meta.internetEnabled,
         )
         return req, pending
     finally:
@@ -1445,7 +1617,7 @@ async def get_citation(
     )
     if not citation:
         return _error(404, "CITATION_NOT_FOUND", "Citation not found")
-    if not await _citation_document_allowed(db, principal, citation):
+    if not await _citation_allowed(db, principal, citation):
         return _error(403, "ACL_DENIED", "Access denied")
     projected = await _project_citations(db, [citation], request, principal)
     return projected[0]

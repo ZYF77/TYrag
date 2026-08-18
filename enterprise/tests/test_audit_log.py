@@ -19,6 +19,7 @@ from enterprise.gateway.auth.middleware import require_user_principal
 from enterprise.gateway.auth.service_auth import require_service_principal
 from enterprise.gateway.auth.service_principal import ServicePrincipal
 from enterprise.gateway.auth.user_principal import UserPrincipal
+from enterprise.gateway.feed_audit_middleware import _request_caller
 from enterprise.gateway.callback_delivery import (
     CallbackDeliveryWorker,
     CallbackEndpoint,
@@ -39,6 +40,18 @@ def test_redact_does_not_keep_secret_values():
     assert redacted["secret"] == "<redacted>"
     assert redacted["nested"]["hmacSecret"] == "<redacted>"
     assert redacted["nested"]["fileName"] == "a.pdf"
+
+
+def test_request_caller_prefers_business_source_then_safe_request_identity():
+    assert _request_caller(
+        {"X-TY-Key-Id": "producer-key"},
+        {"sourceSystem": "EAM"},
+        ("127.0.0.1", 1234),
+    ) == "EAM"
+    assert _request_caller(
+        {"X-TY-Key-Id": "producer-key"}, None, ("127.0.0.1", 1234)
+    ) == "producer-key"
+    assert _request_caller({}, None, ("127.0.0.1", 1234)) == "127.0.0.1"
 
 
 def test_audit_files_land_on_configured_volume(tmp_path, monkeypatch):

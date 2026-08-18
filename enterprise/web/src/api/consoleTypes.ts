@@ -72,6 +72,7 @@ export interface GatewayHttpLogEvent {
   method: string;
   path: string;
   query?: string;
+  caller?: string | null;
   http_status: number | null;
   duration_ms?: number;
   body?: unknown;
