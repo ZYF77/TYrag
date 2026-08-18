@@ -208,6 +208,14 @@ CREATE TABLE IF NOT EXISTS ext_transient_attachment_audit (
 );
 CREATE INDEX IF NOT EXISTS idx_ext_transient_audit_attachment
     ON ext_transient_attachment_audit(attachment_id, created_at);
+
+CREATE TABLE IF NOT EXISTS ext_ragflow_temp_file (
+    file_id TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    deleted_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ext_ragflow_temp_file_pending
+    ON ext_ragflow_temp_file(deleted_at, created_at);
 """
 
 
@@ -223,6 +231,32 @@ async def ensure_attachment_schema(db: aiosqlite.Connection) -> None:
             await db.execute(
                 f"ALTER TABLE ext_transient_attachment ADD COLUMN {column} {definition}"
             )
+    await db.commit()
+
+
+async def remember_ragflow_temp_file(db: aiosqlite.Connection, file_id: str) -> None:
+    if not file_id:
+        return
+    await ensure_attachment_schema(db)
+    now = utc_now().isoformat()
+    await db.execute(
+        """INSERT INTO ext_ragflow_temp_file (file_id, created_at, deleted_at)
+           VALUES (?, ?, NULL)
+           ON CONFLICT(file_id) DO UPDATE SET
+             created_at=excluded.created_at,
+             deleted_at=NULL""",
+        (file_id, now),
+    )
+    await db.commit()
+
+
+async def mark_ragflow_temp_file_deleted(db: aiosqlite.Connection, file_id: str) -> None:
+    if not file_id:
+        return
+    await db.execute(
+        "UPDATE ext_ragflow_temp_file SET deleted_at=? WHERE file_id=?",
+        (utc_now().isoformat(), file_id),
+    )
     await db.commit()
 
 
@@ -1362,6 +1396,43 @@ class TransientAttachmentService:
             (now_iso,),
         )
         await self.db.commit()
+        temp = await self._cleanup_ragflow_temp_files(
+            limit=limit, delete_ragflow_file=delete_ragflow_file
+        )
+        return {
+            "examined": len(rows) + temp["examined"],
+            "deleted": deleted,
+            "failed": failed,
+            "ragflowTempDeleted": temp["deleted"],
+            "ragflowTempFailed": temp["failed"],
+        }
+
+    async def _cleanup_ragflow_temp_files(
+        self,
+        *,
+        limit: int,
+        delete_ragflow_file=None,
+    ) -> dict[str, int]:
+        await ensure_attachment_schema(self.db)
+        deleter = delete_ragflow_file or _default_delete_ragflow_file
+        async with self.db.execute(
+            """SELECT file_id FROM ext_ragflow_temp_file
+               WHERE deleted_at IS NULL OR deleted_at=''
+               ORDER BY created_at ASC LIMIT ?""",
+            (max(1, min(limit, 1000)),),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        deleted = 0
+        failed = 0
+        for row in rows:
+            file_id = row["file_id"]
+            try:
+                await deleter(file_id)
+                await mark_ragflow_temp_file_deleted(self.db, file_id)
+                deleted += 1
+            except Exception:
+                failed += 1
+                logger.warning("RAGFlow orphan file delete failed file_id=%s", file_id)
         return {"examined": len(rows), "deleted": deleted, "failed": failed}
 
 
@@ -1747,6 +1818,8 @@ __all__ = [
     "ensure_attachment_schema",
     "get_db",
     "get_storage",
+    "mark_ragflow_temp_file_deleted",
+    "remember_ragflow_temp_file",
     "optional_user_principal",
     "router",
     "utc_now",

@@ -409,9 +409,11 @@ async def migrate_schema(db: aiosqlite.Connection) -> None:
     await db.executescript(CREATE_SOURCE_TICKET)
     from enterprise.gateway.sync.transient_attachment import ensure_attachment_schema
     from enterprise.gateway.callback_delivery import ensure_callback_delivery_schema
+    from enterprise.gateway.query.citation_file import ensure_citation_file_schema
 
     await ensure_attachment_schema(db)
     await ensure_callback_delivery_schema(db)
+    await ensure_citation_file_schema(db)
     await db.commit()
 
 

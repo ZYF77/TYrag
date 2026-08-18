@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from enterprise.gateway.query.citation_select import ABSTAIN_PHRASE
 from enterprise.gateway.query.enterprise_prompt import (
     ENTERPRISE_PROMPT_MARKER,
     REFERENCE_METADATA_FIELDS,
@@ -29,6 +30,16 @@ def test_enterprise_prompt_has_knowledge_and_two_tier_relevance():
     assert "设备归属不等于内容与问题相关" in system
     assert "不能证明" in system and "正文包含用户当前问题需要的事实" in system
     assert "不得根据设备归属推测" in system
+    assert ABSTAIN_PHRASE in system
+    assert "禁止任何 [ID:n]" in system
+    assert "禁止把合格证、调试记录等无关文档当对照证据引用" in system
+    assert "有哪些资料/文档" in system
+    assert "必须在正文用方括号引用格式 [ID:n]" in system
+    assert "半支撑" in system
+    assert "禁止沿用上一轮" in system
+    assert "必须标 [ID:0]" in system
+    assert "<think>" in system and "</think>" in system
+    assert "标签外只写给用户看的最终正文" in system
     assert "尽量回答" not in system
     assert "not found in the dataset" not in system.lower()
 
@@ -47,6 +58,17 @@ def test_needs_enterprise_prompt_upgrade_detects_default_chat():
     }) is True
     upgraded = {"prompt_config": build_enterprise_prompt_config()}
     assert needs_enterprise_prompt_upgrade(upgraded) is False
+    for legacy_marker in (
+        "enterprise_identity_metadata_v2",
+        "enterprise_identity_metadata_v3",
+        "enterprise_identity_metadata_v4",
+        "enterprise_identity_metadata_v5",
+    ):
+        legacy = build_enterprise_prompt_config()
+        legacy["system"] = legacy["system"].replace(
+            ENTERPRISE_PROMPT_MARKER, legacy_marker
+        )
+        assert needs_enterprise_prompt_upgrade({"prompt_config": legacy}) is True
 
 
 def test_ragflow_question_never_adds_gateway_identity_prefix():
@@ -80,10 +102,18 @@ async def test_ensure_chat_writes_prompt_config_on_create():
 
 
 @pytest.mark.asyncio
-async def test_ensure_chat_patches_legacy_prompt_config():
+async def test_ensure_chat_does_not_patch_legacy_prompt_config():
     client = RAGFlowQueryStub()
     principal = type("P", (), {"tenant_id": "tenant-b"})()
     scope = type("S", (), {"dataset_ids": ("ds-1", "ds-2")})()
+    updates: list[tuple[tuple, dict]] = []
+    original_update = client.update_chat
+
+    async def tracking_update(*args, **kwargs):
+        updates.append((args, kwargs))
+        return await original_update(*args, **kwargs)
+
+    client.update_chat = tracking_update
 
     created = await client.create_chat(
         "enterprise-formal-tenant-b",
@@ -96,8 +126,45 @@ async def test_ensure_chat_patches_legacy_prompt_config():
     assert ensured == chat_id
     chat = client._chats[chat_id]
     assert set(chat["dataset_ids"]) == {"ds-1", "ds-2"}
-    assert needs_enterprise_prompt_upgrade(chat) is False
-    assert ENTERPRISE_PROMPT_MARKER in chat["prompt_config"]["system"]
+    assert "prompt_config" not in chat
+    assert needs_enterprise_prompt_upgrade(chat) is True
+    assert len(updates) == 1
+    args, kwargs = updates[0]
+    assert kwargs.get("prompt_config") is None
+    assert not any(isinstance(arg, dict) and "system" in arg for arg in args)
+
+
+@pytest.mark.asyncio
+async def test_ensure_chat_preserves_ragflow_edited_system_prompt():
+    client = RAGFlowQueryStub()
+    principal = type("P", (), {"tenant_id": "tenant-c"})()
+    scope = type("S", (), {"dataset_ids": ("ds-1", "ds-2")})()
+    custom_system = "You are a custom RAGFlow assistant. {knowledge}"
+    updates: list[tuple[tuple, dict]] = []
+    original_update = client.update_chat
+
+    async def tracking_update(*args, **kwargs):
+        updates.append((args, kwargs))
+        return await original_update(*args, **kwargs)
+
+    client.update_chat = tracking_update
+
+    created = await client.create_chat(
+        "enterprise-formal-tenant-c",
+        ["ds-1"],
+        prompt_config={"system": custom_system},
+    )
+    chat_id = created["data"]["id"]
+
+    ensured = await _ensure_chat(client, principal, scope)
+    assert ensured == chat_id
+    chat = client._chats[chat_id]
+    assert chat["prompt_config"]["system"] == custom_system
+    assert set(chat["dataset_ids"]) == {"ds-1", "ds-2"}
+    assert len(updates) == 1
+    args, kwargs = updates[0]
+    assert kwargs.get("prompt_config") is None
+    assert not any(isinstance(arg, dict) and "system" in arg for arg in args)
 
 
 def test_external_meta_fields_include_canonical_identity_not_ocr_ground_truth():

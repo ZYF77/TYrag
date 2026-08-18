@@ -313,6 +313,62 @@ class TestAsk:
         )
 
     @pytest.mark.asyncio
+    async def test_think_tags_are_stripped_from_formal_answer(self, isolated_db):
+        await _insert_document(isolated_db, doc_id="DOC-THINK")
+        from enterprise.gateway.query import formal_router
+        from enterprise.gateway.query.ragflow_client import RAGFlowQueryStub
+
+        class _ThinkStub(RAGFlowQueryStub):
+            async def chat_completion(
+                self,
+                chat_id: str,
+                question: str,
+                session_id: str | None = None,
+                doc_ids: list[str] | None = None,
+                request_id: str | None = None,
+            ) -> dict:
+                del chat_id, question, session_id, doc_ids, request_id
+                return {
+                    "code": 0,
+                    "data": {
+                        "answer": "<think>规划过程</think>故障码 E-104 时先检查液压油位。 [ID:0]",
+                        "id": "ragflow-message",
+                        "session_id": "ragflow-session",
+                        "reference": {
+                            "chunks": [
+                                {
+                                    "id": "chunk-1",
+                                    "document_id": "doc-1",
+                                    "document_name": "manual.pdf",
+                                    "content": "故障码 E-104 时先检查液压油位。",
+                                    "positions": [[3, 0.1, 0.8, 0.2, 0.4]],
+                                }
+                            ]
+                        },
+                    },
+                }
+
+        formal_router._query_stub = _ThinkStub()
+        token = _make_token()
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as c:
+            conversation_id = (
+                await _create_conversation(c, token)
+            ).json()["conversationId"]
+            resp = await c.post(
+                f"/enterprise/api/v1/conversations/{conversation_id}/messages:stream",
+                headers=_headers(token),
+                json={"question": "故障码 E-104 怎么处理？"},
+            )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert "规划" not in body["answer"]
+        assert "<think>" not in body["answer"]
+        assert "液压油位" in body["answer"]
+        assert body.get("reasoning") == "规划过程"
+
+    @pytest.mark.asyncio
     async def test_non_ready_document_is_not_retrievable(self, isolated_db):
         await _insert_document(
             isolated_db, doc_id="DOC-NOT-READY", sync_status="parsing"
@@ -832,6 +888,20 @@ class TestRunOutcome:
         assert formal_router._resolve_run_outcome(
             completion, "answer", [{"id": "c1"}]
         ) == "no_reliable_evidence"
+
+    def test_abstain_phrase_overrides_explicit_completed(self):
+        from enterprise.gateway.query import formal_router
+        from enterprise.gateway.query.citation_select import ABSTAIN_PHRASE
+
+        completion = {"code": 0, "data": {"status": "completed"}}
+        assert (
+            formal_router._resolve_run_outcome(
+                completion,
+                f"暂无维修记录。{ABSTAIN_PHRASE} [ID:0]",
+                [{"id": "c1"}],
+            )
+            == "no_reliable_evidence"
+        )
 
     def test_run_outcome_uses_answer_and_retrieval_evidence(self):
         from enterprise.gateway.query import formal_router

@@ -13,16 +13,14 @@ import { WebSearchProvider } from '@/constants/chat';
 import { useTranslate } from '@/hooks/common-hooks';
 import { z } from 'zod';
 
-export function useChatSettingSchema() {
-  const { t } = useTranslate('chat');
-
+export function createChatSettingSchema(t: (key: string) => string) {
   const promptConfigSchema = z.object({
     quote: z.boolean(),
     keyword: z.boolean(),
     tts: z.boolean(),
     empty_response: z.string().optional(),
     prologue: z.string().optional(),
-    system: z.string().min(1, { message: t('systemMessage') }),
+    system: z.string(),
     refine_multiturn: z.boolean(),
     parameters: z
       .array(
@@ -66,4 +64,10 @@ export function useChatSettingSchema() {
   });
 
   return formSchema;
+}
+
+export function useChatSettingSchema() {
+  const { t } = useTranslate('chat');
+
+  return createChatSettingSchema(t);
 }

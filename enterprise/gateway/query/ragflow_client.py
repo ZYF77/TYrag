@@ -96,6 +96,26 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
             "doc_type_kwd": data.get("doc_type_kwd"),
         }
 
+    async def get_document_image(
+        self,
+        image_id: str,
+        request_id: str | None = None,
+    ) -> tuple[bytes, str] | None:
+        """Fetch a RAGFlow cropped document image without exposing storage paths."""
+        if not image_id:
+            return None
+        rid = request_id or self._new_request_id()
+        try:
+            return await self._run_sync(
+                self._sync_request_bytes,
+                "GET",
+                "/api/v1/documents/images/{}".format(quote(image_id, safe="-_.")),
+                rid,
+            )
+        except RAGFlowAPIError:
+            logger.warning("RAGFlow citation image unavailable request_id=%s", rid)
+            return None
+
     async def list_chats(
         self, name: str | None = None, request_id: str | None = None
     ) -> list[dict]:
@@ -203,19 +223,20 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
 
     async def chat_completion(
         self,
-        chat_id: str,
+        chat_id: str | None,
         question: str,
         session_id: str | None = None,
         doc_ids: list[str] | None = None,
         request_id: str | None = None,
-        files: list[str] | None = None,
+        files: list[dict[str, Any]] | list[str] | None = None,
     ) -> dict:
         rid = request_id or self._new_request_id()
         body: dict[str, Any] = {
-            "chat_id": chat_id,
             "question": question,
             "stream": False,
         }
+        if chat_id:
+            body["chat_id"] = chat_id
         if session_id:
             body["session_id"] = session_id
         if doc_ids:
@@ -223,6 +244,8 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
             # string for doc_ids; a JSON list breaks its attachment parser.
             body["doc_ids"] = ",".join(doc_ids)
         if files:
+            # RAGFlow expects attachment descriptors
+            # ({id, name, mime_type, created_by}), not bare file ids.
             body["files"] = list(files)
         _trace_doc_ids(rid, doc_ids)
         result = await self._run_sync(
@@ -240,52 +263,99 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
         content: bytes,
         media_type: str,
         request_id: str | None = None,
-    ) -> str:
+    ) -> dict[str, Any]:
+        """Upload a runtime chat attachment for VLM/OCR understand.
+
+        Must use ``/api/v1/documents/upload`` (not ``/api/v1/files``). Chat
+        completion resolves attachments via ``FileService.get_files``, which
+        reads the downloads bucket and requires ``id`` / ``mime_type`` /
+        ``created_by`` / ``name``.
+        """
         import io
 
         rid = request_id or self._new_request_id()
         files = {"file": (file_name, io.BytesIO(content), media_type)}
         result = self._require_ok(
             await self._run_sync(
-                self._sync_request, "POST", "/api/v1/files", rid, files=files
+                self._sync_request,
+                "POST",
+                "/api/v1/documents/upload",
+                rid,
+                files=files,
             )
         )
         data = result.get("data")
         if isinstance(data, list) and data:
-            file_id = data[0].get("id")
-        elif isinstance(data, dict):
-            file_id = data.get("id")
-        else:
-            file_id = None
-        if not file_id:
+            data = data[0]
+        if not isinstance(data, dict) or not data.get("id"):
             raise RAGFlowAPIError("RAGFlow file upload returned no id", 502, rid)
-        return str(file_id)
+        desc = {
+            "id": str(data["id"]),
+            "name": str(data.get("name") or file_name),
+            "mime_type": str(data.get("mime_type") or media_type),
+            "created_by": str(data.get("created_by") or ""),
+        }
+        if not desc["created_by"]:
+            raise RAGFlowAPIError(
+                "RAGFlow chat attachment missing created_by", 502, rid
+            )
+        return desc
 
     async def delete_file(self, file_id: str, request_id: str | None = None) -> None:
-        rid = request_id or self._new_request_id()
-        self._require_ok(
-            await self._run_sync(
-                self._sync_request,
-                "DELETE",
-                "/api/v1/files",
-                rid,
-                json_data={"ids": [file_id]},
-            )
+        """Best-effort cleanup for temporary chat attachments.
+
+        Runtime attachments from ``/documents/upload`` live in the downloads
+        bucket. RAGFlow has no public DELETE for that store (session delete
+        cleans them internally). Skip the file-manager DELETE so we do not
+        confuse ledger cleanup with a wrong API.
+        """
+        del request_id
+        logger.info(
+            "chat attachment delete skipped (no public downloads DELETE) file_id=%s",
+            file_id,
         )
 
     async def understand_file(
         self,
-        chat_id: str,
-        file_id: str,
+        chat_id: str | None,
+        file: dict[str, Any] | str,
         request_id: str | None = None,
     ) -> dict[str, Any]:
+        """Extract short visible facts from an image via vision-only chat.
+
+        Intentionally omits the enterprise RAG ``chat_id``. Binding the
+        equipment dataset chat causes retrieval to contaminate observations
+        with knowledge-base facts that are not in the image.
+        """
+        del chat_id  # kept for call-site compatibility; must not bind RAG chat
         prompt = (
-            "从附件中提取可见短事实。只输出 JSON："
+            "只根据当前附件图片中肉眼可见的文字与控件作答。"
+            "禁止使用知识库、设备台账、会话历史或猜测补全。"
+            "若图片与设备无关，也如实描述图片内容。"
+            "只输出 JSON："
             '{"errorCodes":[],"equipmentCodes":[],"visibleValues":[],'
             '"textSpans":[],"confidence":0.0}。这些是观察，不是设备台账。'
         )
+        if isinstance(file, dict):
+            attachment = file
+        else:
+            raise RAGFlowAPIError(
+                "Chat attachment must be a descriptor with mime_type",
+                502,
+                request_id,
+            )
+        if not attachment.get("id") or not attachment.get("mime_type"):
+            raise RAGFlowAPIError(
+                "Chat attachment descriptor missing id or mime_type",
+                502,
+                request_id,
+            )
         result = await self.chat_completion(
-            chat_id, prompt, session_id=None, files=[file_id], request_id=request_id
+            None,
+            prompt,
+            session_id=None,
+            files=[attachment],
+            request_id=request_id,
         )
         data = result.get("data", {}) if isinstance(result, dict) else {}
         answer = str(data.get("answer") or "").strip()
@@ -405,6 +475,7 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         self.uploaded_files: list[str] = []
         self.deleted_files: list[str] = []
         self._ragflow_files: dict[str, bytes] = {}
+        self._last_understand_file: dict[str, Any] | None = None
         self.understand_result: dict[str, Any] = {
             "errorCodes": ["E07"],
             "equipmentCodes": [],
@@ -412,6 +483,14 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
             "textSpans": [],
             "confidence": 0.8,
         }
+
+    async def get_document_image(
+        self,
+        image_id: str,
+        request_id: str | None = None,
+    ) -> tuple[bytes, str] | None:
+        del image_id, request_id
+        return None
 
     async def start_parsing(
         self,
@@ -495,11 +574,16 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         content: bytes,
         media_type: str,
         request_id: str | None = None,
-    ) -> str:
+    ) -> dict[str, Any]:
         self.uploaded_files.append(file_name)
         file_id = f"rf-{len(self.uploaded_files)}"
         self._ragflow_files[file_id] = content
-        return file_id
+        return {
+            "id": file_id,
+            "name": file_name,
+            "mime_type": media_type,
+            "created_by": "stub-tenant",
+        }
 
     async def delete_file(self, file_id: str, request_id: str | None = None) -> None:
         self.deleted_files.append(file_id)
@@ -507,20 +591,26 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
 
     async def understand_file(
         self,
-        chat_id: str,
-        file_id: str,
+        chat_id: str | None,
+        file: dict[str, Any] | str,
         request_id: str | None = None,
     ) -> dict[str, Any]:
+        del chat_id, request_id
+        if isinstance(file, str):
+            raise RAGFlowAPIError(
+                "Chat attachment must be a descriptor with mime_type", 502
+            )
+        self._last_understand_file = dict(file)
         return dict(self.understand_result)
 
     async def chat_completion(
         self,
-        chat_id: str,
+        chat_id: str | None,
         question: str,
         session_id: str | None = None,
         doc_ids: list[str] | None = None,
         request_id: str | None = None,
-        files: list[str] | None = None,
+        files: list[dict[str, Any]] | list[str] | None = None,
     ) -> dict:
         turn_id = f"msg-{uuid.uuid4().hex[:12]}"
         base_chunk = {
@@ -598,13 +688,15 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
                 if chunk.get("id") or chunk.get("chunk_id")
             }
         )
+        markers = "".join(f" [ID:{index}]" for index in range(len(chunks)))
+        answer = f"stub answer for: {question}{markers}"
         session["messages"].append(
             {"role": "user", "content": question, "id": turn_id}
         )
         session["messages"].append(
             {
                 "role": "assistant",
-                "content": f"stub answer for: {question}",
+                "content": answer,
                 "id": turn_id,
             }
         )
@@ -612,7 +704,7 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         return {
             "code": 0,
             "data": {
-                "answer": f"stub answer for: {question}",
+                "answer": answer,
                 "id": turn_id,
                 "session_id": session_id,
                 "reference": {"chunks": chunks},

@@ -29,7 +29,7 @@ EAM 投喂时 Gateway 已按 `equipment_id` / `fixed_asset_no` 建立文档映�
 2. 企业 Chat `prompt_config` 开启 `reference_metadata.include`，白名单仅含：`equipment_id`、`fixed_asset_no`、`enterprise_document_type`、`enterprise_external_document_id`。生成时以 `document_metadata` 暴露归属。
 3. 企业 system Prompt 明确两层相关性：归属看 metadata；具体事实必须由 Content 支持。归属成立 ≠ 问题可答。无正文依据时须说明没有可靠依据，不得按设备归属推测。
 4. `_ragflow_question` 原样转发用户问题（绑定与未绑定均不加 Gateway 身份前缀，也不拼 `GLOBAL_QUESTION_PREFIX`）。用户问题里自己写的设备号保留。未绑定场景仍用 `_with_equipment_hint` 在回答末尾提示补充设备号。
-5. `_ensure_chat` 创建时写入上述 `prompt_config`；已有 `enterprise-formal-{tenant}` 缺标记则 PATCH。
+5. `_ensure_chat` 仅在首次创建 `enterprise-formal-{tenant}` 时写入上述 `prompt_config`。创建之后 RAGFlow 为 prompt 权威源；Gateway 不再因标记缺失或 metadata 漂移 PATCH `prompt_config`，已有助手只在 ACL `dataset_ids` 缺成员时补数据集。
 
 ## 本工作包明确不做
 
@@ -40,19 +40,19 @@ EAM 投喂时 Gateway 已按 `equipment_id` / `fixed_asset_no` 建立文档映�
 - Numeric Grounding
 - Web Search
 
-无正文证据时的拒答，本包依赖 Prompt 两层相关性与现有 Gateway 空检索 → `no_reliable_evidence`。
+无正文证据时的拒答，本包依赖 Prompt 两层相关性与现有 Gateway 空检索 → `no_reliable_evidence`。企业 Prompt v6 要求无法支撑用户当前所问事实时写出约定拒答句「当前检索结果中没有找到可靠依据」且不得标 `[ID:n]`；半支撑回答必须用本轮方括号 `[ID:n]` 引用支撑片段，禁止沿用上一轮编号。Gateway 见到拒答短语则强制 `no_reliable_evidence` 并清空 `citations`；`completed` 时除 `[ID:n]` 外也识别正文中的 `知识库ID:n` / `ID:n` 散文引用；若编号相对本轮 chunk 列表越界但本轮仅有很少检索结果（≤2），仍保留本轮支撑文档，避免多轮 ID 漂移导致参考附件为空。
 
 ## 正面影响
 
 - 问「该设备有哪些资料」且命中发票时，模型可依据归属概括发票，而不因正文无设备号说「库里没有该设备」。
-- 问「有没有漏气维修记录」且只有发票时，模型仍应说没有可靠依据，而不是用发票编维修事实。
+- 问「有没有漏气维修记录」且只有发票时，模型仍应说没有可靠依据，而不是用发票编维修事实；Gateway 将该负向结论标为 `无可靠依据` 且 `citations=[]`。
 - 检索打分继续只对用户原问题，不被 Gateway 身份前缀污染。
 
 ## 负面影响和风险
 
 - 旧文档 `meta_fields` 可能仍无设备号，直到新版本投喂。
 - 仅靠 Prompt 约束，模型仍可能偶发误判；更强的事实接地需后续 Grounding 工作包。
-- 已存在的企业 Chat 依赖 `_ensure_chat` 探测标记并 PATCH；若 list chats 未返回 `prompt_config`，可能重复 PATCH（幂等）。
+- 已存在的企业 Chat 创建后不再由 Gateway 自动升级 prompt；管理员在 RAGFlow 中的修改会保留，代码里的新种子只影响新租户首次创建。助手被删后 Gateway 会按当前种子重建，手工修改丢失。
 
 ## 验证方式
 

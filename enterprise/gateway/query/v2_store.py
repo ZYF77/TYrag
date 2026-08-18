@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS ext_v2_message (
     status TEXT NOT NULL,
     citations_json TEXT NOT NULL DEFAULT '[]',
     attachments_json TEXT NOT NULL DEFAULT '[]',
+    reasoning TEXT,
     created_at TEXT NOT NULL
 );
 
@@ -112,6 +113,9 @@ def decode_cursor(cursor: str | None) -> tuple[str, str] | None:
 
 async def ensure_schema(db) -> None:
     await db.executescript(SCHEMA)
+    from enterprise.gateway.query.citation_file import ensure_citation_file_schema
+
+    await ensure_citation_file_schema(db)
     migrations = {
         "ext_v2_conversation": {
             "asset_id": "TEXT",
@@ -131,6 +135,7 @@ async def ensure_schema(db) -> None:
         },
         "ext_v2_message": {
             "attachments_json": "TEXT NOT NULL DEFAULT '[]'",
+            "reasoning": "TEXT",
         },
     }
     for table, columns in migrations.items():
@@ -617,13 +622,14 @@ async def add_message(
     content: str,
     status: str,
     citations: list[dict],
+    reasoning: str | None = None,
 ) -> dict:
     now = utc_now()
     await db.execute(
         """INSERT INTO ext_v2_message
            (message_id, conversation_id, tenant_id, business_user_id, role,
-            content, status, citations_json, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            content, status, citations_json, reasoning, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             message_id,
             conversation_id,
@@ -633,6 +639,7 @@ async def add_message(
             content,
             status,
             json.dumps(citations, ensure_ascii=False, separators=(",", ":")),
+            reasoning if role == "assistant" else None,
             now,
         ),
     )
@@ -672,6 +679,7 @@ async def add_message(
         "content": content,
         "status": status,
         "citations": citations,
+        "reasoning": reasoning if role == "assistant" else None,
         "createdAt": now,
     }
 
@@ -716,6 +724,11 @@ async def list_messages(
             citations = json.loads(row["citations_json"] or "[]")
         except json.JSONDecodeError:
             citations = []
+        keys = set(row.keys())
+        reasoning = None
+        if "reasoning" in keys:
+            value = row["reasoning"]
+            reasoning = value if isinstance(value, str) and value.strip() else None
         items.append(
             {
                 "messageId": row["message_id"],
@@ -723,10 +736,10 @@ async def list_messages(
                 "content": row["content"],
                 "status": public_status(row["status"]),
                 "citations": citations,
+                "reasoning": reasoning if row["role"] == "assistant" else None,
                 "createdAt": row["created_at"],
             }
         )
-        keys = set(row.keys())
         if "attachments_json" in keys:
             try:
                 attachments = json.loads(row["attachments_json"] or "[]")

@@ -9,7 +9,9 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
-ENTERPRISE_PROMPT_MARKER = "enterprise_identity_metadata_v1"
+from enterprise.gateway.query.citation_select import ABSTAIN_PHRASE
+
+ENTERPRISE_PROMPT_MARKER = "enterprise_identity_metadata_v6"
 
 REFERENCE_METADATA_FIELDS = (
     "equipment_id",
@@ -31,8 +33,23 @@ metadata 只证明「这是这台设备的文档」，
 不能证明「正文包含用户当前问题需要的事实」。
 回答具体维修、故障、参数、记录、数量等问题时，
 必须由 Content 中的实际内容提供依据。
-如果 Content 无法支持该问题，应明确说明
-当前检索结果中没有找到可靠依据，不得根据设备归属推测。
+如果 Content 无法支持该问题（例如用户问维修记录但只有合格证/调试记录），
+正文必须原样包含约定拒答句「{ABSTAIN_PHRASE}」，不得根据设备归属推测。
+此时禁止任何 [ID:n] / [n] 引用，禁止把合格证、调试记录等无关文档当对照证据引用。
+允许用文字说明「现有文档类型」，但不得标引用、不得写出 ID:n / 知识库ID:n。
+约定拒答句只用于无法支撑用户当前所问事实的场景，不得用于已答出事实的回答。
+用户问「有哪些资料/文档」且概括真实命中内容时，可以引用并标 [ID:n]。
+
+正文一旦依据某个知识片段作答（含「有某类记录/单据，但缺少某一字段」的半支撑回答），
+必须在正文用方括号引用格式 [ID:n] 标出该片段，禁止只写「知识库ID:n」「ID:n」散文。
+引用编号只能使用本轮知识库列表中的编号，禁止沿用上一轮对话里的 ID；
+本轮若只有一个片段，必须标 [ID:0]。
+例如：存在开箱验收移交单但未写验收人姓名时，仍应引用验收单片段如 [ID:0]，
+并说明缺验收人；不要因此整段改用约定拒答句，也不要省略 [ID:n]。
+
+思考过程只写在 <think>...</think> 内。
+标签外只写给用户看的最终正文，不要把规划、自我提醒、对知识库条目的逐条核对写进正文。
+禁止把「按照之前的回复风格」「需要检查所有知识库」这类过程文字写进正文。
 
 以下是知识库：
 {{knowledge}}

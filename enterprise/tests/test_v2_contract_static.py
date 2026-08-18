@@ -412,7 +412,7 @@ def test_p1_callback_and_attachment_invariants_are_explicit():
 
 def test_v21_attachment_surface_and_security_are_frozen():
     _, spec = _contract()
-    assert spec["info"]["version"] == "2.3.0"
+    assert spec["info"]["version"] == "2.5.0"
     detail = spec["components"]["schemas"]["ConversationDetail"]
     assert "suggestions" in detail["required"]
     assert "contextCompacted" in detail["required"]
@@ -437,6 +437,33 @@ def test_v21_attachment_surface_and_security_are_frozen():
     assert {"downloadUrl", "ticketExpiresAt", "expiresAt", "sha256"} <= set(
         response["required"]
     )
+
+
+def test_v24_citation_file_ticket_download_is_frozen():
+    _, spec = _contract()
+    assert spec["info"]["version"] == "2.5.0"
+    citation = spec["components"]["schemas"]["Citation"]
+    assert {"downloadUrl", "downloadExpiresAt"} <= set(citation["required"])
+    assert "imageId" not in citation["properties"]
+    assert "chunkId" not in citation["properties"]
+    download = spec["paths"]["/citations/{citationId}/file/{ticket}"]["get"]
+    assert download["security"] == [{}]
+    assert download["x-status"] == "implemented"
+    assert set(download["responses"]) >= {"200", "404"}
+    names = {item["name"] for item in download["parameters"]}
+    assert {"citationId", "ticket"} <= names
+
+
+def test_v25_reasoning_is_optional_on_message_and_run():
+    _, spec = _contract()
+    assert spec["info"]["version"] == "2.5.0"
+    message = spec["components"]["schemas"]["Message"]
+    run = spec["components"]["schemas"]["MessageRunResult"]
+    assert message["properties"]["reasoning"]["type"] == ["string", "null"]
+    assert run["properties"]["reasoning"]["type"] == ["string", "null"]
+    assert "reasoning" not in message["required"]
+    assert "reasoning" not in run["required"]
+    assert "reasoning" not in spec["components"]["schemas"]["MessageRunPending"]["properties"]
 
 
 def test_error_code_http_statuses_match_the_v2_freeze():

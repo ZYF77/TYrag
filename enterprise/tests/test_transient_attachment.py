@@ -30,6 +30,7 @@ from enterprise.gateway.sync.transient_attachment import (
     get_db,
     get_storage,
     optional_user_principal,
+    remember_ragflow_temp_file,
     router,
 )
 
@@ -1115,4 +1116,41 @@ async def test_cleanup_retries_ragflow_file_delete(storage_env):
     ) as cursor:
         row = await cursor.fetchone()
     assert row["ragflow_file_deleted_at"]
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_retries_ephemeral_ragflow_temp_file():
+    db = await init_db(":memory:")
+    storage = MemoryObjectStorage()
+    service = TransientAttachmentService(
+        db, storage, now_fn=lambda: datetime(2026, 8, 10, tzinfo=timezone.utc)
+    )
+    await remember_ragflow_temp_file(db, "rf-msg")
+    deleted: list[str] = []
+
+    async def boom(file_id: str) -> None:
+        deleted.append(file_id)
+        raise RuntimeError("ragflow down")
+
+    await service.cleanup_expired(delete_ragflow_file=boom)
+    assert deleted == ["rf-msg"]
+    async with db.execute(
+        "SELECT deleted_at FROM ext_ragflow_temp_file WHERE file_id=?",
+        ("rf-msg",),
+    ) as cursor:
+        row = await cursor.fetchone()
+    assert row["deleted_at"] is None
+
+    async def ok(file_id: str) -> None:
+        deleted.append(file_id)
+
+    await service.cleanup_expired(delete_ragflow_file=ok)
+    assert deleted[-1] == "rf-msg"
+    async with db.execute(
+        "SELECT deleted_at FROM ext_ragflow_temp_file WHERE file_id=?",
+        ("rf-msg",),
+    ) as cursor:
+        row = await cursor.fetchone()
+    assert row["deleted_at"]
     await db.close()

@@ -34,6 +34,7 @@
     ["/attachments/{attachmentId}/ticket", "post"],
     ["/attachments/{attachmentId}/download/{ticket}", "get"],
     ["/citations/{citationId}", "get"],
+    ["/citations/{citationId}/file/{ticket}", "get"],
     ["/citations/{citationId}/source", "get"]
   ]
 }

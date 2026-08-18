@@ -10,7 +10,7 @@ class TestGatewayConfig:
         monkeypatch.delenv("ENTERPRISE_TRANSIENT_ATTACHMENTS_ENABLED", raising=False)
         cfg = GatewayConfig()
         assert cfg.ragflow_base_url == "http://localhost:9380"
-        assert cfg.ragflow_timeout == 30.0
+        assert cfg.ragflow_timeout == 120.0
         assert cfg.ragflow_api_version == "v1"
         assert cfg.auth_enabled is True
         assert cfg.transient_attachments_enabled is True

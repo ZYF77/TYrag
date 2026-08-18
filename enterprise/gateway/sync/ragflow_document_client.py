@@ -133,6 +133,27 @@ class RAGFlowDocumentClient:
             )
             raise RAGFlowAPIError("RAGFlow API request failed", 0, request_id) from e
 
+    def _sync_request_bytes(
+        self, method: str, path: str, request_id: str
+    ) -> tuple[bytes, str]:
+        import urllib.error
+        import urllib.request
+
+        url = f"{self.base_url}{path}"
+        headers = self._headers(request_id)
+        headers.pop("Content-Type", None)
+        req = urllib.request.Request(url, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                content_type = resp.headers.get("Content-Type") or "application/octet-stream"
+                return resp.read(), content_type.split(";", 1)[0].strip()
+        except urllib.error.HTTPError as exc:
+            raise RAGFlowAPIError(
+                "RAGFlow API request failed", exc.code, request_id
+            ) from exc
+        except Exception as exc:
+            raise RAGFlowAPIError("RAGFlow API request failed", 0, request_id) from exc
+
     async def _run_sync(self, fn, *args, **kwargs):
         return await asyncio.to_thread(fn, *args, **kwargs)
         

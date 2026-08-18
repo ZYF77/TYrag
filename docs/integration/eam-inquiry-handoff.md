@@ -1,7 +1,7 @@
-# EAM 问询对接说明（Gateway Inquiry v2.3）
+# EAM 问询对接说明（Gateway Inquiry v2.5）
 
 面向：EAM 开发 / 测试 / 运维  
-契约版本：`integration-openapi-v2` **v2.3.0**  
+契约版本：`integration-openapi-v2` **v2.5.0**  
 正式契约文件：
 
 - `contracts/integration-openapi-v2.yaml`
@@ -30,6 +30,9 @@ HMAC secret、JWT 私钥、RAGFlow API key **必须互相独立**，不可混用
 | `assetId` / `registryVersion` | 可能依赖注册表回填 | 问询路径通常为 `null`；勿依赖 |
 | SSE | 有契约描述 | Gateway **已实现**；EAM **首期可不接**（见 §7） |
 | 消息附件 | 无 | 同一 `POST .../messages`；无附件继续 JSON，有附件改 multipart。**不走 HMAC** |
+| 引用列表 | 检索命中的 chunk 可能全部进 `citations` | **只保留回答真正引用的 chunk**；`无可靠依据` 时 `citations=[]`（含「答非所问」负向结论，不弹对照文档） |
+| 引用文件 | JWT `GET /citations/{id}/source` 下整份 PDF | 每条 citation 一个无 JWT 的 `downloadUrl`；有裁剪图回图，否则回原件 |
+| 思考过程 | 混在 `answer` / `content` 里整段展示 | 正文只在 `answer`/`content`；可选 `reasoning` 给 EAM 做可展开「思考中」 |
 
 **不变：**
 
@@ -51,7 +54,7 @@ HMAC secret、JWT 私钥、RAGFlow API key **必须互相独立**，不可混用
   → 渲染响应 suggestions（开场 chips）
   → 用户点选 chip 或自由输入
   → POST .../messages（suggestionId 或 question）
-  → 展示 answer / status / citations
+  → 展示 answer / reasoning / status / citations
   → 同一 conversationId 续问；需要时 GET 历史 / citation
 ```
 
@@ -285,17 +288,22 @@ Accept: application/json
   "runId": "run-001",
   "messageId": "assistant-message-001",
   "answer": "维护步骤如下……",
+  "reasoning": null,
   "status": "已完成",
   "citations": [],
   "replayed": false
 }
 ```
 
+`reasoning` 有值时是思考过程，EAM 做成可展开「思考中」；正文只渲染 `answer`。增量说明见 [`eam-inquiry-reasoning-notice.md`](./eam-inquiry-reasoning-notice.md)。
+
 若相同 `clientMessageId` 对应的 run 仍在执行，可能返回 `202` + 同一 `runId`（勿再开第二次执行）。
 
 ### 4.2.1 带附件提问（multipart，v2.3）
 
 有文件时走**同一 URL**，不要先调 `POST .../attachments`，也不要在 JSON 里塞 `attachments[].content` base64。鉴权仍是问询 JWT，**不要加 HMAC 三头**。
+
+给 EAM 的增量变更说明见 [`eam-inquiry-attachment-notice.md`](./eam-inquiry-attachment-notice.md)。
 
 ```http
 POST {BASE_URL}/enterprise/api/v2/conversations/{conversationId}/messages
@@ -304,12 +312,12 @@ Content-Type: multipart/form-data
 ```
 
 - `metadata`：JSON，`{ "clientMessageId": "...", "question": "..." }`；`question` 可省略（只发文件合法）
-- `files`：原始字节；最多 **5** 个，单文件 **10MB**
+- `files`：原始字节；最多 **5** 个，单文件 **10MB**。对话框粘贴 / Ctrl+V 的图片也放这里（常见 `image/png`），没有单独粘贴接口；不要把 `data:image/...` 写进 `question`
 - 第一波 MIME：`image/jpeg`、`image/png`、`text/plain`、`application/pdf`
 - chips（`suggestionId`）**禁止**带文件；请继续用 JSON
 - 超限：`413`；类型不支持：`422`
 
-历史 `GET .../messages` 只回附件元数据（`attachmentId` / `fileName` / `mediaType` / `sizeBytes` / `sha256`），**不回文件字节、不嵌下载 URL**。
+历史 `GET .../messages` 只回附件元数据（`attachmentId` / `fileName` / `mediaType` / `sizeBytes` / `sha256`），**不回文件字节、不嵌下载 URL**。Gateway **也不把对话框原件写入对象存储**；文件只在本次请求内用于抽文本/看图，处理完丢弃。EAM 不要持久化这份临时文件。
 
 从图/OCR 抽出的短码只用于检索 enrichment，信任级别是观察（`observed`），不是台账字段。回答应写成「从你上传的图片中识别到疑似故障码 E07」，不要写成「设备当前故障码是 E07」。citations 仍只来自已投喂知识库。
 
@@ -340,6 +348,10 @@ Authorization: Bearer <JWT>
 
 ### 4.4 Citation
 
+提问、历史、详情里的 `citations[]` **只含回答真正引用的 chunk**。`status = 无可靠依据` 时一定是 `[]`。检索内容无法支撑用户当前所问事实时也是 `无可靠依据` + 空引用，不要弹出对照文档。不要用空引用反推状态。
+
+给 EAM 的增量说明见 [`eam-inquiry-citation-notice.md`](./eam-inquiry-citation-notice.md)。
+
 ```http
 GET {BASE_URL}/enterprise/api/v2/citations/{citationId}
 Authorization: Bearer <JWT>
@@ -354,8 +366,18 @@ Authorization: Bearer <JWT>
 | `pageNo` | PDF 页码（从 1） |
 | `bbox` | 页面位置，可能为 `null` |
 | `excerpt` | 引用摘要 |
+| `downloadUrl` | 引用文件 ticket 下载地址（**不带 JWT**） |
+| `downloadExpiresAt` | 该 URL 过期时间 |
 
-原 PDF：
+打开引用文件：
+
+```http
+GET {downloadUrl}
+```
+
+不要带 `Authorization`。Gateway 有裁剪图则返回图片，否则返回原件。按 `Content-Type` 渲染。过期或 404 后重新 GET 消息/详情换新 URL。
+
+旧 JWT 原件口仍可用，但**不要作为 EAM 新改造主路径**：
 
 ```http
 GET {BASE_URL}/enterprise/api/v2/citations/{citationId}/source
@@ -416,11 +438,12 @@ Accept: application/pdf
 - [ ] 用 `clientMessageId` 做提问幂等
 - [ ] 按消息 `status` 展示结果，不按 citation 数量改判
 - [ ] 会话/历史按当前登录用户隔离展示
+- [ ] 用 `citations[].downloadUrl` 打开引用文件（不带 JWT）；`无可靠依据` 时按空引用展示
 
 ### 建议做
 
 - [ ] 仅在投喂回调 `retrievable` 后开放该文档/设备问询
-- [ ] 展示 citation 的 `externalDocumentId` / 页码，并支持打开 `/citations/{id}/source`
+- [ ] 展示 citation 的 `externalDocumentId` / 页码，并用 `downloadUrl` 打开引用文件（不带 JWT）
 - [ ] 记录 `requestId` / `conversationId` / `runId` 便于联调排障
 - [ ] UI 对 `无可靠依据` 给出明确空证据提示
 
@@ -449,7 +472,7 @@ SSE 事件顺序（契约）：
 
 ```text
 run.started
-  → 0..n × (answer.delta | citation)
+  → 0..n × (reasoning.delta | answer.delta | citation)
   → answer.completed  或  run.failed
 ```
 
@@ -458,6 +481,7 @@ run.started
 - 没有单独的 `:stream` 第二路由
 - run 仍在执行时的重复请求：返回 `202` 状态 JSON，**不会**再开第二条 SSE
 - 业务字段（`status` / `citations`）以最终完成事件或后续 GET 历史为准，规则与 JSON 模式相同
+- `reasoning.delta` 是思考过程；`answer.delta` 只含用户正文。不接 SSE 时用 JSON 的 `reasoning` 字段即可
 
 **建议给 EAM 的产品决策：** 第一阶段 JSON；第二阶段按体验需要增量接 SSE，不影响会话模型与 `conversationId`。
 
@@ -474,7 +498,7 @@ run.started
 6. `GET .../messages` 能看到用户原文与助手回答  
 7. 用户 A 不能读写用户 B 的 `conversationId`  
 8. （可选）`Accept: text/event-stream` 能收到 `run.started` 与终态事件  
-9. citation 详情/PDF source 在有引用时可用  
+9. 有引用时 `downloadUrl` 无 JWT 可下载；`无可靠依据` 时 `citations` 为空  
 10. 问询全程不出现因 Asset Registry 导致的 `503 ASSET_REGISTRY_UNAVAILABLE`
 
 ---
@@ -485,7 +509,10 @@ run.started
 |---|---|
 | 本文 | EAM 问询变更与对接总览（与投喂 handoff 成对） |
 | `docs/integration/eam-inquiry-sub-notice.md` | **给 EAM 的 `sub` 白话说明**（规则；无需开通名单） |
+| `docs/integration/eam-inquiry-attachment-notice.md` | **给 EAM 的消息附件接口变更**（v2.2 → v2.3，同一 URL 双 Content-Type） |
+| `docs/integration/eam-inquiry-citation-notice.md` | **给 EAM 的引用过滤与统一下载**（v2.3 → v2.4，`downloadUrl` 不带 JWT） |
+| `docs/integration/eam-inquiry-reasoning-notice.md` | **给 EAM 的思考过程与正文拆分**（v2.4 → v2.5，可选 `reasoning`） |
 | `docs/integration/eam-file-feed-handoff-3.1.md` | 文件投喂 + 终态回调 |
 | `docs/integration/eam-device-integration-guide.md` | 综合对接总册（含问询细节示例） |
 | `docs/设备管理系统—企业知识库对接协议.md` | 协议/验收底稿 |
-| `contracts/integration-openapi-v2.yaml` | 问询正式 OpenAPI（v2.3.0） |
+| `contracts/integration-openapi-v2.yaml` | 问询正式 OpenAPI（v2.5.0） |

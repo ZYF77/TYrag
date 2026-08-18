@@ -19,7 +19,7 @@ class GatewayConfig:
         default_factory=lambda: os.getenv("RAGFLOW_BASE_URL", "http://localhost:9380")
     )
     ragflow_timeout: float = field(
-        default_factory=lambda: float(os.getenv("RAGFLOW_TIMEOUT", "30.0"))
+        default_factory=lambda: float(os.getenv("RAGFLOW_TIMEOUT", "120.0"))
     )
     ragflow_api_version: str = field(
         default_factory=lambda: os.getenv("RAGFLOW_API_VERSION", "v1")

@@ -108,6 +108,13 @@ async def lifespan(app: FastAPI):
     configure_gateway_file_logging()
     if not _test_mode():
         require_ragflow_api_key()
+    from enterprise.gateway.query.citation_file import set_citation_image_fetcher
+    from enterprise.gateway.query.formal_router import _query_client
+
+    async def _fetch_citation_image(image_id: str):
+        return await _query_client().get_document_image(image_id)
+
+    set_citation_image_fetcher(_fetch_citation_image)
     started_tasks: list[asyncio.Task] = []
     if config.worker_enabled and not _test_mode():
         service = _sync_service(_db)

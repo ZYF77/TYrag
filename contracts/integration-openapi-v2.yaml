@@ -1,17 +1,21 @@
 openapi: 3.1.0
 info:
   title: TYrag External Integration API
-  version: 2.3.0
+  version: 2.5.0
   description: >-
-    Frozen external contract for the Equipment Management System. Version 2.3
-    additively accepts multipart message attachments on the existing messages
-    path while keeping JSON text and chips wire compatible. Version 2.2
-    additively includes starter suggestion chips on ConversationDetail while
-    keeping the v2 path and prior operations wire compatible for clients that
-    ignore unknown fields. Inquiry conversation and message `status` values are
-    Chinese labels: 进行中/已归档, 已完成/无可靠依据/失败, and 处理中 for a
-    pending run. Version 1 remains wire compatible; external consumers
-    never receive integration engine internal identifiers.
+    Frozen external contract for the Equipment Management System. Version 2.5
+    additively returns optional `reasoning` (model thinking) beside
+    `answer`/`content`; clients that ignore unknown fields stay compatible.
+    Version 2.4 additively returns a ticket `downloadUrl` on each citation and
+    only keeps chunks the answer actually cited. Version 2.3 additively accepts
+    multipart message attachments on the existing messages path while keeping
+    JSON text and chips wire compatible. Version 2.2 additively includes starter
+    suggestion chips on ConversationDetail while keeping the v2 path and prior
+    operations wire compatible for clients that ignore unknown fields. Inquiry
+    conversation and message `status` values are Chinese labels:
+    进行中/已归档, 已完成/无可靠依据/失败, and 处理中 for a pending run.
+    Version 1 remains wire compatible; external consumers never receive
+    integration engine internal identifiers.
 servers:
   - url: /enterprise/api/v2
 tags:
@@ -299,6 +303,8 @@ paths:
         with multipart/form-data (metadata JSON plus files). suggestionId must
         not be sent with files. First-wave MIME types are image/jpeg, image/png,
         text/plain, and application/pdf; at most 5 files, 10MB each.
+        SSE thinking tokens are `reasoning.delta`; user-facing tokens remain
+        `answer.delta`.
       operationId: v2CreateConversationMessage
       x-status: implemented
       security:
@@ -488,6 +494,38 @@ paths:
               schema:
                 $ref: '#/components/schemas/Citation'
         '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /citations/{citationId}/file/{ticket}:
+    get:
+      tags: [citations]
+      summary: Download the cited file through a short-lived ticket
+      description: >-
+        The ticket is a bearer capability. Do not send a JWT. Gateway returns
+        a cropped image when the citation has one, otherwise the original
+        document. Clients should render from HTTP Content-Type. Expired,
+        replayed, or mismatched tickets return 404.
+      operationId: v2DownloadCitationFile
+      x-status: implemented
+      security:
+        - {}
+      parameters:
+        - name: citationId
+          in: path
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 256 }
+        - name: ticket
+          in: path
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 256 }
+      responses:
+        '200':
+          description: Cited file bytes
+          headers:
+            Cache-Control:
+              schema: { type: string, const: 'private, no-store' }
+          content:
+            '*/*':
+              schema: { type: string, format: binary }
         '404': { $ref: '#/components/responses/Error' }
   /citations/{citationId}/source:
     get:
@@ -889,6 +927,8 @@ components:
         - title
         - externalDocumentId
         - sourceVersionId
+        - downloadUrl
+        - downloadExpiresAt
       properties:
         citationId: { type: string }
         sourceType: { type: string, enum: [document, business_record, timeseries] }
@@ -901,6 +941,8 @@ components:
         excerpt: { type: [string, 'null'] }
         recordType: { type: [string, 'null'] }
         recordId: { type: [string, 'null'] }
+        downloadUrl: { type: string, format: uri }
+        downloadExpiresAt: { type: string, format: date-time }
     Message:
       type: object
       additionalProperties: false
@@ -916,6 +958,7 @@ components:
         attachments:
           type: array
           items: { $ref: '#/components/schemas/MessageAttachment' }
+        reasoning: { type: [string, 'null'] }
         createdAt: { type: string, format: date-time }
     MessagePage:
       type: object
@@ -944,6 +987,7 @@ components:
         attachments:
           type: array
           items: { $ref: '#/components/schemas/MessageAttachment' }
+        reasoning: { type: [string, 'null'] }
         replayed: { type: boolean }
     MessageRunPending:
       type: object

@@ -11,7 +11,7 @@ from pathlib import PurePath
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -27,6 +27,23 @@ from enterprise.gateway.query.attachment_context import (
     any_understood,
     enrich_question,
     observe_attachments,
+)
+from enterprise.gateway.query.citation_file import (
+    CitationFileError,
+    claim_citation_file_ticket,
+    fetch_citation_image,
+    issue_citation_file_ticket,
+    principal_from_ticket,
+    public_citation,
+)
+from enterprise.gateway.query.answer_split import (
+    StreamThinkSplitter,
+    public_reasoning,
+    split_assistant_output,
+)
+from enterprise.gateway.query.citation_select import (
+    force_abstain_outcome,
+    select_cited_chunks,
 )
 from enterprise.gateway.query.formal_router import (
     FormalScopeResolver,
@@ -47,10 +64,7 @@ from enterprise.gateway.sync.readiness import document_candidate_readiness_from_
 from enterprise.gateway.sync.transient_attachment import (
     ATTACHMENT_DISABLED_MESSAGE,
     TransientAttachmentError,
-    TransientAttachmentService,
     attachment_max_size_bytes,
-    ensure_attachment_schema,
-    get_storage,
 )
 
 
@@ -91,12 +105,46 @@ def _error(status_code: int, code: str, message: str) -> JSONResponse:
     )
 
 
-def _public_run_payload(result: dict) -> dict:
-    return {
+def _public_run_payload(result: dict, citations: list[dict] | None = None) -> dict:
+    payload = {
         key: v2_store.public_status(value) if key == "status" else value
         for key, value in result.items()
         if not str(key).startswith("_")
     }
+    if citations is not None:
+        payload["citations"] = citations
+    return payload
+
+
+def _citation_download_url(request: Request, citation_id: str, token: str) -> str:
+    return str(
+        request.url_for(
+            "download_citation_file",
+            citation_id=citation_id,
+            ticket=token,
+        )
+    )
+
+
+async def _project_citations(
+    db,
+    citations: list[dict],
+    request: Request,
+    principal: UserPrincipal,
+) -> list[dict]:
+    projected: list[dict] = []
+    for item in citations:
+        ticket = await issue_citation_file_ticket(
+            db, citation=item, principal=principal
+        )
+        projected.append(
+            public_citation(
+                item,
+                ticket,
+                _citation_download_url(request, item["citationId"], ticket.token),
+            )
+        )
+    return projected
 
 
 def _candidate_identifiers(question: str) -> list[str]:
@@ -438,6 +486,7 @@ async def archive_conversation(
 
 @router.get("/conversations/{conversation_id}/messages")
 async def list_messages(
+    request: Request,
     conversation_id: str,
     limit: int = Query(default=20, ge=1, le=100),
     cursor: str | None = Query(default=None, max_length=2048),
@@ -467,7 +516,14 @@ async def list_messages(
             for citation in item.get("citations", [])
             if await _citation_document_allowed(db, principal, citation)
         ]
-        authorized_items.append({**item, "citations": citations})
+        authorized_items.append(
+            {
+                **item,
+                "citations": await _project_citations(
+                    db, citations, request, principal
+                ),
+            }
+        )
     return {
         "items": authorized_items,
         "nextCursor": next_cursor,
@@ -550,25 +606,14 @@ async def _context_scope(
 
 
 def _external_citations(
-    chunks: list[dict], docs_by_internal_id: dict[str, ExtDocumentMap], message_id: str
+    chunks: list[dict],
+    docs_by_internal_id: dict[str, ExtDocumentMap],
+    message_id: str,
+    answer: str = "",
+    status: str = "completed",
 ) -> list[dict]:
-    internal = _build_citations(chunks, docs_by_internal_id, message_id)
-    return [
-        {
-            "citationId": item["citationId"],
-            "sourceType": item.get("sourceType", "document"),
-            "title": item["title"],
-            "externalDocumentId": item.get("documentId"),
-            "sourceVersionId": item.get("versionId"),
-            "pageNo": item.get("pageNo"),
-            "bbox": item.get("bbox"),
-            "assetId": item.get("assetId"),
-            "excerpt": item.get("excerpt"),
-            "recordType": item.get("recordType"),
-            "recordId": item.get("recordId"),
-        }
-        for item in internal
-    ]
+    cited = select_cited_chunks(answer, chunks, status)
+    return _build_citations(cited, docs_by_internal_id, message_id)
 
 
 def _request_hash(
@@ -601,8 +646,10 @@ def _business_status(completion: dict | None, answer: str) -> str:
     data = completion.get("data", {}) if isinstance(completion, dict) else {}
     explicit = data.get("status") if isinstance(data, dict) else None
     if explicit in {"completed", "no_reliable_evidence", "failed"}:
-        return explicit
-    return "completed" if answer.strip() else "no_reliable_evidence"
+        status = explicit
+    else:
+        status = "completed" if answer.strip() else "no_reliable_evidence"
+    return force_abstain_outcome(answer, status)
 
 
 def _error_response_from_result(result: dict) -> JSONResponse:
@@ -765,7 +812,6 @@ async def _retrieval_question(
     conversation: dict,
     question: str,
     pending: list[PendingAttachment],
-    storage,
 ) -> tuple[str, JSONResponse | None, Any]:
     if not pending:
         return question, None, None
@@ -774,8 +820,7 @@ async def _retrieval_question(
     scope, _docs = await _context_scope(db, principal, conversation)
     if not scope.is_empty:
         chat_id = await _ensure_chat(client, principal, scope)
-    service = TransientAttachmentService(db, storage)
-    observations = await observe_attachments(pending, client, chat_id, service)
+    observations = await observe_attachments(pending, client, chat_id, db)
     if not question.strip() and not any_understood(observations):
         return question, _error(
             422,
@@ -793,13 +838,13 @@ async def _execute_json_run(
     question: str,
     run: dict,
     pending: list[PendingAttachment] | None = None,
-    storage=None,
+    request: Request | None = None,
 ) -> tuple[dict | None, JSONResponse | None]:
     assistant_message_id = run.get("assistant_message_id") or str(uuid.uuid4())
     try:
         pending = pending or []
         question, observe_error, _client = await _retrieval_question(
-            db, principal, conversation, question, pending, storage
+            db, principal, conversation, question, pending
         )
         if observe_error:
             return None, await _save_failed_run(
@@ -811,6 +856,7 @@ async def _execute_json_run(
         answer = NO_RELIABLE_EVIDENCE_ANSWER
         status = "no_reliable_evidence"
         citations: list[dict] = []
+        reasoning: str | None = None
         if not scope.is_empty:
             client = _query_client()
             chat_id = await _ensure_chat(client, principal, scope)
@@ -823,9 +869,17 @@ async def _execute_json_run(
             data = completion.get("data", {}) if isinstance(completion, dict) else {}
             reference = data.get("reference", {}) if isinstance(data, dict) else {}
             chunks = [item for item in (reference.get("chunks", []) if isinstance(reference, dict) else []) if isinstance(item, dict)]
-            answer = str(data.get("answer") or "")
+            split = split_assistant_output(str(data.get("answer") or ""))
+            answer = split.answer
+            reasoning = public_reasoning(split.reasoning)
             status = _business_status(completion, answer)
-            citations = _external_citations(chunks, docs_by_internal_id, assistant_message_id)
+            citations = _external_citations(
+                chunks,
+                docs_by_internal_id,
+                assistant_message_id,
+                answer=answer,
+                status=status,
+            )
             if status == "no_reliable_evidence" and not answer:
                 answer = NO_RELIABLE_EVIDENCE_ANSWER
             answer = _with_equipment_hint(conversation, answer, status)
@@ -846,6 +900,7 @@ async def _execute_json_run(
             content=answer,
             status=status,
             citations=citations,
+            reasoning=reasoning,
         )
         result = {
             "conversationId": conversation["conversation_id"],
@@ -853,6 +908,7 @@ async def _execute_json_run(
             "runId": run["run_id"],
             "messageId": assistant_message_id,
             "answer": answer,
+            "reasoning": reasoning,
             "status": status,
             "citations": citations,
             "replayed": False,
@@ -894,22 +950,25 @@ async def _stream_run_events(
     question: str,
     run: dict,
     pending: list[PendingAttachment] | None = None,
-    storage=None,
+    request: Request | None = None,
 ) -> AsyncIterator[str]:
     conversation_id = conversation["conversation_id"]
     assistant_message_id = run.get("assistant_message_id") or str(uuid.uuid4())
     yield _sse("run.started", {"conversationId": conversation_id, "clientMessageId": req.clientMessageId, "runId": run["run_id"], "replayed": False})
     accumulated = ""
-    deltas: list[str] = []
+    accumulated_reasoning = ""
+    deltas: list[dict] = []
     chunks: list[dict] = []
     citations: list[dict] = []
     upstream_status: str | None = None
     status = "no_reliable_evidence"
     answer = NO_RELIABLE_EVIDENCE_ANSWER
+    reasoning: str | None = None
+    splitter = StreamThinkSplitter()
     try:
         pending = pending or []
         question, observe_error, _client = await _retrieval_question(
-            db, principal, conversation, question, pending, storage
+            db, principal, conversation, question, pending
         )
         if observe_error:
             await _save_failed_run(
@@ -944,12 +1003,35 @@ async def _stream_run_events(
                 raw_chunks = reference.get("chunks", []) if isinstance(reference, dict) else []
                 chunks.extend(item for item in raw_chunks if isinstance(item, dict))
                 delta = data.get("answer")
-                if delta and not data.get("final"):
-                    accumulated += str(delta)
-                    deltas.append(str(delta))
-                    yield _sse("answer.delta", {"conversationId": conversation_id, "runId": run["run_id"], "content": str(delta)})
-                elif delta and data.get("final") and not accumulated:
-                    accumulated = str(delta)
+                if not data.get("final"):
+                    pieces = splitter.feed(
+                        str(delta or ""),
+                        start_to_think=bool(data.get("start_to_think")),
+                        end_to_think=bool(data.get("end_to_think")),
+                    )
+                    for kind, chunk in pieces:
+                        event = (
+                            "reasoning.delta"
+                            if kind == "reasoning"
+                            else "answer.delta"
+                        )
+                        if kind == "reasoning":
+                            accumulated_reasoning += chunk
+                        else:
+                            accumulated += chunk
+                        deltas.append({"event": event, "content": chunk})
+                        yield _sse(
+                            event,
+                            {
+                                "conversationId": conversation_id,
+                                "runId": run["run_id"],
+                                "content": chunk,
+                            },
+                        )
+                elif delta and not accumulated and not accumulated_reasoning:
+                    split = split_assistant_output(str(delta))
+                    accumulated = split.answer
+                    accumulated_reasoning = split.reasoning
                 await db.execute(
                     """UPDATE ext_v2_conversation
                        SET ragflow_chat_id=?, ragflow_session_id=COALESCE(?, ragflow_session_id)
@@ -957,16 +1039,30 @@ async def _stream_run_events(
                     (chat_id, ragflow_session_id, conversation_id, principal.tenant_id, principal.business_user_id),
                 )
                 await db.commit()
-            status = upstream_status or (
-                "completed" if accumulated.strip() else "no_reliable_evidence"
+            status = force_abstain_outcome(
+                accumulated,
+                upstream_status
+                or (
+                    "completed"
+                    if accumulated.strip()
+                    else "no_reliable_evidence"
+                ),
             )
-            citations = _external_citations(chunks, docs_by_internal_id, assistant_message_id)
+            citations = _external_citations(
+                chunks,
+                docs_by_internal_id,
+                assistant_message_id,
+                answer=accumulated,
+                status=status,
+            )
             answer = accumulated
+            reasoning = public_reasoning(accumulated_reasoning)
             if status == "no_reliable_evidence" and not answer:
                 answer = NO_RELIABLE_EVIDENCE_ANSWER
             hinted = _with_equipment_hint(conversation, answer, status)
             extra = hinted[len(answer):] if hinted.startswith(answer) else ""
             if extra:
+                deltas.append({"event": "answer.delta", "content": extra})
                 yield _sse(
                     "answer.delta",
                     {
@@ -986,6 +1082,7 @@ async def _stream_run_events(
             content=answer,
             status=status,
             citations=citations,
+            reasoning=reasoning,
         )
         result = {
             "conversationId": conversation_id,
@@ -993,6 +1090,7 @@ async def _stream_run_events(
             "runId": run["run_id"],
             "messageId": assistant_message_id,
             "answer": answer,
+            "reasoning": reasoning,
             "status": status,
             "citations": citations,
             "replayed": False,
@@ -1008,9 +1106,14 @@ async def _stream_run_events(
             status="completed",
             assistant_message_id=assistant_message_id,
         )
-        for citation in citations:
+        public_citations = (
+            await _project_citations(db, citations, request, principal)
+            if request is not None
+            else citations
+        )
+        for citation in public_citations:
             yield _sse("citation", citation)
-        yield _sse("answer.completed", {"conversationId": conversation_id, "runId": run["run_id"], "messageId": assistant_message_id, "status": v2_store.public_status(status), "citations": citations})
+        yield _sse("answer.completed", {"conversationId": conversation_id, "runId": run["run_id"], "messageId": assistant_message_id, "status": v2_store.public_status(status), "citations": public_citations})
     except asyncio.CancelledError:
         await _save_failed_run(
             db, principal, conversation, req, run, assistant_message_id,
@@ -1064,9 +1167,19 @@ async def _result_events(result: dict) -> AsyncIterator[str]:
         },
     )
     for delta in result.get("_streamDeltas", []):
+        if isinstance(delta, dict):
+            event = str(delta.get("event") or "answer.delta")
+            content = delta.get("content")
+        else:
+            event = "answer.delta"
+            content = delta
         yield _sse(
-            "answer.delta",
-            {"conversationId": result["conversationId"], "runId": result.get("runId"), "content": delta},
+            event,
+            {
+                "conversationId": result["conversationId"],
+                "runId": result.get("runId"),
+                "content": content,
+            },
         )
     for citation in result["citations"]:
         yield _sse("citation", citation)
@@ -1164,6 +1277,7 @@ async def _parse_multipart_message(
                     content=content,
                     sha256=hashlib.sha256(content).hexdigest(),
                     size_bytes=len(content),
+                    attachment_id=str(uuid.uuid4()),
                 )
             )
         question = (meta.question or "").strip() or None
@@ -1182,28 +1296,10 @@ async def _parse_multipart_message(
 
 async def _persist_pending_attachments(
     db,
-    storage,
-    principal: UserPrincipal,
-    conversation: dict,
     run: dict,
     pending: list[PendingAttachment],
-    request: Request,
 ) -> list[dict]:
-    await ensure_attachment_schema(db)
-    service = TransientAttachmentService(db, storage)
-    metas: list[dict] = []
-    for item in pending:
-        record, _ticket = await service.create(
-            tenant_id=principal.tenant_id,
-            conversation_id=conversation["conversation_id"],
-            business_user_id=principal.business_user_id,
-            file_name=item.file_name,
-            media_type=item.media_type,
-            content=item.content,
-            request_id=str(uuid.uuid4()),
-        )
-        item.attachment_id = record.attachment_id
-        metas.append(_attachment_public_meta(item))
+    metas = [_attachment_public_meta(item) for item in pending]
     user_message_id = run.get("user_message_id")
     if user_message_id and metas:
         await v2_store.set_message_attachments(
@@ -1217,7 +1313,6 @@ async def create_message(
     conversation_id: str,
     request: Request,
     db=Depends(get_db),
-    storage=Depends(get_storage),
     principal: UserPrincipal = Depends(
         require_capability("ask", "view_citations")
     ),
@@ -1265,51 +1360,50 @@ async def create_message(
             return _error(503, "RUN_INTERRUPTED", "Message run could not be prepared")
         if "answer" in run_or_result and "messageId" in run_or_result:
             result = run_or_result
+            public_citations = await _project_citations(
+                db, result.get("citations") or [], request, principal
+            )
             if "text/event-stream" in request.headers.get("accept", "").lower():
                 return StreamingResponse(
-                    _result_events(result),
+                    _result_events({**result, "citations": public_citations}),
                     media_type="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
                 )
-            return _public_run_payload(result)
+            return _public_run_payload(result, public_citations)
         run = run_or_result
         if pending:
-            try:
-                await _persist_pending_attachments(
-                    db, storage, principal, conversation, run, pending, request
-                )
-                request.state.inquiry_audit_body = _inquiry_audit_body(req, pending)
-            except TransientAttachmentError as exc:
-                await _save_failed_run(
-                    db, principal, conversation, req, run,
-                    run.get("assistant_message_id") or str(uuid.uuid4()),
-                    code=exc.code, status_code=exc.status_code, message=exc.message,
-                )
-                return _error(exc.status_code, exc.code, exc.message)
+            await _persist_pending_attachments(db, run, pending)
+            request.state.inquiry_audit_body = _inquiry_audit_body(req, pending)
     if run.get("status") == "running" and not question and not pending:
         return _pending_response(conversation, req, run)
     if "text/event-stream" in request.headers.get("accept", "").lower():
         return StreamingResponse(
             _stream_run_events(
-                db, principal, conversation, req, question, run, pending, storage
+                db, principal, conversation, req, question, run, pending, request
             ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
     result, error = await _execute_json_run(
-        db, principal, conversation, req, question, run, pending, storage
+        db, principal, conversation, req, question, run, pending, request
     )
     if result is not None and pending:
         result = dict(result)
         result["attachments"] = [
             _attachment_public_meta(item) for item in pending if item.attachment_id
         ]
-    return error or _public_run_payload(result)
+    if error:
+        return error
+    public_citations = await _project_citations(
+        db, result.get("citations") or [], request, principal
+    )
+    return _public_run_payload(result, public_citations)
 
 
 @router.get("/citations/{citation_id}")
 async def get_citation(
     citation_id: str,
+    request: Request,
     db=Depends(get_db),
     principal: UserPrincipal = Depends(
         require_capability("view_citations", "list_sessions")
@@ -1326,7 +1420,49 @@ async def get_citation(
         return _error(404, "CITATION_NOT_FOUND", "Citation not found")
     if not await _citation_document_allowed(db, principal, citation):
         return _error(403, "ACL_DENIED", "Access denied")
-    return citation
+    projected = await _project_citations(db, [citation], request, principal)
+    return projected[0]
+
+
+@router.get(
+    "/citations/{citation_id}/file/{ticket}",
+    name="download_citation_file",
+)
+async def download_citation_file(
+    citation_id: str,
+    ticket: str,
+    request: Request,
+    db=Depends(get_db),
+):
+    await v2_store.ensure_schema(db)
+    try:
+        claimed = await claim_citation_file_ticket(db, citation_id, ticket)
+    except CitationFileError:
+        return _error(404, "CITATION_FILE_NOT_FOUND", "Citation file not found")
+    citation = await v2_store.get_citation(
+        db,
+        citation_id=citation_id,
+        tenant_id=claimed["tenant_id"],
+        business_user_id=claimed["business_user_id"],
+    )
+    if not citation:
+        return _error(404, "CITATION_FILE_NOT_FOUND", "Citation file not found")
+    principal = principal_from_ticket(claimed)
+    doc = await _citation_document_for_principal(db, principal, citation)
+    if doc is None:
+        return _error(404, "CITATION_FILE_NOT_FOUND", "Citation file not found")
+    if claimed["kind"] == "crop":
+        image_id = claimed.get("image_id") or citation.get("imageId") or ""
+        fetched = await fetch_citation_image(str(image_id))
+        if not fetched:
+            return _error(404, "CITATION_FILE_NOT_FOUND", "Citation file not found")
+        content, media_type = fetched
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={"Cache-Control": "private, no-store"},
+        )
+    return await source_response(request, doc)
 
 
 @router.get("/citations/{citation_id}/source")

@@ -35,9 +35,17 @@ from enterprise.gateway.config import require_ragflow_api_key
 from enterprise.gateway.quality.gate import enforce_quality_gate
 from enterprise.gateway.quality.models import get_latest_evaluation
 from enterprise.gateway.query import conversation_store
+from enterprise.gateway.query.answer_split import (
+    StreamThinkSplitter,
+    public_reasoning,
+    split_assistant_output,
+)
+from enterprise.gateway.query.citation_select import (
+    force_abstain_outcome,
+    select_cited_chunks,
+)
 from enterprise.gateway.query.enterprise_prompt import (
     enterprise_prompt_config_for_api,
-    needs_enterprise_prompt_upgrade,
 )
 from enterprise.gateway.query.ragflow_client import (
     RAGFlowAPIError,
@@ -170,6 +178,7 @@ class AskJsonResponse(BaseModel):
     answer: str
     status: Literal["completed", "no_reliable_evidence", "failed"]
     citations: list[CitationOut] = Field(default_factory=list)
+    reasoning: str | None = None
 
 
 class _FormalQueryError(Exception):
@@ -394,10 +403,10 @@ def _resolve_run_outcome(
         if isinstance(data, dict):
             explicit = data.get("status")
             if explicit in ("completed", "no_reliable_evidence"):
-                return explicit
+                return force_abstain_outcome(answer, explicit)
     if not answer.strip() or not raw_chunks:
         return "no_reliable_evidence"
-    return "completed"
+    return force_abstain_outcome(answer, "completed")
 
 
 class FormalScopeResolver(ScopeResolver):
@@ -612,12 +621,11 @@ async def _ensure_chat(
         (c.get("id") for c in chats if c.get("name") == chat_name),
         None,
     )
-    prompt_config = enterprise_prompt_config_for_api()
     if not chat_id:
         created = await client.create_chat(
             chat_name,
             list(scope.dataset_ids),
-            prompt_config=prompt_config,
+            prompt_config=enterprise_prompt_config_for_api(),
         )
         chat_id = (created.get("data") or {}).get("id", "")
         if not chat_id:
@@ -626,12 +634,10 @@ async def _ensure_chat(
     chat = next((c for c in chats if c.get("id") == chat_id), {})
     existing_datasets = set(chat.get("dataset_ids") or [])
     needs_datasets = not set(scope.dataset_ids).issubset(existing_datasets)
-    needs_prompt = needs_enterprise_prompt_upgrade(chat)
-    if needs_datasets or needs_prompt:
+    if needs_datasets:
         await client.update_chat(
             chat_id,
-            list(scope.dataset_ids) if needs_datasets else None,
-            prompt_config=prompt_config if needs_prompt else None,
+            list(scope.dataset_ids),
         )
     return chat_id
 
@@ -810,11 +816,17 @@ async def _run_ask(
             else []
         )
         chunks = [c for c in raw_chunks if isinstance(c, dict)]
-        citations = _build_citations(
-            chunks, docs_by_ragflow, assistant_message_id
+        split = split_assistant_output(
+            data.get("answer", "") if isinstance(data, dict) else ""
         )
-        answer = data.get("answer", "") if isinstance(data, dict) else ""
+        answer = split.answer
+        reasoning = public_reasoning(split.reasoning)
         status = _resolve_run_outcome(completion, answer, chunks)
+        citations = _build_citations(
+            select_cited_chunks(answer, chunks, status),
+            docs_by_ragflow,
+            assistant_message_id,
+        )
         if status == "no_reliable_evidence":
             answer = NO_RELIABLE_EVIDENCE_ANSWER
             citations = []
@@ -864,6 +876,7 @@ async def _run_ask(
         answer=answer,
         status=status,
         citations=[CitationOut(**c) for c in citations],
+        reasoning=reasoning,
     )
 
 
@@ -898,6 +911,7 @@ async def _stream_ask_events(
         citations=[],
     )
     accumulated = ""
+    accumulated_reasoning = ""
     chunks: list[dict] = []
     ragflow_message_id: str | None = None
     ragflow_session_id = conversation.get("ragflow_session_id")
@@ -905,6 +919,7 @@ async def _stream_ask_events(
     answer = ""
     citations: list[dict] = []
     chat_id: str | None = None
+    splitter = StreamThinkSplitter()
     try:
         client = _query_client()
         chat_id = await _ensure_chat(client, principal, scope)
@@ -932,21 +947,36 @@ async def _stream_ask_events(
             chunks.extend(c for c in raw_chunks if isinstance(c, dict))
             delta = data.get("answer")
             is_final = bool(data.get("final"))
-            if is_final and not accumulated and delta:
-                accumulated = delta
-            elif not is_final and delta:
-                accumulated += delta
-                yield _sse(
-                    "answer.delta",
-                    {
-                        "conversationId": conversation_id,
-                        "content": delta,
-                    },
+            if is_final and not accumulated and not accumulated_reasoning and delta:
+                split = split_assistant_output(str(delta))
+                accumulated = split.answer
+                accumulated_reasoning = split.reasoning
+            elif not is_final:
+                pieces = splitter.feed(
+                    str(delta or ""),
+                    start_to_think=bool(data.get("start_to_think")),
+                    end_to_think=bool(data.get("end_to_think")),
                 )
-        citations = _build_citations(
-            chunks, docs_by_ragflow, assistant_message_id
-        )
+                for kind, chunk in pieces:
+                    if kind == "reasoning":
+                        accumulated_reasoning += chunk
+                        event = "reasoning.delta"
+                    else:
+                        accumulated += chunk
+                        event = "answer.delta"
+                    yield _sse(
+                        event,
+                        {
+                            "conversationId": conversation_id,
+                            "content": chunk,
+                        },
+                    )
         status = _resolve_run_outcome(None, accumulated, chunks)
+        citations = _build_citations(
+            select_cited_chunks(accumulated, chunks, status),
+            docs_by_ragflow,
+            assistant_message_id,
+        )
         if status == "no_reliable_evidence":
             answer = NO_RELIABLE_EVIDENCE_ANSWER
             citations = []

@@ -103,7 +103,7 @@ def test_openapi_23_declares_multipart_and_history_metadata():
     spec = yaml.safe_load(
         (ROOT / "contracts" / "integration-openapi-v2.yaml").read_text(encoding="utf-8")
     )
-    assert spec["info"]["version"] == "2.3.0"
+    assert spec["info"]["version"] == "2.5.0"
     post = spec["paths"]["/conversations/{conversationId}/messages"]["post"]
     assert "application/json" in post["requestBody"]["content"]
     assert "multipart/form-data" in post["requestBody"]["content"]
@@ -198,6 +198,11 @@ async def test_multipart_png_only_enriches_and_deletes_ragflow_file(runtime):
     assert body is not None
     assert "E07" in body["question"]
     assert not body.get("files")
+    understand = runtime.stub._last_understand_file
+    assert understand is not None
+    assert understand["mime_type"] == "image/png"
+    assert understand["name"] == "photo.png"
+    assert understand["id"]
     items = history.json()["items"]
     user = next(item for item in items if item["role"] == "user")
     assert user["content"] == ""
@@ -208,6 +213,12 @@ async def test_multipart_png_only_enriches_and_deletes_ragflow_file(runtime):
         row = await cursor.fetchone()
     assert row["n"] == 1
     assert runtime.stub.deleted_files
+    async with runtime.db.execute(
+        "SELECT file_id, deleted_at FROM ext_ragflow_temp_file"
+    ) as cursor:
+        temps = await cursor.fetchall()
+    assert temps
+    assert all(row["deleted_at"] for row in temps)
 
 
 @pytest.mark.asyncio
@@ -230,6 +241,57 @@ async def test_multipart_txt_history_keeps_filename(runtime):
     user = next(item for item in history.json()["items"] if item["role"] == "user")
     assert user["content"] == "看看这个说明"
     assert user["attachments"][0]["fileName"] == "note.txt"
+
+
+@pytest.mark.asyncio
+async def test_multipart_txt_works_without_object_storage(isolated_gateway_db, monkeypatch):
+    db, _ = isolated_gateway_db
+    monkeypatch.setenv("ENTERPRISE_TEST_MODE", "1")
+    monkeypatch.setenv("ENTERPRISE_QUERY_QUALITY_REQUIRED", "false")
+    monkeypatch.delenv("S3_BUCKET", raising=False)
+    monkeypatch.delenv("S3_TRANSIENT_BUCKET", raising=False)
+
+    async def boom_storage():
+        raise RuntimeError("object storage should not be used for message attachments")
+
+    application = FastAPI()
+    application.add_middleware(FeedRegisterAuditMiddleware)
+    application.include_router(v2_router.router)
+    application.dependency_overrides[v2_router.get_db] = lambda: db
+    application.dependency_overrides[require_user_principal] = _principal
+    application.dependency_overrides[get_storage] = boom_storage
+    stub = RAGFlowQueryStub()
+    formal_router._query_stub = stub
+    await _seed_doc(db)
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=application), base_url="http://test"
+        ) as client:
+            created = await client.post(f"{BASE}/conversations", json={"equipmentId": "EQ-ATT"})
+            response = await client.post(
+                f"{BASE}/conversations/{created.json()['conversationId']}/messages",
+                data={
+                    "metadata": json.dumps(
+                        {"clientMessageId": "no-s3-txt", "question": "看看这个说明"}
+                    )
+                },
+                files={"files": ("note.txt", b"HMI fault code E07", "text/plain")},
+            )
+            history = await client.get(
+                f"{BASE}/conversations/{created.json()['conversationId']}/messages"
+            )
+    finally:
+        formal_router._query_stub = None
+    assert response.status_code == 200, response.text
+    atts = response.json().get("attachments") or []
+    assert atts
+    assert "content" not in atts[0]
+    assert "downloadUrl" not in atts[0]
+    user = next(item for item in history.json()["items"] if item["role"] == "user")
+    assert user["attachments"][0]["fileName"] == "note.txt"
+    async with db.execute("SELECT COUNT(*) AS n FROM ext_transient_attachment") as cursor:
+        row = await cursor.fetchone()
+    assert row["n"] == 0
 
 
 @pytest.mark.asyncio
@@ -286,6 +348,7 @@ async def test_replay_does_not_create_second_attachment(runtime):
         second = await client.post(
             f"{BASE}/conversations/{conversation_id}/messages", **payload
         )
+        history = await client.get(f"{BASE}/conversations/{conversation_id}/messages")
     assert first.status_code == 200
     assert second.status_code == 200
     assert second.json()["replayed"] is True
@@ -293,7 +356,10 @@ async def test_replay_does_not_create_second_attachment(runtime):
         "SELECT COUNT(*) AS n FROM ext_transient_attachment"
     ) as cursor:
         row = await cursor.fetchone()
-    assert row["n"] == 1
+    assert row["n"] == 0
+    user = next(item for item in history.json()["items"] if item["role"] == "user")
+    assert len(user["attachments"]) == 1
+    assert user["attachments"][0]["fileName"] == "photo.png"
 
 
 @pytest.mark.asyncio

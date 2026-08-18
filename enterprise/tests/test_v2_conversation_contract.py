@@ -15,6 +15,7 @@ from httpx import ASGITransport, AsyncClient
 from enterprise.gateway.auth.middleware import require_user_principal
 from enterprise.gateway.auth.user_principal import UserPrincipal
 from enterprise.gateway.query import formal_router, v2_router, v2_store
+from enterprise.gateway.query.citation_file import set_citation_image_fetcher
 from enterprise.gateway.query.ragflow_client import RAGFlowAPIError, RAGFlowQueryStub
 from enterprise.gateway.sync.models import (
     ExtDocumentMap,
@@ -98,37 +99,45 @@ async def _insert_document(
     dataset_id: str = "ds-v2",
     version_id: str = "v1",
     allow_group_ids: list[str] | None = None,
+    **extra,
 ) -> ExtDocumentMap:
-    return await insert_mapping(
-        db,
-        ExtDocumentMap(
-            tenant_id="customer-a",
-            source_system="DEMO",
-            external_document_id=external_id,
-            source_version_id=version_id,
-            event_id=str(uuid.uuid4()),
-            sha256=hashlib.sha256(external_id.encode()).hexdigest(),
-            file_name=f"{external_id}.pdf",
-            asset_id=fixed_asset_no if asset_id is _DEFAULT_ASSET_ID else asset_id,
-            equipment_id=equipment_id,
-            fixed_asset_no=fixed_asset_no,
-            department_id="d10",
-            security_level=2,
-            allow_group_ids=json.dumps(allow_group_ids or ["maintenance"]),
-            deny_group_ids="[]",
-            ragflow_dataset_id=dataset_id,
-            ragflow_document_id=ragflow_id,
-            sync_status="ready",
-            pipeline_status="DONE",
-            business_status="active",
-            current_version=1,
-        ),
+    payload = dict(
+        tenant_id="customer-a",
+        source_system="DEMO",
+        external_document_id=external_id,
+        source_version_id=version_id,
+        event_id=str(uuid.uuid4()),
+        sha256=hashlib.sha256(external_id.encode()).hexdigest(),
+        file_name=f"{external_id}.pdf",
+        asset_id=fixed_asset_no if asset_id is _DEFAULT_ASSET_ID else asset_id,
+        equipment_id=equipment_id,
+        fixed_asset_no=fixed_asset_no,
+        department_id="d10",
+        security_level=2,
+        allow_group_ids=json.dumps(allow_group_ids or ["maintenance"]),
+        deny_group_ids="[]",
+        ragflow_dataset_id=dataset_id,
+        ragflow_document_id=ragflow_id,
+        sync_status="ready",
+        pipeline_status="DONE",
+        business_status="active",
+        current_version=1,
     )
+    payload.update(extra)
+    return await insert_mapping(db, ExtDocumentMap(**payload))
 
 
 def _stub_doc_ids(runtime) -> set[str]:
     raw = (runtime.stub._last_completion_body or {}).get("doc_ids") or ""
     return {item for item in raw.split(",") if item}
+
+
+def _citation_identity(item: dict) -> dict:
+    return {
+        key: value
+        for key, value in item.items()
+        if key not in {"downloadUrl", "downloadExpiresAt"}
+    }
 
 
 @pytest.mark.asyncio
@@ -988,14 +997,198 @@ class _ExplicitOutcomeStub(RAGFlowQueryStub):
                     "positions": [[2, 0.1, 0.2, 0.3, 0.4]],
                 }
             )
+        answer = "explicit answer [ID:0]" if self.include_chunk else "explicit answer"
         return {
             "code": 0,
             "data": {
-                "answer": "explicit answer",
+                "answer": answer,
                 "id": "ragflow-message",
                 "session_id": "ragflow-session",
                 "status": self.status,
                 "reference": {"chunks": chunks},
+            },
+        }
+
+
+class _SelectiveCitationStub(RAGFlowQueryStub):
+    async def chat_completion(
+        self,
+        chat_id: str,
+        question: str,
+        session_id: str | None = None,
+        doc_ids: list[str] | None = None,
+        request_id: str | None = None,
+    ) -> dict:
+        del chat_id, question, session_id, doc_ids, request_id
+        return {
+            "code": 0,
+            "data": {
+                "answer": "漏气维修见工单。[ID:1]",
+                "id": "ragflow-message",
+                "session_id": "ragflow-session",
+                "status": "completed",
+                "reference": {
+                    "chunks": [
+                        {
+                            "id": "invoice-chunk",
+                            "document_id": "doc-1",
+                            "document_name": "invoice.pdf",
+                            "content": "Cursor Pro invoice",
+                        },
+                        {
+                            "id": "repair-chunk",
+                            "document_id": "doc-1",
+                            "document_name": "repair.pdf",
+                            "content": "leak repair work order",
+                        },
+                    ]
+                },
+            },
+        }
+
+
+class _AbstainContrastStub(RAGFlowQueryStub):
+    async def chat_completion(
+        self,
+        chat_id: str,
+        question: str,
+        session_id: str | None = None,
+        doc_ids: list[str] | None = None,
+        request_id: str | None = None,
+    ) -> dict:
+        del chat_id, question, session_id, doc_ids, request_id
+        return {
+            "code": 0,
+            "data": {
+                "answer": (
+                    "当前检索到的知识库中，仅包含调试记录和合格证[ID:0][ID:1]，"
+                    "暂无专门的设备维修记录。"
+                ),
+                "id": "ragflow-message",
+                "session_id": "ragflow-session",
+                "status": "completed",
+                "reference": {
+                    "chunks": [
+                        {
+                            "id": "cert-chunk",
+                            "document_id": "doc-1",
+                            "document_name": "certificate.pdf",
+                            "content": "product certificate",
+                        },
+                        {
+                            "id": "debug-chunk",
+                            "document_id": "doc-1",
+                            "document_name": "debug.pdf",
+                            "content": "commissioning record",
+                        },
+                    ]
+                },
+            },
+        }
+
+
+class _ThinkAnswerStub(RAGFlowQueryStub):
+    async def chat_completion(
+        self,
+        chat_id: str,
+        question: str,
+        session_id: str | None = None,
+        doc_ids: list[str] | None = None,
+        request_id: str | None = None,
+    ) -> dict:
+        del chat_id, question, session_id, doc_ids, request_id
+        return {
+            "code": 0,
+            "data": {
+                "answer": "<think>规划并引用发票 [ID:0]</think>漏气维修见工单。[ID:1]",
+                "id": "ragflow-message",
+                "session_id": "ragflow-session",
+                "status": "completed",
+                "reference": {
+                    "chunks": [
+                        {
+                            "id": "invoice-chunk",
+                            "document_id": "doc-1",
+                            "document_name": "invoice.pdf",
+                            "content": "Cursor Pro invoice",
+                        },
+                        {
+                            "id": "repair-chunk",
+                            "document_id": "doc-1",
+                            "document_name": "repair.pdf",
+                            "content": "leak repair work order",
+                        },
+                    ]
+                },
+            },
+        }
+
+
+class _ThinkStreamStub(RAGFlowQueryStub):
+    async def chat_completion_stream(
+        self,
+        chat_id: str,
+        question: str,
+        session_id: str | None = None,
+        doc_ids: list[str] | None = None,
+        request_id: str | None = None,
+    ):
+        del chat_id, question, session_id, doc_ids, request_id
+        yield {
+            "code": 0,
+            "data": {
+                "answer": "",
+                "start_to_think": True,
+                "final": False,
+                "session_id": "s",
+            },
+        }
+        yield {"code": 0, "data": {"answer": "规划过程", "final": False, "session_id": "s"}}
+        yield {
+            "code": 0,
+            "data": {"answer": "", "end_to_think": True, "final": False, "session_id": "s"},
+        }
+        yield {"code": 0, "data": {"answer": "你好呀", "final": False, "session_id": "s"}}
+        yield {
+            "code": 0,
+            "data": {
+                "answer": "",
+                "final": True,
+                "session_id": "s",
+                "reference": {"chunks": []},
+            },
+        }
+        yield {"code": 0, "data": True}
+
+
+class _CropCitationStub(RAGFlowQueryStub):
+    async def chat_completion(
+        self,
+        chat_id: str,
+        question: str,
+        session_id: str | None = None,
+        doc_ids: list[str] | None = None,
+        request_id: str | None = None,
+    ) -> dict:
+        del chat_id, question, session_id, doc_ids, request_id
+        return {
+            "code": 0,
+            "data": {
+                "answer": "见图示。[ID:0]",
+                "id": "ragflow-message",
+                "session_id": "ragflow-session",
+                "status": "completed",
+                "reference": {
+                    "chunks": [
+                        {
+                            "id": "crop-chunk",
+                            "document_id": "doc-1",
+                            "document_name": "panel.png",
+                            "content": "fault panel",
+                            "image_id": "ds-v2-page-1.png",
+                        }
+                    ]
+                },
             },
         }
 
@@ -1166,7 +1359,7 @@ async def test_v2_stream_keeps_business_state_independent_of_citations(runtime):
 
     assert response.status_code == 200
     assert '"status": "无可靠依据"' in response.text
-    assert "event: citation" in response.text
+    assert "event: citation" not in response.text
 
 
 @pytest.mark.asyncio
@@ -1180,7 +1373,7 @@ async def test_citation_uses_external_fields_and_state_is_independent(runtime):
         version_id="version-external-1",
     )
     stub = _ExplicitOutcomeStub(
-        status="no_reliable_evidence", include_chunk=True
+        status="completed", include_chunk=True
     )
     formal_router._query_stub = stub
     async with _client(runtime) as client:
@@ -1207,7 +1400,7 @@ async def test_citation_uses_external_fields_and_state_is_independent(runtime):
             f"{BASE}/conversations/{conversation_id}/messages"
         )
 
-    assert body["status"] == "无可靠依据"
+    assert body["status"] == "已完成"
     assert body["citations"]
     assert citation["externalDocumentId"] == "EXT-DOC-1"
     assert citation["sourceVersionId"] == "version-external-1"
@@ -1216,14 +1409,281 @@ async def test_citation_uses_external_fields_and_state_is_independent(runtime):
         "versionId",
         "ragflowDocumentId",
         "chunkId",
+        "imageId",
     }.intersection(citation)
+    assert citation["downloadUrl"]
+    assert citation["downloadExpiresAt"]
+    assert "/file/" in citation["downloadUrl"]
     assert citation_response.status_code == 200
-    assert citation_response.json() == citation
+    assert _citation_identity(citation_response.json()) == _citation_identity(citation)
     assistant = [
         item for item in history.json()["items"] if item["role"] == "assistant"
     ][0]
+    assert assistant["status"] == "已完成"
+    assert [_citation_identity(item) for item in assistant["citations"]] == [
+        _citation_identity(citation)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_v2_keeps_only_chunks_cited_in_the_answer(runtime):
+    await _insert_document(
+        runtime.db,
+        external_id="EXT-DOC-CITE",
+        ragflow_id="doc-1",
+        equipment_id="EQ-CITE",
+        fixed_asset_no="FA-CITE",
+    )
+    formal_router._query_stub = _SelectiveCitationStub()
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(client, equipmentId="EQ-CITE")
+        response = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={"clientMessageId": "cite-filter", "question": "有漏气维修记录吗"},
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "已完成"
+    assert len(body["citations"]) == 1
+    assert body["citations"][0]["title"] == "repair.pdf"
+    assert "invoice.pdf" not in {item["title"] for item in body["citations"]}
+
+
+@pytest.mark.asyncio
+async def test_v2_clears_citations_when_no_reliable_evidence(runtime):
+    await _insert_document(
+        runtime.db,
+        external_id="EXT-DOC-NONE",
+        ragflow_id="doc-1",
+        equipment_id="EQ-NONE",
+        fixed_asset_no="FA-NONE",
+    )
+    formal_router._query_stub = _ExplicitOutcomeStub(
+        status="no_reliable_evidence", include_chunk=True
+    )
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(client, equipmentId="EQ-NONE")
+        response = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={"clientMessageId": "no-evidence-cite", "question": "有漏气维修记录吗"},
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "无可靠依据"
+    assert body["citations"] == []
+
+
+@pytest.mark.asyncio
+async def test_v2_abstain_phrase_forces_no_reliable_evidence_and_clears_citations(
+    runtime,
+):
+    await _insert_document(
+        runtime.db,
+        external_id="EXT-DOC-ABSTAIN",
+        ragflow_id="doc-1",
+        equipment_id="EQ-ABSTAIN",
+        fixed_asset_no="FA-ABSTAIN",
+    )
+    formal_router._query_stub = _AbstainContrastStub()
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(client, equipmentId="EQ-ABSTAIN")
+        response = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={"clientMessageId": "abstain-cite", "question": "设备维修记录有么？"},
+        )
+        history = await client.get(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages"
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "无可靠依据"
+    assert body["citations"] == []
+    assistant = next(
+        item for item in history.json()["items"] if item["role"] == "assistant"
+    )
     assert assistant["status"] == "无可靠依据"
-    assert assistant["citations"] == [citation]
+    assert assistant["citations"] == []
+
+
+@pytest.mark.asyncio
+async def test_v2_splits_think_from_answer_and_filters_citations_on_body(runtime):
+    await _insert_document(
+        runtime.db,
+        external_id="EXT-DOC-THINK",
+        ragflow_id="doc-1",
+        equipment_id="EQ-THINK",
+        fixed_asset_no="FA-THINK",
+    )
+    formal_router._query_stub = _ThinkAnswerStub()
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(client, equipmentId="EQ-THINK")
+        response = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={"clientMessageId": "think-split", "question": "有漏气维修记录吗"},
+        )
+        history = await client.get(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages"
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["answer"] == "漏气维修见工单。[ID:1]"
+    assert "规划" not in body["answer"]
+    assert body["reasoning"] == "规划并引用发票 [ID:0]"
+    assert [item["title"] for item in body["citations"]] == ["repair.pdf"]
+    items = history.json()["items"]
+    user = next(item for item in items if item["role"] == "user")
+    assistant = next(item for item in items if item["role"] == "assistant")
+    assert user["reasoning"] is None
+    assert assistant["content"] == "漏气维修见工单。[ID:1]"
+    assert assistant["reasoning"] == "规划并引用发票 [ID:0]"
+
+
+@pytest.mark.asyncio
+async def test_v2_sse_routes_think_tokens_to_reasoning_delta(runtime):
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-THINK-STREAM",
+        ragflow_id="doc-think-stream",
+        equipment_id="EQ-THINK-STREAM",
+        fixed_asset_no="FA-THINK-STREAM",
+    )
+    formal_router._query_stub = _ThinkStreamStub()
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(
+            client, equipmentId="EQ-THINK-STREAM"
+        )
+        response = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            headers={"Accept": "text/event-stream"},
+            json={"clientMessageId": "think-stream", "question": "你好"},
+        )
+        replay = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            headers={"Accept": "text/event-stream"},
+            json={"clientMessageId": "think-stream", "question": "你好"},
+        )
+        json_replay = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            headers={"Accept": "application/json"},
+            json={"clientMessageId": "think-stream", "question": "你好"},
+        )
+
+    assert response.status_code == 200, response.text
+    assert "event: reasoning.delta" in response.text
+    assert '"content": "规划过程"' in response.text
+    assert response.text.count("event: answer.delta") == 1
+    assert '"content": "你好呀"' in response.text
+    answer_block = response.text.split("event: answer.delta", 1)[-1].split(
+        "event: answer.completed", 1
+    )[0]
+    assert "规划过程" not in answer_block
+    assert replay.status_code == 200
+    assert "event: reasoning.delta" in replay.text
+    assert json_replay.status_code == 200
+    assert json_replay.json()["answer"] == "你好呀"
+    assert json_replay.json()["reasoning"] == "规划过程"
+
+
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"crop-bytes"
+
+
+@pytest.mark.asyncio
+async def test_citation_download_url_serves_crop_without_jwt(runtime):
+    await _insert_document(
+        runtime.db,
+        external_id="EXT-DOC-CROP",
+        ragflow_id="doc-1",
+        equipment_id="EQ-CROP",
+        fixed_asset_no="FA-CROP",
+    )
+    formal_router._query_stub = _CropCitationStub()
+
+    async def _fetch(image_id: str):
+        assert image_id == "ds-v2-page-1.png"
+        return PNG_BYTES, "image/png"
+
+    set_citation_image_fetcher(_fetch)
+    try:
+        async with _client(runtime) as client:
+            conversation = await _create_conversation(client, equipmentId="EQ-CROP")
+            asked = await client.post(
+                f"{BASE}/conversations/{conversation['conversationId']}/messages",
+                json={"clientMessageId": "crop-cite", "question": "图上是什么"},
+            )
+            assert asked.status_code == 200, asked.text
+            download_url = asked.json()["citations"][0]["downloadUrl"]
+            downloaded = await client.get(download_url)
+            replayed = await client.get(download_url)
+            missing = await client.get(
+                f"{BASE}/citations/cite-missing/file/not-a-ticket"
+            )
+    finally:
+        set_citation_image_fetcher(None)
+
+    assert downloaded.status_code == 200
+    assert downloaded.headers["content-type"].startswith("image/png")
+    assert downloaded.content == PNG_BYTES
+    assert replayed.status_code == 200
+    assert missing.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_citation_download_url_serves_original_without_jwt(
+    runtime, tmp_path, monkeypatch
+):
+    source_path = tmp_path / "original.pdf"
+    source_path.write_bytes(b"%PDF-1.4 original-bytes")
+    monkeypatch.setenv(
+        "ENTERPRISE_FILE_SHARE_ROOTS",
+        json.dumps({"test-root": str(tmp_path)}),
+    )
+    from enterprise.gateway.sync.external_source import FileShareSourceAdapter
+
+    stat = FileShareSourceAdapter().stat_source("test-root", source_path.name)
+    document = await _insert_document(
+        runtime.db,
+        external_id="EXT-DOC-1",
+        ragflow_id="doc-1",
+        equipment_id="EQ-ORIG",
+        fixed_asset_no="FA-ORIG",
+    )
+    formal_router._query_stub = _ExplicitOutcomeStub(
+        status="completed", include_chunk=True
+    )
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(client, equipmentId="EQ-ORIG")
+        asked = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={"clientMessageId": "orig-cite", "question": "question"},
+        )
+        assert asked.status_code == 200, asked.text
+        download_url = asked.json()["citations"][0]["downloadUrl"]
+        await runtime.db.execute(
+            """UPDATE ext_document_map
+               SET source_kind='FILE_SHARE', storage_root_id=?, relative_path=?,
+                   source_size=?, source_modified_ns=?, source_etag=?,
+                   file_name=?
+               WHERE id=?""",
+            (
+                "test-root",
+                source_path.name,
+                stat.size,
+                stat.modified_ns,
+                stat.etag,
+                "original.pdf",
+                document.id,
+            ),
+        )
+        await runtime.db.commit()
+        downloaded = await client.get(download_url)
+
+    assert downloaded.status_code == 200
+    assert downloaded.headers["content-type"].startswith("application/pdf")
+    assert downloaded.content == source_path.read_bytes()
 
 
 @pytest.mark.asyncio

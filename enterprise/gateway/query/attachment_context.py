@@ -95,8 +95,14 @@ async def observe_attachments(
     pending: list[PendingAttachment],
     client: Any,
     chat_id: str | None,
-    service: Any | None = None,
+    db: Any | None = None,
 ) -> list[AttachmentObservation]:
+    del chat_id  # image understand uses vision-only completion, not RAG chat
+    from enterprise.gateway.sync.transient_attachment import (
+        mark_ragflow_temp_file_deleted,
+        remember_ragflow_temp_file,
+    )
+
     observations: list[AttachmentObservation] = []
     for item in pending:
         if item.media_type == "text/plain":
@@ -105,29 +111,43 @@ async def observe_attachments(
         if item.media_type == "application/pdf":
             observations.append(_from_text(_pdf_text(item.content)))
             continue
-        if item.media_type not in {"image/jpeg", "image/png"} or not chat_id:
+        if item.media_type not in {"image/jpeg", "image/png"}:
             observations.append(AttachmentObservation(trust_level="observed"))
             continue
-        file_id = await client.upload_chat_file(
+        file_desc = await client.upload_chat_file(
             item.file_name, item.content, item.media_type
         )
-        if service is not None and item.attachment_id and hasattr(service, "set_ragflow_file"):
-            await service.set_ragflow_file(item.attachment_id, file_id)
+        file_id = str(file_desc.get("id") or "")
+        if not file_id:
+            observations.append(AttachmentObservation(trust_level="observed"))
+            continue
+        if db is not None:
+            try:
+                await remember_ragflow_temp_file(db, file_id)
+            except Exception:
+                logger.warning("RAGFlow temp file ledger write failed file_id=%s", file_id)
         try:
-            raw = await client.understand_file(chat_id, file_id)
+            raw = await client.understand_file(None, file_desc)
             observations.append(_from_raw(raw))
-        except Exception:
-            logger.warning("attachment understand failed name=%s", item.file_name)
+        except Exception as exc:
+            logger.warning(
+                "attachment understand failed name=%s err=%s",
+                item.file_name,
+                type(exc).__name__,
+            )
             observations.append(AttachmentObservation(trust_level="observed"))
         finally:
             try:
                 await client.delete_file(file_id)
-                if service is not None and item.attachment_id and hasattr(
-                    service, "mark_ragflow_file_deleted"
-                ):
-                    await service.mark_ragflow_file_deleted(item.attachment_id)
             except Exception:
                 logger.warning("RAGFlow temp file delete failed file_id=%s", file_id)
+            if db is not None:
+                try:
+                    await mark_ragflow_temp_file_deleted(db, file_id)
+                except Exception:
+                    logger.warning(
+                        "RAGFlow temp file ledger mark failed file_id=%s", file_id
+                    )
     return observations
 
 
@@ -148,8 +168,8 @@ def enrich_question(original: str, observations: list[AttachmentObservation]) ->
     joined = "、".join(facts[:12])
     prefix = (
         f"【上传附件观察，非设备台账】识别到疑似：{joined}。"
-        "回答时必须写成「从你上传的图片中识别到疑似故障码 …」，"
-        "禁止写成「设备当前故障码是 …」。\n"
+        "回答时必须写成「从你上传的图片中识别到疑似…」，"
+        "禁止写成「设备当前故障码是 …」或把知识库内容说成图片内容。\n"
     )
     if original.strip():
         return prefix + "用户问题：" + original

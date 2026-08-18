@@ -33,6 +33,7 @@ services:
     environment:
       PYTHONPATH: /ragflow
       RAGFLOW_BASE_URL: http://ragflow-cpu:9380
+      RAGFLOW_TIMEOUT: "120"
       RAGFLOW_API_KEY: ${RAGFLOW_API_KEY:?set RAGFLOW_API_KEY}
       ENTERPRISE_RAGFLOW_BASE_URL: http://ragflow-cpu:9380
       ENTERPRISE_RAGFLOW_API_KEY: ${RAGFLOW_API_KEY:?set RAGFLOW_API_KEY}
