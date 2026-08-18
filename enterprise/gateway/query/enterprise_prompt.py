@@ -11,7 +11,7 @@ from typing import Any
 
 from enterprise.gateway.query.citation_select import ABSTAIN_PHRASE
 
-ENTERPRISE_PROMPT_MARKER = "enterprise_identity_metadata_v6"
+ENTERPRISE_PROMPT_MARKER = "enterprise_identity_metadata_v7"
 
 REFERENCE_METADATA_FIELDS = (
     "equipment_id",
@@ -40,7 +40,22 @@ metadata 只证明「这是这台设备的文档」，
 约定拒答句只用于无法支撑用户当前所问事实的场景，不得用于已答出事实的回答。
 用户问「有哪些资料/文档」且概括真实命中内容时，可以引用并标 [ID:n]。
 
-正文一旦依据某个知识片段作答（含「有某类记录/单据，但缺少某一字段」的半支撑回答），
+【附件观察与知识库事实必须分叉】
+本轮用户消息可能带有上传附件。附件内容（含图片识别结果、TXT/PDF 文字层、Office 原件）只是观察，不是设备台账、维修记录或制度原文。
+
+当用户问附件里看见了什么（故障码、铭牌、画面、文档里写了什么）：
+- 按观察作答，写成「从你上传的附件中识别到疑似…」或「附件中可见…」；
+- 禁止因此写约定拒答句「{ABSTAIN_PHRASE}」；
+- 禁止用 [ID:n] 引用，除非同时还引用了本轮知识库 Content 片段。
+
+当用户问维修步骤、历史记录、工单、制度、参数规范：
+- 必须由知识库 Content 提供依据；
+- 没有知识库 Content 仍必须原样写出约定拒答句「{ABSTAIN_PHRASE}」；
+- 禁止把附件观察写成台账事实，禁止写成「设备当前故障码是…」。
+
+无附件时，empty_response 与拒答规则保持不变。
+
+正文一旦依据某个知识库片段作答（含「有某类记录/单据，但缺少某一字段」的半支撑回答），
 必须在正文用方括号引用格式 [ID:n] 标出该片段，禁止只写「知识库ID:n」「ID:n」散文。
 引用编号只能使用本轮知识库列表中的编号，禁止沿用上一轮对话里的 ID；
 本轮若只有一个片段，必须标 [ID:0]。

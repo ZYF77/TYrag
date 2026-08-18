@@ -10,6 +10,7 @@ import {
   removeUselessFieldsFromValues,
   setLLMSettingEnabledValues,
 } from '@/utils/form';
+import { chatAssistantSaveModelFields } from '@/utils/llm-util';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { isEmpty, omit } from 'lodash';
 import { LucidePanelRightClose, LucideSettings } from 'lucide-react';
@@ -23,8 +24,29 @@ import { ChatPromptEngine } from './chat-prompt-engine';
 import { SavingButton } from './saving-button';
 import { useChatSettingSchema } from './use-chat-setting-schema';
 import { getWebSearchProvider } from '../web-search-api-key';
+import message from '@/components/ui/message';
 
 type ChatSettingsProps = { hasSingleChatBox: boolean };
+
+function firstFieldError(errors: unknown, prefix = ''): string | undefined {
+  if (!errors || typeof errors !== 'object') {
+    return undefined;
+  }
+  for (const [key, value] of Object.entries(errors as Record<string, any>)) {
+    if (!value || typeof value !== 'object') {
+      continue;
+    }
+    const path = prefix ? `${prefix}.${key}` : key;
+    if (typeof value.message === 'string' && value.message) {
+      return `${path}: ${value.message}`;
+    }
+    const nested = firstFieldError(value, path);
+    if (nested) {
+      return nested;
+    }
+  }
+  return undefined;
+}
 
 export function ChatSettings({ hasSingleChatBox }: ChatSettingsProps) {
   const formSchema = useChatSettingSchema();
@@ -86,15 +108,20 @@ export function ChatSettings({ hasSingleChatBox }: ChatSettingsProps) {
       referenceMetadata.fields = undefined;
     }
 
-    // Add model_type to llm_setting based on the selected llm_id
+    // Add model_type to llm_setting based on the selected llm_id.
+    // GET returns llm_id as a composite name; do not copy that name into
+    // tenant_llm_id (older backends reject it with 102).
     if (nextValues.llm_id) {
-      // The model selector returns the tenant model ID. Keep the legacy
-      // llm_id and the tenant-scoped ID synchronized; the backend gives
-      // tenant_llm_id precedence when resolving the chat model.
-      nextValues.tenant_llm_id = nextValues.llm_id;
+      const fields = chatAssistantSaveModelFields(
+        nextValues.llm_id,
+        findLlmByUuid(nextValues.llm_id)?.model_type,
+      );
+      if (fields.tenant_llm_id) {
+        nextValues.tenant_llm_id = fields.tenant_llm_id;
+      }
       nextValues.llm_setting = {
         ...nextValues.llm_setting,
-        model_type: findLlmByUuid(nextValues.llm_id)?.model_type || 'chat',
+        model_type: fields.model_type,
       };
     }
 
@@ -117,7 +144,8 @@ export function ChatSettings({ hasSingleChatBox }: ChatSettingsProps) {
   }
 
   function onInvalid(errors: any) {
-    void errors;
+    const first = firstFieldError(errors);
+    message.error(first || '保存失败，请检查聊天设置');
   }
 
   useEffect(() => {
@@ -134,7 +162,12 @@ export function ChatSettings({ hasSingleChatBox }: ChatSettingsProps) {
 
     const nextData = {
       ...data,
+      icon: data.icon ?? '',
       prompt_config: {
+        quote: true,
+        keyword: false,
+        tts: false,
+        refine_multiturn: true,
         ...data.prompt_config,
         web_search_provider: getWebSearchProvider(data.prompt_config),
         reference_metadata: normalizedReferenceMetadata,

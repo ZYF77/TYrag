@@ -1,7 +1,7 @@
-# EAM 问询对接说明（Gateway Inquiry v2.5）
+# EAM 问询对接说明（Gateway Inquiry v2.6）
 
 面向：EAM 开发 / 测试 / 运维  
-契约版本：`integration-openapi-v2` **v2.5.0**  
+契约版本：`integration-openapi-v2` **v2.6.0**  
 正式契约文件：
 
 - `contracts/integration-openapi-v2.yaml`
@@ -299,7 +299,7 @@ Accept: application/json
 
 若相同 `clientMessageId` 对应的 run 仍在执行，可能返回 `202` + 同一 `runId`（勿再开第二次执行）。
 
-### 4.2.1 带附件提问（multipart，v2.3）
+### 4.2.1 带附件提问（multipart，v2.6）
 
 有文件时走**同一 URL**，不要先调 `POST .../attachments`，也不要在 JSON 里塞 `attachments[].content` base64。鉴权仍是问询 JWT，**不要加 HMAC 三头**。
 
@@ -313,17 +313,25 @@ Content-Type: multipart/form-data
 
 - `metadata`：JSON，`{ "clientMessageId": "...", "question": "..." }`；`question` 可省略（只发文件合法）
 - `files`：原始字节；最多 **5** 个，单文件 **10MB**。对话框粘贴 / Ctrl+V 的图片也放这里（常见 `image/png`），没有单独粘贴接口；不要把 `data:image/...` 写进 `question`
-- 第一波 MIME：`image/jpeg`、`image/png`、`text/plain`、`application/pdf`
+- 支持的 MIME：`image/jpeg`、`image/png`、`text/plain`、`application/pdf`、`application/vnd.openxmlformats-officedocument.wordprocessingml.document`（.docx）、`application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`（.xlsx）。不接收旧版 `.doc` / `.xls`、ppt、csv
 - chips（`suggestionId`）**禁止**带文件；请继续用 JSON
-- 超限：`413`；类型不支持：`422`
+- 超限：`413`；类型不支持（如 ppt、旧版 .doc）：`422`
 
-历史 `GET .../messages` 只回附件元数据（`attachmentId` / `fileName` / `mediaType` / `sizeBytes` / `sha256`），**不回文件字节、不嵌下载 URL**。Gateway **也不把对话框原件写入对象存储**；文件只在本次请求内用于抽文本/看图，处理完丢弃。EAM 不要持久化这份临时文件。
+历史 `GET .../messages` 只回附件元数据（`attachmentId` / `fileName` / `mediaType` / `sizeBytes` / `sha256`），**不回文件字节、不嵌下载 URL**。Gateway **不提供附件下载**，也不把对话框原件写入 Gateway 对象存储供回下。原件会进入 RAGFlow 本次生成；RAGFlow downloads 会有**短时副本**，不是给 EAM 的下载口。EAM 不要持久化这份临时文件。
 
 从图/OCR 抽出的短码只用于检索 enrichment，信任级别是观察（`observed`），不是台账字段。回答应写成「从你上传的图片中识别到疑似故障码 E07」，不要写成「设备当前故障码是 E07」。citations 仍只来自已投喂知识库。
 
+行为变化（v2.6，协议字段不变）：
+
+- **`已完成` 可以没有 `citations`：** 只根据附件观察作答时，`status` 仍可为 `已完成`，`citations` 为空。不要把「已完成」当成「一定有知识库依据」。
+- **PDF 内嵌图 / 扫描 PDF ≠ 直接发 JPG：** Chat 不会把页内图拆成多模态看图输入。需要看图请直接传 jpeg/png。
+- **续问默认不会自动带上一张图：** 附件只作用于当前句。下一句纯文字提问时原图不在，除非用户再贴，或依赖上一轮写进问题里的短观察。
+- **带附件延迟可能增加**（图片会先 Understand 再进入最终看图）；可能更多 `202`。
+- **Gateway 不提供附件下载**；RAGFlow downloads 会有短时副本。
+
 | `status` | 含义 |
 |---|---|
-| `已完成` | 问答正常完成 |
+| `已完成` | 问答正常完成（只答附件观察时可以没有 `citations`） |
 | `无可靠依据` | 没有足够可靠证据 |
 | `失败` | 执行失败 |
 | `处理中` | 同一 `clientMessageId` 的 run 仍在执行（HTTP 202） |
@@ -509,10 +517,10 @@ run.started
 |---|---|
 | 本文 | EAM 问询变更与对接总览（与投喂 handoff 成对） |
 | `docs/integration/eam-inquiry-sub-notice.md` | **给 EAM 的 `sub` 白话说明**（规则；无需开通名单） |
-| `docs/integration/eam-inquiry-attachment-notice.md` | **给 EAM 的消息附件接口变更**（v2.2 → v2.3，同一 URL 双 Content-Type） |
+| `docs/integration/eam-inquiry-attachment-notice.md` | **给 EAM 的消息附件接口变更**（v2.5 → v2.6，同一 URL 双 Content-Type；MIME 含 docx/xlsx） |
 | `docs/integration/eam-inquiry-citation-notice.md` | **给 EAM 的引用过滤与统一下载**（v2.3 → v2.4，`downloadUrl` 不带 JWT） |
 | `docs/integration/eam-inquiry-reasoning-notice.md` | **给 EAM 的思考过程与正文拆分**（v2.4 → v2.5，可选 `reasoning`） |
 | `docs/integration/eam-file-feed-handoff-3.1.md` | 文件投喂 + 终态回调 |
 | `docs/integration/eam-device-integration-guide.md` | 综合对接总册（含问询细节示例） |
 | `docs/设备管理系统—企业知识库对接协议.md` | 协议/验收底稿 |
-| `contracts/integration-openapi-v2.yaml` | 问询正式 OpenAPI（v2.5.0） |
+| `contracts/integration-openapi-v2.yaml` | 问询正式 OpenAPI（v2.6.0） |

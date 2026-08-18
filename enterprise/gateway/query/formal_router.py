@@ -610,28 +610,26 @@ async def _ensure_formal_context(
     return conversation, resolved
 
 
-async def _ensure_chat(
+async def _ensure_chat_info(
     client,
     principal: UserPrincipal,
     scope: AclScope,
-) -> str:
+) -> tuple[str, dict]:
     chat_name = f"enterprise-formal-{principal.tenant_id}"
     chats = await client.list_chats(name=chat_name)
-    chat_id = next(
-        (c.get("id") for c in chats if c.get("name") == chat_name),
-        None,
-    )
-    if not chat_id:
+    chat = next((c for c in chats if c.get("name") == chat_name), None)
+    if not chat:
         created = await client.create_chat(
             chat_name,
             list(scope.dataset_ids),
             prompt_config=enterprise_prompt_config_for_api(),
         )
-        chat_id = (created.get("data") or {}).get("id", "")
+        chat = (created.get("data") or {}) if isinstance(created, dict) else {}
+        chat_id = chat.get("id", "")
         if not chat_id:
             raise RAGFlowAPIError("Chat id missing after create", 502)
-        return chat_id
-    chat = next((c for c in chats if c.get("id") == chat_id), {})
+        return str(chat_id), chat
+    chat_id = str(chat.get("id") or "")
     existing_datasets = set(chat.get("dataset_ids") or [])
     needs_datasets = not set(scope.dataset_ids).issubset(existing_datasets)
     if needs_datasets:
@@ -639,6 +637,15 @@ async def _ensure_chat(
             chat_id,
             list(scope.dataset_ids),
         )
+    return chat_id, chat
+
+
+async def _ensure_chat(
+    client,
+    principal: UserPrincipal,
+    scope: AclScope,
+) -> str:
+    chat_id, _ = await _ensure_chat_info(client, principal, scope)
     return chat_id
 
 

@@ -42,6 +42,10 @@ def test_enterprise_prompt_has_knowledge_and_two_tier_relevance():
     assert "标签外只写给用户看的最终正文" in system
     assert "尽量回答" not in system
     assert "not found in the dataset" not in system.lower()
+    assert "附件观察与知识库事实必须分叉" in system
+    assert "禁止因此写约定拒答句" in system
+    assert "禁止把附件观察写成台账事实" in system
+    assert "无附件时，empty_response 与拒答规则保持不变" in system
 
     ref = cfg["reference_metadata"]
     assert ref["include"] is True
@@ -63,6 +67,7 @@ def test_needs_enterprise_prompt_upgrade_detects_default_chat():
         "enterprise_identity_metadata_v3",
         "enterprise_identity_metadata_v4",
         "enterprise_identity_metadata_v5",
+        "enterprise_identity_metadata_v6",
     ):
         legacy = build_enterprise_prompt_config()
         legacy["system"] = legacy["system"].replace(

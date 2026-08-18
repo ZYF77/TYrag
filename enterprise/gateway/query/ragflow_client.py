@@ -301,15 +301,39 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
             )
         return desc
 
-    async def delete_file(self, file_id: str, request_id: str | None = None) -> None:
+    async def delete_file(
+        self,
+        file_id: str,
+        request_id: str | None = None,
+        created_by: str | None = None,
+    ) -> None:
         """Best-effort cleanup for temporary chat attachments.
 
         Runtime attachments from ``/documents/upload`` live in the downloads
         bucket. RAGFlow has no public DELETE for that store (session delete
-        cleans them internally). Skip the file-manager DELETE so we do not
-        confuse ledger cleanup with a wrong API.
+        cleans them internally). If this process already has RAGFlow
+        ``STORAGE_IMPL`` loaded, remove ``{created_by}-downloads``; otherwise
+        the Gateway ledger and cleanup worker record the orphan.
         """
         del request_id
+        storage = None
+        try:
+            import sys
+
+            settings_mod = sys.modules.get("rag.settings") or sys.modules.get(
+                "common.settings"
+            )
+            storage = getattr(settings_mod, "STORAGE_IMPL", None) if settings_mod else None
+        except Exception:
+            storage = None
+        if storage is not None and created_by and file_id:
+            try:
+                storage.rm(f"{created_by}-downloads", file_id)
+                return
+            except Exception:
+                logger.warning(
+                    "RAGFlow downloads STORAGE_IMPL.rm failed file_id=%s", file_id
+                )
         logger.info(
             "chat attachment delete skipped (no public downloads DELETE) file_id=%s",
             file_id,
@@ -380,6 +404,7 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
         session_id: str | None = None,
         doc_ids: list[str] | None = None,
         request_id: str | None = None,
+        files: list[dict[str, Any]] | list[str] | None = None,
     ):
         """Stream RAGFlow chat completion over the public SSE API.
 
@@ -398,6 +423,8 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
             body["session_id"] = session_id
         if doc_ids:
             body["doc_ids"] = ",".join(doc_ids)
+        if files:
+            body["files"] = list(files)
         _trace_doc_ids(rid, doc_ids)
         timeout = httpx.Timeout(self.timeout, connect=self.timeout)
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -476,6 +503,9 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         self.deleted_files: list[str] = []
         self._ragflow_files: dict[str, bytes] = {}
         self._last_understand_file: dict[str, Any] | None = None
+        self.understand_calls = 0
+        self.default_llm_setting: dict[str, Any] = {"model_type": "chat"}
+        self.forced_answer: str | None = None
         self.understand_result: dict[str, Any] = {
             "errorCodes": ["E07"],
             "equipmentCodes": [],
@@ -530,6 +560,7 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
             "id": f"chat-{uuid.uuid4().hex[:12]}",
             "name": name,
             "dataset_ids": list(dataset_ids),
+            "llm_setting": dict(self.default_llm_setting),
         }
         if prompt_config is not None:
             chat["prompt_config"] = dict(prompt_config)
@@ -585,7 +616,13 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
             "created_by": "stub-tenant",
         }
 
-    async def delete_file(self, file_id: str, request_id: str | None = None) -> None:
+    async def delete_file(
+        self,
+        file_id: str,
+        request_id: str | None = None,
+        created_by: str | None = None,
+    ) -> None:
+        del request_id, created_by
         self.deleted_files.append(file_id)
         self._ragflow_files.pop(file_id, None)
 
@@ -600,6 +637,7 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
             raise RAGFlowAPIError(
                 "Chat attachment must be a descriptor with mime_type", 502
             )
+        self.understand_calls += 1
         self._last_understand_file = dict(file)
         return dict(self.understand_result)
 
@@ -688,8 +726,11 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
                 if chunk.get("id") or chunk.get("chunk_id")
             }
         )
-        markers = "".join(f" [ID:{index}]" for index in range(len(chunks)))
-        answer = f"stub answer for: {question}{markers}"
+        if self.forced_answer is not None:
+            answer = self.forced_answer
+        else:
+            markers = "".join(f" [ID:{index}]" for index in range(len(chunks)))
+            answer = f"stub answer for: {question}{markers}"
         session["messages"].append(
             {"role": "user", "content": question, "id": turn_id}
         )
@@ -718,6 +759,7 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         session_id: str | None = None,
         doc_ids: list[str] | None = None,
         request_id: str | None = None,
+        files: list[dict[str, Any]] | list[str] | None = None,
     ):
         if self._stream_fail_after == 0:
             completion = await self.chat_completion(
@@ -726,6 +768,7 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
                 session_id=session_id,
                 doc_ids=doc_ids,
                 request_id=request_id,
+                files=files,
             )
             data = completion.get("data", {})
             if isinstance(data, dict) and data.get("answer"):

@@ -1,4 +1,10 @@
-import { addTenantParams, buildModelValue, parseModelUuid, parseModelValue } from '../llm-util';
+import {
+  addTenantParams,
+  buildModelValue,
+  chatAssistantSaveModelFields,
+  parseModelUuid,
+  parseModelValue,
+} from '../llm-util';
 
 // Composite model keys are right-anchored:
 // "model_name@instance_name@provider_name" or "model_name@provider_name".
@@ -136,5 +142,30 @@ describe('addTenantParams', () => {
       '/v1/other',
     );
     expect(result.tenant_llm_id).toBe('old-llm-id');
+  });
+});
+
+describe('chatAssistantSaveModelFields', () => {
+  test('does not copy a composite llm_id into tenant_llm_id', () => {
+    const fields = chatAssistantSaveModelFields(
+      'qwen-plus@default@Tongyi-Qianwen',
+      ['chat', 'vision'],
+    );
+    expect(fields.tenant_llm_id).toBeUndefined();
+    expect(fields.model_type).toBe('chat');
+
+    const storedTenantLlmId = 'a'.repeat(32);
+    const params = {
+      llm_id: 'qwen-plus@default@Tongyi-Qianwen',
+      tenant_llm_id: storedTenantLlmId,
+      ...fields,
+    };
+    expect(params.tenant_llm_id).toBe(storedTenantLlmId);
+  });
+
+  test('uses a bare tenant model id as tenant_llm_id', () => {
+    const fields = chatAssistantSaveModelFields('doubao-llm-id', 'chat');
+    expect(fields.tenant_llm_id).toBe('doubao-llm-id');
+    expect(fields.model_type).toBe('chat');
   });
 });

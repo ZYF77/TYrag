@@ -787,7 +787,7 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
     logging.debug("{}->{}".format(" ".join(questions), "\n->".join(knowledges)))
 
     retrieval_ts = timer()
-    if not knowledges and prompt_config.get("empty_response"):
+    if not knowledges and prompt_config.get("empty_response") and not messages[-1].get("files"):
         empty_res = prompt_config["empty_response"]
         logging.debug("async_chat empty_response path: empty_res=%r tts_mdl=%r", empty_res, tts_mdl)
         # HTML-escape for frontend display so DOMPurify does not strip

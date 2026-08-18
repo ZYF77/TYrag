@@ -65,4 +65,34 @@ describe('chat settings schema', () => {
 
     expect(result.success).toBe(true);
   });
+
+  it('allows a Gateway-seeded enterprise chat that omits keyword', () => {
+    const result = createChatSettingSchema((key) => key).safeParse({
+      name: 'enterprise-formal-wp04e2e',
+      icon: null,
+      dataset_ids: ['ds-1'],
+      prompt_config: {
+        quote: true,
+        tts: false,
+        refine_multiturn: true,
+        system: '企业助手 {knowledge}',
+        prologue: '你好',
+        parameters: [
+          { key: 'knowledge', optional: false },
+          { key: 'date', optional: true },
+        ],
+        empty_response: '未找到可靠依据，无法回答。',
+        reference_metadata: {
+          include: true,
+          fields: ['equipment_id', 'fixed_asset_no'],
+        },
+      },
+      llm_setting: { model_type: 'chat' },
+      similarity_threshold: 0.2,
+      vector_similarity_weight: 0.3,
+      top_n: 8,
+    });
+
+    expect(result.success).toBe(true);
+  });
 });

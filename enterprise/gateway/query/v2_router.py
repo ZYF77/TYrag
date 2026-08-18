@@ -7,7 +7,6 @@ import asyncio
 import re
 import uuid
 from typing import Any, AsyncIterator
-from pathlib import PurePath
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -25,8 +24,12 @@ from enterprise.gateway.query.attachment_context import (
     MAX_MESSAGE_FILES,
     PendingAttachment,
     any_understood,
+    chat_is_vision_capable,
+    cleanup_ragflow_files,
+    completion_files,
     enrich_question,
     observe_attachments,
+    ragflow_attachment_filename,
 )
 from enterprise.gateway.query.citation_file import (
     CitationFileError,
@@ -54,6 +57,7 @@ from enterprise.gateway.query.formal_router import (
     _citation_document_for_principal,
     _conversation_lock,
     _ensure_chat,
+    _ensure_chat_info,
     _query_client,
     _sse,
 )
@@ -841,105 +845,116 @@ async def _execute_json_run(
     request: Request | None = None,
 ) -> tuple[dict | None, JSONResponse | None]:
     assistant_message_id = run.get("assistant_message_id") or str(uuid.uuid4())
+    pending = pending or []
+    client = None
     try:
-        pending = pending or []
-        question, observe_error, _client = await _retrieval_question(
-            db, principal, conversation, question, pending
-        )
-        if observe_error:
+        try:
+            question, observe_error, client = await _retrieval_question(
+                db, principal, conversation, question, pending
+            )
+            if observe_error:
+                return None, await _save_failed_run(
+                    db, principal, conversation, req, run, assistant_message_id,
+                    code="VALIDATION_ERROR", status_code=422,
+                    message="Could not understand the attachment; add a text question",
+                )
+            scope, docs_by_internal_id = await _context_scope(db, principal, conversation)
+            answer = NO_RELIABLE_EVIDENCE_ANSWER
+            status = "no_reliable_evidence"
+            citations: list[dict] = []
+            reasoning: str | None = None
+            if not scope.is_empty:
+                client = client or _query_client()
+                chat_id, chat = await _ensure_chat_info(client, principal, scope)
+                files = completion_files(
+                    pending, vision=chat_is_vision_capable(chat)
+                )
+                completion_kwargs: dict[str, Any] = {}
+                if files:
+                    completion_kwargs["files"] = files
+                completion = await client.chat_completion(
+                    chat_id,
+                    _ragflow_question(conversation, question),
+                    session_id=conversation.get("ragflow_session_id"),
+                    doc_ids=list(scope.document_ids),
+                    **completion_kwargs,
+                )
+                data = completion.get("data", {}) if isinstance(completion, dict) else {}
+                reference = data.get("reference", {}) if isinstance(data, dict) else {}
+                chunks = [item for item in (reference.get("chunks", []) if isinstance(reference, dict) else []) if isinstance(item, dict)]
+                split = split_assistant_output(str(data.get("answer") or ""))
+                answer = split.answer
+                reasoning = public_reasoning(split.reasoning)
+                status = _business_status(completion, answer)
+                citations = _external_citations(
+                    chunks,
+                    docs_by_internal_id,
+                    assistant_message_id,
+                    answer=answer,
+                    status=status,
+                )
+                if status == "no_reliable_evidence" and not answer:
+                    answer = NO_RELIABLE_EVIDENCE_ANSWER
+                answer = _with_equipment_hint(conversation, answer, status)
+                await db.execute(
+                    """UPDATE ext_v2_conversation
+                       SET ragflow_chat_id=?, ragflow_session_id=COALESCE(?, ragflow_session_id)
+                       WHERE conversation_id=? AND tenant_id=? AND business_user_id=?""",
+                    (chat_id, data.get("session_id"), conversation["conversation_id"], principal.tenant_id, principal.business_user_id),
+                )
+                await db.commit()
+            await v2_store.add_message(
+                db,
+                message_id=assistant_message_id,
+                conversation_id=conversation["conversation_id"],
+                tenant_id=principal.tenant_id,
+                business_user_id=principal.business_user_id,
+                role="assistant",
+                content=answer,
+                status=status,
+                citations=citations,
+                reasoning=reasoning,
+            )
+            result = {
+                "conversationId": conversation["conversation_id"],
+                "clientMessageId": req.clientMessageId,
+                "runId": run["run_id"],
+                "messageId": assistant_message_id,
+                "answer": answer,
+                "reasoning": reasoning,
+                "status": status,
+                "citations": citations,
+                "replayed": False,
+            }
+            await v2_store.complete_message_run(
+                db,
+                conversation_id=conversation["conversation_id"],
+                tenant_id=principal.tenant_id,
+                business_user_id=principal.business_user_id,
+                client_message_id=req.clientMessageId,
+                result=result,
+                status="completed",
+                assistant_message_id=assistant_message_id,
+            )
+            return result, None
+        except (RAGFlowAPIError, _FormalQueryError) as exc:
+            if isinstance(exc, _FormalQueryError):
+                code, status_code, message = exc.code, exc.status_code, exc.message
+            else:
+                code = "RAGFLOW_API_INCOMPATIBLE" if exc.status_code and 400 <= exc.status_code < 500 else "RAGFLOW_UNAVAILABLE"
+                status_code = 503
+                message = "Query engine unavailable"
             return None, await _save_failed_run(
                 db, principal, conversation, req, run, assistant_message_id,
-                code="VALIDATION_ERROR", status_code=422,
-                message="Could not understand the attachment; add a text question",
+                code=code, status_code=status_code, message=message,
             )
-        scope, docs_by_internal_id = await _context_scope(db, principal, conversation)
-        answer = NO_RELIABLE_EVIDENCE_ANSWER
-        status = "no_reliable_evidence"
-        citations: list[dict] = []
-        reasoning: str | None = None
-        if not scope.is_empty:
-            client = _query_client()
-            chat_id = await _ensure_chat(client, principal, scope)
-            completion = await client.chat_completion(
-                chat_id,
-                _ragflow_question(conversation, question),
-                session_id=conversation.get("ragflow_session_id"),
-                doc_ids=list(scope.document_ids),
+        except Exception:
+            return None, await _save_failed_run(
+                db, principal, conversation, req, run, assistant_message_id,
+                code="INTERNAL_ERROR", status_code=500, message="Message run failed",
             )
-            data = completion.get("data", {}) if isinstance(completion, dict) else {}
-            reference = data.get("reference", {}) if isinstance(data, dict) else {}
-            chunks = [item for item in (reference.get("chunks", []) if isinstance(reference, dict) else []) if isinstance(item, dict)]
-            split = split_assistant_output(str(data.get("answer") or ""))
-            answer = split.answer
-            reasoning = public_reasoning(split.reasoning)
-            status = _business_status(completion, answer)
-            citations = _external_citations(
-                chunks,
-                docs_by_internal_id,
-                assistant_message_id,
-                answer=answer,
-                status=status,
-            )
-            if status == "no_reliable_evidence" and not answer:
-                answer = NO_RELIABLE_EVIDENCE_ANSWER
-            answer = _with_equipment_hint(conversation, answer, status)
-            await db.execute(
-                """UPDATE ext_v2_conversation
-                   SET ragflow_chat_id=?, ragflow_session_id=COALESCE(?, ragflow_session_id)
-                   WHERE conversation_id=? AND tenant_id=? AND business_user_id=?""",
-                (chat_id, data.get("session_id"), conversation["conversation_id"], principal.tenant_id, principal.business_user_id),
-            )
-            await db.commit()
-        await v2_store.add_message(
-            db,
-            message_id=assistant_message_id,
-            conversation_id=conversation["conversation_id"],
-            tenant_id=principal.tenant_id,
-            business_user_id=principal.business_user_id,
-            role="assistant",
-            content=answer,
-            status=status,
-            citations=citations,
-            reasoning=reasoning,
-        )
-        result = {
-            "conversationId": conversation["conversation_id"],
-            "clientMessageId": req.clientMessageId,
-            "runId": run["run_id"],
-            "messageId": assistant_message_id,
-            "answer": answer,
-            "reasoning": reasoning,
-            "status": status,
-            "citations": citations,
-            "replayed": False,
-        }
-        await v2_store.complete_message_run(
-            db,
-            conversation_id=conversation["conversation_id"],
-            tenant_id=principal.tenant_id,
-            business_user_id=principal.business_user_id,
-            client_message_id=req.clientMessageId,
-            result=result,
-            status="completed",
-            assistant_message_id=assistant_message_id,
-        )
-        return result, None
-    except (RAGFlowAPIError, _FormalQueryError) as exc:
-        if isinstance(exc, _FormalQueryError):
-            code, status_code, message = exc.code, exc.status_code, exc.message
-        else:
-            code = "RAGFLOW_API_INCOMPATIBLE" if exc.status_code and 400 <= exc.status_code < 500 else "RAGFLOW_UNAVAILABLE"
-            status_code = 503
-            message = "Query engine unavailable"
-        return None, await _save_failed_run(
-            db, principal, conversation, req, run, assistant_message_id,
-            code=code, status_code=status_code, message=message,
-        )
-    except Exception:
-        return None, await _save_failed_run(
-            db, principal, conversation, req, run, assistant_message_id,
-            code="INTERNAL_ERROR", status_code=500, message="Message run failed",
-        )
+    finally:
+        await cleanup_ragflow_files(pending, client, db)
 
 
 async def _stream_run_events(
@@ -965,9 +980,10 @@ async def _stream_run_events(
     answer = NO_RELIABLE_EVIDENCE_ANSWER
     reasoning: str | None = None
     splitter = StreamThinkSplitter()
+    pending = pending or []
+    client = None
     try:
-        pending = pending or []
-        question, observe_error, _client = await _retrieval_question(
+        question, observe_error, client = await _retrieval_question(
             db, principal, conversation, question, pending
         )
         if observe_error:
@@ -980,15 +996,22 @@ async def _stream_run_events(
             return
         scope, docs_by_internal_id = await _context_scope(db, principal, conversation)
         if not scope.is_empty:
-            client = _query_client()
-            chat_id = await _ensure_chat(client, principal, scope)
+            client = client or _query_client()
+            chat_id, chat = await _ensure_chat_info(client, principal, scope)
             session_id = conversation.get("ragflow_session_id")
             ragflow_session_id = session_id
+            files = completion_files(
+                pending, vision=chat_is_vision_capable(chat)
+            )
+            stream_kwargs: dict[str, Any] = {}
+            if files:
+                stream_kwargs["files"] = files
             async for payload in client.chat_completion_stream(
                 chat_id,
                 _ragflow_question(conversation, question),
                 session_id=session_id,
                 doc_ids=list(scope.document_ids),
+                **stream_kwargs,
             ):
                 data = payload.get("data") if isinstance(payload, dict) else None
                 if data is True:
@@ -1154,6 +1177,8 @@ async def _stream_run_events(
             code="INTERNAL_ERROR", status_code=500, message="Message run failed", content=accumulated,
         )
         yield _sse("run.failed", {"conversationId": conversation_id, "runId": run["run_id"], "code": "INTERNAL_ERROR", "message": "Message run failed"})
+    finally:
+        await cleanup_ragflow_files(pending, client, db)
 
 
 async def _result_events(result: dict) -> AsyncIterator[str]:
@@ -1263,12 +1288,14 @@ async def _parse_multipart_message(
         pending: list[PendingAttachment] = []
         max_bytes = attachment_max_size_bytes()
         for upload in uploads:
-            filename = PurePath(getattr(upload, "filename", None) or "attachment").name
             media_type = (
                 (getattr(upload, "content_type", None) or "").split(";")[0].strip().lower()
             )
             if media_type not in MESSAGE_MEDIA_TYPES:
                 raise ValueError("Attachment MIME type is not allowed")
+            filename = ragflow_attachment_filename(
+                getattr(upload, "filename", None), media_type
+            )
             content = await _read_upload_bytes(upload, max_bytes)
             pending.append(
                 PendingAttachment(

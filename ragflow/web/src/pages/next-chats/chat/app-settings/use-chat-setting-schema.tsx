@@ -15,13 +15,13 @@ import { z } from 'zod';
 
 export function createChatSettingSchema(t: (key: string) => string) {
   const promptConfigSchema = z.object({
-    quote: z.boolean(),
-    keyword: z.boolean(),
-    tts: z.boolean(),
+    quote: z.boolean().optional(),
+    keyword: z.boolean().optional(),
+    tts: z.boolean().optional(),
     empty_response: z.string().optional(),
     prologue: z.string().optional(),
     system: z.string(),
-    refine_multiturn: z.boolean(),
+    refine_multiturn: z.boolean().optional(),
     parameters: z
       .array(
         z.object({
@@ -47,7 +47,7 @@ export function createChatSettingSchema(t: (key: string) => string) {
 
   const formSchema = z.object({
     name: z.string().min(1, { message: t('assistantNameMessage') }),
-    icon: z.string(),
+    icon: z.string().nullish(),
     description: z.string().optional(),
     dataset_ids: z.array(z.string()).min(0, {
       message: t('knowledgeBasesMessage'),

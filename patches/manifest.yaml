@@ -29,3 +29,13 @@ patches:
     tests:
       - "python -m py_compile ragflow/api/apps/restful_apis/document_api.py ragflow/rag/utils/external_source.py ragflow/rag/svr/task_executor.py ragflow/rag/svr/task_executor_refactor/task_handler.py"
       - "enterprise/tests/test_external_file_source.py"
+  - id: RF-PATCH-003
+    reason: "skip empty_response early return when the last chat message has files"
+    upstream_files:
+      - ragflow/api/db/services/dialog_service.py
+    adr: "decisions/ADR-008-empty-response-skip-on-files.md"
+    change_request: "patches/CHANGE-REQUEST-EMPTY-RESPONSE-SKIP-ON-FILES.md"
+    introduced_in: "inquiry-attachment-hybrid"
+    tests:
+      - "enterprise/tests/test_v2_message_attachments.py"
+    upgrade_notes: "Replay the files-guard on async_chat empty_response; rollback restores the original if."

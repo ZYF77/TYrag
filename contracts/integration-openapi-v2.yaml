@@ -1,21 +1,25 @@
 openapi: 3.1.0
 info:
   title: TYrag External Integration API
-  version: 2.5.0
+  version: 2.6.0
   description: >-
-    Frozen external contract for the Equipment Management System. Version 2.5
-    additively returns optional `reasoning` (model thinking) beside
-    `answer`/`content`; clients that ignore unknown fields stay compatible.
-    Version 2.4 additively returns a ticket `downloadUrl` on each citation and
-    only keeps chunks the answer actually cited. Version 2.3 additively accepts
-    multipart message attachments on the existing messages path while keeping
-    JSON text and chips wire compatible. Version 2.2 additively includes starter
-    suggestion chips on ConversationDetail while keeping the v2 path and prior
-    operations wire compatible for clients that ignore unknown fields. Inquiry
-    conversation and message `status` values are Chinese labels:
-    进行中/已归档, 已完成/无可靠依据/失败, and 处理中 for a pending run.
-    Version 1 remains wire compatible; external consumers never receive
-    integration engine internal identifiers.
+    Frozen external contract for the Equipment Management System. Version 2.6
+    additively accepts Office Open XML message attachments
+    (application/vnd.openxmlformats-officedocument.wordprocessingml.document
+    and application/vnd.openxmlformats-officedocument.spreadsheetml.sheet) on
+    the existing multipart messages path; it does not accept legacy .doc/.xls
+    or PowerPoint. Version 2.5 additively returns optional `reasoning` (model
+    thinking) beside `answer`/`content`; clients that ignore unknown fields stay
+    compatible. Version 2.4 additively returns a ticket `downloadUrl` on each
+    citation and only keeps chunks the answer actually cited. Version 2.3
+    additively accepts multipart message attachments on the existing messages
+    path while keeping JSON text and chips wire compatible. Version 2.2
+    additively includes starter suggestion chips on ConversationDetail while
+    keeping the v2 path and prior operations wire compatible for clients that
+    ignore unknown fields. Inquiry conversation and message `status` values are
+    Chinese labels: 进行中/已归档, 已完成/无可靠依据/失败, and 处理中 for a
+    pending run. Version 1 remains wire compatible; external consumers never
+    receive integration engine internal identifiers.
 servers:
   - url: /enterprise/api/v2
 tags:
@@ -301,8 +305,11 @@ paths:
         context overrides and client-controlled prompts are forbidden.
         JSON remains the text-only and chips path. Attachments use the same URL
         with multipart/form-data (metadata JSON plus files). suggestionId must
-        not be sent with files. First-wave MIME types are image/jpeg, image/png,
-        text/plain, and application/pdf; at most 5 files, 10MB each.
+        not be sent with files. Allowed MIME types are image/jpeg, image/png,
+        text/plain, application/pdf,
+        application/vnd.openxmlformats-officedocument.wordprocessingml.document,
+        and application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;
+        at most 5 files, 10MB each. Legacy .doc/.xls and PowerPoint are rejected.
         SSE thinking tokens are `reasoning.delta`; user-facing tokens remain
         `answer.delta`.
       operationId: v2CreateConversationMessage
@@ -915,7 +922,13 @@ components:
         fileName: { type: string }
         mediaType:
           type: string
-          enum: [image/jpeg, image/png, text/plain, application/pdf]
+          enum:
+            - image/jpeg
+            - image/png
+            - text/plain
+            - application/pdf
+            - application/vnd.openxmlformats-officedocument.wordprocessingml.document
+            - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
         sizeBytes: { type: integer, minimum: 1 }
         sha256: { type: string, minLength: 64, maxLength: 64 }
     Citation:

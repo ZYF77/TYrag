@@ -123,3 +123,57 @@ async def test_chat_completion_forwards_file_descriptors(monkeypatch):
     assert captured["path"] == "/api/v1/chat/completions"
     assert captured["json"]["files"] == [desc]
     assert not isinstance(captured["json"]["files"][0], str)
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_stream_forwards_file_descriptors(monkeypatch):
+    client = RAGFlowQueryClient(base_url="http://ragflow.test", api_key="k")
+    captured: dict = {}
+
+    class _Resp:
+        status_code = 200
+
+        async def aread(self):
+            return b""
+
+        async def aiter_lines(self):
+            yield 'data: {"code":0,"data":true}'
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class _Http:
+        def __init__(self, *args, **kwargs):
+            del args, kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def stream(self, method, url, json=None, headers=None):
+            captured["method"] = method
+            captured["url"] = url
+            captured["json"] = json
+            captured["headers"] = headers
+            return _Resp()
+
+    monkeypatch.setattr("httpx.AsyncClient", _Http)
+    desc = {
+        "id": "att-1",
+        "name": "paste.png",
+        "mime_type": "image/png",
+        "created_by": "tenant-1",
+    }
+    payloads = []
+    async for payload in client.chat_completion_stream(
+        "chat-1", "see image", files=[desc]
+    ):
+        payloads.append(payload)
+    assert captured["json"]["files"] == [desc]
+    assert captured["json"]["stream"] is True
+    assert payloads and payloads[-1]["data"] is True

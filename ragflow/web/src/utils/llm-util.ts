@@ -184,3 +184,46 @@ export function addTenantParams(data: any, url?: string): any {
 
   return newData;
 }
+
+/** Coerce a model_type list from GET into the string the chat API expects. */
+export function chatSaveModelType(selectedModelType: unknown): string {
+  if (Array.isArray(selectedModelType)) {
+    if (selectedModelType.includes('chat')) {
+      return 'chat';
+    }
+    return selectedModelType.includes('vision') ? 'vision' : 'chat';
+  }
+  if (selectedModelType === 'vision' || selectedModelType === 'chat') {
+    return selectedModelType;
+  }
+  return 'chat';
+}
+
+/**
+ * Chat GET returns llm_id as a composite model name. Copying that name into
+ * tenant_llm_id makes older backends fail with 102 (`must be a valid tenant
+ * model id`). Only overwrite tenant_llm_id when llm_id is a bare UUID.
+ */
+export function tenantLlmIdForChatSave(
+  llmId: string | undefined,
+): string | undefined {
+  if (!llmId) {
+    return undefined;
+  }
+  if (parseModelValue(llmId)) {
+    return undefined;
+  }
+  return llmId;
+}
+
+export function chatAssistantSaveModelFields(
+  llmId: string | undefined,
+  selectedModelType: unknown,
+): { tenant_llm_id?: string; model_type: string } {
+  const model_type = chatSaveModelType(selectedModelType);
+  const tenant_llm_id = tenantLlmIdForChatSave(llmId);
+  if (tenant_llm_id) {
+    return { tenant_llm_id, model_type };
+  }
+  return { model_type };
+}

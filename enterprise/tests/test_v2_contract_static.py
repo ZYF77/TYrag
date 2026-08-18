@@ -412,7 +412,7 @@ def test_p1_callback_and_attachment_invariants_are_explicit():
 
 def test_v21_attachment_surface_and_security_are_frozen():
     _, spec = _contract()
-    assert spec["info"]["version"] == "2.5.0"
+    assert spec["info"]["version"] == "2.6.0"
     detail = spec["components"]["schemas"]["ConversationDetail"]
     assert "suggestions" in detail["required"]
     assert "contextCompacted" in detail["required"]
@@ -441,7 +441,7 @@ def test_v21_attachment_surface_and_security_are_frozen():
 
 def test_v24_citation_file_ticket_download_is_frozen():
     _, spec = _contract()
-    assert spec["info"]["version"] == "2.5.0"
+    assert spec["info"]["version"] == "2.6.0"
     citation = spec["components"]["schemas"]["Citation"]
     assert {"downloadUrl", "downloadExpiresAt"} <= set(citation["required"])
     assert "imageId" not in citation["properties"]
@@ -456,7 +456,7 @@ def test_v24_citation_file_ticket_download_is_frozen():
 
 def test_v25_reasoning_is_optional_on_message_and_run():
     _, spec = _contract()
-    assert spec["info"]["version"] == "2.5.0"
+    assert spec["info"]["version"] == "2.6.0"
     message = spec["components"]["schemas"]["Message"]
     run = spec["components"]["schemas"]["MessageRunResult"]
     assert message["properties"]["reasoning"]["type"] == ["string", "null"]
@@ -464,6 +464,25 @@ def test_v25_reasoning_is_optional_on_message_and_run():
     assert "reasoning" not in message["required"]
     assert "reasoning" not in run["required"]
     assert "reasoning" not in spec["components"]["schemas"]["MessageRunPending"]["properties"]
+
+
+def test_v26_message_attachment_office_mime_types_are_declared():
+    _, spec = _contract()
+    assert spec["info"]["version"] == "2.6.0"
+    attachment = spec["components"]["schemas"]["MessageAttachment"]
+    assert set(attachment["properties"]["mediaType"]["enum"]) == {
+        "image/jpeg",
+        "image/png",
+        "text/plain",
+        "application/pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    }
+    post = spec["paths"]["/conversations/{conversationId}/messages"]["post"]
+    description = post["description"]
+    assert "wordprocessingml.document" in description
+    assert "spreadsheetml.sheet" in description
+    assert ".doc/.xls" in description or "PowerPoint" in description
 
 
 def test_error_code_http_statuses_match_the_v2_freeze():
