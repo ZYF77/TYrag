@@ -133,3 +133,11 @@ docker compose -f ragflow/docker/docker-compose.yml up -d --no-deps ragflow-cpu
 - `citations` 只是证据数据，与业务状态相互独立；
 - 禁止用 `citations` 是否为空推导消息状态，也禁止用消息状态推导 `citations`；
 - 历史回放和前端展示必须原样保留已持久化的业务状态，不得按 citation 改判或抹平状态。
+
+## 10. 更新部署到 30 联调机
+
+用户要求把已测通改动更新到 30 服务器（`192.168.30.30`）时，必须先读并执行：
+
+`docs/integration/update-30-server-agent.md`
+
+硬门禁：recreate 后必须从**开发机**验证局域网端口仍为 `0.0.0.0`。只在 30 本机 `curl 127.0.0.1` 或 health=healthy **不算成功**。仓库 compose 默认 bind 是 `127.0.0.1`，用 `production.env.example` recreate 会再次把 8080/5188/3000 打成仅本机可访问。

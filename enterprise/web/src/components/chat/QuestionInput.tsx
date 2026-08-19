@@ -36,8 +36,8 @@ export function QuestionInput({
   );
 
   return (
-    <div className="px-4 py-3 border-t border-gray-100 bg-white">
-      <div className="flex items-end gap-2 bg-gray-50 rounded-xl border border-gray-200 px-3 py-2 focus-within:border-blue-400 focus-within:ring-1 focus-within:ring-blue-100 transition-all">
+    <div className="question-composer px-4 py-3 border-t border-gray-100 bg-white">
+      <div className="question-composer-field flex items-end gap-2 bg-gray-50 rounded-xl border border-gray-200 px-3 py-2 focus-within:border-blue-400 focus-within:ring-1 focus-within:ring-blue-100 transition-all">
         <textarea
           ref={textareaRef}
           value={value}
@@ -52,7 +52,7 @@ export function QuestionInput({
         {isStreaming ? (
           <button
             onClick={onCancel}
-            className="flex-shrink-0 p-1.5 rounded-lg bg-red-100 text-red-600 hover:bg-red-200 transition-colors"
+            className="question-composer-action flex-shrink-0 p-1.5 rounded-lg bg-red-100 text-red-600 hover:bg-red-200 transition-colors"
             title="停止生成"
             aria-label="停止生成"
           >
@@ -62,7 +62,7 @@ export function QuestionInput({
           <button
             onClick={handleSend}
             disabled={!value.trim() || disabled}
-            className="flex-shrink-0 p-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:bg-gray-200 disabled:text-gray-400 transition-colors"
+            className="question-composer-action flex-shrink-0 p-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:bg-gray-200 disabled:text-gray-400 transition-colors"
             title="发送"
             aria-label="发送"
           >

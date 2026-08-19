@@ -69,12 +69,18 @@ export function WorkbenchShell({
   children,
   footer,
 }: WorkbenchShellProps) {
+  const activeGroup = groups.find((group) => group.items.some((item) => item.id === activeId));
+  const activeItem = activeGroup?.items.find((item) => item.id === activeId);
+
   return (
     <div data-testid={testId} className={`${shellClass} workbench`}>
       <aside className="workbench-side" aria-label="功能菜单">
         <div className="workbench-brand">
-          <strong>{brand}</strong>
-          <span>{subtitle}</span>
+          <span className="workbench-brand-mark" aria-hidden="true"><i /></span>
+          <span className="workbench-brand-copy">
+            <strong>{brand}</strong>
+            <small>{subtitle}</small>
+          </span>
         </div>
         <nav className="workbench-nav">
           {groups.map((group) => (
@@ -99,6 +105,10 @@ export function WorkbenchShell({
         <header className="console-nav">
           <div className="console-nav-inner">
             <div className="console-nav-top">
+              <div className="workbench-context">
+                <span>{brand} / {activeGroup?.label ?? '工作台'}</span>
+                <strong data-testid="workbench-active-title">{activeItem?.label ?? brand}</strong>
+              </div>
               <div className="console-nav-actions">{actions}</div>
             </div>
             {tokenRow}

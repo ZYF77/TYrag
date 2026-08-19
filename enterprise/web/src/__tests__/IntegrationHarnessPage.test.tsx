@@ -151,6 +151,7 @@ describe('IntegrationHarnessPage', () => {
     render(<IntegrationHarnessPage />);
     await user.click(screen.getByRole('button', { name: 'HTTP 日志' }));
     const panel = screen.getByTestId('harness-runtime-log');
+    expect(screen.getByTestId('workbench-active-title').textContent).toBe('HTTP 日志');
     expect(panel.textContent).toContain('运行');
     await screen.findByText('/enterprise/api/v2/conversations');
     expect(panel.textContent).toContain('POST');
