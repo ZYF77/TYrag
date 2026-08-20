@@ -248,6 +248,31 @@ async def get_conversation(
     return dict(row) if row else None
 
 
+async def update_conversation_mapping(
+    db,
+    *,
+    conversation_id: str,
+    tenant_id: str,
+    business_user_id: str,
+    ragflow_chat_id: str | None,
+    ragflow_session_id: str | None,
+) -> None:
+    await db.execute(
+        """UPDATE ext_v2_conversation
+           SET ragflow_chat_id=COALESCE(?, ragflow_chat_id),
+               ragflow_session_id=COALESCE(?, ragflow_session_id)
+           WHERE conversation_id=? AND tenant_id=? AND business_user_id=?""",
+        (
+            ragflow_chat_id,
+            ragflow_session_id,
+            conversation_id,
+            tenant_id,
+            business_user_id,
+        ),
+    )
+    await db.commit()
+
+
 async def list_conversations(
     db,
     *,

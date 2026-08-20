@@ -92,6 +92,8 @@ class LLMBundle(LLM4Tenant):
             "langfuse_session_id": self.langfuse_session_id,
             "verbose_tool_use": self.verbose_tool_use,
         }
+        if self.disable_langfuse:
+            kwargs["disable_langfuse"] = True
         for attr, key in (("max_retries", "max_retries"), ("base_delay", "retry_interval"), ("max_rounds", "max_rounds")):
             value = getattr(self.mdl, attr, None)
             if value is not None:

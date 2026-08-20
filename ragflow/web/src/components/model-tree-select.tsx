@@ -13,16 +13,19 @@ import { buildModelValue, getRealModelName } from '@/utils/llm-util';
 import { forwardRef, useCallback, useMemo } from 'react';
 import { useFormContext } from 'react-hook-form';
 import { useTranslation } from 'react-i18next';
+import {
+  LayoutRecognizeModelTypes,
+  ModelTypeMap,
+  VlmModelTypes,
+  modelMatchesTypes,
+} from './model-type-filters';
 import { TreeSelect, TreeSelectNode } from './tree-select';
 
-/** Maps form field names to their supported model types */
-export const ModelTypeMap: Record<string, string[]> = {
-  llm_id: ['chat', 'vision'],
-  embd_id: ['embedding'],
-  img2txt_id: ['vision'],
-  asr_id: ['asr'],
-  rerank_id: ['rerank'],
-  tts_id: ['tts'],
+export {
+  LayoutRecognizeModelTypes,
+  ModelTypeMap,
+  VlmModelTypes,
+  modelMatchesTypes,
 };
 
 export function buildModelTree(
@@ -34,7 +37,7 @@ export function buildModelTree(
   ) => React.ReactNode,
 ): TreeSelectNode[] {
   const filtered = allModels.filter((m) =>
-    m.model_type?.some((t) => modelTypes.includes(t)),
+    modelMatchesTypes(m.model_type, modelTypes),
   );
 
   const seenLeafIds = new Set<string>();

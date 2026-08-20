@@ -55,7 +55,7 @@ API envelope 固定 camelCase；`metadata` 固定 snake_case。`tenantId/sourceS
 
 ## 8. SSE / Message Idempotency Decision
 
-消息入口为 `POST /conversations/{id}/messages`。`Accept: text/event-stream` 返回来自 RAGFlow `chat_completion_stream()` 的真流式 SSE，否则 JSON。SSE 至少包含 `run.started`、零到多个 `answer.delta|citation`、最后 `answer.completed|run.failed`；不得先等待完整答案再伪造 delta。
+消息入口为 `POST /conversations/{id}/messages`。`Accept: text/event-stream` 返回 SSE，否则 JSON。EAM v2 的 Grounding Guard 在完整候选回答生成后执行，因此 SSE 先返回 `run.started`，等待期间可返回标准 SSE comment heartbeat，校验通过后返回一个安全的 `answer.delta`、零到多个 `citation`，最后返回 `answer.completed`；失败返回 `run.failed`。Guard 前不发送候选 answer 或 reasoning。URL、请求体、响应字段和事件名不变。
 
 请求严格 oneOf：question branch `{clientMessageId,question}` 或 suggestion branch `{clientMessageId,suggestionId,contextVersion}`。同 conversation + clientMessageId + 同 normalized payload replay 原结果；payload 不同返回 409 `CLIENT_MESSAGE_ID_CONFLICT`。首次请求建立持久 run 状态机 `running -> completed|failed`、稳定 runId 和有限租约；租约过期只落为稳定 `RUN_INTERRUPTED`，不自动重跑。pending run replay 返回相同 runId/状态并使用 202 JSON，不重复插入 user message；SSE pending 也不得伪造流。
 
@@ -96,7 +96,7 @@ create/ticket 必须使用 User JWT，download ticket 是有界 bearer capabilit
 | Credential binding/HMAC | MISSING | IMPLEMENTED（Redis/Valkey atomic SET NX EX；生产无静默内存 fallback） |
 | 文档 status/lifecycle | IMPLEMENTED | IMPLEMENTED（外部 ID only） |
 | idempotency conflict | MISSING | IMPLEMENTED |
-| conversation create/detail/SSE/citation | IMPLEMENTED | IMPLEMENTED（真流式） |
+| conversation create/detail/SSE/citation | IMPLEMENTED | IMPLEMENTED（Grounding 后安全下发） |
 | list/messages cursor/archive | MISSING | IMPLEMENTED |
 | context mutation/version | PARTIAL | IMPLEMENTED（Asset Registry snapshot/TTL/immutable equipment） |
 | context retrieval filter | MISSING | IMPLEMENTED（无 context 不发送） |
@@ -108,7 +108,7 @@ create/ticket 必须使用 User JWT，download ticket 是有界 bearer capabilit
 
 ## 13. OpenAPI Delta
 
-新增 `integration-openapi-v2.yaml` 与 `/enterprise/api/v2` server；删除 v2 外部内部 ID；添加 HMAC headers、安全 binding 语义、document status scope、conversation list/context/messages/archive/suggestions、strict oneOf、cursor objects。v2.1 保持 `/enterprise/api/v2` 路径不变，以 additive minor version 正式公开 transient attachment create/ticket/download；callback 与其他 P1 项仍为 planned。
+新增 `integration-openapi-v2.yaml` 与 `/enterprise/api/v2` server；删除 v2 外部内部 ID；添加 HMAC headers、安全 binding 语义、document status scope、conversation list/context/messages/archive/suggestions、strict oneOf、cursor objects。v2.1 保持 `/enterprise/api/v2` 路径不变，以 additive minor version 正式公开 transient attachment create/ticket/download；callback 与其他 P1 项仍为 planned。v2.8 additive 增加 `Citation.refIndex`，供 EAM 将正文 `[ID:n]` 绑定到 `citations[]`（禁止用数组下标当 `n`）。
 
 ## 14. Docs / Task Rebaseline
 

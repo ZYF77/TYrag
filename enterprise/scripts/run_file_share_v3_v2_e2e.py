@@ -14,9 +14,12 @@ import hashlib
 import json
 import os
 import shutil
+import sqlite3
+import subprocess
 import sys
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
@@ -28,11 +31,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from enterprise.gateway.auth.service_auth import sign_request  # noqa: E402
-from enterprise.gateway.models.ext_user_map import (  # noqa: E402
-    ExtUserMap,
-    ExtUserMapRepo,
-)
-from enterprise.gateway.sync.models import init_db  # noqa: E402
 
 
 class LiveEnvironmentError(RuntimeError):
@@ -45,7 +43,7 @@ class LiveAssertionError(RuntimeError):
 
 def _env(name: str, *, required: bool = True, default: str = "") -> str:
     value = os.environ.get(name, "").strip()
-    if required and not value:
+    if required and not value and not default:
         raise LiveEnvironmentError("required live configuration is missing")
     return value or default
 
@@ -281,30 +279,265 @@ def matching_ingested_citations(
     ]
 
 
-def _ensure_user_mapping(db_path: str, tenant_id: str, subject: str) -> None:
-    async def seed() -> None:
-        db = await init_db(db_path)
-        await db.close()
-        repo = ExtUserMapRepo(db_path=db_path)
-        try:
-            await repo.ensure_table()
-            await repo.insert_mapping(
-                ExtUserMap(
-                    tenant_id=tenant_id,
-                    business_subject=subject,
-                    business_user_id=subject,
-                    mapping_strategy="B",
-                )
-            )
-        finally:
-            await repo.close()
+def parse_sse(payload: str) -> list[tuple[str, dict]]:
+    events: list[tuple[str, dict]] = []
+    event_name = ""
+    data_lines: list[str] = []
+    for line in [*payload.splitlines(), ""]:
+        if line.startswith(":"):
+            continue
+        if not line:
+            if event_name:
+                try:
+                    data = json.loads("\n".join(data_lines))
+                except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                    raise LiveAssertionError("SSE event returned invalid JSON data") from exc
+                if not isinstance(data, dict):
+                    raise LiveAssertionError("SSE event returned non-object data")
+                events.append((event_name, data))
+            event_name = ""
+            data_lines = []
+            continue
+        if line.startswith("event:"):
+            event_name = line[6:].strip()
+        elif line.startswith("data:"):
+            data_lines.append(line[5:].lstrip())
+    return events
 
-    import asyncio
 
-    asyncio.run(seed())
+def assert_no_internal_grounding(payload: object) -> None:
+    if isinstance(payload, dict):
+        forbidden = {"grounding", "groundingVersion", "effectiveKnowledge"}
+        if forbidden.intersection(payload):
+            raise LiveAssertionError("internal grounding metadata leaked externally")
+        for value in payload.values():
+            assert_no_internal_grounding(value)
+    elif isinstance(payload, list):
+        for value in payload:
+            assert_no_internal_grounding(value)
 
 
-def run_live() -> dict[str, bool]:
+def _git_head() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=ROOT,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return ""
+
+
+def _ragflow_base_url() -> str:
+    return _env(
+        "ENTERPRISE_RAGFLOW_BASE_URL",
+        required=False,
+        default=_env("RAGFLOW_BASE_URL", required=False, default="http://127.0.0.1:9380"),
+    ).rstrip("/")
+
+
+def _ragflow_api_key() -> str:
+    return _env("ENTERPRISE_RAGFLOW_API_KEY", required=False) or _env(
+        "RAGFLOW_API_KEY", required=False
+    )
+
+
+def _ragflow_headers() -> dict[str, str]:
+    api_key = _ragflow_api_key()
+    if not api_key:
+        raise LiveEnvironmentError("RAGFlow API key is missing")
+    return {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+
+def _conversation_mapping(
+    db_path: str, conversation_id: str
+) -> tuple[str | None, str | None]:
+    db_uri = Path(db_path).resolve().as_uri() + "?mode=ro"
+    with sqlite3.connect(db_uri, uri=True) as db:
+        row = db.execute(
+            """SELECT ragflow_chat_id, ragflow_session_id
+               FROM ext_v2_conversation WHERE conversation_id=?""",
+            (conversation_id,),
+        ).fetchone()
+    if row is None:
+        return None, None
+    return row[0], row[1]
+
+
+def _document_scope(
+    db_path: str,
+    *,
+    tenant_id: str,
+    external_document_id: str,
+    source_version_id: str,
+) -> tuple[str | None, str | None]:
+    db_uri = Path(db_path).resolve().as_uri() + "?mode=ro"
+    with sqlite3.connect(db_uri, uri=True) as db:
+        row = db.execute(
+            """SELECT ragflow_dataset_id, ragflow_document_id
+               FROM ext_document_map
+               WHERE tenant_id=? AND external_document_id=? AND source_version_id=?""",
+            (tenant_id, external_document_id, source_version_id),
+        ).fetchone()
+    if row is None:
+        return None, None
+    return row[0], row[1]
+
+
+def _assert_ragflow_session(
+    db_path: str,
+    conversation_id: str,
+    questions: tuple[str, ...],
+) -> tuple[str, str]:
+    chat_id, session_id = _conversation_mapping(db_path, conversation_id)
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise LiveAssertionError("formal v2 did not persist a RAGFlow session")
+    if not isinstance(chat_id, str) or not chat_id.strip():
+        raise LiveAssertionError("formal v2 did not persist a RAGFlow chat")
+    with httpx.Client(timeout=30.0) as client:
+        response = client.get(
+            f"{_ragflow_base_url()}/api/v1/chats/{quote(chat_id, safe='')}"
+            f"/sessions/{quote(session_id, safe='')}",
+            headers=_ragflow_headers(),
+        )
+    if response.status_code != 200:
+        raise LiveAssertionError("RAGFlow session was not readable")
+    payload = _json_response(response)
+    if payload.get("code") not in (0, None):
+        raise LiveAssertionError("RAGFlow session lookup returned an error")
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    messages = data.get("messages") or data.get("message") or []
+    if not isinstance(messages, list):
+        raise LiveAssertionError("RAGFlow session history is missing")
+    contents = [
+        str(item.get("content") or "")
+        for item in messages
+        if isinstance(item, dict)
+    ]
+    joined = "\n".join(contents)
+    for question in questions:
+        if question not in joined:
+            raise LiveAssertionError("RAGFlow session history does not include the live turns")
+    return chat_id, session_id
+
+
+def _chat_retrieval_knobs(chat_id: str) -> dict[str, object]:
+    with httpx.Client(timeout=30.0) as client:
+        response = client.get(
+            f"{_ragflow_base_url()}/api/v1/chats/{quote(chat_id, safe='')}",
+            headers=_ragflow_headers(),
+        )
+    if response.status_code != 200:
+        raise LiveAssertionError("enterprise Chat retrieval knobs were not readable")
+    payload = _json_response(response)
+    if payload.get("code") not in (0, None):
+        raise LiveAssertionError("enterprise Chat lookup returned an error")
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    return {
+        "top_n": data.get("top_n"),
+        "top_k": data.get("top_k"),
+        "similarity_threshold": data.get("similarity_threshold"),
+        "vector_similarity_weight": data.get("vector_similarity_weight"),
+        "rerank_id": data.get("rerank_id") or "",
+        "dataset_ids": list(data.get("dataset_ids") or []),
+    }
+
+
+def _ranked_retrieval_snapshot(
+    *,
+    question: str,
+    knobs: dict[str, object],
+    dataset_id: str,
+    document_id: str,
+) -> list[dict[str, object]]:
+    body: dict[str, object] = {
+        "question": question,
+        "dataset_ids": [dataset_id],
+        "document_ids": [document_id],
+        "page": 1,
+        "page_size": 8,
+    }
+    if knobs.get("similarity_threshold") is not None:
+        body["similarity_threshold"] = knobs["similarity_threshold"]
+    if knobs.get("vector_similarity_weight") is not None:
+        body["vector_similarity_weight"] = knobs["vector_similarity_weight"]
+    if knobs.get("top_k") is not None:
+        body["top_k"] = knobs["top_k"]
+    if knobs.get("rerank_id"):
+        body["rerank_id"] = knobs["rerank_id"]
+    with httpx.Client(timeout=60.0) as client:
+        response = client.post(
+            f"{_ragflow_base_url()}/api/v1/retrieval",
+            headers=_ragflow_headers(),
+            json=body,
+        )
+    if response.status_code != 200:
+        raise LiveAssertionError("offline retrieval snapshot failed")
+    payload = _json_response(response)
+    if payload.get("code") not in (0, None):
+        raise LiveAssertionError("offline retrieval snapshot returned an error")
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    chunks = data.get("chunks") if isinstance(data.get("chunks"), list) else []
+    ranked: list[dict[str, object]] = []
+    for chunk in chunks:
+        if not isinstance(chunk, dict):
+            continue
+        ranked.append(
+            {
+                "doc_id": chunk.get("document_id") or chunk.get("doc_id"),
+                "chunk_id": chunk.get("id") or chunk.get("chunk_id"),
+                "score": chunk.get("similarity", chunk.get("score")),
+            }
+        )
+    return ranked
+
+
+def _write_retrieval_baseline(
+    *,
+    chat_id: str,
+    questions: tuple[str, ...],
+    dataset_id: str,
+    document_id: str,
+    knobs: dict[str, object],
+    ranked: list[dict[str, object]],
+) -> Path:
+    artifact_dir = ROOT / "artifacts" / "e2e"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    path = artifact_dir / "file-share-retrieval-baseline.json"
+    payload = {
+        "collectedAt": datetime.now(timezone.utc).isoformat(),
+        "gitCommit": _git_head(),
+        "chatId": chat_id,
+        "datasetId": dataset_id,
+        "documentId": document_id,
+        "questions": list(questions),
+        "chatRetrieval": {
+            "top_n": knobs.get("top_n"),
+            "top_k": knobs.get("top_k"),
+            "similarity_threshold": knobs.get("similarity_threshold"),
+            "vector_similarity_weight": knobs.get("vector_similarity_weight"),
+            "rerank_id": knobs.get("rerank_id") or "",
+        },
+        "rankedChunks": ranked,
+        "metrics": {
+            "recall_at_8": None,
+            "mrr": None,
+            "misattribution_rate": None,
+        },
+        "notes": (
+            "Record-only baseline. Knobs and ranked ids were not tuned. "
+            "Recall metrics stay null without a labeled set."
+        ),
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+def run_live() -> dict[str, object]:
     gateway = _env("GATEWAY_URL").rstrip("/")
     tenant_id = _env("ENTERPRISE_E2E_TENANT_ID", default="tyrag-integration")
     source_system = _env("ENTERPRISE_E2E_SOURCE_SYSTEM", default="EAM")
@@ -325,7 +558,9 @@ def run_live() -> dict[str, bool]:
         required=False,
         default=f"evt-{external_document_id}",
     )
-    equipment_id = _env("ENTERPRISE_E2E_EQUIPMENT_ID")
+    equipment_id = (
+        f"{_env('ENTERPRISE_E2E_EQUIPMENT_ID')[:96]}-e2e-{uuid.uuid4().hex[:12]}"
+    )
     fixed_asset_no = _env("ENTERPRISE_E2E_FIXED_ASSET_NO", required=False)
     subject = _env("ENTERPRISE_E2E_USER_SUBJECT", required=False, default="tyrag-e2e-user")
     db_path = _env("ENTERPRISE_DB_PATH")
@@ -340,7 +575,6 @@ def run_live() -> dict[str, bool]:
     source_sha256 = hashlib.sha256(content).hexdigest()
     source_stat = source_path.stat()
     source_etag = f'"{source_stat.st_size:x}-{source_stat.st_mtime_ns:x}"'
-    _ensure_user_mapping(db_path, tenant_id, subject)
 
     registration = {
         "eventId": event_id,
@@ -385,7 +619,14 @@ def run_live() -> dict[str, bool]:
             ),
         )
         if response.status_code != 202:
-            raise LiveAssertionError("FILE_SHARE registration did not return 202")
+            try:
+                error_code = str(response.json().get("code") or "unknown")
+            except (AttributeError, ValueError, json.JSONDecodeError):
+                error_code = "non_json"
+            raise LiveAssertionError(
+                f"FILE_SHARE registration returned {response.status_code} "
+                f"({error_code}), expected 202"
+            )
         receipt = _json_response(response)
         validate_accept_receipt(
             receipt,
@@ -463,50 +704,90 @@ def run_live() -> dict[str, bool]:
             },
         )
         if conversation_response.status_code != 201:
-            raise LiveAssertionError("formal v2 conversation was not created")
+            try:
+                error_code = str(conversation_response.json().get("code") or "unknown")
+            except (AttributeError, ValueError, json.JSONDecodeError):
+                error_code = "non_json"
+            raise LiveAssertionError(
+                f"formal v2 conversation returned {conversation_response.status_code} "
+                f"({error_code}), expected 201"
+            )
         conversation = _json_response(conversation_response)
         conversation_id = conversation.get("conversationId")
         if not isinstance(conversation_id, str) or not conversation_id:
             raise LiveAssertionError("formal v2 conversationId is missing")
 
         citations: list[dict] = []
-        questions = tuple(
-            f"{question}\nUse evidence from the file named {source_path.name}."
-            for question in (
-                _env(
-                    "ENTERPRISE_E2E_QUESTION_ONE",
-                    required=False,
-                    default="Summarize the maintenance instructions in the newly ingested manual.",
-                ),
-                _env(
-                    "ENTERPRISE_E2E_QUESTION_TWO",
-                    required=False,
-                    default="What safety checks are stated in the newly ingested manual?",
-                ),
-            )
+        questions = (
+            _env(
+                "ENTERPRISE_E2E_QUESTION_ONE",
+                required=False,
+                default="What is RAGFlow designed to turn raw documents into?",
+            ),
+            _env(
+                "ENTERPRISE_E2E_QUESTION_TWO",
+                required=False,
+                default="Which document formats beyond plain text are explicitly listed?",
+            ),
         )
-        for index, question in enumerate(questions, start=1):
-            message_response = client.post(
-                f"{gateway}/enterprise/api/v2/conversations/{quote(conversation_id, safe='-._~')}/messages",
-                headers=user_headers,
-                json={"clientMessageId": f"e2e-message-{index}", "question": question},
-            )
-            if message_response.status_code != 200:
-                raise LiveAssertionError("formal v2 message was not completed")
-            message = _json_response(message_response)
-            if not message.get("answer") or message.get("status") != "completed":
-                raise LiveAssertionError("formal v2 message has no completed answer")
-            message_citations = message.get("citations")
-            if not isinstance(message_citations, list) or not message_citations:
-                raise LiveAssertionError("formal v2 message has no citation")
-            matching_citations = matching_ingested_citations(
-                message_citations,
-                external_document_id=external_document_id,
-                source_version_id=source_version_id,
-            )
-            if not matching_citations:
-                raise LiveAssertionError("citation scope does not include ingested document")
-            citations.extend(matching_citations)
+        message_url = (
+            f"{gateway}/enterprise/api/v2/conversations/"
+            f"{quote(conversation_id, safe='-._~')}/messages"
+        )
+        generation_timeout = float(os.environ.get("ENTERPRISE_E2E_QUERY_TIMEOUT", "120"))
+        json_response = client.post(
+            message_url,
+            headers=user_headers,
+            json={"clientMessageId": "e2e-message-1", "question": questions[0]},
+            timeout=generation_timeout,
+        )
+        if json_response.status_code != 200:
+            raise LiveAssertionError("formal v2 JSON message was not completed")
+        json_message = _json_response(json_response)
+        assert_no_internal_grounding(json_message)
+        if not json_message.get("answer") or json_message.get("status") != "已完成":
+            raise LiveAssertionError("formal v2 JSON message has no completed answer")
+        json_citations = json_message.get("citations")
+        matching_json_citations = matching_ingested_citations(
+            json_citations,
+            external_document_id=external_document_id,
+            source_version_id=source_version_id,
+        )
+        if not matching_json_citations:
+            raise LiveAssertionError("JSON citation scope does not include ingested document")
+        citations.extend(matching_json_citations)
+
+        sse_response = client.post(
+            message_url,
+            headers={**user_headers, "Accept": "text/event-stream"},
+            json={"clientMessageId": "e2e-message-2", "question": questions[1]},
+            timeout=generation_timeout,
+        )
+        if sse_response.status_code != 200 or not sse_response.headers.get(
+            "content-type", ""
+        ).startswith("text/event-stream"):
+            raise LiveAssertionError("formal v2 SSE message was not completed")
+        events = parse_sse(sse_response.text)
+        if not events or events[0][0] != "run.started":
+            raise LiveAssertionError("formal v2 SSE did not start a run")
+        if any(event == "reasoning.delta" for event, _ in events):
+            raise LiveAssertionError("grounded SSE exposed reasoning")
+        answer_deltas = [data for event, data in events if event == "answer.delta"]
+        if len(answer_deltas) != 1 or not answer_deltas[0].get("content"):
+            raise LiveAssertionError("grounded SSE did not emit one safe answer delta")
+        completed = [data for event, data in events if event == "answer.completed"]
+        if len(completed) != 1 or completed[0].get("status") != "已完成":
+            raise LiveAssertionError("grounded SSE has no completed terminal event")
+        assert_no_internal_grounding([data for _, data in events])
+        sse_citations = completed[0].get("citations")
+        matching_sse_citations = matching_ingested_citations(
+            sse_citations,
+            external_document_id=external_document_id,
+            source_version_id=source_version_id,
+        )
+        if not matching_sse_citations:
+            raise LiveAssertionError("SSE citation scope does not include ingested document")
+        citations.extend(matching_sse_citations)
 
         history_response = client.get(
             f"{gateway}/enterprise/api/v2/conversations/{quote(conversation_id, safe='-._~')}/messages",
@@ -542,6 +823,33 @@ def run_live() -> dict[str, bool]:
         if source_response.status_code != 200 or hashlib.sha256(source_response.content).hexdigest() != source_sha256:
             raise LiveAssertionError("citation source is not the ingested FILE_SHARE bytes")
 
+        chat_id, _session_id = _assert_ragflow_session(
+            db_path, conversation_id, questions
+        )
+        dataset_id, document_id = _document_scope(
+            db_path,
+            tenant_id=tenant_id,
+            external_document_id=external_document_id,
+            source_version_id=source_version_id,
+        )
+        if not dataset_id or not document_id:
+            raise LiveAssertionError("ingested document is missing RAGFlow dataset/doc ids")
+        knobs = _chat_retrieval_knobs(chat_id)
+        ranked = _ranked_retrieval_snapshot(
+            question=questions[0],
+            knobs=knobs,
+            dataset_id=dataset_id,
+            document_id=document_id,
+        )
+        baseline_path = _write_retrieval_baseline(
+            chat_id=chat_id,
+            questions=questions,
+            dataset_id=dataset_id,
+            document_id=document_id,
+            knobs=knobs,
+            ranked=ranked,
+        )
+
     return {
         "fileShareRegistration": True,
         "serverStatusUrl": True,
@@ -549,9 +857,13 @@ def run_live() -> dict[str, bool]:
         "statusTruthFields": True,
         "formalConversation": True,
         "formalMessages": True,
+        "groundedSse": True,
+        "ragflowSession": True,
         "history": True,
         "citationDetail": True,
         "citationSource": True,
+        "retrievalBaseline": True,
+        "retrievalBaselinePath": str(baseline_path),
     }
 
 

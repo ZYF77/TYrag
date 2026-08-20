@@ -183,6 +183,7 @@ def public_citation(
         "excerpt": citation.get("excerpt"),
         "recordType": citation.get("recordType"),
         "recordId": citation.get("recordId"),
+        "refIndex": citation.get("refIndex"),
         "downloadUrl": download_url,
         "downloadExpiresAt": ticket.expires_at,
     }

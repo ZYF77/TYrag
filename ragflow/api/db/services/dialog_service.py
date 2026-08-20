@@ -47,6 +47,14 @@ from common.text_utils import normalize_arabic_digits
 from rag.advanced_rag.knowlege_compile.mind_map_extractor import MindMapExtractor
 from rag.advanced_rag import DeepResearcher
 from rag.app.tag import label_question
+from rag.grounding.guard import (
+    STANDARD_ABSTAIN_ANSWER,
+    GroundingResult,
+    apply_identifier_numeric_fuse,
+    empty_reference,
+    strip_ungrounded_zero_measurements,
+    _unmatched_keys_are_zero_only,
+)
 from rag.nlp.search import index_name
 from rag.prompts.generator import chunks_format, citation_prompt, cross_languages, full_question, kb_prompt, keyword_extraction, message_fit_in, PROMPT_JINJA_ENV, ASK_SUMMARY
 from common.token_utils import num_tokens_from_string
@@ -54,6 +62,178 @@ from rag.utils.web_search_conn import create_web_search_provider, has_web_search
 from rag.utils.tts_cache import synthesize_with_cache
 from common.string_utils import remove_redundant_spaces
 from common import settings
+
+
+def _grounding_requested(version) -> bool:
+    return type(version) is int and version == 1
+
+
+def _grounding_markers(knowledge: str) -> tuple[str, str]:
+    """Return collision-free per-request markers for one knowledge body."""
+    knowledge = knowledge or ""
+    while True:
+        nonce = uuid.uuid4().hex
+        start = f"<GROUNDING_START:{nonce}>"
+        end = f"<GROUNDING_END:{nonce}>"
+        if start not in knowledge and end not in knowledge:
+            return start, end
+
+
+def _extract_effective_knowledge(content: str, start: str | None, end: str | None) -> str:
+    if not start or not content:
+        return ""
+    start_index = content.find(start)
+    if start_index < 0:
+        return ""
+    body_start = start_index + len(start)
+    end_index = content.find(end, body_start) if end else -1
+    return content[body_start:end_index if end_index >= 0 else len(content)]
+
+
+# Identifier/Numeric Fuse implementation is retained below, but not applied on
+# the live path until explicitly re-enabled.  Prompt-fit / empty_response /
+# stream buffering for grounding_version=1 remain active.
+_IDENTIFIER_NUMERIC_FUSE_ENABLED = False
+
+
+def _log_grounding_guard(result, *, abstain: bool) -> None:
+    logging.info(
+        "grounding_guard passed=%s unmatched_identifiers=%s unmatched_numbers=%s unmatched_number_keys=%s abstain=%s",
+        result.passed,
+        result.unmatched_identifiers,
+        result.unmatched_numbers,
+        list(getattr(result, "unmatched_number_keys", ()) or ()),
+        abstain,
+    )
+
+
+_SHORT_FUSE_RETRY_SUFFIX = (
+    "\n\n[系统约束] 请仅根据原有证据重新简短回答。"
+    "不要新增任何数字、数量统计或数字序号；证据中的原始数字除外。"
+    "不要用 0 或 0.0 作为未给出参数的占位值。"
+    "不要因为需要重写而改成无依据拒答。"
+)
+_SHORT_FUSE_RETRY_MAX_TOKENS = 512
+
+
+def _fuse_or_keep(
+    ans: dict,
+    *,
+    effective_knowledge: str,
+    attachment_observations,
+    allowed_identifiers,
+):
+    if not _IDENTIFIER_NUMERIC_FUSE_ENABLED:
+        logging.info("grounding_guard skipped enabled=False")
+        return ans, GroundingResult(
+            passed=True,
+            unmatched_identifiers=0,
+            unmatched_numbers=0,
+            unmatched_number_keys=(),
+        )
+
+    result = apply_identifier_numeric_fuse(
+        ans.get("answer") or "",
+        effective_knowledge,
+        attachment_observations,
+        allowed_identifiers,
+    )
+    _log_grounding_guard(result, abstain=not result.passed)
+    if result.passed:
+        return ans, result
+
+    # Deterministic repair: drop invented 0/0.0+unit placeholders, then re-fuse.
+    if _unmatched_keys_are_zero_only(result):
+        cleaned_answer = strip_ungrounded_zero_measurements(ans.get("answer") or "")
+        if cleaned_answer.strip() != (ans.get("answer") or "").strip():
+            cleaned = dict(ans)
+            cleaned["answer"] = cleaned_answer
+            result2 = apply_identifier_numeric_fuse(
+                cleaned_answer,
+                effective_knowledge,
+                attachment_observations,
+                allowed_identifiers,
+            )
+            logging.info(
+                "grounding_guard zero_placeholder_strip unmatched_before=%s passed=%s unmatched_numbers=%s",
+                result.unmatched_numbers,
+                result2.passed,
+                result2.unmatched_numbers,
+            )
+            _log_grounding_guard(result2, abstain=not result2.passed)
+            if result2.passed:
+                return cleaned, result2
+            result = result2
+
+    fused = dict(ans)
+    fused["answer"] = STANDARD_ABSTAIN_ANSWER
+    fused["reference"] = empty_reference()
+    return fused, result
+
+
+def _should_short_fuse_retry(result, *, effective_knowledge: str, allow_short_retry: bool) -> bool:
+    """Retry only for numeric-only fuse fails when evidence was provided to the model."""
+    if not _IDENTIFIER_NUMERIC_FUSE_ENABLED:
+        return False
+    if not allow_short_retry:
+        return False
+    if not (effective_knowledge or "").strip():
+        return False
+    if result.passed:
+        return False
+    return result.unmatched_identifiers == 0 and result.unmatched_numbers > 0
+
+
+def _with_short_fuse_retry_instruction(history: list) -> list:
+    if not history:
+        return history
+    out = deepcopy(history)
+    last = dict(out[-1])
+    content = last.get("content")
+    if isinstance(content, list):
+        last["content"] = list(content) + [{"type": "text", "text": _SHORT_FUSE_RETRY_SUFFIX}]
+    else:
+        last["content"] = str(content or "") + _SHORT_FUSE_RETRY_SUFFIX
+    out[-1] = last
+    return out
+
+
+async def _generate_short_fuse_retry(
+    chat_mdl,
+    *,
+    prompt: str,
+    prompt4citation: str,
+    msg: list,
+    gen_conf: dict,
+    model_type: str,
+    image_files=None,
+):
+    retry_conf = dict(gen_conf or {})
+    retry_conf["max_tokens"] = min(
+        int(retry_conf.get("max_tokens") or _SHORT_FUSE_RETRY_MAX_TOKENS),
+        _SHORT_FUSE_RETRY_MAX_TOKENS,
+    )
+    history = _with_short_fuse_retry_instruction(msg[1:])
+    system = prompt + (prompt4citation or "")
+    logging.info(
+        "grounding_guard retry=1 max_tokens=%s",
+        retry_conf.get("max_tokens"),
+    )
+    if model_type == "chat":
+        return await chat_mdl.async_chat(system, history, retry_conf)
+    return await chat_mdl.async_chat(system, history, retry_conf, images=image_files)
+
+
+def _grounding_abstain_event(**extra) -> dict:
+    payload = {
+        "answer": STANDARD_ABSTAIN_ANSWER,
+        "reference": empty_reference(),
+        "prompt": "",
+        "audio_binary": None,
+        "final": True,
+    }
+    payload.update(extra)
+    return payload
 
 
 def _chunk_kb_id_for_doc(row_dict, kb_ids, doc_id):
@@ -321,14 +501,23 @@ def _resolve_dialog_llm_config(dialog):
         return get_tenant_default_model_by_type(dialog.tenant_id, LLMType.CHAT)
 
 
-async def async_chat_solo(dialog, messages, stream=True, session_id=None):
+async def async_chat_solo(dialog, messages, stream=True, session_id=None, grounding_version=None, **kwargs):
+    grounding_enabled = _grounding_requested(grounding_version)
+    allowed_identifiers = list(kwargs.pop("allowed_identifiers", None) or [])
+    attachment_observations = kwargs.pop("attachment_observations", None)
+    last_user = str(messages[-1].get("content") or "") if messages else ""
+    if last_user:
+        allowed_identifiers.append(last_user)
     attachments = ""
     image_attachments = []
     image_files = []
 
     model_config = _resolve_dialog_llm_config(dialog)
 
-    chat_mdl = LLMBundle(dialog.tenant_id, model_config, langfuse_session_id=session_id)
+    bundle_kwargs = {"langfuse_session_id": session_id}
+    if grounding_enabled:
+        bundle_kwargs["disable_langfuse"] = True
+    chat_mdl = LLMBundle(dialog.tenant_id, model_config, **bundle_kwargs)
     factory = model_config.get("llm_factory", "") if model_config else ""
     if "files" in messages[-1]:
         if model_config["model_type"] == "chat":
@@ -339,7 +528,7 @@ async def async_chat_solo(dialog, messages, stream=True, session_id=None):
 
     prompt_config = dialog.prompt_config
     tts_mdl = None
-    if prompt_config.get("tts"):
+    if prompt_config.get("tts") and not grounding_enabled:
         default_tts_model = get_tenant_default_model_by_type(dialog.tenant_id, LLMType.TTS)
         tts_mdl = LLMBundle(dialog.tenant_id, default_tts_model, trace_context=chat_mdl.trace_context, langfuse_session_id=session_id)
     msg = [{"role": m["role"], "content": re.sub(r"##\d+\$\$", "", m["content"])} for m in messages if m["role"] != "system"]
@@ -354,24 +543,63 @@ async def async_chat_solo(dialog, messages, stream=True, session_id=None):
             stream_iter = chat_mdl.async_chat_streamly_delta(system_prompt, msg, dialog.llm_setting)
         else:
             stream_iter = chat_mdl.async_chat_streamly_delta(system_prompt, msg, dialog.llm_setting, images=image_files)
+        last_state = None
         async for kind, value, state in _stream_with_think_delta(stream_iter):
+            last_state = state
+            if grounding_enabled:
+                continue
             if kind == "marker":
                 flags = {"start_to_think": True} if value == "<think>" else {"end_to_think": True}
                 yield {"answer": "", "reference": {}, "audio_binary": None, "prompt": "", "created_at": time.time(), "final": False, **flags}
                 continue
-            yield {"answer": value, "reference": {}, "audio_binary": tts(tts_mdl, value), "prompt": "", "created_at": time.time(), "final": False}
+            yield {
+                "answer": value,
+                "reference": {},
+                "audio_binary": tts(tts_mdl, value),
+                "prompt": "",
+                "created_at": time.time(),
+                "final": False,
+            }
+        if grounding_enabled:
+            answer = last_state.full_text if last_state else ""
+            fused, _result = _fuse_or_keep(
+                {"answer": answer, "reference": {}, "prompt": "", "created_at": time.time()},
+                effective_knowledge="",
+                attachment_observations=attachment_observations,
+                allowed_identifiers=allowed_identifiers,
+            )
+            fused["audio_binary"] = None
+            fused["final"] = True
+            yield fused
     else:
         if model_config["model_type"] == "chat":
             answer = await chat_mdl.async_chat(system_prompt, msg, dialog.llm_setting)
         else:
             answer = await chat_mdl.async_chat(system_prompt, msg, dialog.llm_setting, images=image_files)
         user_content = msg[-1].get("content", "[content not available]")
-        logging.debug("User: {}|Assistant: {}".format(user_content, answer))
-        yield {"answer": answer, "reference": {}, "audio_binary": tts(tts_mdl, answer), "prompt": "", "created_at": time.time()}
+        if not grounding_enabled:
+            logging.debug("User: {}|Assistant: {}".format(user_content, answer))
+        payload = {"answer": answer, "reference": {}, "audio_binary": tts(tts_mdl, answer), "prompt": "", "created_at": time.time()}
+        if grounding_enabled:
+            payload, _result = _fuse_or_keep(
+                payload,
+                effective_knowledge="",
+                attachment_observations=attachment_observations,
+                allowed_identifiers=allowed_identifiers,
+            )
+            payload["audio_binary"] = tts(tts_mdl, payload.get("answer") or "")
+        yield payload
 
 
-def get_models(dialog, trace_context=None, langfuse_session_id=None):
+def get_models(dialog, trace_context=None, langfuse_session_id=None, disable_langfuse=False):
     embd_mdl, chat_mdl, rerank_mdl, tts_mdl = None, None, None, None
+
+    def bundle_kwargs():
+        result = {"trace_context": trace_context, "langfuse_session_id": langfuse_session_id}
+        if disable_langfuse:
+            result["disable_langfuse"] = True
+        return result
+
     kbs = KnowledgebaseService.get_by_ids(dialog.kb_ids)
     err = validate_dataset_embedding_models(kbs)
     if err:
@@ -380,13 +608,13 @@ def get_models(dialog, trace_context=None, langfuse_session_id=None):
     if kbs and kbs[0].embd_id:
         embd_owner_tenant_id = kbs[0].tenant_id
         embd_model_config = resolve_model_config(embd_owner_tenant_id, LLMType.EMBEDDING, kbs[0].embd_id)
-        embd_mdl = LLMBundle(embd_owner_tenant_id, embd_model_config, trace_context=trace_context, langfuse_session_id=langfuse_session_id)
+        embd_mdl = LLMBundle(embd_owner_tenant_id, embd_model_config, **bundle_kwargs())
         if not embd_mdl:
             raise LookupError("Embedding model(%s) not found" % kbs[0].embd_id)
 
     chat_model_config = _resolve_dialog_llm_config(dialog)
 
-    chat_mdl = LLMBundle(dialog.tenant_id, chat_model_config, trace_context=trace_context, langfuse_session_id=langfuse_session_id)
+    chat_mdl = LLMBundle(dialog.tenant_id, chat_model_config, **bundle_kwargs())
 
     if dialog.rerank_id:
         if dialog.tenant_rerank_id:
@@ -396,11 +624,11 @@ def get_models(dialog, trace_context=None, langfuse_session_id=None):
                 rerank_model_config = resolve_model_config(dialog.tenant_id, LLMType.RERANK, dialog.rerank_id)
         else:
             rerank_model_config = resolve_model_config(dialog.tenant_id, LLMType.RERANK, dialog.rerank_id)
-        rerank_mdl = LLMBundle(dialog.tenant_id, rerank_model_config, trace_context=trace_context, langfuse_session_id=langfuse_session_id)
+        rerank_mdl = LLMBundle(dialog.tenant_id, rerank_model_config, **bundle_kwargs())
 
-    if dialog.prompt_config.get("tts"):
+    if dialog.prompt_config.get("tts") and not disable_langfuse:
         default_tts_model_config = get_tenant_default_model_by_type(dialog.tenant_id, LLMType.TTS)
-        tts_mdl = LLMBundle(dialog.tenant_id, default_tts_model_config, trace_context=trace_context, langfuse_session_id=langfuse_session_id)
+        tts_mdl = LLMBundle(dialog.tenant_id, default_tts_model_config, **bundle_kwargs())
     return kbs, embd_mdl, rerank_mdl, chat_mdl, tts_mdl
 
 
@@ -577,11 +805,22 @@ def repair_bad_citation_formats(answer: str, kbinfos: dict, idx: set):
 async def async_chat(dialog, messages, stream=True, **kwargs):
     logging.debug("Begin async_chat")
     assert messages[-1]["role"] == "user", "The last content of this conversation is not from user."
+    grounding_enabled = _grounding_requested(kwargs.get("grounding_version"))
+    allowed_identifiers = list(kwargs.pop("allowed_identifiers", None) or [])
+    attachment_observations = kwargs.pop("attachment_observations", None)
+    last_user = str(messages[-1].get("content") or "")
+    if last_user:
+        allowed_identifiers.append(last_user)
     session_id = kwargs.get("session_id")
     use_web_search = _should_use_web_search(dialog.prompt_config, kwargs.get("internet"))
     logging.debug("web_search kb=%s configured=%s internet=%r enabled=%s", bool(dialog.kb_ids), has_web_search_provider(dialog.prompt_config), kwargs.get("internet"), use_web_search)
     if not dialog.kb_ids and not use_web_search:
-        async for ans in async_chat_solo(dialog, messages, stream, session_id=session_id):
+        solo_kwargs = {"session_id": session_id}
+        if grounding_enabled:
+            solo_kwargs["grounding_version"] = 1
+            solo_kwargs["allowed_identifiers"] = allowed_identifiers
+            solo_kwargs["attachment_observations"] = attachment_observations
+        async for ans in async_chat_solo(dialog, messages, stream, **solo_kwargs):
             yield ans
         return
 
@@ -596,7 +835,7 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
     langfuse_tracer = None
     langfuse_generation = None
     trace_context = {}
-    langfuse_keys = TenantLangfuseService.filter_by_tenant(tenant_id=dialog.tenant_id)
+    langfuse_keys = None if grounding_enabled else TenantLangfuseService.filter_by_tenant(tenant_id=dialog.tenant_id)
     if langfuse_keys:
         langfuse = Langfuse(public_key=langfuse_keys.public_key, secret_key=langfuse_keys.secret_key, host=langfuse_keys.host)
         try:
@@ -609,7 +848,10 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
             pass
 
     check_langfuse_tracer_ts = timer()
-    kbs, embd_mdl, rerank_mdl, chat_mdl, tts_mdl = get_models(dialog, trace_context=trace_context, langfuse_session_id=session_id)
+    model_kwargs = {"trace_context": trace_context, "langfuse_session_id": session_id}
+    if grounding_enabled:
+        model_kwargs["disable_langfuse"] = True
+    kbs, embd_mdl, rerank_mdl, chat_mdl, tts_mdl = get_models(dialog, **model_kwargs)
     toolcall_session, tools = kwargs.get("toolcall_session"), kwargs.get("tools")
     if toolcall_session and tools:
         chat_mdl.bind_tools(toolcall_session, tools)
@@ -648,7 +890,7 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
     field_map = KnowledgebaseService.get_field_map(dialog.kb_ids)
     logging.debug(f"field_map retrieved: {field_map}")
     # try to use sql if field mapping is good to go
-    if field_map:
+    if field_map and not grounding_enabled:
         logging.debug("Use SQL to retrieval:{}".format(questions[-1]))
         ans = await use_sql(questions[-1], field_map, dialog.tenant_id, chat_mdl, prompt_config.get("quote", True), dialog.kb_ids, doc_ids=attachments)
         # For aggregate queries (COUNT, SUM, etc.), chunks may be empty but answer is still valid
@@ -683,12 +925,27 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
             prompt_config["system"] = prompt_config["system"].replace("{%s}" % p["key"], " ")
 
     if len(questions) > 1 and prompt_config.get("refine_multiturn"):
-        questions = [await full_question(dialog.tenant_id, dialog.llm_id, messages)]
+        questions = [
+            await full_question(
+                dialog.tenant_id,
+                dialog.llm_id,
+                messages,
+                chat_mdl=chat_mdl if grounding_enabled else None,
+            )
+        ]
     else:
         questions = questions[-1:]
 
     if prompt_config.get("cross_languages"):
-        questions = [await cross_languages(dialog.tenant_id, dialog.llm_id, questions[0], prompt_config["cross_languages"])]
+        questions = [
+            await cross_languages(
+                dialog.tenant_id,
+                dialog.llm_id,
+                questions[0],
+                prompt_config["cross_languages"],
+                chat_mdl=chat_mdl if grounding_enabled else None,
+            )
+        ]
 
     if prompt_config.get("keyword", False):
         questions[-1] = questions[-1] + "," + await keyword_extraction(chat_mdl, questions[-1])
@@ -769,8 +1026,11 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
                 kbinfos["doc_aggs"].extend(web_res["doc_aggs"])
             if prompt_config.get("use_kg"):
                 default_chat_model = get_tenant_default_model_by_type(dialog.tenant_id, LLMType.CHAT)
+                kg_bundle_kwargs = {"trace_context": trace_context, "langfuse_session_id": session_id}
+                if grounding_enabled:
+                    kg_bundle_kwargs["disable_langfuse"] = True
                 ck = await settings.kg_retriever.retrieval(
-                    " ".join(questions), tenant_ids, dialog.kb_ids, embd_mdl, LLMBundle(dialog.tenant_id, default_chat_model, trace_context=trace_context, langfuse_session_id=session_id)
+                    " ".join(questions), tenant_ids, dialog.kb_ids, embd_mdl, LLMBundle(dialog.tenant_id, default_chat_model, **kg_bundle_kwargs)
                 )
                 if ck["content_with_weight"]:
                     kbinfos["chunks"].insert(0, ck)
@@ -784,53 +1044,113 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
         _enrich_chunks_with_document_metadata(kbinfos.get("chunks", []), metadata_fields)
 
     knowledges = kb_prompt(kbinfos, max_tokens)
-    logging.debug("{}->{}".format(" ".join(questions), "\n->".join(knowledges)))
+    retrieved_knowledge_count = len(kbinfos.get("chunks", []))
+    if grounding_enabled:
+        logging.debug("retrieval completed: grounding_version=%s knowledge_count=%d", 1, len(knowledges))
+    else:
+        logging.debug("{}->{}".format(" ".join(questions), "\n->".join(knowledges)))
 
     retrieval_ts = timer()
     if not knowledges and prompt_config.get("empty_response") and not messages[-1].get("files"):
         empty_res = prompt_config["empty_response"]
-        logging.debug("async_chat empty_response path: empty_res=%r tts_mdl=%r", empty_res, tts_mdl)
+        if grounding_enabled:
+            logging.info(
+                "grounding prompt fit: retrieved_knowledge_count=%d included_knowledge_count=0 effective_knowledge_length=0",
+                retrieved_knowledge_count,
+            )
+        else:
+            logging.debug("async_chat empty_response path: empty_res=%r tts_mdl=%r", empty_res, tts_mdl)
         # HTML-escape for frontend display so DOMPurify does not strip
         # unknown tags (e.g. <abc> → &lt;abc&gt;), which would otherwise
         # leave the content blank and stall the UI on "Searching…".
         # The raw value is still used for TTS (which has its own tag-
         # stripping in clean_tts_text).
         escaped_answer = html.escape(empty_res)
+        if grounding_enabled:
+            logging.info(
+                "grounding answer finalized: answer_length=%d contains_empty_response=%s",
+                len(STANDARD_ABSTAIN_ANSWER),
+                True,
+            )
+            yield _grounding_abstain_event()
+            return
         yield {"answer": escaped_answer, "reference": {}, "prompt": "", "audio_binary": None, "final": False}
-        yield {"answer": escaped_answer, "reference": kbinfos, "prompt": "\n\n### Query:\n%s" % " ".join(questions), "audio_binary": tts(tts_mdl, empty_res), "final": True}
+        yield {
+            "answer": escaped_answer,
+            "reference": kbinfos,
+            "prompt": "\n\n### Query:\n%s" % " ".join(questions),
+            "audio_binary": tts(tts_mdl, empty_res),
+            "final": True,
+        }
         return
 
-    # Only overwrite kwargs["knowledge"] when retrieval produced something;
-    # otherwise preserve any caller-supplied value.
-    knowledge_text = "\n\n------\n\n".join(knowledges)
-    if knowledge_text:
-        kwargs["knowledge"] = "\n------\n" + knowledge_text
-    else:
-        kwargs.setdefault("knowledge", "")
     gen_conf = dialog.llm_setting
+    grounding_start = grounding_end = None
+    grounding_prompt_unfit = False
+    while True:
+        # Only overwrite kwargs["knowledge"] when retrieval produced something;
+        # otherwise preserve any caller-supplied value.
+        knowledge_text = "\n\n------\n\n".join(knowledges)
+        if knowledge_text:
+            kwargs["knowledge"] = "\n------\n" + knowledge_text
+        else:
+            kwargs.setdefault("knowledge", "")
 
-    system_content = prompt_config["system"].format(**kwargs) + attachments_
-    # If knowledge was retrieved but the template has no {knowledge}
-    # placeholder, auto-append it so the LLM still sees the context.
-    if knowledges and "{knowledge}" not in prompt_config.get("system", ""):
-        system_content += kwargs["knowledge"]
-    msg = [{"role": "system", "content": system_content}]
+        if grounding_enabled and kwargs.get("knowledge"):
+            knowledge_body = str(kwargs["knowledge"])
+            if grounding_start is None:
+                grounding_start, grounding_end = _grounding_markers(knowledge_body)
+            kwargs["knowledge"] = f"{grounding_start}{knowledge_body}{grounding_end}"
+
+        system_content = prompt_config["system"].format(**kwargs) + attachments_
+        # If knowledge was retrieved but the template has no {knowledge}
+        # placeholder, auto-append it so the LLM still sees the context.
+        if knowledges and "{knowledge}" not in prompt_config.get("system", ""):
+            system_content += kwargs["knowledge"]
+        msg = [{"role": "system", "content": system_content}]
+        msg.extend([{"role": m["role"], "content": re.sub(r"##\d+\$\$", "", m["content"])} for m in messages if m["role"] != "system"])
+        used_token_count, msg = message_fit_in(msg, int(max_tokens * 0.95))
+        prompt = msg[0]["content"]
+        if not grounding_enabled or not knowledges or grounding_start in prompt:
+            break
+        if len(knowledges) == 1:
+            knowledges = []
+            grounding_prompt_unfit = True
+            break
+        knowledges = knowledges[:-1]
+
+    effective_knowledge = _extract_effective_knowledge(prompt, grounding_start, grounding_end)
+    if grounding_enabled:
+        logging.info(
+            "grounding prompt fit: retrieved_knowledge_count=%d included_knowledge_count=%d effective_knowledge_length=%d",
+            retrieved_knowledge_count,
+            len(knowledges),
+            len(effective_knowledge),
+        )
+
+    if grounding_prompt_unfit:
+        logging.info(
+            "grounding answer finalized: answer_length=%d contains_empty_response=%s",
+            len(STANDARD_ABSTAIN_ANSWER),
+            True,
+        )
+        yield _grounding_abstain_event()
+        return
+
     prompt4citation = ""
     if knowledges and (prompt_config.get("quote", True) and kwargs.get("quote", True)):
         prompt4citation = citation_prompt()
-    msg.extend([{"role": m["role"], "content": re.sub(r"##\d+\$\$", "", m["content"])} for m in messages if m["role"] != "system"])
-    used_token_count, msg = message_fit_in(msg, int(max_tokens * 0.95))
     if llm_model_config["model_type"] == "chat" and image_attachments:
         convert_last_user_msg_to_multimodal(msg, image_attachments, factory)
     assert len(msg) >= 2, f"message_fit_in has bug: {msg}"
-    prompt = msg[0]["content"]
 
     if "max_tokens" in gen_conf:
         gen_conf["max_tokens"] = min(gen_conf["max_tokens"], max_tokens - used_token_count)
 
-    async def decorate_answer(answer):
+    async def decorate_answer(answer, *, allow_short_retry: bool = True):
         nonlocal embd_mdl, prompt_config, knowledges, kwargs, kbinfos, prompt, retrieval_ts, questions, langfuse_generation
 
+        system_prompt_snapshot = prompt
         refs = []
         ans = answer.split("</think>")
         think = ""
@@ -874,6 +1194,13 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
 
         if answer.lower().find("invalid key") >= 0 or answer.lower().find("invalid api") >= 0:
             answer += " Please set LLM API-Key in 'User Setting -> Model providers -> API-Key'"
+        if grounding_enabled:
+            empty_res = prompt_config.get("empty_response", "")
+            logging.info(
+                "grounding answer finalized: answer_length=%d contains_empty_response=%s",
+                len(think + answer),
+                bool(empty_res and empty_res in (think + answer)),
+            )
         finish_chat_ts = timer()
 
         total_time_cost = (finish_chat_ts - chat_start_ts) * 1000
@@ -903,8 +1230,11 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
 
         # Add a condition check to call the end method only if langfuse_generation exists
         if langfuse_generation is not None:
-            langfuse_output = "\n" + re.sub(r"^.*?(### Query:.*)", r"\1", prompt, flags=re.DOTALL)
-            langfuse_output = {"time_elapsed:": re.sub(r"\n", "  \n", langfuse_output), "created_at": time.time()}
+            if grounding_enabled:
+                langfuse_output = {"grounding_version": 1, "created_at": time.time()}
+            else:
+                langfuse_output = "\n" + re.sub(r"^.*?(### Query:.*)", r"\1", prompt, flags=re.DOTALL)
+                langfuse_output = {"time_elapsed:": re.sub(r"\n", "  \n", langfuse_output), "created_at": time.time()}
             langfuse_generation.update(
                 output=langfuse_output,
                 usage_details={
@@ -915,16 +1245,45 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
             )
             langfuse_generation.end()
 
-        return {"answer": think + answer, "reference": refs, "prompt": re.sub(r"\n", "  \n", prompt), "created_at": time.time()}
+        payload = {
+            "answer": think + answer,
+            "reference": refs,
+            "prompt": "" if grounding_enabled else re.sub(r"\n", "  \n", prompt),
+            "created_at": time.time(),
+        }
+        if grounding_enabled:
+            payload, fuse_result = _fuse_or_keep(
+                payload,
+                effective_knowledge=effective_knowledge,
+                attachment_observations=attachment_observations,
+                allowed_identifiers=allowed_identifiers,
+            )
+            if _should_short_fuse_retry(
+                fuse_result,
+                effective_knowledge=effective_knowledge,
+                allow_short_retry=allow_short_retry,
+            ):
+                retry_raw = await _generate_short_fuse_retry(
+                    chat_mdl,
+                    prompt=system_prompt_snapshot,
+                    prompt4citation=prompt4citation,
+                    msg=msg,
+                    gen_conf=gen_conf,
+                    model_type=llm_model_config["model_type"],
+                    image_files=image_files,
+                )
+                return await decorate_answer(retry_raw, allow_short_retry=False)
+        return payload
 
     if langfuse_tracer:
         try:
+            observation_input = {"grounding_version": 1} if grounding_enabled else {"prompt": prompt, "prompt4citation": prompt4citation, "messages": msg}
             observation_kwargs = {
                 "as_type": "generation",
                 "trace_context": trace_context,
                 "name": "chat",
                 "model": llm_model_config["llm_name"],
-                "input": {"prompt": prompt, "prompt4citation": prompt4citation, "messages": msg},
+                "input": observation_input,
             }
             if session_id:
                 with propagate_attributes(session_id=session_id):
@@ -944,6 +1303,8 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
         last_state = None
         async for kind, value, state in _stream_with_think_delta(stream_iter):
             last_state = state
+            if grounding_enabled:
+                continue
             if kind == "marker":
                 flags = {"start_to_think": True} if value == "<think>" else {"end_to_think": True}
                 yield {"answer": "", "reference": {}, "audio_binary": None, "final": False, **flags}
@@ -954,17 +1315,22 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
             final = await decorate_answer(_extract_visible_answer(thought + full_answer))
             final["final"] = True
             final["audio_binary"] = None
-            final["answer"] = ""
+            if not grounding_enabled:
+                final["answer"] = ""
             yield final
+        elif grounding_enabled:
+            logging.info("grounding answer finalized: answer_length=0 contains_empty_response=False")
+            yield _grounding_abstain_event()
     else:
         if llm_model_config["model_type"] == "chat":
             answer = await chat_mdl.async_chat(prompt + prompt4citation, msg[1:], gen_conf)
         else:
             answer = await chat_mdl.async_chat(prompt + prompt4citation, msg[1:], gen_conf, images=image_files)
         user_content = msg[-1].get("content", "[content not available]")
-        logging.debug("User: {}|Assistant: {}".format(user_content, answer))
+        if not grounding_enabled:
+            logging.debug("User: {}|Assistant: {}".format(user_content, answer))
         res = await decorate_answer(answer)
-        res["audio_binary"] = tts(tts_mdl, answer)
+        res["audio_binary"] = tts(tts_mdl, res.get("answer") or "")
         yield res
 
     return
@@ -1854,7 +2220,8 @@ async def gen_mindmap(question, kb_ids, tenant_id, search_config={}):
 async def rag_agent(dialog, messages, stream=True, **kwargs):
     prompt_config = dialog.prompt_config or {}
     assert messages[-1]["role"] == "user", "The last content of this conversation is not from user."
-    if not prompt_config.get("reasoning", 0) and not kwargs.get("reasoning"):
+    grounding_enabled = _grounding_requested(kwargs.get("grounding_version"))
+    if grounding_enabled or (not prompt_config.get("reasoning", 0) and not kwargs.get("reasoning")):
         async for ans in async_chat(dialog, messages, stream, **kwargs):
             yield ans
         return

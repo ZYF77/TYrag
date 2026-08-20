@@ -221,6 +221,14 @@ def _move_litellm_provider_body_fields(provider: SupportedLiteLLMProvider | str 
     return completion_args
 
 
+def _log_history(history, *, stream: bool = False, redact: bool = False) -> None:
+    label = "[HISTORY STREAMLY]" if stream else "[HISTORY]"
+    if redact:
+        logging.info("%s message_count=%d", label, len(history or []))
+        return
+    logging.info(label + json.dumps(history, ensure_ascii=False, indent=4 if stream else 2))
+
+
 class Base(ABC):
     def __init__(self, key, model_name, base_url, **kwargs):
         timeout = int(os.environ.get("LLM_TIMEOUT_SECONDS", 600))
@@ -232,6 +240,7 @@ class Base(ABC):
         self.max_retries = kwargs.get("max_retries", int(os.environ.get("LLM_MAX_RETRIES", 5)))
         self.base_delay = kwargs.get("retry_interval", float(os.environ.get("LLM_BASE_DELAY", 2.0)))
         self.max_rounds = kwargs.get("max_rounds", 5)
+        self.disable_content_logging = bool(kwargs.get("disable_content_logging", False))
         self.is_tools = False
         self.tools = []
         self.toolcall_sessions = {}
@@ -271,7 +280,11 @@ class Base(ABC):
         return gen_conf
 
     async def _async_chat_streamly(self, history, gen_conf, **kwargs):
-        logging.info("[HISTORY STREAMLY]" + json.dumps(history, ensure_ascii=False, indent=4))
+        _log_history(
+            history,
+            stream=True,
+            redact=getattr(self, "disable_content_logging", False),
+        )
         reasoning_start = False
 
         gen_conf, extra_request_kwargs = _apply_model_family_policies(
@@ -749,7 +762,10 @@ class Base(ABC):
         assert False, "Shouldn't be here."
 
     async def _async_chat(self, history, gen_conf, **kwargs):
-        logging.info("[HISTORY]" + json.dumps(history, ensure_ascii=False, indent=2))
+        _log_history(
+            history,
+            redact=getattr(self, "disable_content_logging", False),
+        )
         if self.model_name.lower().find("qwq") >= 0:
             logging.info(f"[INFO] {self.model_name} detected as reasoning model, using async_chat_streamly")
 
@@ -1680,6 +1696,7 @@ class LiteLLMBase(ABC):
         self.max_retries = kwargs.get("max_retries", int(os.environ.get("LLM_MAX_RETRIES", 5)))
         self.base_delay = kwargs.get("retry_interval", float(os.environ.get("LLM_BASE_DELAY", 2.0)))
         self.max_rounds = kwargs.get("max_rounds", 5)
+        self.disable_content_logging = bool(kwargs.get("disable_content_logging", False))
         self.is_tools = False
         self.tools = []
         self.toolcall_sessions = {}
@@ -1789,7 +1806,10 @@ class LiteLLMBase(ABC):
             if not hist or hist[0].get("role") != "system":
                 hist.insert(0, {"role": "system", "content": system})
 
-        logging.info("[HISTORY]" + json.dumps(hist, ensure_ascii=False, indent=2))
+        _log_history(
+            hist,
+            redact=getattr(self, "disable_content_logging", False),
+        )
         gen_conf = self._clean_conf(gen_conf)
         _, kwargs = _apply_model_family_policies(
             self.model_name,
@@ -1828,7 +1848,11 @@ class LiteLLMBase(ABC):
     async def async_chat_streamly(self, system, history, gen_conf, **kwargs):
         if system and history and history[0].get("role") != "system":
             history.insert(0, {"role": "system", "content": system})
-        logging.info("[HISTORY STREAMLY]" + json.dumps(history, ensure_ascii=False, indent=4))
+        _log_history(
+            history,
+            stream=True,
+            redact=getattr(self, "disable_content_logging", False),
+        )
         gen_conf = self._clean_conf(gen_conf)
         reasoning_start = False
         total_tokens = 0

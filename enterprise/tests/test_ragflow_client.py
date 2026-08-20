@@ -7,6 +7,11 @@ from enterprise.gateway.ragflow_client import (
     RAGFlowStub,
     HealthStatus,
 )
+from enterprise.gateway.query.ragflow_client import (
+    RAGFlowQueryClient,
+    _json_missing_payload,
+)
+from enterprise.gateway.sync.ragflow_document_client import RAGFlowAPIError
 
 
 class TestRAGFlowStub:
@@ -45,8 +50,68 @@ class TestHealthStatus:
 class TestRAGFlowClientTimeout:
     def test_timeout_default(self):
         client = RAGFlowClient()
-        assert client.timeout == 30.0
+        assert client.timeout == 120.0
 
     def test_timeout_custom(self):
         client = RAGFlowClient(timeout=5.0)
         assert client.timeout == 5.0
+
+
+@pytest.mark.asyncio
+async def test_v2_completion_sends_session_without_projected_messages():
+    client = RAGFlowQueryClient()
+    captured = {}
+
+    async def fake_run_sync(fn, *args, **kwargs):
+        captured.update(kwargs)
+        return {"code": 0, "data": {"session_id": "sess-1"}}
+
+    client._run_sync = fake_run_sync
+    await client.chat_completion(
+        "chat-1",
+        "current",
+        session_id="sess-1",
+        grounding_version=1,
+        allowed_identifiers=["EQ-1"],
+    )
+
+    body = captured["json_data"]
+    assert body["session_id"] == "sess-1"
+    assert "messages" not in body
+    assert body["question"] == "current"
+    assert body["grounding_version"] == 1
+    assert body["allowed_identifiers"] == ["EQ-1"]
+
+
+def test_json_missing_payload_treats_code_102_as_missing():
+    payload = b'{"code":102,"message":"The document is not found."}'
+    assert _json_missing_payload(payload, "application/json") is True
+    assert _json_missing_payload(payload, "text/plain") is True
+    assert _json_missing_payload(payload, "image/png") is True
+    assert _json_missing_payload(b"\x89PNG\r\n\x1a\n", "image/png") is False
+    assert _json_missing_payload(b'{"code":0,"data":"ok"}', "application/json") is False
+
+
+@pytest.mark.asyncio
+async def test_get_document_image_does_not_forward_json_102_as_binary():
+    client = RAGFlowQueryClient()
+
+    async def fake_run_sync(fn, *args, **kwargs):
+        return (
+            b'{"code":102,"message":"The document is not found."}',
+            "application/json",
+        )
+
+    client._run_sync = fake_run_sync
+    assert await client.get_document_image("kb-id-page-1.png") is None
+
+
+@pytest.mark.asyncio
+async def test_get_document_image_returns_none_on_api_error():
+    client = RAGFlowQueryClient()
+
+    async def fake_run_sync(fn, *args, **kwargs):
+        raise RAGFlowAPIError("missing", 404)
+
+    client._run_sync = fake_run_sync
+    assert await client.get_document_image("kb-id-page-1.png") is None

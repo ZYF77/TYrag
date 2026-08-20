@@ -989,6 +989,14 @@ async def test_suggestion_requires_current_context_version(runtime):
     assert accepted.status_code == 200
 
 
+def _grounding(version: int | None, knowledge: str = "evidence") -> dict | None:
+    return (
+        {"version": version, "effectiveKnowledge": knowledge}
+        if version is not None
+        else None
+    )
+
+
 class _ExplicitOutcomeStub(RAGFlowQueryStub):
     def __init__(self, *, status: str, include_chunk: bool) -> None:
         super().__init__()
@@ -1002,7 +1010,13 @@ class _ExplicitOutcomeStub(RAGFlowQueryStub):
         session_id: str | None = None,
         doc_ids: list[str] | None = None,
         request_id: str | None = None,
+        messages: list[dict] | None = None,
+        store_history_messages: bool | None = None,
+        pass_all_history_messages: bool | None = None,
+        grounding_version: int | None = None,
+        **kwargs,
     ) -> dict:
+        del messages, store_history_messages, pass_all_history_messages, kwargs
         self._last_completion_body = {
             "chat_id": chat_id,
             "question": question,
@@ -1029,6 +1043,7 @@ class _ExplicitOutcomeStub(RAGFlowQueryStub):
                 "session_id": "ragflow-session",
                 "status": self.status,
                 "reference": {"chunks": chunks},
+                "grounding": _grounding(grounding_version),
             },
         }
 
@@ -1041,8 +1056,14 @@ class _SelectiveCitationStub(RAGFlowQueryStub):
         session_id: str | None = None,
         doc_ids: list[str] | None = None,
         request_id: str | None = None,
+        messages: list[dict] | None = None,
+        store_history_messages: bool | None = None,
+        pass_all_history_messages: bool | None = None,
+        grounding_version: int | None = None,
+        **kwargs,
     ) -> dict:
         del chat_id, question, session_id, doc_ids, request_id
+        del messages, store_history_messages, pass_all_history_messages, kwargs
         return {
             "code": 0,
             "data": {
@@ -1064,8 +1085,9 @@ class _SelectiveCitationStub(RAGFlowQueryStub):
                             "document_name": "repair.pdf",
                             "content": "leak repair work order",
                         },
-                    ]
+                    ],
                 },
+                "grounding": _grounding(grounding_version),
             },
         }
 
@@ -1078,8 +1100,14 @@ class _AbstainContrastStub(RAGFlowQueryStub):
         session_id: str | None = None,
         doc_ids: list[str] | None = None,
         request_id: str | None = None,
+        messages: list[dict] | None = None,
+        store_history_messages: bool | None = None,
+        pass_all_history_messages: bool | None = None,
+        grounding_version: int | None = None,
+        **kwargs,
     ) -> dict:
         del chat_id, question, session_id, doc_ids, request_id
+        del messages, store_history_messages, pass_all_history_messages, kwargs
         return {
             "code": 0,
             "data": {
@@ -1104,8 +1132,9 @@ class _AbstainContrastStub(RAGFlowQueryStub):
                             "document_name": "debug.pdf",
                             "content": "commissioning record",
                         },
-                    ]
+                    ],
                 },
+                "grounding": _grounding(grounding_version),
             },
         }
 
@@ -1118,8 +1147,14 @@ class _ThinkAnswerStub(RAGFlowQueryStub):
         session_id: str | None = None,
         doc_ids: list[str] | None = None,
         request_id: str | None = None,
+        messages: list[dict] | None = None,
+        store_history_messages: bool | None = None,
+        pass_all_history_messages: bool | None = None,
+        grounding_version: int | None = None,
+        **kwargs,
     ) -> dict:
         del chat_id, question, session_id, doc_ids, request_id
+        del messages, store_history_messages, pass_all_history_messages, kwargs
         return {
             "code": 0,
             "data": {
@@ -1141,8 +1176,9 @@ class _ThinkAnswerStub(RAGFlowQueryStub):
                             "document_name": "repair.pdf",
                             "content": "leak repair work order",
                         },
-                    ]
+                    ],
                 },
+                "grounding": _grounding(grounding_version),
             },
         }
 
@@ -1155,8 +1191,14 @@ class _ThinkStreamStub(RAGFlowQueryStub):
         session_id: str | None = None,
         doc_ids: list[str] | None = None,
         request_id: str | None = None,
+        messages: list[dict] | None = None,
+        store_history_messages: bool | None = None,
+        pass_all_history_messages: bool | None = None,
+        grounding_version: int | None = None,
+        **kwargs,
     ):
         del chat_id, question, session_id, doc_ids, request_id
+        del messages, store_history_messages, pass_all_history_messages, kwargs
         yield {
             "code": 0,
             "data": {
@@ -1179,6 +1221,7 @@ class _ThinkStreamStub(RAGFlowQueryStub):
                 "final": True,
                 "session_id": "s",
                 "reference": {"chunks": []},
+                "grounding": _grounding(grounding_version),
             },
         }
         yield {"code": 0, "data": True}
@@ -1192,8 +1235,14 @@ class _CropCitationStub(RAGFlowQueryStub):
         session_id: str | None = None,
         doc_ids: list[str] | None = None,
         request_id: str | None = None,
+        messages: list[dict] | None = None,
+        store_history_messages: bool | None = None,
+        pass_all_history_messages: bool | None = None,
+        grounding_version: int | None = None,
+        **kwargs,
     ) -> dict:
         del chat_id, question, session_id, doc_ids, request_id
+        del messages, store_history_messages, pass_all_history_messages, kwargs
         return {
             "code": 0,
             "data": {
@@ -1210,8 +1259,9 @@ class _CropCitationStub(RAGFlowQueryStub):
                             "content": "fault panel",
                             "image_id": "ds-v2-page-1.png",
                         }
-                    ]
+                    ],
                 },
+                "grounding": _grounding(grounding_version),
             },
         }
 
@@ -1224,11 +1274,17 @@ class _MultiDeltaStub(RAGFlowQueryStub):
         session_id: str | None = None,
         doc_ids: list[str] | None = None,
         request_id: str | None = None,
+        messages: list[dict] | None = None,
+        store_history_messages: bool | None = None,
+        pass_all_history_messages: bool | None = None,
+        grounding_version: int | None = None,
+        **kwargs,
     ):
         del chat_id, question, session_id, doc_ids, request_id
+        del messages, store_history_messages, pass_all_history_messages, kwargs
         yield {"code": 0, "data": {"answer": "first ", "final": False, "session_id": "s"}}
         yield {"code": 0, "data": {"answer": "second", "final": False, "session_id": "s"}}
-        yield {"code": 0, "data": {"answer": "", "final": True, "session_id": "s", "reference": {"chunks": []}}}
+        yield {"code": 0, "data": {"answer": "", "final": True, "session_id": "s", "reference": {"chunks": []}, "grounding": _grounding(grounding_version)}}
         yield {"code": 0, "data": True}
 
 
@@ -1240,8 +1296,14 @@ class _TransportFailureStub(RAGFlowQueryStub):
         session_id: str | None = None,
         doc_ids: list[str] | None = None,
         request_id: str | None = None,
+        messages: list[dict] | None = None,
+        store_history_messages: bool | None = None,
+        pass_all_history_messages: bool | None = None,
+        grounding_version: int | None = None,
+        **kwargs,
     ):
         del chat_id, question, session_id, doc_ids, request_id
+        del messages, store_history_messages, pass_all_history_messages, grounding_version, kwargs
         if False:
             yield {}
         raise RAGFlowAPIError("stream transport failed", 0)
@@ -1255,8 +1317,14 @@ class _ExplicitStreamOutcomeStub(RAGFlowQueryStub):
         session_id: str | None = None,
         doc_ids: list[str] | None = None,
         request_id: str | None = None,
+        messages: list[dict] | None = None,
+        store_history_messages: bool | None = None,
+        pass_all_history_messages: bool | None = None,
+        grounding_version: int | None = None,
+        **kwargs,
     ):
         del chat_id, question, session_id, doc_ids, request_id
+        del messages, store_history_messages, pass_all_history_messages, kwargs
         yield {
             "code": 0,
             "data": {
@@ -1271,6 +1339,7 @@ class _ExplicitStreamOutcomeStub(RAGFlowQueryStub):
                 "answer": "",
                 "status": "no_reliable_evidence",
                 "final": True,
+                "grounding": _grounding(grounding_version),
                 "reference": {
                     "chunks": [
                         {
@@ -1314,17 +1383,15 @@ async def test_v2_sse_forwards_upstream_deltas(runtime):
         )
 
     assert response.status_code == 200
-    assert response.text.count("event: answer.delta") == 2
-    assert '"content": "first "' in response.text
-    assert '"content": "second"' in response.text
-    assert "first second" not in response.text.split("event: answer.delta", 1)[-1].split(
-        "event: answer.completed", 1
-    )[0]
+    assert response.text.count("event: answer.delta") == 1
+    assert '"content": "first second"' in response.text
+    assert "event: reasoning.delta" not in response.text
     assert replay.status_code == 200
-    assert replay.text.count("event: answer.delta") == 2
-    assert '"content": "first second"' not in replay.text
+    assert replay.text.count("event: answer.delta") == 1
+    assert '"content": "first second"' in replay.text
     assert json_replay.status_code == 200
     assert "_streamDeltas" not in json_replay.json()
+    assert json_replay.json()["reasoning"] is None
 
 
 @pytest.mark.asyncio
@@ -2041,7 +2108,7 @@ async def test_patch_context_returns_fresh_suggestions_and_stales_old(runtime):
 
 
 @pytest.mark.asyncio
-async def test_same_conversation_followup_reuses_ragflow_session(runtime):
+async def test_same_conversation_followup_projects_gateway_history(runtime):
     await _insert_document(
         runtime.db,
         external_id="DOC-FOLLOW",
@@ -2078,16 +2145,17 @@ async def test_same_conversation_followup_reuses_ragflow_session(runtime):
     ) as cursor:
         row = await cursor.fetchone()
     assert row["ragflow_session_id"]
-    sessions = list(runtime.stub._sessions.values())
-    assert len(sessions) == 1
-    assert sessions[0]["id"] == row["ragflow_session_id"]
-    assert sessions[0]["chat_id"] == row["ragflow_chat_id"]
-    assert sessions[0]["name"].startswith("eam-biz-user-001-")
-    assert conversation_id in sessions[0]["name"]
+    assert row["ragflow_session_id"] in runtime.stub._sessions
+    assert runtime.stub._last_completion_body["session_id"] == row["ragflow_session_id"]
+    assert runtime.stub._last_completion_body["messages"] is None
+    session = runtime.stub._sessions[row["ragflow_session_id"]]
+    assert session["name"].startswith(
+        f"eam-biz-user-001-{conversation_id}-"
+    )
 
 
 @pytest.mark.asyncio
-async def test_cleared_session_is_recreated_with_a_fresh_name(runtime):
+async def test_cleared_legacy_session_is_ignored(runtime):
     await _insert_document(
         runtime.db,
         external_id="DOC-RESET",
@@ -2103,10 +2171,9 @@ async def test_cleared_session_is_recreated_with_a_fresh_name(runtime):
             json={"clientMessageId": "reset-1", "question": "第一轮"},
         )
         assert first.status_code == 200
-        first_session = next(iter(runtime.stub._sessions))
         await runtime.db.execute(
-            "UPDATE ext_v2_conversation SET ragflow_session_id=NULL WHERE conversation_id=?",
-            (conversation_id,),
+            "UPDATE ext_v2_conversation SET ragflow_session_id=? WHERE conversation_id=?",
+            ("legacy-session", conversation_id),
         )
         await runtime.db.commit()
         second = await client.post(
@@ -2115,13 +2182,8 @@ async def test_cleared_session_is_recreated_with_a_fresh_name(runtime):
         )
 
     assert second.status_code == 200
-    assert len(runtime.stub._sessions) == 2
-    second_session = runtime.stub._last_completion_body["session_id"]
-    assert second_session != first_session
-    assert all(
-        conversation_id in session["name"]
-        for session in runtime.stub._sessions.values()
-    )
+    assert runtime.stub._last_completion_body["session_id"] == "legacy-session"
+    assert "legacy-session" in runtime.stub._sessions
 
 
 @pytest.mark.asyncio
@@ -2187,10 +2249,8 @@ async def test_conversation_is_isolated_across_business_users(runtime):
     ) as cursor:
         rows = await cursor.fetchall()
     assert len(rows) == 2
-    assert len({row["ragflow_session_id"] for row in rows}) == 2
-    names = {session["name"] for session in runtime.stub._sessions.values()}
-    assert any(name.startswith("eam-biz-user-001-") for name in names)
-    assert any(name.startswith("eam-biz-user-002-") for name in names)
+    assert all(row["ragflow_session_id"] for row in rows)
+    assert rows[0]["ragflow_session_id"] != rows[1]["ragflow_session_id"]
 
 
 @pytest.mark.asyncio

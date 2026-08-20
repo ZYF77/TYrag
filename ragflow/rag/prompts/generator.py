@@ -287,19 +287,20 @@ async def full_question(tenant_id=None, llm_id=None, messages=[], language=None,
     return ans if ans.find("**ERROR**") < 0 else messages[-1]["content"]
 
 
-async def cross_languages(tenant_id, llm_id, query, languages=[]):
+async def cross_languages(tenant_id, llm_id, query, languages=[], chat_mdl=None):
     from common.constants import LLMType
     from api.db.services.llm_service import LLMBundle
     from api.db.joint_services.tenant_model_service import resolve_model_config, get_tenant_default_model_by_type, resolve_model_type
 
-    if llm_id and "vision" in resolve_model_type(tenant_id, llm_id):
-        chat_model_config = resolve_model_config(tenant_id, LLMType.VISION, llm_id)
-    else:
-        if not llm_id:
-            chat_model_config = get_tenant_default_model_by_type(tenant_id, LLMType.CHAT)
+    if chat_mdl is None:
+        if llm_id and "vision" in resolve_model_type(tenant_id, llm_id):
+            chat_model_config = resolve_model_config(tenant_id, LLMType.VISION, llm_id)
         else:
-            chat_model_config = resolve_model_config(tenant_id, LLMType.CHAT, llm_id)
-    chat_mdl = LLMBundle(tenant_id, chat_model_config)
+            if not llm_id:
+                chat_model_config = get_tenant_default_model_by_type(tenant_id, LLMType.CHAT)
+            else:
+                chat_model_config = resolve_model_config(tenant_id, LLMType.CHAT, llm_id)
+        chat_mdl = LLMBundle(tenant_id, chat_model_config)
     rendered_sys_prompt = PROMPT_JINJA_ENV.from_string(CROSS_LANGUAGES_SYS_PROMPT_TEMPLATE).render()
     rendered_user_prompt = PROMPT_JINJA_ENV.from_string(CROSS_LANGUAGES_USER_PROMPT_TEMPLATE).render(query=query, languages=languages)
 

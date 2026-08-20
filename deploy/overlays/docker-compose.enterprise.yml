@@ -11,7 +11,7 @@
 
 services:
   enterprise-gateway:
-    image: ${ENTERPRISE_GATEWAY_IMAGE:-tyrag/ragflow:v0.26.4}
+    image: ${ENTERPRISE_GATEWAY_IMAGE:-tyrag/enterprise-gateway:v0.26.4}
     entrypoint: []
     working_dir: /ragflow
     command:
@@ -44,7 +44,7 @@ services:
       ENTERPRISE_GATEWAY_STATE_HOST_DIR: /var/lib/tyrag/state
       ENTERPRISE_SYNC_DB_PATH: /var/lib/tyrag/state/gateway.db
       ENTERPRISE_DB_PATH: /var/lib/tyrag/state/gateway.db
-      ENTERPRISE_REDIS_URL: ${ENTERPRISE_REDIS_CONTAINER_URL:-${ENTERPRISE_REDIS_URL:?set ENTERPRISE_REDIS_URL}}
+      ENTERPRISE_REDIS_URL: ${ENTERPRISE_REDIS_CONTAINER_URL:-redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379/0}
       ENTERPRISE_EAM_ASSET_RESOLVER_MODE: ${ENTERPRISE_EAM_ASSET_RESOLVER_MODE:-}
       ENTERPRISE_EAM_ASSET_RESOLVER_BASE_URL: ${ENTERPRISE_EAM_ASSET_RESOLVER_CONTAINER_BASE_URL:-${ENTERPRISE_EAM_ASSET_RESOLVER_BASE_URL:-}}
       ENTERPRISE_EAM_ASSET_RESOLVER_PATH: ${ENTERPRISE_EAM_ASSET_RESOLVER_PATH:-/api/integration/v1/assets/resolve}

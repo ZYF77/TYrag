@@ -8,6 +8,7 @@ from enterprise.gateway.query.citation_select import ABSTAIN_PHRASE
 from enterprise.gateway.query.enterprise_prompt import (
     ENTERPRISE_PROMPT_MARKER,
     REFERENCE_METADATA_FIELDS,
+    apply_inventory_rule_to_operator_prompt,
     build_enterprise_prompt_config,
     needs_enterprise_prompt_upgrade,
 )
@@ -23,29 +24,32 @@ def test_enterprise_prompt_has_knowledge_and_two_tier_relevance():
     system = cfg["system"]
 
     assert "{knowledge}" in system
+    assert ENTERPRISE_PROMPT_MARKER == "enterprise_identity_metadata_v9"
     assert ENTERPRISE_PROMPT_MARKER in system
     assert "document_metadata" in system
     assert "equipment_id" in system
     assert "fixed_asset_no" in system
-    assert "设备归属不等于内容与问题相关" in system
-    assert "不能证明" in system and "正文包含用户当前问题需要的事实" in system
-    assert "不得根据设备归属推测" in system
+    assert "正文未出现设备编号" in system
+    assert "metadata 只证明文档归属" in system
+    assert "必须由 Content 实际内容支持" in system
     assert ABSTAIN_PHRASE in system
-    assert "禁止任何 [ID:n]" in system
-    assert "禁止把合格证、调试记录等无关文档当对照证据引用" in system
-    assert "有哪些资料/文档" in system
-    assert "必须在正文用方括号引用格式 [ID:n]" in system
-    assert "半支撑" in system
-    assert "禁止沿用上一轮" in system
-    assert "必须标 [ID:0]" in system
-    assert "<think>" in system and "</think>" in system
-    assert "标签外只写给用户看的最终正文" in system
-    assert "尽量回答" not in system
-    assert "not found in the dataset" not in system.lower()
-    assert "附件观察与知识库事实必须分叉" in system
-    assert "禁止因此写约定拒答句" in system
-    assert "禁止把附件观察写成台账事实" in system
-    assert "无附件时，empty_response 与拒答规则保持不变" in system
+    assert cfg["empty_response"] == ABSTAIN_PHRASE
+    assert "优先回答可靠信息能够支持的部分" in system
+    assert "metadata 缺字段或引用格式问题" in system
+    assert "核心事实完全没有可靠依据" in system
+    assert "现有资料、文档、文件或内容" in system
+    assert "不要报告检索条数" in system
+    assert "不要使用数字序号" in system
+    assert "不得编造、猜测、补全或错误组合" in system
+    assert "比例或统计结论" in system
+    assert "[ID:n]" in system
+    assert "只能使用本轮实际提供的 ID" in system
+    assert "纯附件回答和无可靠依据的拒答不使用" in system
+    assert "<think>" not in system
+    assert "不得假装已读取" in system
+    assert "TXT/PDF" not in system
+    assert "JPEG" not in system
+    assert "## " not in system
 
     ref = cfg["reference_metadata"]
     assert ref["include"] is True
@@ -68,6 +72,8 @@ def test_needs_enterprise_prompt_upgrade_detects_default_chat():
         "enterprise_identity_metadata_v4",
         "enterprise_identity_metadata_v5",
         "enterprise_identity_metadata_v6",
+        "enterprise_identity_metadata_v7",
+        "enterprise_identity_metadata_v8",
     ):
         legacy = build_enterprise_prompt_config()
         legacy["system"] = legacy["system"].replace(
@@ -167,6 +173,55 @@ async def test_ensure_chat_preserves_ragflow_edited_system_prompt():
     assert chat["prompt_config"]["system"] == custom_system
     assert set(chat["dataset_ids"]) == {"ds-1", "ds-2"}
     assert len(updates) == 1
+    args, kwargs = updates[0]
+    assert kwargs.get("prompt_config") is None
+    assert not any(isinstance(arg, dict) and "system" in arg for arg in args)
+
+
+def test_apply_inventory_rule_keeps_operator_attachment_sections():
+    original = (
+        "临时附件规则保留。\n"
+        "[enterprise_identity_metadata_v6]\n"
+        "用户问「有哪些资料/文档」且概括真实命中内容时，可以引用并标 `[ID:n]`。\n"
+        "{knowledge}"
+    )
+    patched = apply_inventory_rule_to_operator_prompt(original)
+    assert "临时附件规则保留" in patched
+    assert "[enterprise_identity_metadata_v6]" in patched
+    assert "现有单据类型本身就是答案" in patched
+    assert "有哪些信息/资料/文档/文件/内容" in patched
+    assert apply_inventory_rule_to_operator_prompt(patched) == patched
+
+
+@pytest.mark.asyncio
+async def test_ensure_chat_preserves_v6_operator_prompt():
+    client = RAGFlowQueryStub()
+    principal = type("P", (), {"tenant_id": "tenant-v6"})()
+    scope = type("S", (), {"dataset_ids": ("ds-1", "ds-2")})()
+    operator_system = (
+        "你是企业设备知识库助手。[enterprise_identity_metadata_v6]\n"
+        "临时附件规则…… {knowledge}"
+    )
+    updates: list[tuple[tuple, dict]] = []
+    original_update = client.update_chat
+
+    async def tracking_update(*args, **kwargs):
+        updates.append((args, kwargs))
+        return await original_update(*args, **kwargs)
+
+    client.update_chat = tracking_update
+    created = await client.create_chat(
+        "enterprise-formal-tenant-v6",
+        ["ds-1"],
+        prompt_config={"system": operator_system},
+    )
+    chat_id = created["data"]["id"]
+
+    ensured = await _ensure_chat(client, principal, scope)
+    assert ensured == chat_id
+    chat = client._chats[chat_id]
+    assert chat["prompt_config"]["system"] == operator_system
+    assert "enterprise_identity_metadata_v9" not in chat["prompt_config"]["system"]
     args, kwargs = updates[0]
     assert kwargs.get("prompt_config") is None
     assert not any(isinstance(arg, dict) and "system" in arg for arg in args)

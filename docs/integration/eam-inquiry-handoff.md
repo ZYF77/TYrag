@@ -358,7 +358,8 @@ Authorization: Bearer <JWT>
 
 提问、历史、详情里的 `citations[]` **只含回答真正引用的 chunk**。`status = 无可靠依据` 时一定是 `[]`。检索内容无法支撑用户当前所问事实时也是 `无可靠依据` + 空引用，不要弹出对照文档。不要用空引用反推状态。
 
-给 EAM 的增量说明见 [`eam-inquiry-citation-notice.md`](./eam-inquiry-citation-notice.md)。
+给 EAM 的增量说明见 [`eam-inquiry-citation-notice.md`](./eam-inquiry-citation-notice.md)。  
+正文 `[ID:n]` 角标与 `refIndex` 绑定见 [`eam-inquiry-citation-marker-notice.md`](./eam-inquiry-citation-marker-notice.md)。
 
 ```http
 GET {BASE_URL}/enterprise/api/v2/citations/{citationId}
@@ -519,6 +520,7 @@ run.started
 | `docs/integration/eam-inquiry-sub-notice.md` | **给 EAM 的 `sub` 白话说明**（规则；无需开通名单） |
 | `docs/integration/eam-inquiry-attachment-notice.md` | **给 EAM 的消息附件接口变更**（v2.5 → v2.6，同一 URL 双 Content-Type；MIME 含 docx/xlsx） |
 | `docs/integration/eam-inquiry-citation-notice.md` | **给 EAM 的引用过滤与统一下载**（v2.3 → v2.4，`downloadUrl` 不带 JWT） |
+| `docs/integration/eam-inquiry-citation-marker-notice.md` | **给 EAM 的正文 `[ID:n]` 角标绑定**（v2.7 → v2.8，`refIndex`） |
 | `docs/integration/eam-inquiry-reasoning-notice.md` | **给 EAM 的思考过程与正文拆分**（v2.4 → v2.5，可选 `reasoning`） |
 | `docs/integration/eam-file-feed-handoff-3.1.md` | 文件投喂 + 终态回调 |
 | `docs/integration/eam-device-integration-guide.md` | 综合对接总册（含问询细节示例） |

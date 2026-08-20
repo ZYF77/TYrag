@@ -2,7 +2,10 @@
 
 from enterprise.gateway.query.citation_select import (
     ABSTAIN_PHRASE,
+    catalog_inventory_answer,
     force_abstain_outcome,
+    is_inventory_question,
+    select_cited_chunk_refs,
     select_cited_chunks,
 )
 
@@ -32,6 +35,32 @@ def test_keeps_multiple_marked_chunks_in_first_seen_order():
     )
 
     assert [item["id"] for item in selected] == ["manual", "repair"]
+
+
+def test_select_cited_chunk_refs_preserves_marker_indexes():
+    selected = select_cited_chunk_refs(
+        "手册 [ID:2] 与工单 [ID:1] [ID:2]",
+        CHUNKS,
+        status="completed",
+    )
+
+    assert [(item["id"], ref) for item, ref in selected] == [
+        ("manual", 2),
+        ("repair", 1),
+    ]
+
+
+def test_overlap_fallback_refs_have_null_ref_index():
+    answer = "leak repair work order already handled for this asset."
+    selected = select_cited_chunk_refs(
+        f"{answer} [ID:99]",
+        CHUNKS,
+        status="completed",
+    )
+
+    assert len(selected) == 1
+    assert selected[0][0]["id"] == "repair"
+    assert selected[0][1] is None
 
 
 def test_ignores_out_of_range_and_unmarked_chunks():
@@ -154,3 +183,46 @@ def test_force_abstain_outcome_does_not_override_failed():
     assert (
         force_abstain_outcome(f"{ABSTAIN_PHRASE} [ID:0]", "failed") == "failed"
     )
+
+
+def test_force_abstain_keeps_inventory_question_with_mixed_abstain_phrase():
+    answer = f"现有发票与收据[ID:0]。{ABSTAIN_PHRASE}"
+    status = force_abstain_outcome(
+        answer, "completed", question="GI01240015这个设备有哪些信息？"
+    )
+
+    assert status == "completed"
+    assert [item["id"] for item in select_cited_chunks(answer, CHUNKS, status)] == [
+        "invoice"
+    ]
+
+
+def test_force_abstain_still_blocks_inventory_question_with_only_phrase():
+    status = force_abstain_outcome(
+        ABSTAIN_PHRASE, "completed", question="这个设备有哪些资料？"
+    )
+
+    assert status == "no_reliable_evidence"
+    assert select_cited_chunks(ABSTAIN_PHRASE, CHUNKS, status) == []
+
+
+def test_force_abstain_still_blocks_repair_question_with_inventory_aside():
+    answer = (
+        "当前检索到的知识库中，仅包含调试记录[ID:4]和合格证[ID:0]，"
+        "暂无专门的设备维修记录。"
+    )
+    status = force_abstain_outcome(answer, "completed", question="设备维修记录有么？")
+
+    assert status == "no_reliable_evidence"
+    assert select_cited_chunks(answer, CHUNKS, status) == []
+
+
+def test_catalog_inventory_answer_uses_type_labels_not_filenames():
+    answer = catalog_inventory_answer(
+        "Invoice-GTBOCLJY-0002.pdf",
+        "Receipt-2939-1838.pdf",
+    )
+    assert answer == "当前知识库中该设备已有以下资料：发票、收据。"
+    assert "GTBOCLJY" not in answer
+    assert "2939" not in answer
+    assert is_inventory_question("GI01240015这个设备有哪些信息？")

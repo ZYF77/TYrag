@@ -1,4 +1,4 @@
-"""Tests for Gateway-owned rolling conversation context compression."""
+"""Conversation history behavior while Gateway compression remains deferred."""
 
 from __future__ import annotations
 
@@ -93,7 +93,7 @@ async def _seed_doc(db) -> None:
 
 
 @pytest.mark.asyncio
-async def test_threshold_clears_session_and_stores_summary(runtime):
+async def test_stateless_history_keeps_raw_turns_without_summary(runtime):
     await _seed_doc(runtime.db)
     async with _client(runtime) as client:
         created = await client.post(
@@ -118,7 +118,7 @@ async def test_threshold_clears_session_and_stores_summary(runtime):
         )
 
     assert detail.status_code == 200
-    assert detail.json()["contextCompacted"] is True
+    assert detail.json()["contextCompacted"] is False
     assert detail.json()["conversationId"] == conversation_id
     async with runtime.db.execute(
         "SELECT context_summary, ragflow_session_id, compressed_turn_watermark "
@@ -126,9 +126,9 @@ async def test_threshold_clears_session_and_stores_summary(runtime):
         (conversation_id,),
     ) as cursor:
         row = await cursor.fetchone()
-    assert row["context_summary"]
-    assert row["ragflow_session_id"] is None
-    assert int(row["compressed_turn_watermark"]) >= 2
+    assert row["context_summary"] is None
+    assert row["ragflow_session_id"]
+    assert int(row["compressed_turn_watermark"]) == 0
     user_contents = [
         item["content"]
         for item in history.json()["items"]
@@ -138,9 +138,7 @@ async def test_threshold_clears_session_and_stores_summary(runtime):
 
 
 @pytest.mark.asyncio
-async def test_next_ask_injects_summary_prefix_without_persisting_it(
-    runtime, monkeypatch
-):
+async def test_next_ask_projects_prior_turns_without_summary_prefix(runtime):
     await _seed_doc(runtime.db)
     async with _client(runtime) as client:
         created = await client.post(
@@ -155,8 +153,6 @@ async def test_next_ask_injects_summary_prefix_without_persisting_it(
                     "question": f"前缀轮次-{index}",
                 },
             )
-        # Avoid a trailing summary completion overwriting the user ask body.
-        monkeypatch.setattr(config, "context_compress_enabled", False)
         follow = await client.post(
             f"{BASE}/conversations/{conversation_id}/messages",
             json={
@@ -171,9 +167,9 @@ async def test_next_ask_injects_summary_prefix_without_persisting_it(
     assert follow.status_code == 200
     body = runtime.stub._last_completion_body
     assert body is not None
-    assert "[先前对话摘要]" in body["question"]
-    assert "[当前问题]" in body["question"]
-    assert "压缩后续问" in body["question"]
+    assert body["question"] == "压缩后续问"
+    assert body["messages"] is None
+    assert body["session_id"]
     user_contents = [
         item["content"]
         for item in history.json()["items"]

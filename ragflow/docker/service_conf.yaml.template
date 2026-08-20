@@ -19,7 +19,7 @@ minio:
   user: '${MINIO_USER:-rag_flow}'
   password: '${MINIO_PASSWORD:-infini_rag_flow}'
   host: '${MINIO_HOST:-minio}:9000'
-  bucket: '${MINIO_BUCKET:-}'
+  bucket: '${MINIO_BUCKET:-ragflow}'
   prefix_path: '${MINIO_PREFIX_PATH:-}'
   # optional: set to true for HTTPS (SSL/TLS). Used by MinIO client and health check.
   # secure: ${MINIO_SECURE:-false}

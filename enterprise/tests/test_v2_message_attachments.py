@@ -711,7 +711,7 @@ async def test_repair_question_without_kb_still_abstains(runtime):
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["status"] == "无可靠依据"
-    assert ABSTAIN_PHRASE in (body.get("answer") or "")
+    assert body.get("answer") == formal_router.NO_RELIABLE_EVIDENCE_ANSWER
 
 
 def test_upstream_empty_response_skips_when_last_message_has_files():

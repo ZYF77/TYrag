@@ -507,10 +507,13 @@ class LLM4Tenant:
     def __init__(self, tenant_id: str, model_config: dict, lang="Chinese", **kwargs):
         self.trace_context = kwargs.pop("trace_context", None) or {}
         self.langfuse_session_id = kwargs.pop("langfuse_session_id", None)
+        self.disable_langfuse = bool(kwargs.pop("disable_langfuse", False))
         self.tenant_id = tenant_id
         self.lang = lang
         self.llm_name = model_config["llm_name"]
         self.model_config = model_config
+        if self.disable_langfuse:
+            kwargs["disable_content_logging"] = True
         self.mdl = TenantLLMService.model_instance(model_config, lang=lang, **kwargs)
         assert self.mdl, "Can't find model for {}/{}/{}".format(tenant_id, model_config["model_type"], model_config["llm_name"])
         self.max_length = model_config.get("max_tokens") or 8192
@@ -518,8 +521,8 @@ class LLM4Tenant:
         self.is_tools = model_config.get("is_tools", False)
         self.verbose_tool_use = kwargs.get("verbose_tool_use")
 
-        langfuse_keys = TenantLangfuseService.filter_by_tenant(tenant_id=tenant_id)
         self.langfuse = None
+        langfuse_keys = None if self.disable_langfuse else TenantLangfuseService.filter_by_tenant(tenant_id=tenant_id)
         if langfuse_keys:
             langfuse = Langfuse(public_key=langfuse_keys.public_key, secret_key=langfuse_keys.secret_key, host=langfuse_keys.host)
             try:

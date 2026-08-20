@@ -16,6 +16,20 @@ from enterprise.gateway.sync.ragflow_document_client import (
 logger = logging.getLogger(__name__)
 
 
+def _json_missing_payload(content: bytes, media_type: str) -> bool:
+    """True when RAGFlow returned HTTP 200 JSON ``code: 102`` instead of bytes."""
+    lowered = (media_type or "").split(";", 1)[0].strip().lower()
+    if lowered not in {"application/json", "text/json", "text/plain"}:
+        stripped = content.lstrip()
+        if not stripped.startswith(b"{") or b'"code"' not in stripped[:80]:
+            return False
+    try:
+        payload = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return False
+    return isinstance(payload, dict) and payload.get("code") == 102
+
+
 def _trace_doc_ids(request_id: str, doc_ids: list[str] | None) -> None:
     """Record the exact doc_ids sent to RAGFlow for E2E verification."""
     path = os.environ.get("ENTERPRISE_QUERY_TRACE_DOC_IDS", "")
@@ -106,7 +120,7 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
             return None
         rid = request_id or self._new_request_id()
         try:
-            return await self._run_sync(
+            content, media_type = await self._run_sync(
                 self._sync_request_bytes,
                 "GET",
                 "/api/v1/documents/images/{}".format(quote(image_id, safe="-_.")),
@@ -115,6 +129,10 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
         except RAGFlowAPIError:
             logger.warning("RAGFlow citation image unavailable request_id=%s", rid)
             return None
+        if _json_missing_payload(content, media_type):
+            logger.warning("RAGFlow citation image unavailable request_id=%s", rid)
+            return None
+        return content, media_type
 
     async def list_chats(
         self, name: str | None = None, request_id: str | None = None
@@ -131,6 +149,65 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
         result = self._require_ok(result)
         data = result.get("data", {}) if isinstance(result, dict) else {}
         return data.get("chats", []) if isinstance(data, dict) else []
+
+    async def get_chat(
+        self,
+        chat_id: str,
+        request_id: str | None = None,
+    ) -> dict:
+        rid = request_id or self._new_request_id()
+        result = self._require_ok(
+            await self._run_sync(
+                self._sync_request,
+                "GET",
+                f"/api/v1/chats/{chat_id}",
+                rid,
+            )
+        )
+        data = result.get("data") if isinstance(result, dict) else {}
+        return data if isinstance(data, dict) else {}
+
+    async def retrieval(
+        self,
+        *,
+        question: str,
+        dataset_ids: list[str],
+        document_ids: list[str] | None = None,
+        similarity_threshold: float | None = None,
+        vector_similarity_weight: float | None = None,
+        top_k: int | None = None,
+        rerank_id: str | None = None,
+        page_size: int | None = None,
+        request_id: str | None = None,
+    ) -> dict:
+        rid = request_id or self._new_request_id()
+        body: dict[str, Any] = {
+            "question": question,
+            "dataset_ids": list(dataset_ids),
+        }
+        if document_ids:
+            body["document_ids"] = list(document_ids)
+        if similarity_threshold is not None:
+            body["similarity_threshold"] = similarity_threshold
+        if vector_similarity_weight is not None:
+            body["vector_similarity_weight"] = vector_similarity_weight
+        if top_k is not None:
+            body["top_k"] = top_k
+        if rerank_id:
+            body["rerank_id"] = rerank_id
+        if page_size is not None:
+            body["page_size"] = page_size
+        result = self._require_ok(
+            await self._run_sync(
+                self._sync_request,
+                "POST",
+                "/api/v1/retrieval",
+                rid,
+                json_data=body,
+            )
+        )
+        data = result.get("data") if isinstance(result, dict) else {}
+        return data if isinstance(data, dict) else {}
 
     async def create_chat(
         self,
@@ -246,12 +323,26 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
         request_id: str | None = None,
         files: list[dict[str, Any]] | list[str] | None = None,
         internet: bool = False,
+        messages: list[dict[str, Any]] | None = None,
+        store_history_messages: bool | None = None,
+        pass_all_history_messages: bool | None = None,
+        grounding_version: int | None = None,
+        allowed_identifiers: list[str] | None = None,
+        attachment_observations: list[str] | None = None,
     ) -> dict:
         rid = request_id or self._new_request_id()
         body: dict[str, Any] = {
-            "question": question,
             "stream": False,
         }
+        if messages is not None:
+            body["messages"] = [dict(item) for item in messages]
+            if files and body["messages"]:
+                for item in reversed(body["messages"]):
+                    if item.get("role") == "user":
+                        item["files"] = list(files)
+                        break
+        else:
+            body["question"] = question
         if chat_id:
             body["chat_id"] = chat_id
         if session_id:
@@ -260,12 +351,24 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
             # RAGFlow v0.26.4 /chat/completions expects a comma-separated
             # string for doc_ids; a JSON list breaks its attachment parser.
             body["doc_ids"] = ",".join(doc_ids)
-        if files:
+        if files and messages is None:
             # RAGFlow expects attachment descriptors
             # ({id, name, mime_type, created_by}), not bare file ids.
             body["files"] = list(files)
         if internet:
             body["internet"] = True
+        if store_history_messages is not None:
+            body["store_history_messages"] = bool(store_history_messages)
+        if pass_all_history_messages is not None:
+            body["pass_all_history_messages"] = bool(pass_all_history_messages)
+        if grounding_version is not None:
+            body["grounding_version"] = grounding_version
+        if allowed_identifiers:
+            body["allowed_identifiers"] = [str(item) for item in allowed_identifiers if str(item)]
+        if attachment_observations:
+            body["attachment_observations"] = [
+                str(item) for item in attachment_observations if str(item)
+            ]
         _trace_doc_ids(rid, doc_ids)
         result = await self._run_sync(
             self._sync_request,
@@ -425,6 +528,12 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
         request_id: str | None = None,
         files: list[dict[str, Any]] | list[str] | None = None,
         internet: bool = False,
+        messages: list[dict[str, Any]] | None = None,
+        store_history_messages: bool | None = None,
+        pass_all_history_messages: bool | None = None,
+        grounding_version: int | None = None,
+        allowed_identifiers: list[str] | None = None,
+        attachment_observations: list[str] | None = None,
     ):
         """Stream RAGFlow chat completion over the public SSE API.
 
@@ -436,17 +545,37 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
         rid = request_id or self._new_request_id()
         body: dict[str, Any] = {
             "chat_id": chat_id,
-            "question": question,
             "stream": True,
         }
+        if messages is not None:
+            body["messages"] = [dict(item) for item in messages]
+            if files and body["messages"]:
+                for item in reversed(body["messages"]):
+                    if item.get("role") == "user":
+                        item["files"] = list(files)
+                        break
+        else:
+            body["question"] = question
         if session_id:
             body["session_id"] = session_id
         if doc_ids:
             body["doc_ids"] = ",".join(doc_ids)
-        if files:
+        if files and messages is None:
             body["files"] = list(files)
         if internet:
             body["internet"] = True
+        if store_history_messages is not None:
+            body["store_history_messages"] = bool(store_history_messages)
+        if pass_all_history_messages is not None:
+            body["pass_all_history_messages"] = bool(pass_all_history_messages)
+        if grounding_version is not None:
+            body["grounding_version"] = grounding_version
+        if allowed_identifiers:
+            body["allowed_identifiers"] = [str(item) for item in allowed_identifiers if str(item)]
+        if attachment_observations:
+            body["attachment_observations"] = [
+                str(item) for item in attachment_observations if str(item)
+            ]
         _trace_doc_ids(rid, doc_ids)
         timeout = httpx.Timeout(self.timeout, connect=self.timeout)
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -505,6 +634,8 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
 class RAGFlowQueryStub(RAGFlowDocumentStub):
     """Offline stub for the query demo loop."""
 
+    _AUTO_EFFECTIVE_KNOWLEDGE = object()
+
     def __init__(self) -> None:
         super().__init__()
         self._chats: dict[str, dict] = {}
@@ -528,6 +659,10 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         self.understand_calls = 0
         self.default_llm_setting: dict[str, Any] = {"model_type": "chat"}
         self.forced_answer: str | None = None
+        self.grounding: dict[str, Any] | None = {
+            "version": 1,
+            "effectiveKnowledge": self._AUTO_EFFECTIVE_KNOWLEDGE,
+        }
         self.understand_result: dict[str, Any] = {
             "errorCodes": ["E07"],
             "equipmentCodes": [],
@@ -691,8 +826,34 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         request_id: str | None = None,
         files: list[dict[str, Any]] | list[str] | None = None,
         internet: bool = False,
+        messages: list[dict[str, Any]] | None = None,
+        store_history_messages: bool | None = None,
+        pass_all_history_messages: bool | None = None,
+        grounding_version: int | None = None,
+        allowed_identifiers: list[str] | None = None,
+        attachment_observations: list[str] | None = None,
     ) -> dict:
         turn_id = f"msg-{uuid.uuid4().hex[:12]}"
+        body_messages = [dict(item) for item in messages] if messages is not None else None
+        if files and body_messages:
+            for item in reversed(body_messages):
+                if item.get("role") == "user":
+                    item["files"] = list(files)
+                    break
+        self._last_completion_body = {
+            "chat_id": chat_id,
+            "question": question,
+            "session_id": session_id,
+            "doc_ids": ",".join(doc_ids) if doc_ids else None,
+            "files": list(files) if files else [],
+            "internet": internet,
+            "messages": body_messages,
+            "store_history_messages": store_history_messages,
+            "pass_all_history_messages": pass_all_history_messages,
+            "grounding_version": grounding_version,
+            "allowed_identifiers": list(allowed_identifiers or []),
+            "attachment_observations": list(attachment_observations or []),
+        }
         base_chunk = {
             "id": "chunk-1",
             "content": "故障码 E-104 时先检查液压油位。",
@@ -701,58 +862,60 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
             "positions": [[3, 0.1, 0.8, 0.2, 0.4]],
         }
         if self._no_evidence:
-            session_id = session_id or "stub-session"
+            session_id = session_id or f"session-{uuid.uuid4().hex[:12]}"
             self._append_no_evidence_turn(
                 session_id, question, turn_id
             )
+            data = {
+                "answer": "",
+                "id": turn_id,
+                "reference": {"chunks": []},
+            }
+            if session_id:
+                data["session_id"] = session_id
             return {
                 "code": 0,
-                "data": {
-                    "answer": "",
-                    "id": turn_id,
-                    "session_id": session_id,
-                    "reference": {"chunks": []},
-                },
+                "data": data,
             }
         if self._empty_answer:
-            session_id = session_id or "stub-session"
+            session_id = session_id or f"session-{uuid.uuid4().hex[:12]}"
             self._append_no_evidence_turn(
                 session_id, question, turn_id, chunks=[base_chunk]
             )
+            data = {
+                "answer": "",
+                "id": turn_id,
+                "reference": {"chunks": [base_chunk]},
+            }
+            if session_id:
+                data["session_id"] = session_id
             return {
                 "code": 0,
-                "data": {
-                    "answer": "",
-                    "id": turn_id,
-                    "session_id": session_id,
-                    "reference": {"chunks": [base_chunk]},
-                },
+                "data": data,
             }
         if self._empty_chunks:
-            session_id = session_id or "stub-session"
+            session_id = session_id or f"session-{uuid.uuid4().hex[:12]}"
             self._append_no_evidence_turn(
                 session_id, question, turn_id
             )
+            data = {
+                "answer": "stub answer",
+                "id": turn_id,
+                "reference": {"chunks": []},
+            }
+            if session_id:
+                data["session_id"] = session_id
             return {
                 "code": 0,
-                "data": {
-                    "answer": "stub answer",
-                    "id": turn_id,
-                    "session_id": session_id,
-                    "reference": {"chunks": []},
-                },
+                "data": data,
             }
-        self._last_completion_body = {
-            "chat_id": chat_id,
-            "question": question,
-            "session_id": session_id,
-            "doc_ids": ",".join(doc_ids) if doc_ids else None,
-            "files": list(files) if files else [],
-            "internet": internet,
-        }
-        session_id = session_id or "stub-session"
-        session = self._sessions.setdefault(
-            session_id, {"messages": [], "reference": []}
+        session_id = session_id or f"session-{uuid.uuid4().hex[:12]}"
+        session = (
+            self._sessions.setdefault(
+                session_id, {"messages": [], "reference": []}
+            )
+            if session_id
+            else None
         )
         chunks = [
             base_chunk
@@ -773,26 +936,29 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
             answer = self.forced_answer
         else:
             markers = "".join(f" [ID:{index}]" for index in range(len(chunks)))
-            answer = f"stub answer for: {question}{markers}"
-        session["messages"].append(
-            {"role": "user", "content": question, "id": turn_id}
-        )
-        session["messages"].append(
-            {
-                "role": "assistant",
-                "content": answer,
-                "id": turn_id,
-            }
-        )
-        session["reference"].append({"chunks": chunks})
+            answer = f"stub answer{markers}"
+        if session is not None:
+            session["messages"].append(
+                {"role": "user", "content": question, "id": turn_id}
+            )
+            session["messages"].append(
+                {
+                    "role": "assistant",
+                    "content": answer,
+                    "id": turn_id,
+                }
+            )
+            session["reference"].append({"chunks": chunks})
+        data = {
+            "answer": answer,
+            "id": turn_id,
+            "reference": {"chunks": chunks},
+        }
+        if session_id:
+            data["session_id"] = session_id
         return {
             "code": 0,
-            "data": {
-                "answer": answer,
-                "id": turn_id,
-                "session_id": session_id,
-                "reference": {"chunks": chunks},
-            },
+            "data": data,
         }
 
     async def chat_completion_stream(
@@ -804,6 +970,12 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         request_id: str | None = None,
         files: list[dict[str, Any]] | list[str] | None = None,
         internet: bool = False,
+        messages: list[dict[str, Any]] | None = None,
+        store_history_messages: bool | None = None,
+        pass_all_history_messages: bool | None = None,
+        grounding_version: int | None = None,
+        allowed_identifiers: list[str] | None = None,
+        attachment_observations: list[str] | None = None,
     ):
         if self._stream_fail_after == 0:
             completion = await self.chat_completion(
@@ -814,29 +986,53 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
                 request_id=request_id,
                 files=files,
                 internet=internet,
+                messages=messages,
+                store_history_messages=store_history_messages,
+                pass_all_history_messages=pass_all_history_messages,
+                grounding_version=grounding_version,
+                allowed_identifiers=allowed_identifiers,
+                attachment_observations=attachment_observations,
             )
             data = completion.get("data", {})
-            if isinstance(data, dict) and data.get("answer"):
-                await asyncio.sleep(self._stream_delay)
-                stream_id = None if self._omit_stream_id else data.get("id")
+            stream_id = None if self._omit_stream_id else (
+                data.get("id") if isinstance(data, dict) else None
+            )
+            session = data.get("session_id") if isinstance(data, dict) else None
+            reference = data.get("reference", {}) if isinstance(data, dict) else {}
+            answer = data.get("answer", "") if isinstance(data, dict) else ""
+            if grounding_version == 1:
                 yield {
                     "code": 0,
                     "message": "",
                     "data": {
-                        "answer": data.get("answer", ""),
+                        "answer": answer,
                         "id": stream_id,
-                        "session_id": data.get("session_id"),
+                        "session_id": session,
+                        "reference": reference,
+                        "final": True,
                     },
                 }
-            stream_id = None if self._omit_stream_id else data.get("id")
+                yield {"code": 0, "message": "", "data": True}
+                return
+            if answer:
+                await asyncio.sleep(self._stream_delay)
+                yield {
+                    "code": 0,
+                    "message": "",
+                    "data": {
+                        "answer": answer,
+                        "id": stream_id,
+                        "session_id": session,
+                    },
+                }
             yield {
                 "code": 0,
                 "message": "",
                 "data": {
                     "answer": "",
                     "id": stream_id,
-                    "session_id": data.get("session_id"),
-                    "reference": data.get("reference", {}),
+                    "session_id": session,
+                    "reference": reference,
                     "final": True,
                 },
             }
@@ -847,12 +1043,14 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
 
     def _append_no_evidence_turn(
         self,
-        session_id: str,
+        session_id: str | None,
         question: str,
         turn_id: str,
         *,
         chunks: list[dict] | None = None,
     ) -> None:
+        if not session_id:
+            return
         session = self._sessions.setdefault(
             session_id, {"messages": [], "reference": []}
         )

@@ -9,6 +9,7 @@ import pytest
 from enterprise.gateway.auth.user_principal import UserPrincipal
 from enterprise.gateway.query.citation_file import (
     CitationFileError,
+    CitationFileTicket,
     claim_citation_file_ticket,
     issue_citation_file_ticket,
     public_citation,
@@ -44,6 +45,7 @@ def _citation(**overrides) -> dict:
         "excerpt": "leak repair",
         "imageId": "ds-1-page-1.png",
         "positions": [],
+        "refIndex": 2,
     }
     item.update(overrides)
     return item
@@ -65,6 +67,7 @@ async def test_public_citation_hides_internal_fields_and_adds_download(isolated_
     assert public["downloadExpiresAt"] == ticket.expires_at
     assert public["externalDocumentId"] == "EXT-DOC-1"
     assert public["sourceVersionId"] == "v1"
+    assert public["refIndex"] == 2
     assert "imageId" not in public
     assert "chunkId" not in public
     assert "documentId" not in public
@@ -75,6 +78,20 @@ async def test_public_citation_hides_internal_fields_and_adds_download(isolated_
     ) as cursor:
         row = await cursor.fetchone()
     assert row["ticket_hash"] != ticket.token
+
+
+def test_public_citation_includes_ref_index_without_db():
+    public = public_citation(
+        _citation(refIndex=5),
+        CitationFileTicket(
+            token="ticket-token",
+            expires_at="2026-08-20T12:00:00+00:00",
+            kind="crop",
+        ),
+        download_url="http://test/enterprise/api/v2/citations/cite-1/file/ticket-token",
+    )
+    assert public["refIndex"] == 5
+    assert public.get("refIndex") is not None
 
 
 @pytest.mark.asyncio

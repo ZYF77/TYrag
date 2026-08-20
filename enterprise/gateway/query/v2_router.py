@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import asyncio
+import logging
 import re
 import uuid
 from typing import Any, AsyncIterator
@@ -21,6 +22,7 @@ from enterprise.gateway.auth.user_principal import UserPrincipal
 from enterprise.gateway.config import config
 from enterprise.gateway.query import v2_store
 from enterprise.gateway.query.attachment_context import (
+    AttachmentObservation,
     MESSAGE_MEDIA_TYPES,
     MAX_MESSAGE_FILES,
     PendingAttachment,
@@ -46,8 +48,11 @@ from enterprise.gateway.query.answer_split import (
     split_assistant_output,
 )
 from enterprise.gateway.query.citation_select import (
+    catalog_inventory_answer,
     force_abstain_outcome,
-    select_cited_chunks,
+    is_inventory_question,
+    sanitize_citation_markers,
+    select_cited_chunk_refs,
 )
 from enterprise.gateway.query.formal_router import (
     FormalScopeResolver,
@@ -74,10 +79,11 @@ from enterprise.gateway.sync.transient_attachment import (
 
 
 router = APIRouter(prefix="/enterprise/api/v2", tags=["query-v2"])
+logger = logging.getLogger(__name__)
 
 IDENTIFIER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._\-]{3,127}")
 EQUIPMENT_ID_HINT = (
-    "建议补充设备号或固定资产号（例如 GD01250002），我可以只查该设备的资料，回答会更准确。"
+    "建议补充设备号或固定资产号，我可以只查该设备的资料，回答会更准确。"
 )
 # Kept for tests asserting retrieval questions never include this Gateway prefix.
 GLOBAL_QUESTION_PREFIX = (
@@ -177,6 +183,7 @@ async def _project_citations(
                         "url": item["url"],
                         "downloadUrl": None,
                         "downloadExpiresAt": None,
+                        "refIndex": item.get("refIndex"),
                     }
                 )
             continue
@@ -301,6 +308,87 @@ def _with_equipment_hint(conversation: dict, answer: str, status: str) -> str:
     if EQUIPMENT_ID_HINT in answer:
         return answer
     return f"{answer.rstrip()}\n\n{EQUIPMENT_ID_HINT}"
+
+
+def _allowed_identifiers(conversation: dict, question: str) -> list[str]:
+    allowed: list[str] = []
+    for key in ("equipment_id", "fixed_asset_no"):
+        value = _conversation_value(conversation, key)
+        if value:
+            allowed.append(value)
+    if question and question.strip():
+        allowed.append(question)
+    return allowed
+
+
+def _attachment_observation_texts(
+    observations: list[AttachmentObservation],
+) -> list[str]:
+    texts: list[str] = []
+    for item in observations:
+        texts.extend(str(value) for value in item.text_spans if str(value).strip())
+        texts.extend(str(value) for value in item.error_codes if str(value).strip())
+        texts.extend(str(value) for value in item.equipment_codes if str(value).strip())
+        texts.extend(str(value) for value in item.visible_values if str(value).strip())
+    return texts
+
+
+def _v2_completion_kwargs(
+    conversation: dict,
+    question: str,
+    observations: list[AttachmentObservation],
+    *,
+    files: list[dict[str, Any]] | None = None,
+    internet: bool = False,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "grounding_version": 1,
+        "allowed_identifiers": _allowed_identifiers(conversation, question),
+    }
+    if session_id:
+        kwargs["session_id"] = session_id
+    texts = _attachment_observation_texts(observations)
+    if texts:
+        kwargs["attachment_observations"] = texts
+    if files:
+        kwargs["files"] = files
+    if internet:
+        kwargs["internet"] = True
+    return kwargs
+
+
+def _conversation_value(conversation: dict, key: str) -> str:
+    value = None
+    if isinstance(conversation, dict):
+        value = conversation.get(key)
+    else:
+        try:
+            value = conversation[key]
+        except (KeyError, IndexError, TypeError):
+            value = None
+    if isinstance(value, str) and value.strip():
+        return value
+    return ""
+
+
+def _catalog_inventory_rescue(
+    question: str,
+    raw_answer: str,
+    status: str,
+    docs_by_internal_id: dict,
+) -> str | None:
+    """If an inventory question fail-closed, list catalog types instead."""
+    del raw_answer
+    if status == "completed" or not is_inventory_question(question):
+        return None
+    if not docs_by_internal_id:
+        return None
+    labels: list[str] = []
+    for doc in docs_by_internal_id.values():
+        labels.append(str(getattr(doc, "file_name", "") or ""))
+        labels.append(str(getattr(doc, "document_type", "") or ""))
+    return catalog_inventory_answer(*labels) or None
 
 
 class StrictModel(BaseModel):
@@ -661,13 +749,21 @@ def _external_citations(
     status: str = "completed",
     internet_enabled: bool = False,
 ) -> list[dict]:
-    cited = select_cited_chunks(answer, chunks, status)
+    cited_refs = select_cited_chunk_refs(answer, chunks, status)
     citations: list[dict] = []
-    for index, chunk in enumerate(cited):
+    for ordinal, (chunk, ref_index) in enumerate(cited_refs):
         document_id = chunk.get("document_id")
         doc = docs_by_internal_id.get(document_id)
         if doc is not None:
-            citations.append(_chunk_to_citation(chunk, index, doc, message_id))
+            citations.append(
+                _chunk_to_citation(
+                    chunk,
+                    ordinal,
+                    doc,
+                    message_id,
+                    ref_index=ref_index,
+                )
+            )
             continue
         url = _valid_web_url(chunk.get("url")) if internet_enabled else None
         if not url:
@@ -677,7 +773,7 @@ def _external_citations(
                 "RAGFlow retrieval returned an out-of-scope document",
             )
         chunk_id = str(chunk.get("id") or chunk.get("chunk_id") or "")
-        citation_id = chunk_id or f"web-{index}"
+        citation_id = chunk_id or f"web-{ordinal}"
         if message_id:
             citation_id = f"{citation_id}-{message_id[:8]}"
         citations.append(
@@ -701,6 +797,7 @@ def _external_citations(
                 "url": url,
                 "downloadUrl": None,
                 "downloadExpiresAt": None,
+                "refIndex": ref_index,
             }
         )
     return citations
@@ -761,8 +858,6 @@ async def _ensure_ragflow_session(
         )
         await db.commit()
         if cursor.rowcount != 1:
-            # ponytail: the conditional write prevents split history; add a
-            # durable creation claim only if parallel first writes are supported.
             current = await _owned_conversation(
                 db, principal, conversation["conversation_id"]
             )
@@ -799,7 +894,9 @@ def _request_hash(
     return hashlib.sha256(raw).hexdigest()
 
 
-def _business_status(completion: dict | None, answer: str) -> str:
+def _business_status(
+    completion: dict | None, answer: str, question: str = ""
+) -> str:
     """Resolve business state without consulting citation presence."""
     data = completion.get("data", {}) if isinstance(completion, dict) else {}
     explicit = data.get("status") if isinstance(data, dict) else None
@@ -807,7 +904,7 @@ def _business_status(completion: dict | None, answer: str) -> str:
         status = explicit
     else:
         status = "completed" if answer.strip() else "no_reliable_evidence"
-    return force_abstain_outcome(answer, status)
+    return force_abstain_outcome(answer, status, question)
 
 
 def _error_response_from_result(result: dict) -> JSONResponse:
@@ -932,7 +1029,6 @@ async def _save_failed_run(
     code: str,
     status_code: int,
     message: str,
-    content: str = "",
 ) -> JSONResponse:
     await v2_store.add_message(
         db,
@@ -941,7 +1037,7 @@ async def _save_failed_run(
         tenant_id=principal.tenant_id,
         business_user_id=principal.business_user_id,
         role="assistant",
-        content=content,
+        content="",
         status="failed",
         citations=[],
     )
@@ -970,9 +1066,9 @@ async def _retrieval_question(
     conversation: dict,
     question: str,
     pending: list[PendingAttachment],
-) -> tuple[str, JSONResponse | None, Any]:
+) -> tuple[str, JSONResponse | None, Any, list[AttachmentObservation]]:
     if not pending:
-        return question, None, None
+        return question, None, None, []
     client = _query_client()
     chat_id = None
     scope, _docs = await _context_scope(db, principal, conversation)
@@ -984,8 +1080,8 @@ async def _retrieval_question(
             422,
             "VALIDATION_ERROR",
             "Could not understand the attachment; add a text question",
-        ), client
-    return enrich_question(question, observations), None, client
+        ), client, observations
+    return enrich_question(question, observations), None, client, observations
 
 
 async def _execute_json_run(
@@ -1003,7 +1099,7 @@ async def _execute_json_run(
     client = None
     try:
         try:
-            question, observe_error, client = await _retrieval_question(
+            question, observe_error, client, observations = await _retrieval_question(
                 db, principal, conversation, question, pending
             )
             if observe_error:
@@ -1037,36 +1133,55 @@ async def _execute_json_run(
                 files = completion_files(
                     pending, vision=chat_is_vision_capable(chat)
                 )
-                completion_kwargs: dict[str, Any] = {}
-                if files:
-                    completion_kwargs["files"] = files
-                if req.internetEnabled:
-                    completion_kwargs["internet"] = True
+                completion_kwargs = _v2_completion_kwargs(
+                    conversation,
+                    question,
+                    observations,
+                    files=files,
+                    internet=req.internetEnabled,
+                    session_id=session_id,
+                )
                 completion = await client.chat_completion(
                     chat_id,
                     _ragflow_question(conversation, question),
-                    session_id=session_id,
                     doc_ids=list(scope.document_ids),
                     **completion_kwargs,
                 )
                 data = completion.get("data", {}) if isinstance(completion, dict) else {}
                 reference = data.get("reference", {}) if isinstance(data, dict) else {}
-                chunks = [item for item in (reference.get("chunks", []) if isinstance(reference, dict) else []) if isinstance(item, dict)]
+                chunks = [
+                    item
+                    for item in (
+                        reference.get("chunks", [])
+                        if isinstance(reference, dict)
+                        else []
+                    )
+                    if isinstance(item, dict)
+                ]
                 split = split_assistant_output(str(data.get("answer") or ""))
-                answer = split.answer
+                answer = sanitize_citation_markers(split.answer)
                 reasoning = public_reasoning(split.reasoning)
-                status = _business_status(completion, answer)
-                citations = _external_citations(
-                    chunks,
-                    docs_by_internal_id,
-                    assistant_message_id,
-                    answer=answer,
-                    status=status,
-                    internet_enabled=req.internetEnabled,
+                status = _business_status(completion, answer, question)
+                rescued = _catalog_inventory_rescue(
+                    question, answer, status, docs_by_internal_id
                 )
-                if status == "no_reliable_evidence" and not answer:
+                if rescued:
+                    status = "completed"
+                    answer = rescued
+                    citations = []
+                elif status == "completed":
+                    citations = _external_citations(
+                        chunks,
+                        docs_by_internal_id,
+                        assistant_message_id,
+                        answer=answer,
+                        status=status,
+                        internet_enabled=req.internetEnabled,
+                    )
+                    answer = _with_equipment_hint(conversation, answer, status)
+                else:
                     answer = NO_RELIABLE_EVIDENCE_ANSWER
-                answer = _with_equipment_hint(conversation, answer, status)
+                    citations = []
             await v2_store.add_message(
                 db,
                 message_id=assistant_message_id,
@@ -1105,14 +1220,19 @@ async def _execute_json_run(
             if isinstance(exc, _FormalQueryError):
                 code, status_code, message = exc.code, exc.status_code, exc.message
             else:
-                code = "RAGFLOW_API_INCOMPATIBLE" if exc.status_code and 400 <= exc.status_code < 500 else "RAGFLOW_UNAVAILABLE"
+                code = (
+                    "RAGFLOW_API_INCOMPATIBLE"
+                    if exc.status_code and 400 <= exc.status_code < 500
+                    else "RAGFLOW_UNAVAILABLE"
+                )
                 status_code = 503
                 message = "Query engine unavailable"
             return None, await _save_failed_run(
                 db, principal, conversation, req, run, assistant_message_id,
                 code=code, status_code=status_code, message=message,
             )
-        except Exception:
+        except Exception as exc:
+            logger.exception("json message run failed err_type=%s", type(exc).__name__)
             return None, await _save_failed_run(
                 db, principal, conversation, req, run, assistant_message_id,
                 code="INTERNAL_ERROR", status_code=500, message="Message run failed",
@@ -1133,10 +1253,17 @@ async def _stream_run_events(
 ) -> AsyncIterator[str]:
     conversation_id = conversation["conversation_id"]
     assistant_message_id = run.get("assistant_message_id") or str(uuid.uuid4())
-    yield _sse("run.started", {"conversationId": conversation_id, "clientMessageId": req.clientMessageId, "runId": run["run_id"], "replayed": False})
+    yield _sse(
+        "run.started",
+        {
+            "conversationId": conversation_id,
+            "clientMessageId": req.clientMessageId,
+            "runId": run["run_id"],
+            "replayed": False,
+        },
+    )
     accumulated = ""
     accumulated_reasoning = ""
-    deltas: list[dict] = []
     chunks: list[dict] = []
     citations: list[dict] = []
     upstream_status: str | None = None
@@ -1147,7 +1274,7 @@ async def _stream_run_events(
     pending = pending or []
     client = None
     try:
-        question, observe_error, client = await _retrieval_question(
+        question, observe_error, client, observations = await _retrieval_question(
             db, principal, conversation, question, pending
         )
         if observe_error:
@@ -1156,7 +1283,15 @@ async def _stream_run_events(
                 code="VALIDATION_ERROR", status_code=422,
                 message="Could not understand the attachment; add a text question",
             )
-            yield _sse("run.failed", {"conversationId": conversation_id, "runId": run["run_id"], "code": "VALIDATION_ERROR", "message": "Could not understand the attachment; add a text question"})
+            yield _sse(
+                "run.failed",
+                {
+                    "conversationId": conversation_id,
+                    "runId": run["run_id"],
+                    "code": "VALIDATION_ERROR",
+                    "message": "Could not understand the attachment; add a text question",
+                },
+            )
             return
         scope, docs_by_internal_id = await _context_scope(db, principal, conversation)
         if not scope.is_empty:
@@ -1179,15 +1314,17 @@ async def _stream_run_events(
             files = completion_files(
                 pending, vision=chat_is_vision_capable(chat)
             )
-            stream_kwargs: dict[str, Any] = {}
-            if files:
-                stream_kwargs["files"] = files
-            if req.internetEnabled:
-                stream_kwargs["internet"] = True
+            stream_kwargs = _v2_completion_kwargs(
+                conversation,
+                question,
+                observations,
+                files=files,
+                internet=req.internetEnabled,
+                session_id=session_id,
+            )
             async for payload in client.chat_completion_stream(
                 chat_id,
                 _ragflow_question(conversation, question),
-                session_id=session_id,
                 doc_ids=list(scope.document_ids),
                 **stream_kwargs,
             ):
@@ -1200,72 +1337,58 @@ async def _stream_run_events(
                 if explicit_status in {"completed", "no_reliable_evidence", "failed"}:
                     upstream_status = explicit_status
                 reference = data.get("reference") or {}
-                raw_chunks = reference.get("chunks", []) if isinstance(reference, dict) else []
+                raw_chunks = (
+                    reference.get("chunks", [])
+                    if isinstance(reference, dict)
+                    else []
+                )
                 chunks.extend(item for item in raw_chunks if isinstance(item, dict))
                 delta = data.get("answer")
                 if not data.get("final"):
-                    pieces = splitter.feed(
+                    for kind, chunk in splitter.feed(
                         str(delta or ""),
                         start_to_think=bool(data.get("start_to_think")),
                         end_to_think=bool(data.get("end_to_think")),
-                    )
-                    for kind, chunk in pieces:
-                        event = (
-                            "reasoning.delta"
-                            if kind == "reasoning"
-                            else "answer.delta"
-                        )
+                    ):
                         if kind == "reasoning":
                             accumulated_reasoning += chunk
                         else:
                             accumulated += chunk
-                        deltas.append({"event": event, "content": chunk})
-                        yield _sse(
-                            event,
-                            {
-                                "conversationId": conversation_id,
-                                "runId": run["run_id"],
-                                "content": chunk,
-                            },
-                        )
                 elif delta and not accumulated and not accumulated_reasoning:
                     split = split_assistant_output(str(delta))
                     accumulated = split.answer
                     accumulated_reasoning = split.reasoning
+
+            conversation["ragflow_chat_id"] = chat_id
+            conversation["ragflow_session_id"] = session_id
+            accumulated = sanitize_citation_markers(accumulated)
             status = force_abstain_outcome(
                 accumulated,
                 upstream_status
-                or (
-                    "completed"
-                    if accumulated.strip()
-                    else "no_reliable_evidence"
-                ),
+                or ("completed" if accumulated.strip() else "no_reliable_evidence"),
+                question,
             )
-            citations = _external_citations(
-                chunks,
-                docs_by_internal_id,
-                assistant_message_id,
-                answer=accumulated,
-                status=status,
-                internet_enabled=req.internetEnabled,
-            )
-            answer = accumulated
             reasoning = public_reasoning(accumulated_reasoning)
-            if status == "no_reliable_evidence" and not answer:
-                answer = NO_RELIABLE_EVIDENCE_ANSWER
-            hinted = _with_equipment_hint(conversation, answer, status)
-            extra = hinted[len(answer):] if hinted.startswith(answer) else ""
-            if extra:
-                deltas.append({"event": "answer.delta", "content": extra})
-                yield _sse(
-                    "answer.delta",
-                    {
-                        "conversationId": conversation_id,
-                        "runId": run["run_id"],
-                        "content": extra,
-                    },
+            rescued = _catalog_inventory_rescue(
+                question, accumulated, status, docs_by_internal_id
+            )
+            if rescued:
+                status = "completed"
+                answer = rescued
+                citations = []
+            elif status == "completed":
+                citations = _external_citations(
+                    chunks,
+                    docs_by_internal_id,
+                    assistant_message_id,
+                    answer=accumulated,
+                    status=status,
+                    internet_enabled=req.internetEnabled,
                 )
-            answer = hinted
+                answer = _with_equipment_hint(conversation, accumulated, status)
+            else:
+                answer = NO_RELIABLE_EVIDENCE_ANSWER
+                citations = []
         await v2_store.add_message(
             db,
             message_id=assistant_message_id,
@@ -1278,6 +1401,10 @@ async def _stream_run_events(
             citations=citations,
             reasoning=reasoning,
         )
+        stream_deltas: list[dict] = []
+        if reasoning:
+            stream_deltas.append({"event": "reasoning.delta", "content": reasoning})
+        stream_deltas.append({"event": "answer.delta", "content": answer})
         result = {
             "conversationId": conversation_id,
             "clientMessageId": req.clientMessageId,
@@ -1288,7 +1415,7 @@ async def _stream_run_events(
             "status": status,
             "citations": citations,
             "replayed": False,
-            "_streamDeltas": deltas,
+            "_streamDeltas": stream_deltas,
         }
         await v2_store.complete_message_run(
             db,
@@ -1305,33 +1432,63 @@ async def _stream_run_events(
             if request is not None
             else citations
         )
+        for delta in stream_deltas:
+            yield _sse(
+                str(delta.get("event") or "answer.delta"),
+                {
+                    "conversationId": conversation_id,
+                    "runId": run["run_id"],
+                    "content": delta.get("content"),
+                },
+            )
         for citation in public_citations:
             yield _sse("citation", citation)
-        yield _sse("answer.completed", {"conversationId": conversation_id, "runId": run["run_id"], "messageId": assistant_message_id, "status": v2_store.public_status(status), "citations": public_citations})
+        yield _sse(
+            "answer.completed",
+            {
+                "conversationId": conversation_id,
+                "runId": run["run_id"],
+                "messageId": assistant_message_id,
+                "status": v2_store.public_status(status),
+                "citations": public_citations,
+            },
+        )
     except asyncio.CancelledError:
         await _save_failed_run(
             db, principal, conversation, req, run, assistant_message_id,
             code="RUN_INTERRUPTED", status_code=503,
-            message="Message run was interrupted before completion", content=accumulated,
+            message="Message run was interrupted before completion",
         )
         raise
     except (RAGFlowAPIError, _FormalQueryError) as exc:
         if isinstance(exc, _FormalQueryError):
             code, message = exc.code, exc.message
         else:
-            code = "RAGFLOW_API_INCOMPATIBLE" if exc.status_code and 400 <= exc.status_code < 500 else "RAGFLOW_UNAVAILABLE"
+            code = (
+                "RAGFLOW_API_INCOMPATIBLE"
+                if exc.status_code and 400 <= exc.status_code < 500
+                else "RAGFLOW_UNAVAILABLE"
+            )
             message = "Query engine unavailable"
         status_code = exc.status_code if isinstance(exc, _FormalQueryError) else 503
         await _save_failed_run(
             db, principal, conversation, req, run, assistant_message_id,
-            code=code, status_code=status_code, message=message, content=accumulated,
+            code=code, status_code=status_code, message=message,
         )
-        yield _sse("run.failed", {"conversationId": conversation_id, "runId": run["run_id"], "code": code, "message": message})
+        yield _sse(
+            "run.failed",
+            {
+                "conversationId": conversation_id,
+                "runId": run["run_id"],
+                "code": code,
+                "message": message,
+            },
+        )
     except (httpx.HTTPError, asyncio.TimeoutError, ConnectionError, OSError):
         await _save_failed_run(
             db, principal, conversation, req, run, assistant_message_id,
             code="RAGFLOW_UNAVAILABLE", status_code=503,
-            message="Query engine unavailable", content=accumulated,
+            message="Query engine unavailable",
         )
         yield _sse(
             "run.failed",
@@ -1342,12 +1499,21 @@ async def _stream_run_events(
                 "message": "Query engine unavailable",
             },
         )
-    except Exception:
+    except Exception as exc:
+        logger.exception("sse message run failed err_type=%s", type(exc).__name__)
         await _save_failed_run(
             db, principal, conversation, req, run, assistant_message_id,
-            code="INTERNAL_ERROR", status_code=500, message="Message run failed", content=accumulated,
+            code="INTERNAL_ERROR", status_code=500, message="Message run failed",
         )
-        yield _sse("run.failed", {"conversationId": conversation_id, "runId": run["run_id"], "code": "INTERNAL_ERROR", "message": "Message run failed"})
+        yield _sse(
+            "run.failed",
+            {
+                "conversationId": conversation_id,
+                "runId": run["run_id"],
+                "code": "INTERNAL_ERROR",
+                "message": "Message run failed",
+            },
+        )
     finally:
         await cleanup_ragflow_files(pending, client, db)
 
@@ -1375,6 +1541,15 @@ async def _result_events(result: dict) -> AsyncIterator[str]:
                 "conversationId": result["conversationId"],
                 "runId": result.get("runId"),
                 "content": content,
+            },
+        )
+    if not result.get("_streamDeltas"):
+        yield _sse(
+            "answer.delta",
+            {
+                "conversationId": result["conversationId"],
+                "runId": result.get("runId"),
+                "content": result.get("answer", ""),
             },
         )
     for citation in result["citations"]:

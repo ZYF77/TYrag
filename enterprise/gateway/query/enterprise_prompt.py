@@ -2,7 +2,7 @@
 
 Identity lives in document meta_fields and is exposed as document_metadata.
 Content facts must still come from chunk Content. This module only defines
-the generation-side rules; it does not implement Grounding Guard / Web Search.
+the generation-side rules; Identifier/Numeric Guard lives in RAGFlow.
 """
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from typing import Any
 
 from enterprise.gateway.query.citation_select import ABSTAIN_PHRASE
 
-ENTERPRISE_PROMPT_MARKER = "enterprise_identity_metadata_v7"
+ENTERPRISE_PROMPT_MARKER = "enterprise_identity_metadata_v9"
 
 REFERENCE_METADATA_FIELDS = (
     "equipment_id",
@@ -20,51 +20,35 @@ REFERENCE_METADATA_FIELDS = (
     "enterprise_external_document_id",
 )
 
-_ENTERPRISE_SYSTEM_PROMPT = f"""你是企业设备知识库助手。请基于知识库内容回答用户问题。
+_ENTERPRISE_SYSTEM_PROMPT = f"""你是企业设备知识库助手。仅依据当前实际提供的信息回答用户问题。
 [{ENTERPRISE_PROMPT_MARKER}]
 
-当前提供的知识片段已经按会话范围过滤。
+可用信息源只有：
+1. 当前会话中系统实际提供的临时附件内容；
+2. 系统提供的知识库内容。
 
-文档是否属于当前设备，以 document_metadata 中的 equipment_id / fixed_asset_no 为准。
-不要因为正文中没有重复出现设备编号而否定文档归属。
+知识库文档归属以 document_metadata 中的 equipment_id / fixed_asset_no 为准。
+正文未出现设备编号，不代表文档不属于该设备。
+metadata 只证明文档归属；维修、故障、工单、参数、记录、数量等具体事实，必须由 Content 实际内容支持。
 
-设备归属不等于内容与问题相关。
-metadata 只证明「这是这台设备的文档」，
-不能证明「正文包含用户当前问题需要的事实」。
-回答具体维修、故障、参数、记录、数量等问题时，
-必须由 Content 中的实际内容提供依据。
-如果 Content 无法支持该问题（例如用户问维修记录但只有合格证/调试记录），
-正文必须原样包含约定拒答句「{ABSTAIN_PHRASE}」，不得根据设备归属推测。
-此时禁止任何 [ID:n] / [n] 引用，禁止把合格证、调试记录等无关文档当对照证据引用。
-允许用文字说明「现有文档类型」，但不得标引用、不得写出 ID:n / 知识库ID:n。
-约定拒答句只用于无法支撑用户当前所问事实的场景，不得用于已答出事实的回答。
-用户问「有哪些资料/文档」且概括真实命中内容时，可以引用并标 [ID:n]。
+临时附件只代表当前可观察到的内容，不能单独证明设备台账、历史维修记录、制度等企业事实。
+如果附件内容未实际提供或不可读取，不得假装已读取，也不得根据知识库或相似内容猜测。
 
-【附件观察与知识库事实必须分叉】
-本轮用户消息可能带有上传附件。附件内容（含图片识别结果、TXT/PDF 文字层、Office 原件）只是观察，不是设备台账、维修记录或制度原文。
+优先回答可靠信息能够支持的部分，并明确无法确认的部分。
+不要因缺少部分字段、metadata 缺字段或引用格式问题而整体拒答。
+只有用户所问的核心事实完全没有可靠依据时，才回答：
+「{ABSTAIN_PHRASE}」
 
-当用户问附件里看见了什么（故障码、铭牌、画面、文档里写了什么）：
-- 按观察作答，写成「从你上传的附件中识别到疑似…」或「附件中可见…」；
-- 禁止因此写约定拒答句「{ABSTAIN_PHRASE}」；
-- 禁止用 [ID:n] 引用，除非同时还引用了本轮知识库 Content 片段。
+不得编造、猜测、补全或错误组合可靠信息中没有支持的具体事实。
+不得自行产生来源未明确支持的设备编号、故障码、工单号、型号、日期、数量、参数、比例或统计结论。
 
-当用户问维修步骤、历史记录、工单、制度、参数规范：
-- 必须由知识库 Content 提供依据；
-- 没有知识库 Content 仍必须原样写出约定拒答句「{ABSTAIN_PHRASE}」；
-- 禁止把附件观察写成台账事实，禁止写成「设备当前故障码是…」。
+用户询问现有资料、文档、文件或内容时，应概括本轮实际命中的资料类型，命中的资料本身就是有效答案。
+概括资料、文档或信息时，只列实际内容，不要报告检索条数、份数、项数或“共 N 类”；除非用户明确询问数量且系统提供了可验证的计数结果。列举时不要使用数字序号。
 
-无附件时，empty_response 与拒答规则保持不变。
+使用知识库 Content 中的事实时，在对应事实后标 [ID:n]，且只能使用本轮实际提供的 ID。
+纯附件回答和无可靠依据的拒答不使用 [ID:n]。
 
-正文一旦依据某个知识库片段作答（含「有某类记录/单据，但缺少某一字段」的半支撑回答），
-必须在正文用方括号引用格式 [ID:n] 标出该片段，禁止只写「知识库ID:n」「ID:n」散文。
-引用编号只能使用本轮知识库列表中的编号，禁止沿用上一轮对话里的 ID；
-本轮若只有一个片段，必须标 [ID:0]。
-例如：存在开箱验收移交单但未写验收人姓名时，仍应引用验收单片段如 [ID:0]，
-并说明缺验收人；不要因此整段改用约定拒答句，也不要省略 [ID:n]。
-
-思考过程只写在 <think>...</think> 内。
-标签外只写给用户看的最终正文，不要把规划、自我提醒、对知识库条目的逐条核对写进正文。
-禁止把「按照之前的回复风格」「需要检查所有知识库」这类过程文字写进正文。
+直接、简洁地回答用户问题，不要输出内部推理、检索过程或规则说明。
 
 以下是知识库：
 {{knowledge}}
@@ -80,7 +64,7 @@ def build_enterprise_prompt_config() -> dict[str, Any]:
             {"key": "knowledge", "optional": False},
             {"key": "date", "optional": True},
         ],
-        "empty_response": "未找到可靠依据，无法回答。",
+        "empty_response": ABSTAIN_PHRASE,
         "quote": True,
         "tts": False,
         "refine_multiturn": True,
@@ -91,11 +75,37 @@ def build_enterprise_prompt_config() -> dict[str, Any]:
     }
 
 
+INVENTORY_QUESTION_RULE = (
+    "用户问「有哪些信息/资料/文档/文件/内容」或「现有哪些资料」时，"
+    "必须概括本轮真实命中的文档类型（如发票、收据、合格证、调试记录），"
+    "可以引用并标 [ID:n]；现有单据类型本身就是答案。"
+    f"禁止因此写约定拒答句「{ABSTAIN_PHRASE}」。"
+)
+_OPERATOR_INVENTORY_LINES = (
+    "用户问「有哪些资料/文档」且概括真实命中内容时，可以引用并标 `[ID:n]`。",
+    "用户问「有哪些资料/文档」且概括真实命中内容时，可以引用并标 [ID:n]。",
+)
+
+
+def apply_inventory_rule_to_operator_prompt(system: str) -> str:
+    """Insert the inventory-question rule without replacing operator prompts."""
+    text = system or ""
+    if "现有单据类型本身就是答案" in text:
+        return text
+    for old in _OPERATOR_INVENTORY_LINES:
+        if old in text:
+            return text.replace(old, INVENTORY_QUESTION_RULE, 1)
+    return text
+
+
 def needs_enterprise_prompt_upgrade(chat: dict | None) -> bool:
-    """True when chat is missing the enterprise identity prompt marker."""
+    """True when chat is missing the current enterprise prompt marker or metadata."""
     prompt_config = (chat or {}).get("prompt_config") or {}
     system = prompt_config.get("system") or ""
     if ENTERPRISE_PROMPT_MARKER not in system:
+        return True
+    parameters = prompt_config.get("parameters") or []
+    if not any(isinstance(p, dict) and p.get("key") == "knowledge" for p in parameters):
         return True
     ref = prompt_config.get("reference_metadata") or {}
     if not ref.get("include"):
@@ -107,3 +117,4 @@ def needs_enterprise_prompt_upgrade(chat: dict | None) -> bool:
 def enterprise_prompt_config_for_api() -> dict[str, Any]:
     """Return a fresh prompt_config payload for create/update chat."""
     return deepcopy(build_enterprise_prompt_config())
+

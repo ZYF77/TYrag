@@ -5,7 +5,7 @@ import { camelCase } from 'lodash';
 import { ReactNode, useMemo } from 'react';
 import { useFormContext } from 'react-hook-form';
 import { MinerUOptionsFormField } from './mineru-options-form-field';
-import { buildModelTree } from './model-tree-select';
+import { ModelTypeMap, buildModelTree } from './model-tree-select';
 import { PaddleOCROptionsFormField } from './paddleocr-options-form-field';
 import { TreeSelect, TreeSelectNode } from './tree-select';
 import {
@@ -72,7 +72,7 @@ export function LayoutRecognizeFormField({
 
     const modelTree = buildModelTree(
       allAddedModels,
-      ['image2text', 'ocr'],
+      ModelTypeMap.layout_recognize,
       (node) => (
         <div className="flex justify-between items-center gap-2 w-full">
           <span className="flex items-center gap-1.5 truncate">

@@ -354,6 +354,8 @@ def _chunk_to_citation(
     index: int,
     doc: ExtDocumentMap,
     message_id: str | None = None,
+    *,
+    ref_index: int | None = None,
 ) -> dict:
     page_no, bbox = _chunk_positions(chunk)
     regions = _chunk_regions(chunk)
@@ -381,6 +383,7 @@ def _chunk_to_citation(
         "excerpt": chunk.get("content") or chunk.get("content_with_weight"),
         "imageId": image_id,
         "positions": regions,
+        "refIndex": ref_index,
         "evidence": {
             "kind": "document_chunk",
             "documentId": doc.external_document_id,
@@ -632,6 +635,8 @@ async def _ensure_chat_info(
     chat_id = str(chat.get("id") or "")
     existing_datasets = set(chat.get("dataset_ids") or [])
     needs_datasets = not set(scope.dataset_ids).issubset(existing_datasets)
+    # Never overwrite operator-edited system prompts, including
+    # enterprise_identity_metadata_v* chats customized in RAGFlow UI.
     if needs_datasets:
         await client.update_chat(
             chat_id,

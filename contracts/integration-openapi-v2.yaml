@@ -1,9 +1,12 @@
 openapi: 3.1.0
 info:
   title: TYrag External Integration API
-  version: 2.7.0
+  version: 2.8.0
   description: >-
-    Frozen external contract for the Equipment Management System. Version 2.7
+    Frozen external contract for the Equipment Management System. Version 2.8
+    additively returns `refIndex` on each citation so clients can bind inline
+    answer markers `[ID:n]` / `[n]` to `citations[]` without using array
+    position as `n`. Version 2.7
     additively accepts per-message `internetEnabled` and returns web results in
     the existing citations array with `sourceType: web`. Version 2.6
     additively accepts Office Open XML message attachments
@@ -301,8 +304,12 @@ paths:
       tags: [conversations]
       summary: Execute a question or a server-defined suggestion
       description: >-
-        Accept text/event-stream for true upstream SSE; all other Accept values
-        receive JSON. A duplicate request while its durable run is active returns
+        Accept text/event-stream for SSE; all other Accept values receive JSON.
+        Grounded v2 requests emit run.started first, may use standard SSE comment
+        heartbeats while buffering the upstream candidate, and emit one safe
+        answer.delta only after the Final Guard passes. Candidate answer and
+        reasoning are never emitted before that decision. A duplicate request
+        while its durable run is active returns
         the same runId with 202 and never starts a second execution. Message-level
         context overrides and client-controlled prompts are forbidden.
         JSON remains the text-only and chips path. Attachments use the same URL
@@ -312,8 +319,8 @@ paths:
         application/vnd.openxmlformats-officedocument.wordprocessingml.document,
         and application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;
         at most 5 files, 10MB each. Legacy .doc/.xls and PowerPoint are rejected.
-        SSE thinking tokens are `reasoning.delta`; user-facing tokens remain
-        `answer.delta`.
+        The grounded v2 path does not emit `reasoning.delta`; user-facing content
+        remains `answer.delta`.
       operationId: v2CreateConversationMessage
       x-status: implemented
       security:
@@ -959,6 +966,13 @@ components:
         excerpt: { type: [string, 'null'] }
         recordType: { type: [string, 'null'] }
         recordId: { type: [string, 'null'] }
+        refIndex:
+          type: [integer, 'null']
+          minimum: 0
+          description: >-
+            The `n` from an inline answer marker `[ID:n]` or `[n]` that selected
+            this citation. Null when the citation was kept by overlap fallback
+            and must not be bound to a marker. Never treat array position as `n`.
         url:
           type: [string, 'null']
           format: uri
