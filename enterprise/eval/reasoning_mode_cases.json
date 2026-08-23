@@ -1,0 +1,34 @@
+{
+  "prompt": "v9",
+  "modes": ["medium", "high", "ultra"],
+  "metrics": [
+    "accuracy",
+    "hallucination_rate",
+    "false_abstain_rate",
+    "citation_accuracy",
+    "ttft_ms",
+    "total_ms"
+  ],
+  "cases": [
+    {
+      "id": "pump-precautions",
+      "question": "使用泵的时候要注意哪些事项？"
+    },
+    {
+      "id": "cqbf-advantages",
+      "question": "CQBF氟塑料磁力泵有哪些优点？"
+    },
+    {
+      "id": "siemens-runtime",
+      "question": "西门子的运行信息有哪些"
+    },
+    {
+      "id": "inventory-docs",
+      "question": "这台设备有哪些资料"
+    },
+    {
+      "id": "chitchat",
+      "question": "你好"
+    }
+  ]
+}
