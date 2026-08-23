@@ -55,7 +55,7 @@ API envelope 固定 camelCase；`metadata` 固定 snake_case。`tenantId/sourceS
 
 ## 8. SSE / Message Idempotency Decision
 
-消息入口为 `POST /conversations/{id}/messages`。`Accept: text/event-stream` 返回 SSE，否则 JSON。EAM v2 的 Grounding Guard 在完整候选回答生成后执行，因此 SSE 先返回 `run.started`，等待期间可返回标准 SSE comment heartbeat，校验通过后返回一个安全的 `answer.delta`、零到多个 `citation`，最后返回 `answer.completed`；失败返回 `run.failed`。Guard 前不发送候选 answer 或 reasoning。URL、请求体、响应字段和事件名不变。
+消息入口为 `POST /conversations/{id}/messages`。`Accept: text/event-stream` 返回 SSE，否则 JSON。SSE 事件顺序为 `run.started` → 0..n × (`reasoning.delta` | `answer.delta`) → 0..1 × `answer.replaced` → 0..n × `citation` → `answer.completed` 或 `run.failed`。`answer.replaced` 表示丢弃先前流出的正文、改用本帧 `content`。已完成 run 的回放只发合并后的单帧 `reasoning.delta`/`answer.delta`，不发 `answer.replaced`。`answer.completed` 不含 `reasoning`。请求可带 `reasoningMode`（`simple|low|medium|high|ultra`，默认 `simple`）。URL 与既有字段名不变。
 
 请求严格 oneOf：question branch `{clientMessageId,question}` 或 suggestion branch `{clientMessageId,suggestionId,contextVersion}`。同 conversation + clientMessageId + 同 normalized payload replay 原结果；payload 不同返回 409 `CLIENT_MESSAGE_ID_CONFLICT`。首次请求建立持久 run 状态机 `running -> completed|failed`、稳定 runId 和有限租约；租约过期只落为稳定 `RUN_INTERRUPTED`，不自动重跑。pending run replay 返回相同 runId/状态并使用 202 JSON，不重复插入 user message；SSE pending 也不得伪造流。
 

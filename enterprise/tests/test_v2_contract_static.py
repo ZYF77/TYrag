@@ -412,7 +412,7 @@ def test_p1_callback_and_attachment_invariants_are_explicit():
 
 def test_v21_attachment_surface_and_security_are_frozen():
     _, spec = _contract()
-    assert spec["info"]["version"] == "2.7.0"
+    assert spec["info"]["version"] == "2.9.0"
     detail = spec["components"]["schemas"]["ConversationDetail"]
     assert "suggestions" in detail["required"]
     assert "contextCompacted" in detail["required"]
@@ -441,7 +441,7 @@ def test_v21_attachment_surface_and_security_are_frozen():
 
 def test_v24_citation_file_ticket_download_is_frozen():
     _, spec = _contract()
-    assert spec["info"]["version"] == "2.7.0"
+    assert spec["info"]["version"] == "2.9.0"
     citation = spec["components"]["schemas"]["Citation"]
     assert {"downloadUrl", "downloadExpiresAt"} <= set(citation["required"])
     assert "imageId" not in citation["properties"]
@@ -456,7 +456,7 @@ def test_v24_citation_file_ticket_download_is_frozen():
 
 def test_v25_reasoning_is_optional_on_message_and_run():
     _, spec = _contract()
-    assert spec["info"]["version"] == "2.7.0"
+    assert spec["info"]["version"] == "2.9.0"
     message = spec["components"]["schemas"]["Message"]
     run = spec["components"]["schemas"]["MessageRunResult"]
     assert message["properties"]["reasoning"]["type"] == ["string", "null"]
@@ -468,7 +468,7 @@ def test_v25_reasoning_is_optional_on_message_and_run():
 
 def test_v26_message_attachment_office_mime_types_are_declared():
     _, spec = _contract()
-    assert spec["info"]["version"] == "2.7.0"
+    assert spec["info"]["version"] == "2.9.0"
     attachment = spec["components"]["schemas"]["MessageAttachment"]
     assert set(attachment["properties"]["mediaType"]["enum"]) == {
         "image/jpeg",
@@ -487,7 +487,7 @@ def test_v26_message_attachment_office_mime_types_are_declared():
 
 def test_v27_message_level_internet_and_web_citations_are_declared():
     _, spec = _contract()
-    assert spec["info"]["version"] == "2.7.0"
+    assert spec["info"]["version"] == "2.9.0"
     schemas = spec["components"]["schemas"]
     for name in (
         "QuestionMessageRequest",
@@ -503,6 +503,32 @@ def test_v27_message_level_internet_and_web_citations_are_declared():
     assert citation["properties"]["url"]["type"] == ["string", "null"]
     assert citation["properties"]["downloadUrl"]["type"] == ["string", "null"]
     assert citation["properties"]["downloadExpiresAt"]["type"] == ["string", "null"]
+
+
+def test_v29_reasoning_mode_and_replaced_event_are_declared():
+    _, spec = _contract()
+    assert spec["info"]["version"] == "2.9.0"
+    schemas = spec["components"]["schemas"]
+    assert schemas["ReasoningMode"]["enum"] == [
+        "simple",
+        "low",
+        "medium",
+        "high",
+        "ultra",
+    ]
+    for name in (
+        "QuestionMessageRequest",
+        "SuggestionMessageRequest",
+        "MessageAttachmentMetadata",
+    ):
+        assert schemas[name]["properties"]["reasoningMode"] == {
+            "$ref": "#/components/schemas/ReasoningMode"
+        }
+    description = spec["paths"]["/conversations/{conversationId}/messages"]["post"][
+        "description"
+    ]
+    assert "answer.replaced" in description
+    assert "reasoningMode" in description or "reasoning.delta" in description
 
 
 def test_error_code_http_statuses_match_the_v2_freeze():

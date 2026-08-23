@@ -1,7 +1,7 @@
 # EAM 问询对接说明（Gateway Inquiry v2.6）
 
 面向：EAM 开发 / 测试 / 运维  
-契约版本：`integration-openapi-v2` **v2.6.0**  
+契约版本：`integration-openapi-v2` **v2.9.0**  
 正式契约文件：
 
 - `contracts/integration-openapi-v2.yaml`
@@ -481,7 +481,10 @@ SSE 事件顺序（契约）：
 
 ```text
 run.started
-  → 0..n × (reasoning.delta | answer.delta | citation)
+  → 0..n × reasoning.delta
+  → 0..n × answer.delta
+  → 0..1 × answer.replaced
+  → 0..n × citation
   → answer.completed  或  run.failed
 ```
 
@@ -491,6 +494,8 @@ run.started
 - run 仍在执行时的重复请求：返回 `202` 状态 JSON，**不会**再开第二条 SSE
 - 业务字段（`status` / `citations`）以最终完成事件或后续 GET 历史为准，规则与 JSON 模式相同
 - `reasoning.delta` 是思考过程；`answer.delta` 只含用户正文。不接 SSE 时用 JSON 的 `reasoning` 字段即可
+- 若出现 `answer.replaced`，用其 `content` 整体替换本轮已拼装的正文。回放只有合并单帧，不发 `answer.replaced`
+- 提问可带 `reasoningMode`（`simple|low|medium|high|ultra`，默认 `simple`）。增量说明见 [`eam-inquiry-streaming-reasoning-mode-notice.md`](./eam-inquiry-streaming-reasoning-mode-notice.md)
 
 **建议给 EAM 的产品决策：** 第一阶段 JSON；第二阶段按体验需要增量接 SSE，不影响会话模型与 `conversationId`。
 
@@ -522,7 +527,8 @@ run.started
 | `docs/integration/eam-inquiry-citation-notice.md` | **给 EAM 的引用过滤与统一下载**（v2.3 → v2.4，`downloadUrl` 不带 JWT） |
 | `docs/integration/eam-inquiry-citation-marker-notice.md` | **给 EAM 的正文 `[ID:n]` 角标绑定**（v2.7 → v2.8，`refIndex`） |
 | `docs/integration/eam-inquiry-reasoning-notice.md` | **给 EAM 的思考过程与正文拆分**（v2.4 → v2.5，可选 `reasoning`） |
+| `docs/integration/eam-inquiry-streaming-reasoning-mode-notice.md` | **给 EAM 的真流式与推理档位**（v2.8 → v2.9，`reasoningMode` / `answer.replaced`） |
 | `docs/integration/eam-file-feed-handoff-3.1.md` | 文件投喂 + 终态回调 |
 | `docs/integration/eam-device-integration-guide.md` | 综合对接总册（含问询细节示例） |
 | `docs/设备管理系统—企业知识库对接协议.md` | 协议/验收底稿 |
-| `contracts/integration-openapi-v2.yaml` | 问询正式 OpenAPI（v2.6.0） |
+| `contracts/integration-openapi-v2.yaml` | 问询正式 OpenAPI（v2.9.0） |

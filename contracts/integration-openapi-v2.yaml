@@ -1,9 +1,12 @@
 openapi: 3.1.0
 info:
   title: TYrag External Integration API
-  version: 2.8.0
+  version: 2.9.0
   description: >-
-    Frozen external contract for the Equipment Management System. Version 2.8
+    Frozen external contract for the Equipment Management System. Version 2.9
+    additively accepts per-message `reasoningMode` (`simple`/`low`/`medium`/`high`/`ultra`)
+    and may emit `answer.replaced` after live `answer.delta` frames when Gateway
+    rewrites the streamed body. Version 2.8
     additively returns `refIndex` on each citation so clients can bind inline
     answer markers `[ID:n]` / `[n]` to `citations[]` without using array
     position as `n`. Version 2.7
@@ -305,22 +308,24 @@ paths:
       summary: Execute a question or a server-defined suggestion
       description: >-
         Accept text/event-stream for SSE; all other Accept values receive JSON.
-        Grounded v2 requests emit run.started first, may use standard SSE comment
-        heartbeats while buffering the upstream candidate, and emit one safe
-        answer.delta only after the Final Guard passes. Candidate answer and
-        reasoning are never emitted before that decision. A duplicate request
-        while its durable run is active returns
-        the same runId with 202 and never starts a second execution. Message-level
-        context overrides and client-controlled prompts are forbidden.
-        JSON remains the text-only and chips path. Attachments use the same URL
-        with multipart/form-data (metadata JSON plus files). suggestionId must
-        not be sent with files. Allowed MIME types are image/jpeg, image/png,
-        text/plain, application/pdf,
+        Live v2 streams emit `run.started`, then zero or more `reasoning.delta`
+        and `answer.delta` frames as tokens arrive. If Gateway later rewrites
+        the already streamed body (citation sanitize, abstain, inventory rescue,
+        or equipment hint), it emits one `answer.replaced` whose `content`
+        replaces every prior `answer.delta`. Replay of a completed run emits
+        merged single `reasoning.delta`/`answer.delta` frames and never
+        `answer.replaced`. A duplicate request while its durable run is active
+        returns the same runId with 202 and never starts a second execution.
+        Message-level context overrides and client-controlled prompts are
+        forbidden. JSON remains the text-only and chips path. Attachments use
+        the same URL with multipart/form-data (metadata JSON plus files).
+        suggestionId must not be sent with files. Allowed MIME types are
+        image/jpeg, image/png, text/plain, application/pdf,
         application/vnd.openxmlformats-officedocument.wordprocessingml.document,
         and application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;
         at most 5 files, 10MB each. Legacy .doc/.xls and PowerPoint are rejected.
-        The grounded v2 path does not emit `reasoning.delta`; user-facing content
-        remains `answer.delta`.
+        `answer.completed` still does not include `reasoning`; use
+        `reasoning.delta` or the JSON `reasoning` field.
       operationId: v2CreateConversationMessage
       x-status: implemented
       security:
@@ -883,6 +888,15 @@ components:
           items: { $ref: '#/components/schemas/ConversationSummary' }
         nextCursor: { type: [string, 'null'] }
         hasMore: { type: boolean }
+    ReasoningMode:
+      type: string
+      enum: [simple, low, medium, high, ultra]
+      default: simple
+      description: >-
+        RAGFlow thinking depth for this turn. `simple` is one-round chat and
+        omits the internal `reasoning` parameter. `low`/`medium`/`high`/`ultra`
+        map to RAGFlow reasoning 1–4. Higher modes cost more tokens and latency.
+        `high`/`ultra` only bind web_search when `internetEnabled` is true.
     QuestionMessageRequest:
       type: object
       additionalProperties: false
@@ -891,6 +905,8 @@ components:
         clientMessageId: { type: string, minLength: 1, maxLength: 128 }
         question: { type: string, minLength: 1, maxLength: 8000 }
         internetEnabled: { type: boolean, default: false }
+        reasoningMode:
+          $ref: '#/components/schemas/ReasoningMode'
     SuggestionMessageRequest:
       type: object
       additionalProperties: false
@@ -900,6 +916,8 @@ components:
         suggestionId: { type: string, minLength: 1, maxLength: 128 }
         contextVersion: { type: integer, minimum: 0 }
         internetEnabled: { type: boolean, default: false }
+        reasoningMode:
+          $ref: '#/components/schemas/ReasoningMode'
     CreateMessageRequest:
       oneOf:
         - $ref: '#/components/schemas/QuestionMessageRequest'
@@ -912,6 +930,8 @@ components:
         clientMessageId: { type: string, minLength: 1, maxLength: 128 }
         question: { type: string, maxLength: 8000 }
         internetEnabled: { type: boolean, default: false }
+        reasoningMode:
+          $ref: '#/components/schemas/ReasoningMode'
     CreateMessageMultipartRequest:
       type: object
       additionalProperties: false
