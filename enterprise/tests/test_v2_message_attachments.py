@@ -113,7 +113,7 @@ def test_openapi_23_declares_multipart_and_history_metadata():
     spec = yaml.safe_load(
         (ROOT / "contracts" / "integration-openapi-v2.yaml").read_text(encoding="utf-8")
     )
-    assert spec["info"]["version"] == "2.7.0"
+    assert spec["info"]["version"] == "2.9.0"
     post = spec["paths"]["/conversations/{conversationId}/messages"]["post"]
     assert "application/json" in post["requestBody"]["content"]
     assert "multipart/form-data" in post["requestBody"]["content"]

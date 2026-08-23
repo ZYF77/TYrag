@@ -16,6 +16,15 @@ from enterprise.gateway.sync.ragflow_document_client import (
 logger = logging.getLogger(__name__)
 
 
+def _chunk_stream_text(text: str, size: int = 8) -> list[str]:
+    """Split a stub answer into multiple SSE pieces so Gateway can live-stream."""
+    if not text:
+        return []
+    if size <= 0 or len(text) <= size:
+        return [text]
+    return [text[index : index + size] for index in range(0, len(text), size)]
+
+
 def _json_missing_payload(content: bytes, media_type: str) -> bool:
     """True when RAGFlow returned HTTP 200 JSON ``code: 102`` instead of bytes."""
     lowered = (media_type or "").split(";", 1)[0].strip().lower()
@@ -329,6 +338,7 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
         grounding_version: int | None = None,
         allowed_identifiers: list[str] | None = None,
         attachment_observations: list[str] | None = None,
+        reasoning: int | None = None,
     ) -> dict:
         rid = request_id or self._new_request_id()
         body: dict[str, Any] = {
@@ -369,6 +379,8 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
             body["attachment_observations"] = [
                 str(item) for item in attachment_observations if str(item)
             ]
+        if reasoning is not None:
+            body["reasoning"] = int(reasoning)
         _trace_doc_ids(rid, doc_ids)
         result = await self._run_sync(
             self._sync_request,
@@ -534,6 +546,7 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
         grounding_version: int | None = None,
         allowed_identifiers: list[str] | None = None,
         attachment_observations: list[str] | None = None,
+        reasoning: int | None = None,
     ):
         """Stream RAGFlow chat completion over the public SSE API.
 
@@ -576,6 +589,8 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
             body["attachment_observations"] = [
                 str(item) for item in attachment_observations if str(item)
             ]
+        if reasoning is not None:
+            body["reasoning"] = int(reasoning)
         _trace_doc_ids(rid, doc_ids)
         timeout = httpx.Timeout(self.timeout, connect=self.timeout)
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -832,6 +847,7 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         grounding_version: int | None = None,
         allowed_identifiers: list[str] | None = None,
         attachment_observations: list[str] | None = None,
+        reasoning: int | None = None,
     ) -> dict:
         turn_id = f"msg-{uuid.uuid4().hex[:12]}"
         body_messages = [dict(item) for item in messages] if messages is not None else None
@@ -854,6 +870,8 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
             "allowed_identifiers": list(allowed_identifiers or []),
             "attachment_observations": list(attachment_observations or []),
         }
+        if reasoning is not None:
+            self._last_completion_body["reasoning"] = int(reasoning)
         base_chunk = {
             "id": "chunk-1",
             "content": "故障码 E-104 时先检查液压油位。",
@@ -976,6 +994,7 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         grounding_version: int | None = None,
         allowed_identifiers: list[str] | None = None,
         attachment_observations: list[str] | None = None,
+        reasoning: int | None = None,
     ):
         if self._stream_fail_after == 0:
             completion = await self.chat_completion(
@@ -992,6 +1011,7 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
                 grounding_version=grounding_version,
                 allowed_identifiers=allowed_identifiers,
                 attachment_observations=attachment_observations,
+                reasoning=reasoning,
             )
             data = completion.get("data", {})
             stream_id = None if self._omit_stream_id else (
@@ -1000,27 +1020,13 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
             session = data.get("session_id") if isinstance(data, dict) else None
             reference = data.get("reference", {}) if isinstance(data, dict) else {}
             answer = data.get("answer", "") if isinstance(data, dict) else ""
-            if grounding_version == 1:
-                yield {
-                    "code": 0,
-                    "message": "",
-                    "data": {
-                        "answer": answer,
-                        "id": stream_id,
-                        "session_id": session,
-                        "reference": reference,
-                        "final": True,
-                    },
-                }
-                yield {"code": 0, "message": "", "data": True}
-                return
-            if answer:
+            for piece in _chunk_stream_text(str(answer or "")):
                 await asyncio.sleep(self._stream_delay)
                 yield {
                     "code": 0,
                     "message": "",
                     "data": {
-                        "answer": answer,
+                        "answer": piece,
                         "id": stream_id,
                         "session_id": session,
                     },

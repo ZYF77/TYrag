@@ -17,6 +17,24 @@ from enterprise.tests.test_v2_conversation_contract import (
 )
 
 
+def _sse_answer_text(body: str) -> str:
+    pieces: list[str] = []
+    replaced = ""
+    event = ""
+    for line in body.splitlines():
+        if line.startswith("event:"):
+            event = line.split(":", 1)[1].strip()
+            continue
+        if line.startswith("data:") and event in {"answer.delta", "answer.replaced"}:
+            payload = json.loads(line.split(":", 1)[1].strip() or "{}")
+            content = str(payload.get("content") or "")
+            if event == "answer.replaced":
+                replaced = content
+            else:
+                pieces.append(content)
+    return replaced or "".join(pieces)
+
+
 @pytest.mark.asyncio
 async def test_v2_creates_and_reuses_ragflow_session(runtime):
     await _insert_document(
@@ -113,7 +131,7 @@ async def test_v2_sse_guard_is_buffered_and_fail_closed(runtime):
         equipment_id="EQ-GROUNDING-SSE",
         fixed_asset_no="FA-GROUNDING-SSE",
     )
-    runtime.stub.forced_answer = "未找到可靠依据，无法回答。"
+    runtime.stub.forced_answer = "当前检索结果中没有找到可靠依据，建议补充设备号。"
     async with _client(runtime) as client:
         conversation = await _create_conversation(
             client, equipmentId="EQ-GROUNDING-SSE"
@@ -132,12 +150,15 @@ async def test_v2_sse_guard_is_buffered_and_fail_closed(runtime):
     expected = "未找到可靠依据，无法回答。"
     assert response.status_code == 200
     assert response.text.count("event: run.started") == 1
-    assert response.text.count("event: answer.delta") == 1
+    assert response.text.count("event: answer.delta") >= 2
+    assert response.text.count("event: answer.replaced") == 1
     assert "event: reasoning.delta" not in response.text
     assert f'"content": "{expected}"' in response.text
     assert "event: run.failed" not in response.text
     assert replay.text.count("event: answer.delta") == 1
+    assert "event: answer.replaced" not in replay.text
     assert "event: reasoning.delta" not in replay.text
+    assert f'"content": "{expected}"' in replay.text
 
 
 @pytest.mark.asyncio
@@ -349,7 +370,7 @@ async def test_v2_bound_equipment_sse_forwards_grounded_answer(runtime):
 
     assert response.status_code == 200
     assert '"status": "已完成"' in response.text
-    assert "设备 EQ-GNDSSE-104 有发票和收据。" in response.text
+    assert _sse_answer_text(response.text) == "设备 EQ-GNDSSE-104 有发票和收据。"
     assert "未找到可靠依据，无法回答。" not in response.text
     _assert_no_grounding_leak(response.text)
 
@@ -382,3 +403,89 @@ async def test_v2_unrelated_fault_code_abstain_from_ragflow(runtime):
     assert body["status"] == "无可靠依据"
     assert body["answer"] == expected
     _assert_no_grounding_leak(body)
+
+
+@pytest.mark.asyncio
+async def test_v2_reasoning_mode_maps_into_completion_body(runtime):
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-REASONING-MODE",
+        ragflow_id="doc-reasoning-mode",
+        equipment_id="EQ-REASONING-MODE",
+        fixed_asset_no="FA-REASONING-MODE",
+    )
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(
+            client, equipmentId="EQ-REASONING-MODE"
+        )
+        high = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={
+                "clientMessageId": "mode-high",
+                "question": "问题",
+                "reasoningMode": "high",
+            },
+        )
+        assert high.status_code == 200
+        assert runtime.stub._last_completion_body["reasoning"] == 3
+        assert runtime.stub._last_completion_body["grounding_version"] == 1
+        simple = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={"clientMessageId": "mode-simple", "question": "问题"},
+        )
+        assert simple.status_code == 200
+        assert "reasoning" not in runtime.stub._last_completion_body
+
+
+@pytest.mark.asyncio
+async def test_v2_reasoning_mode_rejects_unknown_value(runtime):
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-REASONING-BAD",
+        ragflow_id="doc-reasoning-bad",
+        equipment_id="EQ-REASONING-BAD",
+        fixed_asset_no="FA-REASONING-BAD",
+    )
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(
+            client, equipmentId="EQ-REASONING-BAD"
+        )
+        response = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={
+                "clientMessageId": "mode-bad",
+                "question": "问题",
+                "reasoningMode": "max",
+            },
+        )
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_v2_sse_does_not_replace_when_final_matches_stream(runtime):
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-NO-REPLACE",
+        ragflow_id="doc-1",
+        equipment_id="EQ-NO-REPLACE",
+        fixed_asset_no="FA-NO-REPLACE",
+    )
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(
+            client, equipmentId="EQ-NO-REPLACE"
+        )
+        response = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            headers={"Accept": "text/event-stream"},
+            json={"clientMessageId": "no-replace", "question": "问题"},
+        )
+        replay = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            headers={"Accept": "text/event-stream"},
+            json={"clientMessageId": "no-replace", "question": "问题"},
+        )
+    assert response.status_code == 200
+    assert response.text.count("event: answer.delta") >= 2
+    assert "event: answer.replaced" not in response.text
+    assert replay.text.count("event: answer.delta") == 1
+    assert "event: answer.replaced" not in replay.text

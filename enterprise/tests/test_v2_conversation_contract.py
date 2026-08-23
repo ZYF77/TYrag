@@ -1383,12 +1383,15 @@ async def test_v2_sse_forwards_upstream_deltas(runtime):
         )
 
     assert response.status_code == 200
-    assert response.text.count("event: answer.delta") == 1
-    assert '"content": "first second"' in response.text
+    assert response.text.count("event: answer.delta") == 2
+    assert '"content": "first "' in response.text
+    assert '"content": "second"' in response.text
+    assert "event: answer.replaced" not in response.text
     assert "event: reasoning.delta" not in response.text
     assert replay.status_code == 200
     assert replay.text.count("event: answer.delta") == 1
     assert '"content": "first second"' in replay.text
+    assert "event: answer.replaced" not in replay.text
     assert json_replay.status_code == 200
     assert "_streamDeltas" not in json_replay.json()
     assert json_replay.json()["reasoning"] is None

@@ -7,7 +7,7 @@ import asyncio
 import logging
 import re
 import uuid
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Literal
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -333,6 +333,15 @@ def _attachment_observation_texts(
     return texts
 
 
+_REASONING_MODE_TO_INT = {
+    "low": 1,
+    "medium": 2,
+    "high": 3,
+    "ultra": 4,
+}
+ReasoningMode = Literal["simple", "low", "medium", "high", "ultra"]
+
+
 def _v2_completion_kwargs(
     conversation: dict,
     question: str,
@@ -341,6 +350,7 @@ def _v2_completion_kwargs(
     files: list[dict[str, Any]] | None = None,
     internet: bool = False,
     session_id: str | None = None,
+    reasoning_mode: str = "simple",
 ) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         "grounding_version": 1,
@@ -355,6 +365,9 @@ def _v2_completion_kwargs(
         kwargs["files"] = files
     if internet:
         kwargs["internet"] = True
+    mapped = _REASONING_MODE_TO_INT.get(reasoning_mode)
+    if mapped is not None:
+        kwargs["reasoning"] = mapped
     return kwargs
 
 
@@ -419,6 +432,7 @@ class CreateMessageRequest(StrictModel):
     suggestionId: str | None = Field(default=None, min_length=1, max_length=128)
     contextVersion: int | None = Field(default=None, ge=0)
     internetEnabled: bool = False
+    reasoningMode: ReasoningMode = "simple"
 
     @model_validator(mode="after")
     def exactly_one_branch(self):
@@ -444,6 +458,7 @@ class MessageAttachmentMetadata(StrictModel):
     suggestionId: str | None = Field(default=None, min_length=1, max_length=128)
     contextVersion: int | None = Field(default=None, ge=0)
     internetEnabled: bool = False
+    reasoningMode: ReasoningMode = "simple"
 
 
 def _conversation_detail(row: dict) -> dict:
@@ -1140,6 +1155,7 @@ async def _execute_json_run(
                     files=files,
                     internet=req.internetEnabled,
                     session_id=session_id,
+                    reasoning_mode=req.reasoningMode,
                 )
                 completion = await client.chat_completion(
                     chat_id,
@@ -1294,6 +1310,8 @@ async def _stream_run_events(
             )
             return
         scope, docs_by_internal_id = await _context_scope(db, principal, conversation)
+        live_streamed = False
+        emitted_answer = ""
         if not scope.is_empty:
             client = client or _query_client()
             chat_id, chat = await _ensure_chat_info(client, principal, scope)
@@ -1321,7 +1339,10 @@ async def _stream_run_events(
                 files=files,
                 internet=req.internetEnabled,
                 session_id=session_id,
+                reasoning_mode=req.reasoningMode,
             )
+            live_streamed = False
+            emitted_answer = ""
             async for payload in client.chat_completion_stream(
                 chat_id,
                 _ragflow_question(conversation, question),
@@ -1352,8 +1373,20 @@ async def _stream_run_events(
                     ):
                         if kind == "reasoning":
                             accumulated_reasoning += chunk
+                            event = "reasoning.delta"
                         else:
                             accumulated += chunk
+                            emitted_answer += chunk
+                            event = "answer.delta"
+                        live_streamed = True
+                        yield _sse(
+                            event,
+                            {
+                                "conversationId": conversation_id,
+                                "runId": run["run_id"],
+                                "content": chunk,
+                            },
+                        )
                 elif delta and not accumulated and not accumulated_reasoning:
                     split = split_assistant_output(str(delta))
                     accumulated = split.answer
@@ -1432,15 +1465,26 @@ async def _stream_run_events(
             if request is not None
             else citations
         )
-        for delta in stream_deltas:
-            yield _sse(
-                str(delta.get("event") or "answer.delta"),
-                {
-                    "conversationId": conversation_id,
-                    "runId": run["run_id"],
-                    "content": delta.get("content"),
-                },
-            )
+        if live_streamed:
+            if answer != emitted_answer:
+                yield _sse(
+                    "answer.replaced",
+                    {
+                        "conversationId": conversation_id,
+                        "runId": run["run_id"],
+                        "content": answer,
+                    },
+                )
+        else:
+            for delta in stream_deltas:
+                yield _sse(
+                    str(delta.get("event") or "answer.delta"),
+                    {
+                        "conversationId": conversation_id,
+                        "runId": run["run_id"],
+                        "content": delta.get("content"),
+                    },
+                )
         for citation in public_citations:
             yield _sse("citation", citation)
         yield _sse(
@@ -1660,6 +1704,7 @@ async def _parse_multipart_message(
             clientMessageId=meta.clientMessageId,
             question=question,
             internetEnabled=meta.internetEnabled,
+            reasoningMode=meta.reasoningMode,
         )
         return req, pending
     finally:
