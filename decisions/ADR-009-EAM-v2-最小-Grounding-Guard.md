@@ -1,8 +1,8 @@
 # ADR-009 EAM v2 最小 Grounding Guard
 
-- 状态：Accepted
+- 状态：Superseded by [ADR-010](ADR-010-EAM-v2-拆除-Grounding-Mega-Switch.md)
 - 日期：2026-08-19
-- 修订：2026-08-19（Final Guard 前移到 RAGFlow 持久化前，恢复 Session）
+- 修订：2026-08-20（被 ADR-010 取代：`grounding_version=1` 不再兼任路径短路与候选 token 缓冲）
 
 ## 决策
 

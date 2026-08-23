@@ -40,7 +40,7 @@ patches:
       - "enterprise/tests/test_v2_message_attachments.py"
     upgrade_notes: "Replay the files-guard on async_chat empty_response; rollback restores the original if."
   - id: RF-PATCH-004
-    reason: "pre-persist identifier/numeric fuse for grounding_version=1; one short rewrite retry on fuse fail; keep effectiveKnowledge internal; restore minio.bucket=ragflow"
+    reason: "grounding_version=1 keeps prompt markers and log redaction; fuse/buffering gated by _IDENTIFIER_NUMERIC_FUSE_ENABLED; rag_agent path follows reasoning 1-4; think_log redacts question/knowledge on grounding requests"
     upstream_files:
       - ragflow/rag/grounding/__init__.py
       - ragflow/rag/grounding/guard.py
@@ -49,16 +49,18 @@ patches:
       - ragflow/api/db/services/tenant_llm_service.py
       - ragflow/rag/llm/chat_model.py
       - ragflow/rag/prompts/generator.py
+      - ragflow/rag/advanced_rag/think_log.py
       - ragflow/conf/service_conf.yaml
       - ragflow/docker/service_conf.yaml.template
-    adr: "decisions/ADR-009-EAM-v2-最小-Grounding-Guard.md"
+    adr: "decisions/ADR-010-EAM-v2-拆除-Grounding-Mega-Switch.md"
     change_request: "patches/CHANGE-REQUEST-EAM-V2-GROUNDING-CONTEXT.md"
     introduced_in: "eam-v2-grounding-guard"
     tests:
       - "ragflow/test/unit_test/rag/grounding/test_guard.py"
       - "ragflow/test/unit_test/api/db/services/test_dialog_service_grounding.py"
+      - "ragflow/test/unit_test/rag/advanced_rag/test_think_log.py"
       - "enterprise/tests/test_v2_grounding_integration.py"
       - "enterprise/tests/test_v2_conversation_contract.py"
       - "enterprise/tests/test_ragflow_client.py"
       - "enterprise/scripts/run_file_share_v3_v2_e2e.py"
-    upgrade_notes: "Replay grounding_version=1 prompt markers, pre-persist fuse, no-content tracing, and minio.bucket=ragflow; remove them together on rollback. Copy drifted KB-id MinIO objects into ragflow/<dataset_id>/ before deleting source buckets."
+    upgrade_notes: "Replay grounding_version=1 prompt markers, no-content tracing, fuse switch, and minio.bucket=ragflow. Do not restore the rag_agent grounding short-circuit or always-on token buffer. Copy drifted KB-id MinIO objects into ragflow/<dataset_id>/ before deleting source buckets."

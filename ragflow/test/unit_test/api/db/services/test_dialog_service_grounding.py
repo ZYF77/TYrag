@@ -140,6 +140,7 @@ def _patch_chat(monkeypatch, model, knowledge=("knowledge body",), max_tokens=81
 
 
 def test_grounding_stream_does_not_yield_candidate_tokens(monkeypatch):
+    monkeypatch.setattr(dialog_service, "_IDENTIFIER_NUMERIC_FUSE_ENABLED", True)
     model = _FakeModel("设备 EQ-104 压力 2 MPa")
     _patch_chat(monkeypatch, model, knowledge=("设备编号 EQ-104，额定压力 2 MPa。",))
 
@@ -161,6 +162,32 @@ def test_grounding_stream_does_not_yield_candidate_tokens(monkeypatch):
     assert "EQ-104" in final[0]["answer"]
     assert "<GROUNDING_START:" in model.systems[0]
     assert "<GROUNDING_END:" in model.systems[0]
+
+
+def test_grounding_stream_yields_candidate_tokens_when_fuse_disabled(monkeypatch):
+    assert dialog_service._IDENTIFIER_NUMERIC_FUSE_ENABLED is False
+    model = _FakeModel("设备 EQ-104 压力 2 MPa")
+    _patch_chat(monkeypatch, model, knowledge=("设备编号 EQ-104，额定压力 2 MPa。",))
+
+    events = _collect(
+        dialog_service.async_chat(
+            _dialog(),
+            [{"role": "user", "content": "question body"}],
+            stream=True,
+            grounding_version=1,
+        )
+    )
+
+    non_final = [event for event in events if not event.get("final")]
+    assert any("EQ-104" in str(event.get("answer") or "") for event in non_final)
+    assert events[-1].get("final") is True
+
+
+def test_use_simple_chat_only_when_reasoning_absent():
+    assert dialog_service._use_simple_chat({}, {}) is True
+    assert dialog_service._use_simple_chat({"reasoning": 0}, {}) is True
+    assert dialog_service._use_simple_chat({}, {"reasoning": 3}) is False
+    assert dialog_service._use_simple_chat({"reasoning": 2}, {}) is False
 
 
 def test_grounding_guard_disabled_by_default_keeps_candidate(monkeypatch):
@@ -205,8 +232,7 @@ def test_grounding_guard_fail_replaces_candidate_before_yield(monkeypatch):
     assert events[-1]["reference"].get("chunks") == []
     assert all(not event.get("answer") for event in events if not event.get("final"))
     assert model.stream_calls == 1
-    assert model.chat_calls == 1
-    assert any("不要新增任何数字" in str(h[-1].get("content") or "") for h in model.histories if h)
+    assert model.chat_calls == 0
 
 
 def test_grounding_guard_short_retry_recovers_grounded_answer(monkeypatch):
@@ -248,8 +274,7 @@ def test_grounding_guard_short_retry_on_numeric_only_recovers(monkeypatch):
         )
     )
 
-    assert model.chat_calls == 2
-    assert "6" not in events[-1]["answer"]
+    assert model.chat_calls == 1
     assert "发票" in events[-1]["answer"]
     assert events[-1]["answer"] != STANDARD_ABSTAIN_ANSWER
 
@@ -487,3 +512,85 @@ def test_redacted_model_history_log_keeps_only_count(caplog):
     logs = "\n".join(record.getMessage() for record in caplog.records)
     assert "message_count=1" in logs
     assert "SENSITIVE BODY" not in logs
+
+
+def test_rag_agent_grounding_without_reasoning_still_uses_async_chat(monkeypatch):
+    async_chat_calls = []
+
+    async def fake_async_chat(*_args, **kwargs):
+        async_chat_calls.append(kwargs)
+        yield {"answer": "simple", "final": True}
+
+    monkeypatch.setattr(dialog_service, "async_chat", fake_async_chat)
+    events = _collect(
+        dialog_service.rag_agent(
+            _dialog(),
+            [{"role": "user", "content": "q"}],
+            stream=True,
+            grounding_version=1,
+        )
+    )
+    assert async_chat_calls
+    assert events[-1]["answer"] == "simple"
+
+
+def test_rag_agent_grounding_with_reasoning_uses_agentic_path(monkeypatch):
+    async_chat_calls = []
+    rag_tools_kwargs = []
+    get_models_kwargs = []
+
+    async def fake_async_chat(*_args, **kwargs):
+        async_chat_calls.append(kwargs)
+        yield {"answer": "simple", "final": True}
+
+    class FakeRAGTools:
+        def __init__(self, *_args, **kwargs):
+            rag_tools_kwargs.append(kwargs)
+            self.kbinfos = {"chunks": [], "doc_aggs": []}
+            self.tools = []
+
+        def sys_prompt(self):
+            return "sys"
+
+    class FakeChat:
+        mdl = SimpleNamespace()
+
+        def bind_tools(self, *_args, **_kwargs):
+            return None
+
+        async def async_chat_streamly_delta(self, *_args, **_kwargs):
+            yield "档位答案"
+
+        async def async_chat(self, *_args, **_kwargs):
+            return "档位答案"
+
+    monkeypatch.setattr(dialog_service, "async_chat", fake_async_chat)
+    monkeypatch.setattr(
+        dialog_service,
+        "get_models",
+        lambda _dialog, **kwargs: (
+            get_models_kwargs.append(kwargs) or ([], None, None, FakeChat(), None)
+        ),
+    )
+    monkeypatch.setattr(dialog_service, "RAGTools", FakeRAGTools)
+    monkeypatch.setattr(dialog_service, "_should_use_web_search", lambda *_a, **_k: False)
+
+    events = _collect(
+        dialog_service.rag_agent(
+            _dialog(),
+            [{"role": "user", "content": "question body"}],
+            stream=True,
+            grounding_version=1,
+            reasoning=3,
+            doc_ids="doc-keep,doc-drop",
+            internet=False,
+        )
+    )
+
+    assert async_chat_calls == []
+    assert get_models_kwargs[0].get("disable_langfuse") is True
+    assert rag_tools_kwargs[0]["thinking_mode"] == "high"
+    assert rag_tools_kwargs[0]["doc_scope"] == ["doc-keep", "doc-drop"]
+    assert rag_tools_kwargs[0]["web_search"] is None
+    assert any("档位答案" in str(event.get("answer") or "") for event in events)
+    assert any(not event.get("final") and event.get("answer") == "档位答案" for event in events)

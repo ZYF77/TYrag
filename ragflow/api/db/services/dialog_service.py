@@ -91,9 +91,19 @@ def _extract_effective_knowledge(content: str, start: str | None, end: str | Non
 
 
 # Identifier/Numeric Fuse implementation is retained below, but not applied on
-# the live path until explicitly re-enabled.  Prompt-fit / empty_response /
-# stream buffering for grounding_version=1 remain active.
+# the live path until explicitly re-enabled. Prompt-fit, empty_response, and
+# prompt/log redaction still follow grounding_version=1. Candidate-token
+# buffering follows this fuse switch so streaming can stay live while the
+# fuse is off.
 _IDENTIFIER_NUMERIC_FUSE_ENABLED = False
+
+
+def _buffer_candidate_tokens(grounding_enabled: bool) -> bool:
+    return bool(grounding_enabled and _IDENTIFIER_NUMERIC_FUSE_ENABLED)
+
+
+def _use_simple_chat(prompt_config, kwargs) -> bool:
+    return not prompt_config.get("reasoning", 0) and not kwargs.get("reasoning")
 
 
 def _log_grounding_guard(result, *, abstain: bool) -> None:
@@ -546,7 +556,7 @@ async def async_chat_solo(dialog, messages, stream=True, session_id=None, ground
         last_state = None
         async for kind, value, state in _stream_with_think_delta(stream_iter):
             last_state = state
-            if grounding_enabled:
+            if _buffer_candidate_tokens(grounding_enabled):
                 continue
             if kind == "marker":
                 flags = {"start_to_think": True} if value == "<think>" else {"end_to_think": True}
@@ -1303,7 +1313,7 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
         last_state = None
         async for kind, value, state in _stream_with_think_delta(stream_iter):
             last_state = state
-            if grounding_enabled:
+            if _buffer_candidate_tokens(grounding_enabled):
                 continue
             if kind == "marker":
                 flags = {"start_to_think": True} if value == "<think>" else {"end_to_think": True}
@@ -2221,11 +2231,14 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
     prompt_config = dialog.prompt_config or {}
     assert messages[-1]["role"] == "user", "The last content of this conversation is not from user."
     grounding_enabled = _grounding_requested(kwargs.get("grounding_version"))
-    if grounding_enabled or (not prompt_config.get("reasoning", 0) and not kwargs.get("reasoning")):
+    if _use_simple_chat(prompt_config, kwargs):
         async for ans in async_chat(dialog, messages, stream, **kwargs):
             yield ans
         return
-    kbs, embd_mdl, rerank_mdl, chat_mdl, tts_mdl = get_models(dialog)
+    model_kwargs = {"langfuse_session_id": kwargs.get("session_id")}
+    if grounding_enabled:
+        model_kwargs["disable_langfuse"] = True
+    kbs, embd_mdl, rerank_mdl, chat_mdl, tts_mdl = get_models(dialog, **model_kwargs)
     use_web_search = _should_use_web_search(prompt_config, kwargs.get("internet"))
     logging.debug("web_search kb=%s configured=%s internet=%r enabled=%s", bool(dialog.kb_ids), has_web_search_provider(prompt_config), kwargs.get("internet"), use_web_search)
     tenant_ids = list(set([kb.tenant_id for kb in kbs]))
@@ -2355,14 +2368,17 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
             finally:
                 event_queue.put_nowait(("stream_done",))
 
-        token = set_think_log_sink(_log_sink)
+        token = set_think_log_sink(_log_sink, redact_content=grounding_enabled)
         drive = asyncio.create_task(_drive_stream())
         last_state = None
         log_think_open = False
+        hold_tokens = _buffer_candidate_tokens(grounding_enabled)
         try:
             while True:
                 item = await event_queue.get()
                 if item[0] == "log":
+                    if hold_tokens:
+                        continue
                     if not log_think_open:
                         yield {"answer": "", "reference": {}, "audio_binary": None, "final": False, "start_to_think": True}
                         log_think_open = True
@@ -2373,6 +2389,8 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
                 _, kind, value, state = item
                 if state is not None:
                     last_state = state
+                if hold_tokens:
+                    continue
                 # A real stream event follows the logs -> close the log think block.
                 if log_think_open:
                     yield {"answer": "", "reference": {}, "audio_binary": None, "final": False, "end_to_think": True}
@@ -2405,7 +2423,8 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
     else:
         answer = await chat_mdl.async_chat(rag_tools.sys_prompt(), messages, gen_conf)
         user_content = messages[-1].get("content", "[content not available]")
-        logging.debug("User: {}|Assistant: {}".format(user_content, answer))
+        if not grounding_enabled:
+            logging.debug("User: {}|Assistant: {}".format(user_content, answer))
         res = await decorate_answer(answer)
         res["audio_binary"] = tts(tts_mdl, answer)
         yield res

@@ -36,11 +36,16 @@ from __future__ import annotations
 
 import contextvars
 import logging
+import re
 from typing import Callable
 
 # Per-request sink: a callable(str) that forwards one log line, or None when no
 # agentic turn is streaming in the current context.
 _think_log_sink: contextvars.ContextVar[Callable[[str], None] | None] = contextvars.ContextVar("think_log_sink", default=None)
+_think_log_redact: contextvars.ContextVar[bool] = contextvars.ContextVar("think_log_redact", default=False)
+
+# Stage tags like "[Hybrid search]" stay; quoted query/knowledge body does not.
+_STAGE_TAG_RE = re.compile(r"^((?:<br>)?\s*\[[^\]]+\])")
 
 # Only bracket-tagged INFO lines from these logger namespaces are surfaced.
 _SCOPED_PREFIXES = ("rag.advanced_rag", "rag.llm.chat_model", "rag.llm.tool_decorator")
@@ -65,12 +70,26 @@ class ThinkLogHandler(logging.Handler):
         # Only the bracket-tagged progress lines ("[Hybrid search] ...").
         if not msg or not msg.lstrip().startswith("["):
             return
+        if _think_log_redact.get():
+            msg = public_think_log(msg)
+            if not msg:
+                return
         try:
             sink("<br>" + msg.strip())
         except Exception:
             # Never let think-log forwarding break the request or the logging
             # subsystem itself.
             pass
+
+
+def public_think_log(msg: str) -> str | None:
+    """Keep only the agentic stage tag; drop question text and knowledge body."""
+    if not msg:
+        return None
+    match = _STAGE_TAG_RE.match(msg.strip())
+    if not match:
+        return None
+    return match.group(1)
 
 
 def install_think_log_handler() -> None:
@@ -83,12 +102,17 @@ def install_think_log_handler() -> None:
     _installed = True
 
 
-def set_think_log_sink(sink: Callable[[str], None] | None):
+def set_think_log_sink(sink: Callable[[str], None] | None, *, redact_content: bool = False):
     """Activate ``sink`` for the current context; returns the reset token."""
+    _think_log_redact.set(bool(redact_content))
     return _think_log_sink.set(sink)
 
 
 def reset_think_log_sink(token) -> None:
+    try:
+        _think_log_redact.set(False)
+    except Exception:
+        pass
     try:
         _think_log_sink.reset(token)
     except Exception:
