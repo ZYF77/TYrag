@@ -1,5 +1,7 @@
 # Integrated baseline：v2、WP-03 与 file-share-v3
 
+> 历史基线：其中 RF-PATCH-002/source-ticket 路径已由 ADR-011 和官方 multipart upload 取代，不得作为当前实现或升级重放依据。
+
 ## 基线身份
 
 - Baseline ID：`tyrag-integrated-candidate-v2-wp03-file-share-v3`

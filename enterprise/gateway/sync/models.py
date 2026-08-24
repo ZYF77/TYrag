@@ -92,33 +92,6 @@ CREATE INDEX IF NOT EXISTS idx_ext_doc_batch
 """
 
 
-CREATE_SOURCE_TICKET = """
-CREATE TABLE IF NOT EXISTS ext_source_ticket (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ticket_hash TEXT NOT NULL UNIQUE,
-    tenant_id TEXT NOT NULL,
-    source_system TEXT NOT NULL,
-    external_document_id TEXT NOT NULL,
-    source_version_id TEXT NOT NULL,
-    storage_root_id TEXT NOT NULL,
-    relative_path TEXT NOT NULL,
-    file_name TEXT NOT NULL,
-    media_type TEXT NOT NULL,
-    expected_sha256 TEXT NOT NULL,
-    source_size INTEGER NOT NULL,
-    source_modified_ns INTEGER NOT NULL,
-    source_etag TEXT NOT NULL,
-    expires_at TEXT NOT NULL,
-    consumed_at TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_ext_source_ticket_expiry
-    ON ext_source_ticket(expires_at, consumed_at);
-"""
-
-
 CREATE_SYNC_OUTBOX = """
 CREATE TABLE IF NOT EXISTS sync_outbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -406,7 +379,6 @@ async def migrate_schema(db: aiosqlite.Connection) -> None:
             await db.execute(f"ALTER TABLE ext_document_map ADD COLUMN {column} {ddl}")
     await db.executescript(CREATE_SYNC_OUTBOX)
     await db.executescript(CREATE_DOCUMENT_EVENT_RECEIPT)
-    await db.executescript(CREATE_SOURCE_TICKET)
     from enterprise.gateway.sync.transient_attachment import ensure_attachment_schema
     from enterprise.gateway.callback_delivery import ensure_callback_delivery_schema
     from enterprise.gateway.query.citation_file import ensure_citation_file_schema

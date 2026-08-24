@@ -1,5 +1,9 @@
 # CHANGE-REQUEST：RAGFlow 外部文件票据解析
 
+## 状态
+
+已退役。ADR-011 改用 v0.26.4 官方 Dataset Document multipart upload；升级时不得重放本补丁。
+
 ## 原因
 
 `v0.26.4` 默认解析链路把 `Document.location` 当作对象存储坐标。为了满足“原始 PDF 不进入 MinIO/RAGFlow 持久存储”，需要让 `source_type=enterprise_file_share` 的虚拟文档在解析时调用 Gateway 的一次性票据接口。

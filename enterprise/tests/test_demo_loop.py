@@ -304,7 +304,8 @@ class TestAsk:
             )
             assert first.status_code == 200
             conversation_id = first.json()["conversationId"]
-            assert first.json()["ragflowSessionId"] == "stub-session"
+            ragflow_session_id = first.json()["ragflowSessionId"]
+            assert ragflow_session_id.startswith("session-")
 
             second = await c.post(
                 "/enterprise/api/v1/demo/ask",
@@ -371,7 +372,7 @@ class TestAsk:
             assert row[0] == 1
             assert row[1] == "v1"
             assert row[2] == "FA-DEMO-001"
-            assert row[3] == "stub-session"
+            assert row[3] == body["ragflowSessionId"]
 
     @pytest.mark.asyncio
     async def test_ask_returns_no_reliable_evidence_when_answer_empty(
@@ -893,12 +894,13 @@ class TestHistoryEmptyMessageFilter:
             )
             assert created.status_code == 200
             conversation_id = created.json()["conversationId"]
+            ragflow_session_id = created.json()["ragflowSessionId"]
 
             stub = query_router._query_stub
-            stub._sessions["stub-session"]["messages"].append(
+            stub._sessions[ragflow_session_id]["messages"].append(
                 {"role": "assistant", "content": ""}
             )
-            stub._sessions["stub-session"]["reference"].append(
+            stub._sessions[ragflow_session_id]["reference"].append(
                 {"chunks": []}
             )
 

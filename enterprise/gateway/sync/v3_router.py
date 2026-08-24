@@ -1,7 +1,7 @@
 """v3 FILE_SHARE document ingestion.
 
 v2 remains the S3 contract.  v3 deliberately accepts only a read-only file
-share coordinate and hands RAGFlow a short-lived opaque source ticket.
+share coordinate; the sync worker verifies and uploads that file to RAGFlow.
 """
 
 from __future__ import annotations

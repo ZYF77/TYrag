@@ -188,6 +188,21 @@ async def upload_info(tenant_id: str):
         return server_error_response(e)
 
 
+@manager.route("/documents/upload/<file_id>", methods=["DELETE"])  # noqa: F821
+@login_required
+@add_tenant_id_to_kwargs
+async def delete_upload_info(file_id: str, tenant_id: str):
+    """Delete one temporary upload owned by the authenticated tenant."""
+    if not re.fullmatch(r"[0-9a-f]{32}", file_id or ""):
+        return get_error_argument_result("Invalid upload id")
+    await thread_pool_exec(
+        settings.STORAGE_IMPL.rm,
+        f"{tenant_id}-downloads",
+        file_id,
+    )
+    return get_result(data={"id": file_id})
+
+
 @manager.route("/datasets/<dataset_id>/documents/<document_id>", methods=["PATCH"])  # noqa: F821
 @login_required
 @add_tenant_id_to_kwargs
@@ -439,98 +454,6 @@ async def metadata_batch_update(dataset_id, tenant_id):
     target_doc_ids = list(target_doc_ids)
     updated = DocMetadataService.batch_update_metadata(dataset_id, target_doc_ids, updates, deletes)
     return get_result(data={"updated": updated, "matched_docs": len(target_doc_ids)})
-
-
-@manager.route("/datasets/<dataset_id>/documents/external", methods=["POST"])  # noqa: F821
-@login_required
-@add_tenant_id_to_kwargs
-async def register_external_document(dataset_id, tenant_id):
-    """Register a virtual document whose bytes are fetched from a Gateway ticket.
-
-    The RAGFlow database stores only the opaque ticket in ``location``.  No
-    source PDF is uploaded to ``STORAGE_IMPL`` by this endpoint.
-    """
-    if not KnowledgebaseService.accessible(kb_id=dataset_id, user_id=tenant_id):
-        return get_error_data_result(message=f"You don't own the dataset {dataset_id}.")
-    req = await get_request_json()
-    name = (req.get("name") or "").strip()
-    ticket = req.get("ticket") or ""
-    size = req.get("size")
-    media_type = req.get("media_type") or "application/pdf"
-    meta_fields = req.get("meta_fields") or {}
-    if (
-        not name
-        or "/" in name
-        or "\\" in name
-        or len(name.encode("utf-8")) > FILE_NAME_LEN_LIMIT
-    ):
-        return get_error_data_result(message="A safe document name is required.", code=RetCode.ARGUMENT_ERROR)
-    if not isinstance(ticket, str) or not ticket.startswith("external://") or len(ticket) > 255:
-        return get_error_data_result(message="A valid external source ticket is required.", code=RetCode.ARGUMENT_ERROR)
-    if not isinstance(size, int) or isinstance(size, bool) or size < 0:
-        return get_error_data_result(message="size must be a non-negative integer.", code=RetCode.ARGUMENT_ERROR)
-    if media_type != "application/pdf" or not isinstance(meta_fields, dict):
-        return get_error_data_result(message="Only application/pdf external documents are supported.", code=RetCode.ARGUMENT_ERROR)
-
-    e, kb = KnowledgebaseService.get_by_id(dataset_id)
-    if not e or not check_kb_team_permission(kb, tenant_id):
-        return get_error_data_result(message=f"Can't find or access the dataset {dataset_id}.", code=RetCode.AUTHENTICATION_ERROR)
-    if DocumentService.query(name=name, kb_id=dataset_id):
-        return get_error_data_result(message="Duplicated document name in the same dataset.")
-
-    try:
-        kb_root_folder = FileService.get_kb_folder(kb.tenant_id)
-        if not kb_root_folder:
-            return get_error_data_result(message="Cannot find the root folder.")
-        kb_folder = FileService.new_a_file_from_kb(kb.tenant_id, kb.name, kb_root_folder["id"])
-        if not kb_folder:
-            return get_error_data_result(message="Cannot find the kb folder for this file.")
-        doc = DocumentService.insert(
-            {
-                "id": get_uuid(),
-                "kb_id": kb.id,
-                "parser_id": kb.parser_id,
-                "pipeline_id": kb.pipeline_id,
-                "parser_config": kb.parser_config,
-                "created_by": tenant_id,
-                "source_type": "enterprise_file_share",
-                "type": FileType.VIRTUAL,
-                "name": name,
-                "suffix": Path(name).suffix.lstrip(".") or "pdf",
-                "location": ticket,
-                "size": size,
-            }
-        )
-        FileService.add_file_from_kb(doc.to_dict(), kb_folder["id"], kb.tenant_id)
-        if meta_fields:
-            DocMetadataService.insert_document_metadata(doc.id, meta_fields)
-        return get_result(data=[map_doc_keys_with_run_status(doc, run_status="0")])
-    except Exception as e:
-        return server_error_response(e)
-
-
-@manager.route("/datasets/<dataset_id>/documents/<document_id>/external-source", methods=["PATCH"])  # noqa: F821
-@login_required
-@add_tenant_id_to_kwargs
-async def refresh_external_document_source(dataset_id, document_id, tenant_id):
-    """Replace a consumed/expired ticket without touching source storage."""
-    if not KnowledgebaseService.accessible(kb_id=dataset_id, user_id=tenant_id):
-        return get_error_data_result(message="no authorization", code=RetCode.AUTHENTICATION_ERROR)
-    req = await get_request_json()
-    ticket = req.get("ticket") or ""
-    size = req.get("size")
-    if not isinstance(ticket, str) or not ticket.startswith("external://") or len(ticket) > 255:
-        return get_error_data_result(message="A valid external source ticket is required.", code=RetCode.ARGUMENT_ERROR)
-    if not isinstance(size, int) or isinstance(size, bool) or size < 0:
-        return get_error_data_result(message="size must be a non-negative integer.", code=RetCode.ARGUMENT_ERROR)
-    e, doc = DocumentService.get_by_id(document_id)
-    if not e or doc.kb_id != dataset_id or doc.source_type != "enterprise_file_share":
-        return get_error_data_result(message="Document not found.", code=RetCode.DATA_ERROR)
-    DocumentService.update_by_id(
-        document_id,
-        {"location": ticket, "size": size, "source_type": "enterprise_file_share"},
-    )
-    return get_result(data=map_doc_keys_with_run_status(doc, run_status=doc.run or "0"))
 
 
 @manager.route("/datasets/<dataset_id>/documents", methods=["POST"])  # noqa: F821
