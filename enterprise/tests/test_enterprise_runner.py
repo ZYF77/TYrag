@@ -210,7 +210,7 @@ def test_runner_rejects_skips_and_xpasses_in_test_steps():
     assert 'Remove-Item -LiteralPath "Env:$environmentName"' in source
     assert "Remove-Item -LiteralPath 'Env:ENTERPRISE_TEST_MODE'" in source
     assert "RAGFLOW_" in source
-    assert "TYRAG_EXTERNAL_SOURCE_INTERNAL_KEY" in source
+    assert "TYRAG_EXTERNAL_SOURCE_INTERNAL_KEY" not in source
 
 
 def test_required_live_suite_is_v3_v2_and_has_accept_receipt_plus_diagnostic_status():
@@ -229,7 +229,15 @@ def test_required_live_suite_is_v3_v2_and_has_accept_receipt_plus_diagnostic_sta
     assert 'status.get("errorCode") is not None' in source
     assert 'status.get("status") == "retrievable"' not in source
     assert "S3_" not in source
-    assert "/enterprise/api/v1/" not in source
+    assert "/enterprise/api/v1/health" in source
+    assert "/api/v1/system/version" in source
+    assert 'actual != "v0.26.4"' in source
+    assert "parse_sse" in source
+    assert "answer.completed" in source
+    assert "_assert_history_replay" in source
+    assert "_verify_ragflow_session" in source
+    assert "_verify_document_scoped_retrieval" in source
+    assert '"document_ids": [document_id]' in source
     assert "pytest.skip" not in source
     assert "pytest.xfail" not in source
     assert "unittest.mock" not in source
@@ -320,22 +328,19 @@ def test_preflight_accepts_supported_hmac_credential_shapes(
     assert _auth_state() == {"status": "configured", "reason": "hmac_and_jwt"}
 
 
-def test_overlay_wires_gateway_file_share_and_internal_ticket_network():
+def test_overlay_wires_gateway_file_share_and_official_ragflow_api():
     overlay_source = OVERLAY.read_text(encoding="utf-8")
     overlay = yaml.safe_load(OVERLAY.read_text(encoding="utf-8"))
     services = overlay["services"]
     gateway = services["enterprise-gateway"]
-    ragflow = services["ragflow-cpu"]
     assert "ragflow" in gateway["networks"]
     assert any(":ro" in str(volume) for volume in gateway["volumes"])
     assert gateway["environment"]["RAGFLOW_BASE_URL"] == "http://ragflow-cpu:9380"
-    assert gateway["environment"]["TYRAG_EXTERNAL_SOURCE_INTERNAL_KEY"]
     assert gateway["environment"]["ENTERPRISE_SYNC_AUTH_ENABLED"] == "true"
+    assert gateway["environment"]["ENTERPRISE_CALLBACK_ENABLED"]
+    assert gateway["environment"]["ENTERPRISE_CALLBACK_ENDPOINTS"]
     assert gateway["environment"].get("ENTERPRISE_TEST_MODE") != "1"
-    assert ragflow["environment"]["TYRAG_EXTERNAL_SOURCE_GATEWAY_URL"] == (
-        "http://enterprise-gateway:5188"
-    )
-    assert ragflow["environment"]["TYRAG_EXTERNAL_SOURCE_INTERNAL_KEY"]
+    assert "TYRAG_EXTERNAL_SOURCE" not in overlay_source
     assert (
         "${ENTERPRISE_GATEWAY_STATE_HOST_DIR:?set ENTERPRISE_GATEWAY_STATE_HOST_DIR}:/var/lib/tyrag/state"
         in overlay_source
@@ -394,3 +399,42 @@ def test_accept_receipt_and_diagnostic_status_url_helpers():
             external_document_id="DOC-1",
             source_version_id="v3-1",
         )
+
+
+def test_live_runner_docker_target_allowlist():
+    from enterprise.scripts.run_file_share_v3_v2_e2e import (
+        LiveEnvironmentError,
+        assert_http_target,
+    )
+
+    assert assert_http_target("http://enterprise-gateway:5188", target_mode="docker")
+    assert assert_http_target("http://ragflow-cpu:9380", target_mode="docker")
+    with pytest.raises(LiveEnvironmentError):
+        assert_http_target("http://192.168.30.30:5188", target_mode="docker")
+    with pytest.raises(LiveEnvironmentError):
+        assert_http_target("http://example.com", target_mode="docker")
+
+
+def test_existing_callback_mode_reads_only_safe_delivery_fields(tmp_path):
+    import sqlite3
+
+    from enterprise.scripts.run_file_share_v3_v2_e2e import (
+        Artifacts,
+        ExistingCallbackDelivery,
+    )
+
+    db_path = tmp_path / "gateway.db"
+    with sqlite3.connect(db_path) as db:
+        db.execute("""CREATE TABLE callback_delivery (
+            id INTEGER PRIMARY KEY, delivery_id TEXT, attempts INTEGER, state TEXT,
+            last_http_status INTEGER, tenant_id TEXT, source_system TEXT,
+            external_document_id TEXT, source_version_id TEXT)""")
+        db.execute("""INSERT INTO callback_delivery VALUES
+            (1,'delivery-1',2,'delivered',204,'tenant-a','EAM','DOC-1','v1')""")
+    artifacts = Artifacts(tmp_path / "artifacts")
+    ExistingCallbackDelivery(
+        str(db_path), "tenant-a", "EAM", "DOC-1", "v1", artifacts,
+    ).assert_success(1)
+    assert artifacts.callbacks == [
+        {"deliveryId": "delivery-1", "attempts": 2, "httpStatus": 204}
+    ]

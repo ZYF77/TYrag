@@ -1,0 +1,8 @@
+flowchart LR
+  EAM["EAM<br/>Query v2.9.0 / FILE_SHARE v3.1.0 / Callback v1.0.0"]
+  GW["Enterprise Gateway<br/>认证 ACL 状态 幂等 质量门 回调 Citation Snapshot"]
+  RF["RAGFlow v0.26.4<br/>官方 upload dataset document chunks retrieval chat session completion"]
+  EAM -->|既有外部协议| GW
+  GW -->|官方 v0.26.4 API| RF
+  RF -->|parse/retrieval/completion 结果| GW
+  GW -->|既有 JSON/SSE、终态 callback、授权 citation| EAM

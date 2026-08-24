@@ -323,7 +323,7 @@ function Invoke-PytestStep {
     $applicationEnvironmentNames = @(
         Get-ChildItem Env: | Where-Object {
             $_.Name -match '^(ENTERPRISE_|RAGFLOW_|JWT_|S3_|PG_)' -or
-            $_.Name -in @('AUTH_ENABLED', 'GATEWAY_URL', 'TYRAG_EXTERNAL_SOURCE_INTERNAL_KEY')
+            $_.Name -in @('AUTH_ENABLED', 'GATEWAY_URL')
         } | ForEach-Object { $_.Name }
     )
     foreach ($environmentName in $applicationEnvironmentNames) {
