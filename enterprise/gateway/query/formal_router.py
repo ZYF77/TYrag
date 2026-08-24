@@ -659,12 +659,13 @@ def _validate_chunks(
     docs_by_ragflow: dict[str, ExtDocumentMap],
 ) -> None:
     out_of_scope = [
-        c for c in chunks if c.get("document_id") not in docs_by_ragflow
+        c for c in chunks
+        if (c.get("document_id") or c.get("doc_id")) not in docs_by_ragflow
     ]
     if out_of_scope:
         logger.warning(
             "RAGFlow returned out-of-scope chunks document_ids=%s",
-            sorted({c.get("document_id") for c in out_of_scope}),
+            sorted({c.get("document_id") or c.get("doc_id") for c in out_of_scope}),
         )
         raise _FormalQueryError(
             "RAGFLOW_SCOPE_VIOLATION",
@@ -681,7 +682,9 @@ def _build_citations(
     _validate_chunks(chunks, docs_by_ragflow)
     return [
         _chunk_to_citation(
-            c, index, docs_by_ragflow[c["document_id"]], message_id
+            c, index,
+            docs_by_ragflow[c.get("document_id") or c.get("doc_id")],
+            message_id,
         )
         for index, c in enumerate(chunks)
         if isinstance(c, dict)

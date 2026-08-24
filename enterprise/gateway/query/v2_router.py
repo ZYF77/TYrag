@@ -769,7 +769,7 @@ def _external_citations(
     attachment_document_ids = attachment_document_ids or set()
     citations: list[dict] = []
     for ordinal, (chunk, ref_index) in enumerate(cited_refs):
-        document_id = chunk.get("document_id")
+        document_id = chunk.get("document_id") or chunk.get("doc_id")
         if str(document_id or "") in attachment_document_ids:
             continue
         doc = docs_by_internal_id.get(document_id)
