@@ -438,3 +438,9 @@ def test_existing_callback_mode_reads_only_safe_delivery_fields(tmp_path):
     assert artifacts.callbacks == [
         {"deliveryId": "delivery-1", "attempts": 2, "httpStatus": 204}
     ]
+
+
+def test_live_runner_uses_actual_pdf_page_count():
+    from enterprise.scripts.run_file_share_v3_v2_e2e import _pdf_page_count
+
+    assert _pdf_page_count(ROOT / "enterprise" / "tests" / "fixtures" / "Doc1.pdf") == 1

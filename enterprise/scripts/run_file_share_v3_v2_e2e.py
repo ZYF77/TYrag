@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import shutil
 import sqlite3
 import sys
@@ -156,15 +157,28 @@ def _sha256_file(path: Path, *, chunk_bytes: int = HASH_CHUNK_BYTES) -> tuple[st
     return digest.hexdigest(), size
 
 
+def _pdf_page_count(path: Path) -> int:
+    try:
+        from pypdf import PdfReader
+
+        count = len(PdfReader(path).pages)
+    except ModuleNotFoundError:
+        count = len(re.findall(rb"/Type\s*/Page(?!s)\b", path.read_bytes()))
+    if count < 1:
+        raise LiveEnvironmentError("pdf_page_count_unavailable")
+    return count
+
+
 def _metadata(*, tenant_id: str, source_system: str, external_document_id: str,
-              source_version_id: str, equipment_id: str, fixed_asset_no: str) -> dict[str, Any]:
+              source_version_id: str, equipment_id: str, fixed_asset_no: str,
+              page_count: int = 1) -> dict[str, Any]:
     return {"schema_version": 1, "tenant_id": tenant_id, "external_document_id": external_document_id,
             "source_system": source_system, "equipment_id": equipment_id,
             "fixed_asset_no": fixed_asset_no or None, "document_type": os.getenv("ENTERPRISE_E2E_DOCUMENT_TYPE", "PRODUCT_MANUAL"),
             "document_version": source_version_id, "department_id": os.getenv("ENTERPRISE_E2E_DEPARTMENT_ID", "maintenance"),
             "security_level": int(os.getenv("ENTERPRISE_E2E_SECURITY_LEVEL", "2")), "business_status": "active",
             "allow_group_ids": [x.strip() for x in os.getenv("ENTERPRISE_E2E_ALLOW_GROUPS", "maintenance").split(",") if x.strip()],
-            "deny_group_ids": [], "page_count": 1}
+            "deny_group_ids": [], "page_count": page_count}
 
 
 def _service_headers(*, key_id: str, secret: str, method: str, relative_url: str,
@@ -587,14 +601,15 @@ def run_live(artifacts: Artifacts, *, target_mode: str = "local",
     else:
         staged, relative = _stage_unique_source_copy(_file_path(root, original_path), original_path)
     try:
-        sha, size = _sha256_file(staged); stat = staged.stat(); equipment = f"{_env('ENTERPRISE_E2E_EQUIPMENT_ID')[:96]}-e2e-{uuid.uuid4().hex[:12]}"
+        sha, size = _sha256_file(staged); page_count = _pdf_page_count(staged); stat = staged.stat(); equipment = f"{_env('ENTERPRISE_E2E_EQUIPMENT_ID')[:96]}-e2e-{uuid.uuid4().hex[:12]}"
         event = _env("ENTERPRISE_E2E_EVENT_ID", required=False, default=f"evt-{document}")
         feed = {"eventId": event, "eventType": "upsert", "tenantId": tenant, "sourceSystem": system,
                 "externalDocumentId": document, "sourceVersionId": version, "sha256": sha, "fileName": staged.name,
                 "mediaType": "application/pdf", "source": {"kind": "FILE_SHARE", "storageRootId": root,
                     "relativePath": relative, "size": size, "etag": f'"{stat.st_size:x}-{stat.st_mtime_ns:x}"'},
                 "metadata": _metadata(tenant_id=tenant, source_system=system, external_document_id=document,
-                    source_version_id=version, equipment_id=equipment, fixed_asset_no=_env("ENTERPRISE_E2E_FIXED_ASSET_NO", required=False))}
+                    source_version_id=version, equipment_id=equipment, fixed_asset_no=_env("ENTERPRISE_E2E_FIXED_ASSET_NO", required=False),
+                    page_count=page_count)}
         question_one = _env(
             "ENTERPRISE_E2E_QUESTION",
             required=False,
