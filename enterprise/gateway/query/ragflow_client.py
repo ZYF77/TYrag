@@ -76,13 +76,10 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
         document_ids: list[str],
         request_id: str | None = None,
     ) -> dict:
-        rid = request_id or self._new_request_id()
-        result = await self._run_sync(
-            self._sync_request,
-            "POST",
-            f"/api/v1/datasets/{dataset_id}/documents/parse",
-            rid,
-            json_data={"document_ids": document_ids},
+        result = await super().start_parsing(
+            dataset_id,
+            document_ids,
+            request_id=request_id,
         )
         return self._require_ok(result)
 
@@ -441,37 +438,16 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
         request_id: str | None = None,
         created_by: str | None = None,
     ) -> None:
-        """Best-effort cleanup for temporary chat attachments.
-
-        Runtime attachments from ``/documents/upload`` live in the downloads
-        bucket. RAGFlow has no public DELETE for that store (session delete
-        cleans them internally). If this process already has RAGFlow
-        ``STORAGE_IMPL`` loaded, remove ``{created_by}-downloads``; otherwise
-        the Gateway ledger and cleanup worker record the orphan.
-        """
-        del request_id
-        storage = None
-        try:
-            import sys
-
-            settings_mod = sys.modules.get("rag.settings") or sys.modules.get(
-                "common.settings"
-            )
-            storage = getattr(settings_mod, "STORAGE_IMPL", None) if settings_mod else None
-        except Exception:
-            storage = None
-        if storage is not None and created_by and file_id:
-            try:
-                storage.rm(f"{created_by}-downloads", file_id)
-                return
-            except Exception:
-                logger.warning(
-                    "RAGFlow downloads STORAGE_IMPL.rm failed file_id=%s", file_id
-                )
-        logger.info(
-            "chat attachment delete skipped (no public downloads DELETE) file_id=%s",
-            file_id,
+        """Delete one temporary chat upload through the authenticated API."""
+        del created_by
+        rid = request_id or self._new_request_id()
+        result = await self._run_sync(
+            self._sync_request,
+            "DELETE",
+            f"/api/v1/documents/upload/{quote(file_id, safe='')}",
+            rid,
         )
+        self._require_ok(result)
 
     async def understand_file(
         self,

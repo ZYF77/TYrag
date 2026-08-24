@@ -58,6 +58,31 @@ class TestRAGFlowClientTimeout:
 
 
 @pytest.mark.asyncio
+async def test_query_start_parsing_uses_canonical_chunks_endpoint():
+    client = RAGFlowQueryClient()
+    captured = {}
+
+    async def fake_run_sync(fn, *args, **kwargs):
+        del fn
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return {"code": 0, "data": True}
+
+    client._run_sync = fake_run_sync
+    result = await client.start_parsing(
+        "dataset-1", ["document-1"], request_id="request-1"
+    )
+
+    assert captured["args"] == (
+        "POST",
+        "/api/v1/datasets/dataset-1/chunks",
+        "request-1",
+    )
+    assert captured["kwargs"] == {"json_data": {"document_ids": ["document-1"]}}
+    assert result == {"code": 0, "data": True}
+
+
+@pytest.mark.asyncio
 async def test_v2_completion_sends_session_without_projected_messages():
     client = RAGFlowQueryClient()
     captured = {}

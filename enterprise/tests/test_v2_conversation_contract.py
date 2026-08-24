@@ -1328,7 +1328,7 @@ class _ExplicitStreamOutcomeStub(RAGFlowQueryStub):
         yield {
             "code": 0,
             "data": {
-                "answer": "explicit stream answer",
+                "answer": "explicit stream answer [ID:0]",
                 "status": "no_reliable_evidence",
                 "final": False,
             },
@@ -1452,7 +1452,7 @@ async def test_v2_stream_keeps_business_state_independent_of_citations(runtime):
 
     assert response.status_code == 200
     assert '"status": "无可靠依据"' in response.text
-    assert "event: citation" not in response.text
+    assert "event: citation" in response.text
 
 
 @pytest.mark.asyncio
@@ -1540,7 +1540,7 @@ async def test_message_level_internet_streams_web_citation(runtime):
 
 
 @pytest.mark.asyncio
-async def test_internet_requires_configured_provider(runtime):
+async def test_internet_without_configured_provider_falls_back_to_internal(runtime):
     await _insert_document(
         runtime.db,
         external_id="DOC-WEB-OFF",
@@ -1561,11 +1561,10 @@ async def test_internet_requires_configured_provider(runtime):
             },
         )
 
-    assert response.status_code == 503
-    assert response.json()["code"] == "WEB_SEARCH_UNAVAILABLE"
-    assert response.json()["message"] == "联网暂不可用，可关闭联网后重试。"
-    assert response.json()["retryable"] is True
-    assert runtime.stub._sessions == {}
+    assert response.status_code == 200
+    assert response.json()["status"] == "已完成"
+    assert runtime.stub._last_completion_body["internet"] is False
+    assert runtime.stub._sessions
 
 
 @pytest.mark.asyncio
@@ -1690,7 +1689,7 @@ async def test_v2_keeps_only_chunks_cited_in_the_answer(runtime):
 
 
 @pytest.mark.asyncio
-async def test_v2_clears_citations_when_no_reliable_evidence(runtime):
+async def test_v2_keeps_citations_when_no_reliable_evidence(runtime):
     await _insert_document(
         runtime.db,
         external_id="EXT-DOC-NONE",
@@ -1711,11 +1710,12 @@ async def test_v2_clears_citations_when_no_reliable_evidence(runtime):
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["status"] == "无可靠依据"
-    assert body["citations"] == []
+    assert len(body["citations"]) == 1
+    assert body["citations"][0]["externalDocumentId"] == "EXT-DOC-NONE"
 
 
 @pytest.mark.asyncio
-async def test_v2_abstain_phrase_forces_no_reliable_evidence_and_clears_citations(
+async def test_v2_abstain_phrase_keeps_state_and_citations_independent(
     runtime,
 ):
     await _insert_document(
@@ -1739,12 +1739,12 @@ async def test_v2_abstain_phrase_forces_no_reliable_evidence_and_clears_citation
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["status"] == "无可靠依据"
-    assert body["citations"] == []
+    assert len(body["citations"]) == 2
     assistant = next(
         item for item in history.json()["items"] if item["role"] == "assistant"
     )
     assert assistant["status"] == "无可靠依据"
-    assert assistant["citations"] == []
+    assert len(assistant["citations"]) == 2
 
 
 @pytest.mark.asyncio

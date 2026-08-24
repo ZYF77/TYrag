@@ -134,7 +134,7 @@ async def _main() -> int:
                     f"{base}/conversations/{conversation_id}/messages?limit=50"
                 )
                 assert detail.status_code == history.status_code == 200
-                assert detail.json()["contextCompacted"] is True
+                assert detail.json()["contextCompacted"] is False
                 assert len(history.json()["items"]) >= 6
                 config.context_compress_enabled = False
                 after = await client.post(
@@ -145,8 +145,8 @@ async def _main() -> int:
                     },
                 )
                 assert after.status_code == 200, after.text
-                assert "[先前对话摘要]" in (stub._last_completion_body or {}).get(
-                    "question", ""
+                assert (stub._last_completion_body or {}).get("question") == (
+                    "压缩后仍可续问吗？"
                 )
             print("v2 inquiry smoke OK")
             return 0

@@ -763,11 +763,15 @@ def _external_citations(
     answer: str = "",
     status: str = "completed",
     internet_enabled: bool = False,
+    attachment_document_ids: set[str] | None = None,
 ) -> list[dict]:
     cited_refs = select_cited_chunk_refs(answer, chunks, status)
+    attachment_document_ids = attachment_document_ids or set()
     citations: list[dict] = []
     for ordinal, (chunk, ref_index) in enumerate(cited_refs):
         document_id = chunk.get("document_id")
+        if str(document_id or "") in attachment_document_ids:
+            continue
         doc = docs_by_internal_id.get(document_id)
         if doc is not None:
             citations.append(
@@ -1131,12 +1135,7 @@ async def _execute_json_run(
             if not scope.is_empty:
                 client = client or _query_client()
                 chat_id, chat = await _ensure_chat_info(client, principal, scope)
-                if req.internetEnabled and not _web_search_configured(chat):
-                    raise _FormalQueryError(
-                        "WEB_SEARCH_UNAVAILABLE",
-                        503,
-                        "Web search is not configured",
-                    )
+                effective_internet = req.internetEnabled and _web_search_configured(chat)
                 session_id = await _ensure_ragflow_session(
                     db,
                     principal,
@@ -1153,7 +1152,7 @@ async def _execute_json_run(
                     question,
                     observations,
                     files=files,
-                    internet=req.internetEnabled,
+                    internet=effective_internet,
                     session_id=session_id,
                     reasoning_mode=req.reasoningMode,
                 )
@@ -1185,19 +1184,24 @@ async def _execute_json_run(
                     status = "completed"
                     answer = rescued
                     citations = []
-                elif status == "completed":
+                else:
                     citations = _external_citations(
                         chunks,
                         docs_by_internal_id,
                         assistant_message_id,
                         answer=answer,
                         status=status,
-                        internet_enabled=req.internetEnabled,
+                        internet_enabled=effective_internet,
+                        attachment_document_ids={
+                            str((item.ragflow_file or {}).get("id") or "")
+                            for item in pending
+                            if (item.ragflow_file or {}).get("id")
+                        },
                     )
-                    answer = _with_equipment_hint(conversation, answer, status)
-                else:
-                    answer = NO_RELIABLE_EVIDENCE_ANSWER
-                    citations = []
+                    if status == "completed":
+                        answer = _with_equipment_hint(conversation, answer, status)
+                    else:
+                        answer = NO_RELIABLE_EVIDENCE_ANSWER
             await v2_store.add_message(
                 db,
                 message_id=assistant_message_id,
@@ -1221,6 +1225,12 @@ async def _execute_json_run(
                 "citations": citations,
                 "replayed": False,
             }
+            if pending:
+                result["attachments"] = [
+                    _attachment_public_meta(item)
+                    for item in pending
+                    if item.attachment_id
+                ]
             await v2_store.complete_message_run(
                 db,
                 conversation_id=conversation["conversation_id"],
@@ -1315,12 +1325,7 @@ async def _stream_run_events(
         if not scope.is_empty:
             client = client or _query_client()
             chat_id, chat = await _ensure_chat_info(client, principal, scope)
-            if req.internetEnabled and not _web_search_configured(chat):
-                raise _FormalQueryError(
-                    "WEB_SEARCH_UNAVAILABLE",
-                    503,
-                    "Web search is not configured",
-                )
+            effective_internet = req.internetEnabled and _web_search_configured(chat)
             session_id = await _ensure_ragflow_session(
                 db,
                 principal,
@@ -1337,7 +1342,7 @@ async def _stream_run_events(
                 question,
                 observations,
                 files=files,
-                internet=req.internetEnabled,
+                internet=effective_internet,
                 session_id=session_id,
                 reasoning_mode=req.reasoningMode,
             )
@@ -1409,19 +1414,24 @@ async def _stream_run_events(
                 status = "completed"
                 answer = rescued
                 citations = []
-            elif status == "completed":
+            else:
                 citations = _external_citations(
                     chunks,
                     docs_by_internal_id,
                     assistant_message_id,
                     answer=accumulated,
                     status=status,
-                    internet_enabled=req.internetEnabled,
+                    internet_enabled=effective_internet,
+                    attachment_document_ids={
+                        str((item.ragflow_file or {}).get("id") or "")
+                        for item in pending
+                        if (item.ragflow_file or {}).get("id")
+                    },
                 )
-                answer = _with_equipment_hint(conversation, accumulated, status)
-            else:
-                answer = NO_RELIABLE_EVIDENCE_ANSWER
-                citations = []
+                if status == "completed":
+                    answer = _with_equipment_hint(conversation, accumulated, status)
+                else:
+                    answer = NO_RELIABLE_EVIDENCE_ANSWER
         await v2_store.add_message(
             db,
             message_id=assistant_message_id,
@@ -1450,6 +1460,12 @@ async def _stream_run_events(
             "replayed": False,
             "_streamDeltas": stream_deltas,
         }
+        if pending:
+            result["attachments"] = [
+                _attachment_public_meta(item)
+                for item in pending
+                if item.attachment_id
+            ]
         await v2_store.complete_message_run(
             db,
             conversation_id=conversation_id,
@@ -1739,6 +1755,11 @@ async def create_message(
     content_type = (request.headers.get("content-type") or "").lower()
     pending: list[PendingAttachment] = []
     if "multipart/form-data" in content_type:
+        conversation = await _owned_conversation(db, principal, conversation_id)
+        if not conversation:
+            return _error(404, "CONVERSATION_NOT_FOUND", "Conversation not found")
+        if conversation["status"] == "archived":
+            return _error(409, "CONVERSATION_ARCHIVED", "Conversation is archived")
         if not config.transient_attachments_enabled:
             return _error(
                 503, "ATTACHMENT_STORAGE_UNAVAILABLE", ATTACHMENT_DISABLED_MESSAGE
@@ -1806,11 +1827,6 @@ async def create_message(
     result, error = await _execute_json_run(
         db, principal, conversation, req, question, run, pending, request
     )
-    if result is not None and pending:
-        result = dict(result)
-        result["attachments"] = [
-            _attachment_public_meta(item) for item in pending if item.attachment_id
-        ]
     if error:
         return error
     public_citations = await _project_citations(

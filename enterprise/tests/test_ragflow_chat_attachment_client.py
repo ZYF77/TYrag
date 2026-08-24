@@ -42,6 +42,27 @@ async def test_upload_chat_file_uses_documents_upload_not_file_manager(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_delete_chat_file_uses_authenticated_upload_resource(monkeypatch):
+    client = RAGFlowQueryClient(base_url="http://ragflow.test", api_key="k")
+    captured: dict = {}
+
+    def fake_sync(method, path, request_id, json_data=None, files=None):
+        captured.update(method=method, path=path, json=json_data, files=files)
+        return {"code": 0, "data": {"id": "a" * 32}}
+
+    monkeypatch.setattr(client, "_sync_request", fake_sync)
+
+    await client.delete_file("a" * 32, created_by="untrusted-tenant")
+
+    assert captured == {
+        "method": "DELETE",
+        "path": f"/api/v1/documents/upload/{'a' * 32}",
+        "json": None,
+        "files": None,
+    }
+
+
+@pytest.mark.asyncio
 async def test_understand_file_passes_attachment_descriptor_not_bare_id(monkeypatch):
     client = RAGFlowQueryClient(base_url="http://ragflow.test", api_key="k")
     captured: dict = {}
