@@ -581,7 +581,11 @@ def run_live(artifacts: Artifacts, *, target_mode: str = "local",
     callback_secret = ""
     if callback_mode == "temporary":
         callback_secret = _env("ENTERPRISE_E2E_CALLBACK_HMAC_SECRET", required=False) or _env("ENTERPRISE_CALLBACK_HMAC_SECRET")
-    staged, relative = _stage_unique_source_copy(_file_path(root, original_path), original_path)
+    reuse_source = os.getenv("ENTERPRISE_E2E_USE_EXISTING_SOURCE", "false").lower() in {"1", "true", "yes"}
+    if reuse_source:
+        staged, relative = _file_path(root, original_path), original_path
+    else:
+        staged, relative = _stage_unique_source_copy(_file_path(root, original_path), original_path)
     try:
         sha, size = _sha256_file(staged); stat = staged.stat(); equipment = f"{_env('ENTERPRISE_E2E_EQUIPMENT_ID')[:96]}-e2e-{uuid.uuid4().hex[:12]}"
         event = _env("ENTERPRISE_E2E_EVENT_ID", required=False, default=f"evt-{document}")
@@ -763,7 +767,8 @@ def run_live(artifacts: Artifacts, *, target_mode: str = "local",
                    "bounded100MBCheck": large_checked}
         return summary
     finally:
-        staged.unlink(missing_ok=True)
+        if not reuse_source:
+            staged.unlink(missing_ok=True)
 
 
 def _parser() -> argparse.ArgumentParser:
