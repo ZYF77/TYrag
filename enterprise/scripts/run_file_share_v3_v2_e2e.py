@@ -579,14 +579,14 @@ def _large_file_check(root_id: str, artifacts: Artifacts) -> bool:
 
 
 def run_live(artifacts: Artifacts, *, target_mode: str = "local",
-             callback_mode: str = "temporary") -> dict[str, Any]:
+             callback_mode: str = "temporary", resume_document: str = "") -> dict[str, Any]:
     gateway = assert_http_target(_env("GATEWAY_URL"), target_mode=target_mode)
     ragflow = assert_http_target(_env("ENTERPRISE_RAGFLOW_BASE_URL", required=False, default=_env("RAGFLOW_BASE_URL", required=False, default="http://127.0.0.1:9380")), target_mode=target_mode)
     api_key = _env("ENTERPRISE_RAGFLOW_API_KEY", required=False) or _env("RAGFLOW_API_KEY", required=False)
     if not api_key: raise LiveEnvironmentError("ragflow_api_key_missing")
     tenant, system, root = _env("ENTERPRISE_E2E_TENANT_ID", default="tyrag-integration"), _env("ENTERPRISE_E2E_SOURCE_SYSTEM", default="EAM"), _env("ENTERPRISE_E2E_STORAGE_ROOT_ID", default="device-share")
     version, original_path = _env("ENTERPRISE_E2E_SOURCE_VERSION_ID", required=False, default="v3-1"), _env("ENTERPRISE_E2E_FILE_RELATIVE_PATH", required=False, default="Doc1.pdf")
-    document = _env("ENTERPRISE_E2E_EXTERNAL_DOCUMENT_ID", required=False, default=f"LOCAL-E2E-{time.time_ns()}")
+    document = resume_document or _env("ENTERPRISE_E2E_EXTERNAL_DOCUMENT_ID", required=False, default=f"LOCAL-E2E-{time.time_ns()}")
     if document.upper().startswith(("PROBE-", "TYRAG-E2E-")): raise LiveEnvironmentError("callback_fixture_id_not_allowed")
     db_path = _env("ENTERPRISE_DB_PATH")
     if not Path(db_path).is_file(): raise LiveEnvironmentError("gateway_database_unavailable")
@@ -633,17 +633,18 @@ def run_live(artifacts: Artifacts, *, target_mode: str = "local",
                 api_key=api_key,
                 artifacts=artifacts,
             )
-            accepted = _post_feed(client, gateway, key, hmac_secret, feed, artifacts, "file_share_feed")
-            if accepted.status_code != 202: raise LiveAssertionError("file_share_feed_not_accepted")
-            receipt = _json(accepted); validate_accept_receipt(receipt, external_document_id=document, source_version_id=version)
-            time.sleep(1.05)
-            replay = _post_feed(client, gateway, key, hmac_secret, feed, artifacts, "file_share_feed_replay")
-            if replay.status_code != 202: raise LiveAssertionError("business_idempotency_replay_not_accepted")
-            replay_receipt = _json(replay); validate_accept_receipt(replay_receipt, external_document_id=document, source_version_id=version)
-            if replay_receipt.get("deduplicated") is not True or replay_receipt.get("operationId") != receipt.get("operationId"): raise LiveAssertionError("business_idempotency_failed")
-            status_url = build_diagnostic_status_url(tenant_id=tenant, source_system=system,
-                external_document_id=document, source_version_id=version)
-            _poll_status(client, gateway, key, hmac_secret, status_url, artifacts)
+            if not resume_document:
+                accepted = _post_feed(client, gateway, key, hmac_secret, feed, artifacts, "file_share_feed")
+                if accepted.status_code != 202: raise LiveAssertionError("file_share_feed_not_accepted")
+                receipt = _json(accepted); validate_accept_receipt(receipt, external_document_id=document, source_version_id=version)
+                time.sleep(1.05)
+                replay = _post_feed(client, gateway, key, hmac_secret, feed, artifacts, "file_share_feed_replay")
+                if replay.status_code != 202: raise LiveAssertionError("business_idempotency_replay_not_accepted")
+                replay_receipt = _json(replay); validate_accept_receipt(replay_receipt, external_document_id=document, source_version_id=version)
+                if replay_receipt.get("deduplicated") is not True or replay_receipt.get("operationId") != receipt.get("operationId"): raise LiveAssertionError("business_idempotency_failed")
+                status_url = build_diagnostic_status_url(tenant_id=tenant, source_system=system,
+                    external_document_id=document, source_version_id=version)
+                _poll_status(client, gateway, key, hmac_secret, status_url, artifacts)
             dataset, rag_document = _document_scope(db_path, tenant, document, version)
             if not dataset or not rag_document: raise LiveAssertionError("ragflow_mapping_missing")
             _verify_native_upload(client, ragflow, api_key, dataset, rag_document, artifacts)
@@ -774,7 +775,8 @@ def run_live(artifacts: Artifacts, *, target_mode: str = "local",
             )
             callback.assert_success(float(os.getenv("ENTERPRISE_E2E_CALLBACK_TIMEOUT", "45")))
             large_checked = _large_file_check(root, artifacts)
-        summary = {"fileShareFeed": True, "businessIdempotency": True, "nativeUpload": True, "chunksParse": True,
+        summary = {"fileShareFeed": not resume_document, "businessIdempotency": not resume_document,
+                   "resumedExistingDocument": bool(resume_document), "nativeUpload": True, "chunksParse": True,
                    "qualityGate": True, "callbackRetry": True, "authorizedQueryCitationSource": True,
                    "sseSecondTurn": True, "historyReplay": True, "ragflowSession": True,
                    "documentScopedRetrieval": True,
@@ -792,6 +794,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--artifact-dir", type=Path, default=ROOT / "artifacts" / "e2e" / "file-share-v3-v2")
     parser.add_argument("--target-mode", choices=("local", "docker"), default="local")
     parser.add_argument("--callback-mode", choices=("temporary", "existing"), default="temporary")
+    parser.add_argument("--resume-external-document-id", default="")
     return parser
 
 
@@ -805,7 +808,8 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     artifacts = Artifacts(args.artifact_dir)
     try:
-        evidence = run_live(artifacts, target_mode=args.target_mode, callback_mode=args.callback_mode)
+        evidence = run_live(artifacts, target_mode=args.target_mode, callback_mode=args.callback_mode,
+                            resume_document=args.resume_external_document_id)
         payload: dict[str, Any] = {"profile": "Integration", "passed": True, "evidence": evidence}
         code = 0
     except LiveEnvironmentError as exc:
