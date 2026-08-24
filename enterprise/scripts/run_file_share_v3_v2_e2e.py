@@ -421,6 +421,12 @@ def _document_scope(db_path: str, tenant: str, document: str, version: str) -> t
     return (row[0], row[1]) if row else (None, None)
 
 
+def _document_equipment(db_path: str, tenant: str, document: str, version: str) -> str | None:
+    with sqlite3.connect(Path(db_path).resolve().as_uri() + "?mode=ro", uri=True) as db:
+        row = db.execute("SELECT equipment_id FROM ext_document_map WHERE tenant_id=? AND external_document_id=? AND source_version_id=?", (tenant, document, version)).fetchone()
+    return row[0] if row else None
+
+
 def _post_feed(client: httpx.Client, gateway: str, key: str, secret: str, payload: dict, artifacts: Artifacts, name: str) -> httpx.Response:
     body, path = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode(), "/enterprise/api/v3/documents"
     response = client.post(gateway + path, content=body, headers=_service_headers(key_id=key, secret=secret, method="POST", relative_url=path, body=body))
@@ -601,7 +607,14 @@ def run_live(artifacts: Artifacts, *, target_mode: str = "local",
     else:
         staged, relative = _stage_unique_source_copy(_file_path(root, original_path), original_path)
     try:
-        sha, size = _sha256_file(staged); page_count = _pdf_page_count(staged); stat = staged.stat(); equipment = f"{_env('ENTERPRISE_E2E_EQUIPMENT_ID')[:96]}-e2e-{uuid.uuid4().hex[:12]}"
+        sha, size = _sha256_file(staged); page_count = _pdf_page_count(staged); stat = staged.stat()
+        equipment = (
+            _document_equipment(db_path, tenant, document, version)
+            if resume_document
+            else f"{_env('ENTERPRISE_E2E_EQUIPMENT_ID')[:96]}-e2e-{uuid.uuid4().hex[:12]}"
+        )
+        if not equipment:
+            raise LiveEnvironmentError("existing_document_equipment_missing")
         event = _env("ENTERPRISE_E2E_EVENT_ID", required=False, default=f"evt-{document}")
         feed = {"eventId": event, "eventType": "upsert", "tenantId": tenant, "sourceSystem": system,
                 "externalDocumentId": document, "sourceVersionId": version, "sha256": sha, "fileName": staged.name,
