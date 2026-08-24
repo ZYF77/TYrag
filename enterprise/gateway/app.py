@@ -34,7 +34,7 @@ from enterprise.gateway.sync.ragflow_document_client import (
 from enterprise.gateway.sync.source_adapter import (
     S3SourceAdapter, SourceAdapter, SourceStub,
 )
-from enterprise.gateway.sync.external_source import FileShareSourceAdapter, router as external_source_router
+from enterprise.gateway.sync.external_source import FileShareSourceAdapter
 from enterprise.gateway.sync.transient_attachment import (
     TransientAttachmentBodyLimitMiddleware,
     TransientAttachmentCleanupWorker,
@@ -817,7 +817,6 @@ from enterprise.gateway.sync.v2_router import router as v2_document_router
 app.include_router(v2_document_router)
 from enterprise.gateway.sync.v3_router import router as v3_document_router
 app.include_router(v3_document_router)
-app.include_router(external_source_router)
 app.include_router(transient_attachment_router)
 
 # WP-03 Phase 2 quality status APIs

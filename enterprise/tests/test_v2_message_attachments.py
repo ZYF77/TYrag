@@ -55,6 +55,17 @@ def _principal() -> UserPrincipal:
     )
 
 
+def _other_principal() -> UserPrincipal:
+    return UserPrincipal(
+        tenant_id="customer-a",
+        business_user_id="biz-user-002",
+        subject="biz-user-002",
+        role_codes=("end_user",),
+        mapping_status="active",
+        capabilities=("ask", "view_citations", "list_sessions"),
+    )
+
+
 @pytest.fixture
 def runtime(isolated_gateway_db, monkeypatch):
     db, _ = isolated_gateway_db
@@ -194,6 +205,43 @@ async def test_json_attachments_content_returns_422(runtime):
 
 
 @pytest.mark.asyncio
+async def test_multipart_owner_and_archive_are_checked_before_body_parse(
+    runtime, monkeypatch
+):
+    async with _client(runtime) as client:
+        owned = await client.post(f"{BASE}/conversations", json={})
+        archived = await client.post(f"{BASE}/conversations", json={})
+        await client.post(
+            f"{BASE}/conversations/{archived.json()['conversationId']}/archive"
+        )
+
+    async def fail_if_parsed(request):
+        del request
+        raise AssertionError("multipart body must not be parsed before ownership")
+
+    monkeypatch.setattr(v2_router, "_parse_multipart_message", fail_if_parsed)
+    runtime.app.dependency_overrides[require_user_principal] = _other_principal
+    async with _client(runtime) as client:
+        forbidden = await client.post(
+            f"{BASE}/conversations/{owned.json()['conversationId']}/messages",
+            data={"metadata": json.dumps({"clientMessageId": "owner-first"})},
+            files={"files": ("note.txt", b"body", "text/plain")},
+        )
+    runtime.app.dependency_overrides[require_user_principal] = _principal
+    async with _client(runtime) as client:
+        read_only = await client.post(
+            f"{BASE}/conversations/{archived.json()['conversationId']}/messages",
+            data={"metadata": json.dumps({"clientMessageId": "archive-first"})},
+            files={"files": ("note.txt", b"body", "text/plain")},
+        )
+
+    assert forbidden.status_code == 404
+    assert forbidden.json()["code"] == "CONVERSATION_NOT_FOUND"
+    assert read_only.status_code == 409
+    assert read_only.json()["code"] == "CONVERSATION_ARCHIVED"
+
+
+@pytest.mark.asyncio
 async def test_multipart_png_only_enriches_and_deletes_ragflow_file(runtime):
     await _seed_doc(runtime.db)
     async with _client(runtime) as client:
@@ -232,6 +280,39 @@ async def test_multipart_png_only_enriches_and_deletes_ragflow_file(runtime):
         temps = await cursor.fetchall()
     assert temps
     assert all(row["deleted_at"] for row in temps)
+
+
+@pytest.mark.asyncio
+async def test_ragflow_delete_failure_keeps_orphan_for_ttl_cleanup(
+    runtime, monkeypatch
+):
+    await _seed_doc(runtime.db)
+
+    async def fail_delete(*_args, **_kwargs):
+        raise RuntimeError("delete unavailable")
+
+    monkeypatch.setattr(runtime.stub, "delete_file", fail_delete)
+    async with _client(runtime) as client:
+        created = await client.post(
+            f"{BASE}/conversations", json={"equipmentId": "EQ-ATT"}
+        )
+        response = await client.post(
+            f"{BASE}/conversations/{created.json()['conversationId']}/messages",
+            data={
+                "metadata": json.dumps(
+                    {"clientMessageId": "cleanup-failure", "question": "read note"}
+                )
+            },
+            files={"files": ("note.txt", b"private note", "text/plain")},
+        )
+
+    assert response.status_code == 200
+    async with runtime.db.execute(
+        "SELECT deleted_at FROM ext_ragflow_temp_file"
+    ) as cursor:
+        rows = await cursor.fetchall()
+    assert rows
+    assert all(row["deleted_at"] is None for row in rows)
 
 
 @pytest.mark.asyncio
@@ -492,6 +573,7 @@ async def test_replay_does_not_create_second_attachment(runtime):
     assert first.status_code == 200
     assert second.status_code == 200
     assert second.json()["replayed"] is True
+    assert first.json()["attachments"] == second.json()["attachments"]
     assert runtime.stub.uploaded_files.count("photo.png") == 1
     assert runtime.stub.understand_calls == 1
     async with runtime.db.execute(
@@ -656,19 +738,63 @@ async def test_vision_sse_sends_png_files(runtime):
     await _seed_doc(runtime.db)
     async with _client(runtime) as client:
         created = await client.post(f"{BASE}/conversations", json={"equipmentId": "EQ-ATT"})
+        payload = {
+            "data": {"metadata": json.dumps({"clientMessageId": "png-sse"})},
+            "files": {"files": ("photo.png", MIN_PNG, "image/png")},
+        }
         response = await client.post(
             f"{BASE}/conversations/{created.json()['conversationId']}/messages",
-            data={"metadata": json.dumps({"clientMessageId": "png-sse"})},
-            files={"files": ("photo.png", MIN_PNG, "image/png")},
             headers={"Accept": "text/event-stream"},
+            **payload,
         )
         assert response.status_code == 200, response.text
         async for _ in response.aiter_bytes():
             pass
+        replay = await client.post(
+            f"{BASE}/conversations/{created.json()['conversationId']}/messages",
+            **payload,
+        )
     body = runtime.stub._last_completion_body
     assert body is not None
     files = body.get("files") or []
     assert any(item.get("mime_type") == "image/png" for item in files)
+    assert replay.status_code == 200
+    assert replay.json()["replayed"] is True
+    assert replay.json()["attachments"][0]["fileName"] == "photo.png"
+
+
+@pytest.mark.asyncio
+async def test_attachment_reference_is_not_exposed_as_citation(runtime):
+    await _seed_doc(runtime.db)
+    runtime.stub._ignore_doc_scope = True
+    runtime.stub._omit_default_chunk = True
+    runtime.stub._extra_chunks = [
+        {
+            "id": "attachment-chunk",
+            "document_id": "rf-1",
+            "document_name": "note.txt",
+            "content": "attachment-only evidence",
+        }
+    ]
+    runtime.stub.forced_answer = "附件中的内容如下。[ID:0]"
+
+    async with _client(runtime) as client:
+        created = await client.post(
+            f"{BASE}/conversations", json={"equipmentId": "EQ-ATT"}
+        )
+        response = await client.post(
+            f"{BASE}/conversations/{created.json()['conversationId']}/messages",
+            data={
+                "metadata": json.dumps(
+                    {"clientMessageId": "attachment-reference", "question": "附件写了什么"}
+                )
+            },
+            files={"files": ("note.txt", b"attachment-only evidence", "text/plain")},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "已完成"
+    assert response.json()["citations"] == []
 
 
 @pytest.mark.asyncio
