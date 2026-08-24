@@ -377,7 +377,11 @@ class RAGTools:
             return {"chunks": [], "doc_aggs": []}
         if isinstance(keywords, list):
             keywords = ",".join(keywords)
-        logging.info(f"@retrieve: {question}@{keywords}")
+        logging.info(
+            "@retrieve question_chars=%d keyword_chars=%d",
+            len(question or ""),
+            len(keywords or ""),
+        )
 
         doc_scope = self.scoped_doc_ids(doc_scope)
         if doc_scope == ["-999"]:

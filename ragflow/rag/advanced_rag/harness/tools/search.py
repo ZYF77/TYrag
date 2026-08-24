@@ -186,7 +186,11 @@ async def hybrid_search(tools, query: str, kb_ids: list[str] | None = None, top_
     target_ids = kb_ids or tools.kb_ids
     if hasattr(tools, "scoped_doc_ids"):
         doc_scope = tools.scoped_doc_ids(doc_scope)
-    _LOG.info(f'[Hybrid search] Searching the knowledge base for "{query}" (keywords: {keywords})')
+    _LOG.info(
+        "[Hybrid search] query_chars=%d keyword_chars=%d",
+        len(query or ""),
+        len(keywords or ""),
+    )
 
     # Query expansion: append the formalized-question keywords + close synonyms
     # so hybrid/BM25 retrieval gets extra recall signal.
@@ -237,7 +241,11 @@ async def vector_search(tools, query: str, kb_ids: list[str] | None = None, top_
         _LOG.warning("vector_search: no embed_mdl available")
         return {"chunks": [], "doc_aggs": []}
 
-    _LOG.info(f'[Vector search] Searching by meaning for "{query}" (keywords: {keywords})')
+    _LOG.info(
+        "[Vector search] query_chars=%d keyword_chars=%d",
+        len(query or ""),
+        len(keywords or ""),
+    )
     effective_query = f"{query} {keywords}".strip() if keywords else query
     target_ids = kb_ids or tools.kb_ids
     if hasattr(tools, "scoped_doc_ids"):
@@ -265,7 +273,11 @@ async def vector_search(tools, query: str, kb_ids: list[str] | None = None, top_
 
 
 async def bm25_search(tools, query: str, kb_ids: list[str] | None = None, top_n: int = 12, keywords: str = "", doc_scope: list[str] | None = None) -> dict:
-    _LOG.info(f'[BM25 search] Searching by keyword for "{query}" (keywords: {keywords})')
+    _LOG.info(
+        "[BM25 search] query_chars=%d keyword_chars=%d",
+        len(query or ""),
+        len(keywords or ""),
+    )
     target_ids = kb_ids or tools.kb_ids
     effective_query = f"{query} {keywords}".strip() if keywords else query
     if hasattr(tools, "scoped_doc_ids"):
@@ -763,7 +775,7 @@ async def web_search(tools, query: str, keywords: str = "") -> dict:
     if not tools.has_web():
         return {"chunks": [], "doc_aggs": []}
 
-    _LOG.info(f'[Web search] Searching the web for "{query}"')
+    _LOG.info("[Web search] query_chars=%d", len(query or ""))
     try:
         from common.misc_utils import thread_pool_exec
 
@@ -782,7 +794,7 @@ async def structured_query(tools, query: str, keywords: str = "", kb_ids: list[s
     query is translated to SQL rather than keyword-matched, and the rows it
     returns are not prose to narrow.
     """
-    _LOG.info(f'[Structured search] Querying the structured (table) data for "{query}"')
+    _LOG.info("[Structured search] query_chars=%d", len(query or ""))
     sql_kbs = [kb for kb in tools.sql_kbs if kb_ids is None or kb.id in kb_ids]
     if not sql_kbs:
         return {"answer": "", "chunks": [], "doc_aggs": []}

@@ -2,6 +2,8 @@ import asyncio
 import logging
 from types import SimpleNamespace
 
+import pytest
+
 from api.db.services import dialog_service
 
 
@@ -594,3 +596,46 @@ def test_rag_agent_grounding_with_reasoning_uses_agentic_path(monkeypatch):
     assert rag_tools_kwargs[0]["web_search"] is None
     assert any("档位答案" in str(event.get("answer") or "") for event in events)
     assert any(not event.get("final") and event.get("answer") == "档位答案" for event in events)
+
+
+@pytest.mark.parametrize("failure_stage", ["create", "retrieve"])
+def test_simple_web_search_failure_keeps_internal_knowledge(
+    monkeypatch, caplog, failure_stage
+):
+    question = "private maintenance question"
+    secret = "fake-provider-secret"
+    model = _FakeModel("answer from internal knowledge")
+    _patch_chat(monkeypatch, model)
+    dialog = _dialog()
+    dialog.prompt_config["tavily_api_key"] = secret
+    calls = []
+
+    class FailingProvider:
+        def retrieve_chunks(self, query):
+            calls.append(query)
+            raise RuntimeError(f"{question} {secret}")
+
+    def provider_factory(_config):
+        if failure_stage == "create":
+            raise RuntimeError(f"{question} {secret}")
+        return FailingProvider()
+
+    monkeypatch.setattr(dialog_service, "create_web_search_provider", provider_factory)
+    caplog.set_level(logging.WARNING)
+
+    events = _collect(
+        dialog_service.async_chat(
+            dialog,
+            [{"role": "user", "content": question}],
+            stream=False,
+            internet=True,
+        )
+    )
+
+    assert events
+    assert "answer from internal knowledge" in events[-1]["answer"]
+    assert model.chat_calls == 1
+    assert calls == ([] if failure_stage == "create" else [question])
+    assert "web search unavailable; continuing with internal knowledge" in caplog.text
+    assert question not in caplog.text
+    assert secret not in caplog.text

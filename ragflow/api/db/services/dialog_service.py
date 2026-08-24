@@ -58,6 +58,7 @@ from rag.grounding.guard import (
 from rag.nlp.search import index_name
 from rag.prompts.generator import chunks_format, citation_prompt, cross_languages, full_question, kb_prompt, keyword_extraction, message_fit_in, PROMPT_JINJA_ENV, ASK_SUMMARY
 from common.token_utils import num_tokens_from_string
+from common.misc_utils import thread_pool_exec
 from rag.utils.web_search_conn import create_web_search_provider, has_web_search_provider
 from rag.utils.tts_cache import synthesize_with_cache
 from common.string_utils import remove_redundant_spaces
@@ -1030,10 +1031,17 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
                         kbinfos["chunks"] = cks
                 kbinfos["chunks"] = retriever.retrieval_by_children(kbinfos["chunks"], tenant_ids)
             if use_web_search:
-                web_search = create_web_search_provider(prompt_config)
-                web_res = web_search.retrieve_chunks(" ".join(questions))
-                kbinfos["chunks"].extend(web_res["chunks"])
-                kbinfos["doc_aggs"].extend(web_res["doc_aggs"])
+                try:
+                    web_search = create_web_search_provider(prompt_config)
+                    web_res = await thread_pool_exec(
+                        web_search.retrieve_chunks, " ".join(questions)
+                    )
+                    kbinfos["chunks"].extend(web_res.get("chunks", []))
+                    kbinfos["doc_aggs"].extend(web_res.get("doc_aggs", []))
+                except Exception:
+                    logging.warning(
+                        "web search unavailable; continuing with internal knowledge"
+                    )
             if prompt_config.get("use_kg"):
                 default_chat_model = get_tenant_default_model_by_type(dialog.tenant_id, LLMType.CHAT)
                 kg_bundle_kwargs = {"trace_context": trace_context, "langfuse_session_id": session_id}
