@@ -61,6 +61,57 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+@pytest.mark.parametrize(
+    "file_id",
+    ["", "a" * 31, "a" * 33, "A" * 32, "12345678-1234-1234-1234-123456789abc", "../object"],
+)
+def test_delete_upload_info_rejects_unsafe_ids(
+    document_app_module, monkeypatch, file_id
+):
+    removed = []
+
+    class Storage:
+        rm = staticmethod(lambda bucket, object_id: removed.append((bucket, object_id)))
+
+    monkeypatch.setattr(
+        document_app_module.settings,
+        "STORAGE_IMPL",
+        Storage(),
+        raising=False,
+    )
+
+    result = _run(document_app_module.delete_upload_info(file_id=file_id))
+
+    assert result["code"] == 101
+    assert removed == []
+
+
+def test_delete_upload_info_is_tenant_scoped_and_idempotent(
+    document_app_module, monkeypatch
+):
+    removed = []
+    file_id = "a" * 32
+
+    class Storage:
+        rm = staticmethod(lambda bucket, object_id: removed.append((bucket, object_id)))
+
+    monkeypatch.setattr(
+        document_app_module.settings,
+        "STORAGE_IMPL",
+        Storage(),
+        raising=False,
+    )
+
+    first = _run(document_app_module.delete_upload_info(file_id=file_id))
+    second = _run(document_app_module.delete_upload_info(file_id=file_id))
+
+    assert first == second == {"code": 0, "data": {"id": file_id}}
+    assert removed == [
+        ("user-1-downloads", file_id),
+        ("user-1-downloads", file_id),
+    ]
+
+
 # ============================================================================
 # End-to-End Tests
 # ============================================================================

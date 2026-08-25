@@ -1,4 +1,4 @@
-"""Citation chunks must match answer [ID:n] markers, and stay empty when abstaining."""
+"""Citation chunks match answer markers independently from business status."""
 
 from enterprise.gateway.query.citation_select import (
     ABSTAIN_PHRASE,
@@ -119,24 +119,24 @@ def test_oob_prose_ids_do_not_keep_large_unmatched_sets():
     assert selected == []
 
 
-def test_no_reliable_evidence_clears_citations_even_when_answer_has_markers():
+def test_no_reliable_evidence_keeps_citations_when_answer_has_markers():
     selected = select_cited_chunks(
         "当前检索结果中没有找到可靠依据。[ID:0][ID:1]",
         CHUNKS,
         status="no_reliable_evidence",
     )
 
-    assert selected == []
+    assert [item["id"] for item in selected] == ["invoice", "repair"]
 
 
-def test_no_reliable_evidence_clears_prose_id_citations():
+def test_no_reliable_evidence_keeps_prose_id_citations():
     selected = select_cited_chunks(
         "暂无专门的设备维修记录。知识库ID:0、ID:1。",
         CHUNKS,
         status="no_reliable_evidence",
     )
 
-    assert selected == []
+    assert [item["id"] for item in selected] == ["invoice", "repair"]
 
 
 def test_force_abstain_outcome_overrides_completed_when_phrase_present():
@@ -144,7 +144,10 @@ def test_force_abstain_outcome_overrides_completed_when_phrase_present():
     status = force_abstain_outcome(answer, "completed")
 
     assert status == "no_reliable_evidence"
-    assert select_cited_chunks(answer, CHUNKS, status) == []
+    assert [item["id"] for item in select_cited_chunks(answer, CHUNKS, status)] == [
+        "invoice",
+        "repair",
+    ]
 
 
 def test_force_abstain_outcome_catches_paraphrased_no_repair_answer():
@@ -155,7 +158,9 @@ def test_force_abstain_outcome_catches_paraphrased_no_repair_answer():
     status = force_abstain_outcome(answer, "completed")
 
     assert status == "no_reliable_evidence"
-    assert select_cited_chunks(answer, CHUNKS, status) == []
+    assert [item["id"] for item in select_cited_chunks(answer, CHUNKS, status)] == [
+        "invoice"
+    ]
 
 
 def test_force_abstain_outcome_leaves_completed_without_phrase():
@@ -214,7 +219,9 @@ def test_force_abstain_still_blocks_repair_question_with_inventory_aside():
     status = force_abstain_outcome(answer, "completed", question="设备维修记录有么？")
 
     assert status == "no_reliable_evidence"
-    assert select_cited_chunks(answer, CHUNKS, status) == []
+    assert [item["id"] for item in select_cited_chunks(answer, CHUNKS, status)] == [
+        "invoice"
+    ]
 
 
 def test_catalog_inventory_answer_uses_type_labels_not_filenames():

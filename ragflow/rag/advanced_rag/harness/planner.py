@@ -17,7 +17,7 @@ from rag.advanced_rag.harness.prompts.decompose_prompts import (
 _LOG = logging.getLogger(__name__)
 
 
-def _extract_json(text: str) -> dict:
+def _extract_json(text: str):
     text = re.sub(r"^.*</think>", "", text, flags=re.DOTALL).strip()
     text = re.sub(r"```(?:json)?\s*|\s*```", "", text).strip()
     try:
@@ -78,7 +78,13 @@ async def planner_node(state: dict, tools) -> dict:
         _LOG.exception("planner_node failed")
         return _direct_plan(route.question)
 
+    if not isinstance(result, dict):
+        _LOG.warning("planner: expected an object, got %s", type(result).__name__)
+        return _direct_plan(route.question)
     claims_raw = result.get("claims", [])
+    if not isinstance(claims_raw, list):
+        _LOG.warning("planner: claims must be a list")
+        return _direct_plan(route.question)
     plan_type = {
         "factual": "fact_decomposition",
         "comparative": "comparative_decomposition",

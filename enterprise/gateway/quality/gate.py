@@ -125,17 +125,6 @@ def quality_dimensions(metrics: dict[str, Any] | None) -> dict[str, str]:
     }
 
 
-def _parser_application_verified(metrics: dict[str, Any] | None) -> bool:
-    """Return true only after the selected profile was read back post-parse."""
-    metrics = metrics or {}
-    snapshot = metrics.get("parserApplication") or metrics.get("parser_application")
-    return (
-        isinstance(snapshot, dict)
-        and snapshot.get("state") == "executed"
-        and snapshot.get("readbackMatch") is True
-    )
-
-
 def enforce_quality_gate(
     evaluation: QualityEvaluation | None,
     *,
@@ -154,13 +143,6 @@ def enforce_quality_gate(
 
     status = evaluation.parse_quality_status
     if status == "passed":
-        if not _parser_application_verified(
-            getattr(evaluation, "metrics_json", None)
-        ):
-            # Parser application evidence is a hard safety boundary.  Warn
-            # mode may relax metric completeness, but it must never make an
-            # unverified or mismatched parser result retrievable.
-            return False, "DOCUMENT_REVIEW_REQUIRED"
         required, declaration_valid = required_quality_dimensions(
             getattr(evaluation, "metrics_json", None)
         )

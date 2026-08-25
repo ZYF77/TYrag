@@ -1,12 +1,13 @@
-"""Extended RAGFlow client: dataset and document operations for WP-02A.
-Uses synchronous urllib calls via thread executor for FastAPI compatibility."""
+"""Extended RAGFlow client: dataset and document operations for WP-02A."""
 import asyncio
 import json
 import logging
 import re
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, BinaryIO
+
+import httpx
 
 from enterprise.gateway.config import config
 
@@ -85,28 +86,13 @@ class RAGFlowDocumentClient:
         return str(uuid.uuid4())
 
     def _sync_request(self, method: str, path: str, request_id: str,
-                      json_data: dict | None = None,
-                      files: dict | None = None) -> dict:
+                      json_data: dict | None = None) -> dict:
         import urllib.request, urllib.error
         url = f"{self.base_url}{path}"
         headers = self._headers(request_id)
         body = None
 
-        if files:
-            from urllib.parse import urlencode
-            import io
-            boundary = "----FormBoundary" + uuid.uuid4().hex
-            body_parts = []
-            for name, (fname, fobj, ctype) in files.items():
-                body_parts.append(f"--{boundary}\r\n".encode())
-                body_parts.append(f'Content-Disposition: form-data; name="{name}"; filename="{fname}"\r\n'.encode())
-                body_parts.append(f"Content-Type: {ctype}\r\n\r\n".encode())
-                body_parts.append(fobj.read() if hasattr(fobj, 'read') else fobj)
-                body_parts.append(b"\r\n")
-            body_parts.append(f"--{boundary}--\r\n".encode())
-            body = b"".join(body_parts)
-            headers["Content-Type"] = f"multipart/form-data; boundary={boundary}"
-        elif json_data:
+        if json_data:
             body = json.dumps(json_data).encode()
             headers["Content-Type"] = "application/json"
 
@@ -132,6 +118,50 @@ class RAGFlowDocumentClient:
                 type(e).__name__,
             )
             raise RAGFlowAPIError("RAGFlow API request failed", 0, request_id) from e
+
+    def _sync_upload_document(
+        self,
+        dataset_id: str,
+        file_name: str,
+        file_content: bytes | BinaryIO,
+        request_id: str,
+    ) -> dict:
+        headers = self._headers(request_id)
+        headers.pop("Content-Type", None)
+        try:
+            with httpx.Client(timeout=self.timeout) as client:
+                response = client.post(
+                    f"{self.base_url}/api/v1/datasets/{dataset_id}/documents",
+                    headers=headers,
+                    files={
+                        "file": (
+                            file_name,
+                            file_content,
+                            "application/octet-stream",
+                        )
+                    },
+                )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as exc:
+            logger.warning(
+                "RAGFlow HTTP %s request_id=%s response sanitized: %s",
+                exc.response.status_code,
+                request_id,
+                sanitize_log_payload(exc.response.text),
+            )
+            raise RAGFlowAPIError(
+                "RAGFlow API request failed",
+                exc.response.status_code,
+                request_id,
+            ) from exc
+        except Exception as exc:
+            logger.warning(
+                "RAGFlow request failed request_id=%s error_type=%s",
+                request_id,
+                type(exc).__name__,
+            )
+            raise RAGFlowAPIError("RAGFlow API request failed", 0, request_id) from exc
 
     def _sync_request_bytes(
         self, method: str, path: str, request_id: str
@@ -187,57 +217,15 @@ class RAGFlowDocumentClient:
         )
 
     async def upload_document(self, dataset_id: str, file_name: str,
-                              file_content: bytes, request_id: str | None = None) -> dict:
-        rid = request_id or self._new_request_id()
-        import io
-        files = {"file": (file_name, io.BytesIO(file_content), "application/octet-stream")}
-        return await self._run_sync(self._sync_request, "POST",
-                                     f"/api/v1/datasets/{dataset_id}/documents",
-                                     rid, files=files)
-
-    async def register_external_document(
-        self,
-        dataset_id: str,
-        file_name: str,
-        *,
-        external_ticket: str,
-        size: int,
-        media_type: str,
-        meta_fields: dict | None = None,
-        request_id: str | None = None,
-    ) -> dict:
-        """Register a virtual RAGFlow document backed by a one-time source ticket."""
+                              file_content: bytes | BinaryIO,
+                              request_id: str | None = None) -> dict:
         rid = request_id or self._new_request_id()
         return await self._run_sync(
-            self._sync_request,
-            "POST",
-            f"/api/v1/datasets/{dataset_id}/documents/external",
+            self._sync_upload_document,
+            dataset_id,
+            file_name,
+            file_content,
             rid,
-            json_data={
-                "name": file_name,
-                "ticket": external_ticket,
-                "size": size,
-                "media_type": media_type,
-                "meta_fields": meta_fields or {},
-            },
-        )
-
-    async def refresh_external_document(
-        self,
-        dataset_id: str,
-        document_id: str,
-        *,
-        external_ticket: str,
-        size: int,
-        request_id: str | None = None,
-    ) -> dict:
-        rid = request_id or self._new_request_id()
-        return await self._run_sync(
-            self._sync_request,
-            "PATCH",
-            f"/api/v1/datasets/{dataset_id}/documents/{document_id}/external-source",
-            rid,
-            json_data={"ticket": external_ticket, "size": size},
         )
 
     async def start_parsing(
@@ -251,7 +239,7 @@ class RAGFlowDocumentClient:
         return await self._run_sync(
             self._sync_request,
             "POST",
-            f"/api/v1/datasets/{dataset_id}/documents/parse",
+            f"/api/v1/datasets/{dataset_id}/chunks",
             rid,
             json_data={"document_ids": document_ids},
         )
@@ -420,7 +408,8 @@ class RAGFlowDocumentStub(RAGFlowDocumentClient):
         return {"code": 0, "data": True}
 
     async def upload_document(self, dataset_id: str, file_name: str,
-                              file_content: bytes, request_id: str | None = None) -> dict:
+                              file_content: bytes | BinaryIO,
+                              request_id: str | None = None) -> dict:
         if self._fail_next:
             raise RAGFlowAPIError("Stub: simulated RAGFlow failure", 503)
         doc_id = f"doc-{self._next_id}"; self._next_id += 1
@@ -436,63 +425,6 @@ class RAGFlowDocumentStub(RAGFlowDocumentClient):
                           }, "enabled": 1}]}
         self._documents[doc_id] = doc
         self._operation_log.append("upload")
-        return doc
-
-    async def register_external_document(
-        self,
-        dataset_id: str,
-        file_name: str,
-        *,
-        external_ticket: str,
-        size: int,
-        media_type: str,
-        meta_fields: dict | None = None,
-        request_id: str | None = None,
-    ) -> dict:
-        if self._fail_next:
-            raise RAGFlowAPIError("Stub: simulated RAGFlow failure", 503)
-        doc_id = f"doc-{self._next_id}"; self._next_id += 1
-        doc = {"data": [{
-            "id": doc_id,
-            "name": file_name,
-            "dataset_id": dataset_id,
-            "run": "UNSTART",
-            "chunk_method": "naive",
-            "parser_config": {},
-            "meta_fields": {
-                **(meta_fields or {}),
-                "enterprise_source_kind": "FILE_SHARE",
-                "enterprise_external_ticket": external_ticket,
-            },
-            "source_type": "enterprise_file_share",
-            "location": external_ticket,
-            "size": size,
-            "media_type": media_type,
-            "enabled": 1,
-        }]}
-        self._documents[doc_id] = doc
-        self._operation_log.append("external_register")
-        return doc
-
-    async def refresh_external_document(
-        self,
-        dataset_id: str,
-        document_id: str,
-        *,
-        external_ticket: str,
-        size: int,
-        request_id: str | None = None,
-    ) -> dict:
-        doc = self._documents.get(document_id)
-        if not doc or doc["data"][0].get("dataset_id") != dataset_id:
-            raise RAGFlowAPIError("Stub: document not found", 404)
-        item = doc["data"][0]
-        item["location"] = external_ticket
-        item["size"] = size
-        item.setdefault("meta_fields", {})[
-            "enterprise_external_ticket"
-        ] = external_ticket
-        self._operation_log.append("external_refresh")
         return doc
 
     async def start_parsing(
@@ -542,11 +474,21 @@ class RAGFlowDocumentStub(RAGFlowDocumentClient):
         page_size: int = 30,
         request_id: str | None = None,
     ) -> dict:
+        del dataset_id, page, page_size, request_id
+        doc = self._documents.get(document_id)
+        run = ""
+        if doc and doc.get("data"):
+            run = str(doc["data"][0].get("run") or "").upper()
+        # Happy-path stubs that finish as DONE need at least one usable chunk;
+        # empty-result retry tests override this method explicitly.
+        chunks = []
+        if run in {"DONE", "3"}:
+            chunks = [{"id": f"{document_id}-c1", "content": "usable stub chunk"}]
         return {
             "code": 0,
             "data": {
-                "total": 0,
-                "chunks": [],
+                "total": len(chunks),
+                "chunks": chunks,
                 "doc": {},
             },
         }

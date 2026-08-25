@@ -203,7 +203,7 @@ GET status 仅作诊断：对 path+query 重新计算 HMAC，使用新的 timest
 - [ ] 错误 tenant/source 返回 `AUTH_BINDING_DENIED`。
 - [ ] 重复 `eventId` 和相同 payload 结果幂等。
 - [ ] 文件终态达到 `retrievable`，或返回明确失败/复核通知。
-- [ ] 设备管理系统不直接访问 RAGFlow、Redis、数据库、对象存储管理端口或内部 source-ticket 接口。
+- [ ] 设备管理系统不直接访问 RAGFlow、Redis、数据库、对象存储管理端口或任何 Gateway 内部接口。
 
 ## 10. 安全交付记录
 

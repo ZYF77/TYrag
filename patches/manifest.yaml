@@ -16,19 +16,6 @@ patches:
     adr: "decisions/ADR-002"
     introduced_in: "WP-00"
     tests: ["docker compose up -d", "curl /api/v1/system/ping"]
-  - id: RF-PATCH-002
-    reason: "virtual FILE_SHARE document registration and one-shot temporary source fetch"
-    upstream_files:
-      - ragflow/api/apps/restful_apis/document_api.py
-      - ragflow/rag/utils/external_source.py
-      - ragflow/rag/svr/task_executor.py
-      - ragflow/rag/svr/task_executor_refactor/task_handler.py
-    adr: "decisions/ADR-007-外部文件权威源与零持久PDF.md"
-    change_request: "patches/CHANGE-REQUEST-外部文件票据解析.md"
-    introduced_in: "WP-04"
-    tests:
-      - "python -m py_compile ragflow/api/apps/restful_apis/document_api.py ragflow/rag/utils/external_source.py ragflow/rag/svr/task_executor.py ragflow/rag/svr/task_executor_refactor/task_handler.py"
-      - "enterprise/tests/test_external_file_source.py"
   - id: RF-PATCH-003
     reason: "skip empty_response early return when the last chat message has files"
     upstream_files:
@@ -64,3 +51,27 @@ patches:
       - "enterprise/tests/test_ragflow_client.py"
       - "enterprise/scripts/run_file_share_v3_v2_e2e.py"
     upgrade_notes: "Replay grounding_version=1 prompt markers, no-content tracing, fuse switch, and minio.bucket=ragflow. Do not restore the rag_agent grounding short-circuit or always-on token buffer. Copy drifted KB-id MinIO objects into ragflow/<dataset_id>/ before deleting source buckets."
+  - id: RF-PATCH-005
+    reason: "simple chat WebSearch provider failures fall back to already-retrieved internal knowledge without logging query data"
+    upstream_files:
+      - ragflow/api/db/services/dialog_service.py
+      - ragflow/rag/advanced_rag/agentic_rag.py
+      - ragflow/rag/advanced_rag/harness/tools/exploration.py
+      - ragflow/rag/advanced_rag/harness/tools/search.py
+      - ragflow/rag/advanced_rag/harness/tools/navigation.py
+    adr: "decisions/ADR-012-WebSearch故障回退内部知识.md"
+    introduced_in: "RF26-WP05"
+    tests:
+      - "ragflow/test/unit_test/api/db/services/test_dialog_service_grounding.py::test_simple_web_search_failure_keeps_internal_knowledge"
+      - "enterprise/tests/test_v2_grounding_integration.py::test_advanced_rag_query_logs_are_metadata_only"
+    upgrade_notes: "Keep the try/except limited to provider create/retrieve/merge; do not hide internal KB retrieval failures or switch providers."
+  - id: RF-PATCH-006
+    reason: "authenticated single-object cleanup for temporary /documents/upload attachments"
+    upstream_files:
+      - ragflow/api/apps/restful_apis/document_api.py
+    adr: "decisions/ADR-013-会话临时附件认证删除.md"
+    introduced_in: "RF26-WP06"
+    tests:
+      - "ragflow/test/testcases/test_web_api/test_document_app/test_upload_info_unit.py"
+      - "enterprise/tests/test_ragflow_chat_attachment_client.py"
+    upgrade_notes: "Delete only a 32-hex upload id from the authenticated tenant downloads bucket; never accept bucket or owner from the request."

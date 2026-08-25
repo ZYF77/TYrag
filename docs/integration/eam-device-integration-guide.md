@@ -114,7 +114,7 @@ EAM 只访问 Gateway。EAM 不得直接访问：
 - MySQL、Redis/Valkey、Elasticsearch；
 - MinIO 或对象存储管理端口；
 - Gateway 数据库；
-- Gateway 内部 source-ticket 接口。
+- 任何 Gateway 内部接口。
 
 Gateway 不接收 EAM HTTP 请求中的 PDF 二进制，只保存文件坐标、版本、摘要和状态，并从只读共享目录读取原文。PDF 原文始终由双方约定的文件服务器保存。第一阶段不调用 EAM 资产、维修、审批或其他业务接口。
 

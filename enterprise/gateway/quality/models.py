@@ -379,10 +379,11 @@ async def get_or_create_evaluation(
     source_version_id: str,
     ragflow_dataset_id: str | None,
     ragflow_document_id: str | None,
-    routing: dict[str, Any],
+    routing: dict[str, Any] | None = None,
     evaluation_version: str = "1",
     max_attempts: int = 5,
 ) -> QualityEvaluation:
+    routing = routing or {}
     existing = await get_evaluation(
         db, tenant_id, source_system, external_document_id,
         source_version_id, evaluation_version,

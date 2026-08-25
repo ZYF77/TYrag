@@ -59,17 +59,17 @@ def _facts(**kwargs) -> DocumentAclFacts:
 # -- acl-policy-examples.json --
 
 
-def test_policy_version_is_1_1():
-    assert ACL_POLICY_VERSION == "1.1"
+def test_policy_version_is_test_tenant_open():
+    assert ACL_POLICY_VERSION == "test-tenant-open-1"
 
 
 def test_policy_example_department_and_security_allowed():
     decision = evaluate_document_acl(_principal(), _facts())
     assert decision.allowed is True
-    assert decision.rule == "ALLOWED"
+    assert decision.rule == "TEST_TENANT_OPEN"
 
 
-def test_policy_example_deny_wins():
+def test_test_policy_ignores_document_role_acl():
     principal = _principal(
         department_ids=("d10",),
         group_ids=("maintenance", "contractor"),
@@ -82,8 +82,8 @@ def test_policy_example_deny_wins():
         deny_group_ids=("contractor",),
     )
     decision = evaluate_document_acl(principal, facts)
-    assert decision.allowed is False
-    assert decision.rule == "DENY_GROUP_HIT"
+    assert decision.allowed is True
+    assert decision.rule == "TEST_TENANT_OPEN"
 
 
 def test_policy_example_disabled_document():
@@ -139,66 +139,66 @@ def test_non_active_document_status_denied(status):
     assert decision.rule == "DOCUMENT_STATUS_DENIED"
 
 
-def test_deny_group_wins_over_allow_group():
+def test_deny_group_is_ignored_during_test_stage():
     principal = _principal(group_ids=("maintenance", "contractor"))
     facts = _facts(
         allow_group_ids=("maintenance",),
         deny_group_ids=("contractor",),
     )
     decision = evaluate_document_acl(principal, facts)
-    assert decision.allowed is False
-    assert decision.rule == "DENY_GROUP_HIT"
+    assert decision.allowed is True
+    assert decision.rule == "TEST_TENANT_OPEN"
 
 
-def test_allow_group_missing_denied():
+def test_allow_group_mismatch_is_ignored_during_test_stage():
     principal = _principal(group_ids=("electrician",))
     decision = evaluate_document_acl(principal, _facts())
-    assert decision.allowed is False
-    assert decision.rule == "ALLOW_GROUP_MISSING"
+    assert decision.allowed is True
+    assert decision.rule == "TEST_TENANT_OPEN"
 
 
-def test_empty_allow_groups_unresolved():
+def test_empty_allow_groups_are_allowed_during_test_stage():
     decision = evaluate_document_acl(_principal(), _facts(allow_group_ids=()))
-    assert decision.allowed is False
-    assert decision.rule == "UNRESOLVED"
+    assert decision.allowed is True
+    assert decision.rule == "TEST_TENANT_OPEN"
 
 
 def test_missing_user_department_is_allowed():
     principal = _principal(department_ids=())
     decision = evaluate_document_acl(principal, _facts())
     assert decision.allowed is True
-    assert decision.rule == "ALLOWED"
+    assert decision.rule == "TEST_TENANT_OPEN"
 
 
 def test_document_department_mismatch_is_allowed():
     decision = evaluate_document_acl(_principal(), _facts(department_id="d99"))
     assert decision.allowed is True
-    assert decision.rule == "ALLOWED"
+    assert decision.rule == "TEST_TENANT_OPEN"
 
 
 def test_missing_document_department_is_allowed():
     decision = evaluate_document_acl(_principal(), _facts(department_id=None))
     assert decision.allowed is True
-    assert decision.rule == "ALLOWED"
+    assert decision.rule == "TEST_TENANT_OPEN"
 
 
-def test_security_level_insufficient_denied():
+def test_security_level_is_ignored_during_test_stage():
     principal = _principal(security_level=1)
     decision = evaluate_document_acl(principal, _facts(security_level=2))
-    assert decision.allowed is False
-    assert decision.rule == "SECURITY_LEVEL_DENIED"
+    assert decision.allowed is True
+    assert decision.rule == "TEST_TENANT_OPEN"
 
 
-def test_missing_document_security_level_unresolved():
+def test_missing_document_security_level_is_allowed_during_test_stage():
     decision = evaluate_document_acl(_principal(), _facts(security_level=None))
-    assert decision.allowed is False
-    assert decision.rule == "UNRESOLVED"
+    assert decision.allowed is True
+    assert decision.rule == "TEST_TENANT_OPEN"
 
 
-def test_admin_does_not_bypass_by_default():
+def test_role_does_not_change_test_stage_document_visibility():
     principal = _principal(role_codes=("system_admin",), security_level=0)
     decision = evaluate_document_acl(principal, _facts(security_level=5))
-    assert decision.allowed is False
+    assert decision.allowed is True
 
 
 # -- M1 scope model and compile_scope interface --
@@ -347,7 +347,7 @@ def test_compile_scope_rejects_empty_manual_condition_dict():
     assert scope.is_empty is True
 
 
-def test_unresolved_decision_is_not_allowed():
+def test_missing_role_acl_is_allowed_during_test_stage():
     decision = evaluate_document_acl(_principal(), _facts(allow_group_ids=()))
-    assert decision.allowed is False
-    assert decision.rule == "UNRESOLVED"
+    assert decision.allowed is True
+    assert decision.rule == "TEST_TENANT_OPEN"

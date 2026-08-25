@@ -288,6 +288,7 @@ async def cleanup_ragflow_files(
             )
         except Exception:
             logger.warning("RAGFlow temp file delete failed file_id=%s", file_id)
+            continue
         if db is not None:
             try:
                 await mark_ragflow_temp_file_deleted(db, file_id)

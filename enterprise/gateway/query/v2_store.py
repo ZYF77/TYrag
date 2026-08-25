@@ -67,6 +67,8 @@ CREATE TABLE IF NOT EXISTS ext_v2_message_run (
     user_message_id TEXT,
     assistant_message_id TEXT,
     result_json TEXT,
+    entity_scope_json TEXT,
+    allowed_doc_ids_json TEXT,
     created_at TEXT NOT NULL,
     PRIMARY KEY (
         conversation_id, tenant_id, business_user_id, client_message_id
@@ -132,6 +134,8 @@ async def ensure_schema(db) -> None:
             "lease_expires_at": "TEXT",
             "user_message_id": "TEXT",
             "assistant_message_id": "TEXT",
+            "entity_scope_json": "TEXT",
+            "allowed_doc_ids_json": "TEXT",
         },
         "ext_v2_message": {
             "attachments_json": "TEXT NOT NULL DEFAULT '[]'",
@@ -455,6 +459,35 @@ async def get_message_run(
     return dict(row) if row else None
 
 
+async def list_recent_entity_scopes(
+    db,
+    *,
+    conversation_id: str,
+    tenant_id: str,
+    business_user_id: str,
+    limit: int = 2,
+) -> list[dict]:
+    async with db.execute(
+        """SELECT entity_scope_json, created_at FROM ext_v2_message_run
+           WHERE conversation_id=? AND tenant_id=? AND business_user_id=?
+             AND entity_scope_json IS NOT NULL
+           ORDER BY created_at DESC LIMIT ?""",
+        (conversation_id, tenant_id, business_user_id, max(1, limit)),
+    ) as cursor:
+        rows = await cursor.fetchall()
+    scopes: list[dict] = []
+    for row in rows:
+        try:
+            values = json.loads(row["entity_scope_json"] or "[]")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(values, list):
+            scope = [str(value) for value in values if str(value).strip()]
+            if scope:
+                scopes.append({"entity_ids": scope, "created_at": row["created_at"]})
+    return scopes
+
+
 async def reserve_message_run(
     db,
     *,
@@ -468,6 +501,8 @@ async def reserve_message_run(
     assistant_message_id: str | None = None,
     question: str | None = None,
     title: str | None = None,
+    entity_scope: list[str] | tuple[str, ...] = (),
+    allowed_doc_ids: list[str] | tuple[str, ...] = (),
     lease_seconds: int = 1800,
 ) -> dict | None:
     run_id = run_id or __import__("uuid").uuid4().hex
@@ -480,8 +515,9 @@ async def reserve_message_run(
         """INSERT INTO ext_v2_message_run
            (conversation_id, tenant_id, business_user_id, client_message_id,
              request_hash, run_id, status, lease_expires_at, user_message_id,
-             assistant_message_id, result_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, NULL, ?)
+             assistant_message_id, result_json, entity_scope_json,
+             allowed_doc_ids_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, NULL, ?, ?, ?)
            ON CONFLICT DO NOTHING""",
         (
             conversation_id,
@@ -493,6 +529,8 @@ async def reserve_message_run(
             lease_expires_at,
             user_message_id,
             assistant_message_id,
+            json.dumps(list(entity_scope), ensure_ascii=False, separators=(",", ":")),
+            json.dumps(list(allowed_doc_ids), ensure_ascii=False, separators=(",", ":")),
             utc_now(),
         ),
     )

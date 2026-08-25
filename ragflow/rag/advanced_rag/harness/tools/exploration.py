@@ -41,7 +41,11 @@ async def wiki_query(tools, query: str, keywords: str = "") -> dict:
     from rag.nlp import search as _rag_search
     from rag.advanced_rag.harness.tools.search import _narrow_by_keywords
 
-    _LOG.info(f'[Wiki lookup] Searching the compiled wiki for "{query}" (keywords: {keywords})')
+    _LOG.info(
+        "[Wiki lookup] query_chars=%d keyword_chars=%d",
+        len(query or ""),
+        len(keywords or ""),
+    )
 
     kbs = getattr(tools, "kbs", []) or []
     text = f"{query} {keywords}".strip()
@@ -103,6 +107,7 @@ async def wiki_query(tools, query: str, keywords: str = "") -> dict:
                     "docnm_kwd": title,
                     "doc_id": slug or row.get("doc_id") or kb_id,
                     "wiki_slug_kwd": slug,
+                    "source_doc_ids": row.get("source_doc_ids") or [],
                 }
             )
 

@@ -1415,11 +1415,15 @@ class TransientAttachmentService:
     ) -> dict[str, int]:
         await ensure_attachment_schema(self.db)
         deleter = delete_ragflow_file or _default_delete_ragflow_file
+        expires_before = (
+            self._now() - timedelta(seconds=attachment_ttl_seconds())
+        ).isoformat()
         async with self.db.execute(
             """SELECT file_id FROM ext_ragflow_temp_file
-               WHERE deleted_at IS NULL OR deleted_at=''
+               WHERE (deleted_at IS NULL OR deleted_at='')
+                 AND created_at<=?
                ORDER BY created_at ASC LIMIT ?""",
-            (max(1, min(limit, 1000)),),
+            (expires_before, max(1, min(limit, 1000))),
         ) as cursor:
             rows = await cursor.fetchall()
         deleted = 0

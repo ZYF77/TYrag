@@ -318,9 +318,18 @@ async def ontology_navigate(tools, topic: str, keywords: str = "", doc_scope: li
         doc_scope = tools.scoped_doc_ids(doc_scope)
     if not doc_scope:
         doc_scope = []
-    _LOG.info(f'[Ontology navigation] Looking through the document catalog for "{topic}" (keywords: {keywords}) in doc: {len(doc_scope)}')
+    _LOG.info(
+        "[Ontology navigation] topic_chars=%d keyword_chars=%d doc_count=%d",
+        len(topic or ""),
+        len(keywords or ""),
+        len(doc_scope),
+    )
     if not doc_scope:
-        _LOG.info(f'[Ontology navigation] No doc scope provided: "{topic}" (keywords: {keywords})')
+        _LOG.info(
+            "[Ontology navigation] no doc scope topic_chars=%d keyword_chars=%d",
+            len(topic or ""),
+            len(keywords or ""),
+        )
         return {"answer": "", "chunks": [], "doc_aggs": []}
     chunks = await _navigate_within_doc(tools, topic, keywords, doc_scope, _CATALOG_KINDS)
     return {"answer": "", "chunks": chunks, "doc_aggs": _doc_aggs(chunks)}
@@ -338,7 +347,12 @@ async def mindmap_navigate(tools, topic: str, keywords: str = "", doc_scope: lis
         doc_scope = tools.scoped_doc_ids(doc_scope)
     if not doc_scope:
         doc_scope = []
-    _LOG.info(f'[Mindmap navigation] Following the concept mindmap for "{topic}" (keywords: {keywords}) in doc: {len(doc_scope)}')
+    _LOG.info(
+        "[Mindmap navigation] topic_chars=%d keyword_chars=%d doc_count=%d",
+        len(topic or ""),
+        len(keywords or ""),
+        len(doc_scope),
+    )
     chunks = await _navigate_within_doc(tools, topic, keywords, doc_scope, _MINDMAP_KINDS)
     return {"answer": "", "chunks": chunks, "doc_aggs": _doc_aggs(chunks)}
 
@@ -770,7 +784,11 @@ async def graph_explore(tools, query: str, keywords: str = "", doc_scope: list[s
     _empty = {"answer": "", "chunks": [], "doc_aggs": []}
     if hasattr(tools, "scoped_doc_ids"):
         doc_scope = tools.scoped_doc_ids(doc_scope)
-    _LOG.info(f'[Graph exploration] Exploring the knowledge graph for "{query}" (keywords: {keywords})')
+    _LOG.info(
+        "[Graph exploration] query_chars=%d keyword_chars=%d",
+        len(query or ""),
+        len(keywords or ""),
+    )
 
     scopes = await _kg_scopes(tools, doc_scope)
     if not scopes:

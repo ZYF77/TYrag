@@ -1120,37 +1120,42 @@ async def test_cleanup_retries_ragflow_file_delete(storage_env):
 
 
 @pytest.mark.asyncio
-async def test_cleanup_retries_ephemeral_ragflow_temp_file():
+async def test_cleanup_only_deletes_ttl_expired_ragflow_temp_files(monkeypatch):
     db = await init_db(":memory:")
     storage = MemoryObjectStorage()
+    monkeypatch.setenv("ENTERPRISE_ATTACHMENT_TTL_SECONDS", "60")
+    now = datetime(2026, 8, 10, tzinfo=timezone.utc)
     service = TransientAttachmentService(
-        db, storage, now_fn=lambda: datetime(2026, 8, 10, tzinfo=timezone.utc)
+        db, storage, now_fn=lambda: now
     )
-    await remember_ragflow_temp_file(db, "rf-msg")
+    await remember_ragflow_temp_file(db, "rf-new")
+    await remember_ragflow_temp_file(db, "rf-expired")
+    await remember_ragflow_temp_file(db, "rf-failed")
+    await db.executemany(
+        "UPDATE ext_ragflow_temp_file SET created_at=? WHERE file_id=?",
+        (
+            (now.isoformat(), "rf-new"),
+            ((now - timedelta(seconds=61)).isoformat(), "rf-expired"),
+            ((now - timedelta(seconds=61)).isoformat(), "rf-failed"),
+        ),
+    )
+    await db.commit()
     deleted: list[str] = []
 
-    async def boom(file_id: str) -> None:
+    async def delete(file_id: str) -> None:
         deleted.append(file_id)
-        raise RuntimeError("ragflow down")
+        if file_id == "rf-failed":
+            raise RuntimeError("ragflow down")
 
-    await service.cleanup_expired(delete_ragflow_file=boom)
-    assert deleted == ["rf-msg"]
+    result = await service.cleanup_expired(delete_ragflow_file=delete)
+    assert deleted == ["rf-expired", "rf-failed"]
+    assert result["ragflowTempDeleted"] == 1
+    assert result["ragflowTempFailed"] == 1
     async with db.execute(
-        "SELECT deleted_at FROM ext_ragflow_temp_file WHERE file_id=?",
-        ("rf-msg",),
+        "SELECT file_id, deleted_at FROM ext_ragflow_temp_file ORDER BY file_id",
     ) as cursor:
-        row = await cursor.fetchone()
-    assert row["deleted_at"] is None
-
-    async def ok(file_id: str) -> None:
-        deleted.append(file_id)
-
-    await service.cleanup_expired(delete_ragflow_file=ok)
-    assert deleted[-1] == "rf-msg"
-    async with db.execute(
-        "SELECT deleted_at FROM ext_ragflow_temp_file WHERE file_id=?",
-        ("rf-msg",),
-    ) as cursor:
-        row = await cursor.fetchone()
-    assert row["deleted_at"]
+        rows = {row["file_id"]: row["deleted_at"] for row in await cursor.fetchall()}
+    assert rows["rf-new"] is None
+    assert rows["rf-expired"]
+    assert rows["rf-failed"] is None
     await db.close()

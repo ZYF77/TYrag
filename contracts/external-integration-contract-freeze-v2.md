@@ -39,13 +39,15 @@ API envelope 固定 camelCase；`metadata` 固定 snake_case。`tenantId/sourceS
 
 ## 6. Conversation Context Decision
 
-创建会话可携带 initial context；创建后唯一持久 mutation 为 `PATCH /conversations/{id}/context`。context 字段为 `equipmentId/fixedAssetNo/faultCode`。省略=不变，null=清除；有效变化令 `contextVersion` +1。初始无 context 为 0，有 context 为 1。
+创建会话可携带 initial context；创建后唯一持久 mutation 为 `PATCH /conversations/{id}/context`。context 字段为 `equipmentId/fixedAssetNo/faultCode`。省略=不变，null=清除；有效变化令 `contextVersion` +1。初始无 context 为 0，有 context 为 1。设备字段表示当前活动实体，可在消息轮次之间切换，不是永久检索范围。
 
 `equipmentId` / `fixedAssetNo` 由 EAM 提交或从用户问题命中的文档 metadata 绑定，Gateway 原样保存，不调用 Asset Registry。文档 metadata 是问询筛选键，不是跨系统身份回查。
 
 实际检索集合为 `ACL scope ∩（若已绑定则再交设备 metadata）∩ active/current version ∩ quality passed`。没有 canonical equipment 的 draft conversation 可以发送消息：能从问题抽出唯一已投喂设备号则绑定并筛选；否则在当前用户 ACL 可见文档内全局检索，并在回答末尾建议补充设备号。禁止先全库召回再删除。`faultCode` 只进入 server-side prompt/suggestion rules，不作为文档身份。
 
-消息请求不接受 equipmentId/fixedAssetNo/faultCode override。一旦会话已绑定 equipmentId，首条消息后不可改绑；切换设备必须新建 conversation。尚未绑定前允许首句/后续句或 PATCH 完成首次绑定。
+消息请求不接受 equipmentId/fixedAssetNo/faultCode override。EAM 页面切换设备时先调用现有 context PATCH；问题中完整且唯一命中的设备号也可确定性切换本轮实体。每个消息 run 持久化自己的实体集合和 `allowed_doc_ids`，历史回放不按 Conversation 当前设备重新计算。
+
+联调测试阶段文档角色 ACL 暂为空实现：有效用户仅按 tenant、文档 active/current、解析质量和本轮设备范围过滤；`department/groups/security_level` 暂不决定文档可见性。接口 capability 与跨租户隔离继续强制执行。
 
 ## 7. Pagination / Lifecycle Decision
 

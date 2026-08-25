@@ -34,11 +34,6 @@ from enterprise.gateway.quality.models import (
     start_evaluation,
     utc_now,
 )
-from enterprise.gateway.quality.routing import (
-    parser_application_readback_match,
-    parser_configuration_matches,
-    route_document_for_mapping,
-)
 from enterprise.gateway.sync.models import get_mapping, list_mappings
 from enterprise.gateway.sync.ragflow_document_client import RAGFlowAPIError
 from enterprise.gateway.sync.sync_service import promote_quality_passed_version
@@ -98,30 +93,6 @@ def _decoded_json(value: Any) -> Any:
 def _quality_meta(doc_info: dict[str, Any]) -> dict[str, Any]:
     value = _decoded_json(doc_info.get("meta_fields") or {})
     return value if isinstance(value, dict) else {}
-
-
-def _parser_application_snapshot(doc: Any) -> dict[str, Any]:
-    def profile(raw: Any) -> str | None:
-        value = _decoded_json(raw)
-        return value.get("profile") if isinstance(value, dict) else None
-
-    state = getattr(doc, "parser_application_status", None) or "legacy_unverified"
-    readback_match = parser_application_readback_match(doc)
-    reason_code = None
-    if not readback_match:
-        reason_code = (
-            f"PARSER_APPLICATION_{state.upper()}"
-            if state != "executed"
-            else "PARSER_APPLICATION_READBACK_MISMATCH"
-        )
-    return {
-        "state": state,
-        "selectedProfile": getattr(doc, "parser_profile", None),
-        "configuredProfile": profile(getattr(doc, "parser_configured_json", None)),
-        "executedProfile": profile(getattr(doc, "parser_executed_json", None)),
-        "readbackMatch": readback_match,
-        "reasonCode": reason_code,
-    }
 
 
 def _meta_entry(meta: dict[str, Any], name: str) -> tuple[Any, bool]:
@@ -276,7 +247,6 @@ class QualityEvaluationService:
             or not doc.ragflow_document_id
         ):
             return None
-        routing = route_document_for_mapping(doc)
         return await get_or_create_evaluation(
             self.db,
             tenant_id=doc.tenant_id,
@@ -285,7 +255,6 @@ class QualityEvaluationService:
             source_version_id=doc.source_version_id,
             ragflow_dataset_id=doc.ragflow_dataset_id,
             ragflow_document_id=doc.ragflow_document_id,
-            routing=routing,
             evaluation_version="1",
             max_attempts=self.max_attempts,
         )
@@ -446,14 +415,6 @@ class QualityEvaluationService:
             raise QualityRetryableError(
                 "RAGFLOW_NOT_TERMINAL", f"RAGFlow run status is {run}"
             )
-        try:
-            routing = route_document_for_mapping(doc)
-        except ValueError as exc:
-            return self._failed_result(
-                doc, "PARSER_PROFILE_UNVERIFIED", str(exc),
-            )
-        parser_readback_matches = parser_configuration_matches(routing, doc_info)
-
         chunks: list[dict[str, Any]] = []
         page = 1
         page_size = 100
@@ -530,23 +491,14 @@ class QualityEvaluationService:
         )
         dimensions = quality_dimensions(metrics)
         metrics["quality_dimensions"] = dimensions
-        parser_application = _parser_application_snapshot(doc)
-        if not parser_readback_matches:
-            parser_application["readbackMatch"] = False
-            parser_application["reasonCode"] = "PARSER_APPLICATION_READBACK_MISMATCH"
-        metrics["parserApplication"] = parser_application
-        if quality_status == "passed" and not (
-            parser_application["state"] == "executed"
-            and parser_application["readbackMatch"] is True
-        ):
-            quality_status = "review_required"
-            parser_reason = (
-                "PARSER_APPLICATION_NOT_EXECUTED"
-                if parser_application["state"] != "executed"
-                else "PARSER_APPLICATION_READBACK_MISMATCH"
-            )
-            if parser_reason not in reasons:
-                reasons.append(parser_reason)
+        metrics["parserApplication"] = {
+            "state": "ragflow_owned",
+            "selectedProfile": None,
+            "configuredProfile": None,
+            "executedProfile": None,
+            "readbackMatch": True,
+            "reasonCode": None,
+        }
         required_dimensions, declaration_valid = required_quality_dimensions(metrics)
         if not declaration_valid:
             if quality_status == "passed":

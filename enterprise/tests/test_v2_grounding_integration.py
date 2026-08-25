@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -15,6 +16,24 @@ from enterprise.tests.test_v2_conversation_contract import (
     _insert_document,
     runtime,
 )
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_advanced_rag_query_logs_are_metadata_only():
+    paths = [
+        "ragflow/rag/advanced_rag/agentic_rag.py",
+        "ragflow/rag/advanced_rag/harness/tools/exploration.py",
+        "ragflow/rag/advanced_rag/harness/tools/search.py",
+        "ragflow/rag/advanced_rag/harness/tools/navigation.py",
+    ]
+    source = "\n".join((ROOT / path).read_text(encoding="utf-8") for path in paths)
+
+    assert '"{query}"' not in source
+    assert '"{topic}"' not in source
+    assert "keywords: {keywords}" not in source
+    assert "@retrieve: {question}@{keywords}" not in source
+    assert "query_chars=" in source
 
 
 def _sse_answer_text(body: str) -> str:
@@ -406,7 +425,19 @@ async def test_v2_unrelated_fault_code_abstain_from_ragflow(runtime):
 
 
 @pytest.mark.asyncio
-async def test_v2_reasoning_mode_maps_into_completion_body(runtime):
+@pytest.mark.parametrize(
+    ("reasoning_mode", "expected"),
+    [
+        ("simple", None),
+        ("low", 1),
+        ("medium", 2),
+        ("high", 3),
+        ("ultra", 4),
+    ],
+)
+async def test_v2_reasoning_mode_maps_into_completion_body(
+    runtime, reasoning_mode, expected
+):
     await _insert_document(
         runtime.db,
         external_id="DOC-REASONING-MODE",
@@ -418,23 +449,20 @@ async def test_v2_reasoning_mode_maps_into_completion_body(runtime):
         conversation = await _create_conversation(
             client, equipmentId="EQ-REASONING-MODE"
         )
-        high = await client.post(
+        response = await client.post(
             f"{BASE}/conversations/{conversation['conversationId']}/messages",
             json={
-                "clientMessageId": "mode-high",
+                "clientMessageId": f"mode-{reasoning_mode}",
                 "question": "问题",
-                "reasoningMode": "high",
+                "reasoningMode": reasoning_mode,
             },
         )
-        assert high.status_code == 200
-        assert runtime.stub._last_completion_body["reasoning"] == 3
+        assert response.status_code == 200
         assert runtime.stub._last_completion_body["grounding_version"] == 1
-        simple = await client.post(
-            f"{BASE}/conversations/{conversation['conversationId']}/messages",
-            json={"clientMessageId": "mode-simple", "question": "问题"},
-        )
-        assert simple.status_code == 200
+    if expected is None:
         assert "reasoning" not in runtime.stub._last_completion_body
+    else:
+        assert runtime.stub._last_completion_body["reasoning"] == expected
 
 
 @pytest.mark.asyncio

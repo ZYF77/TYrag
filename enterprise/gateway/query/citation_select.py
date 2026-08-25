@@ -219,8 +219,7 @@ def select_cited_chunk_refs(
     every marker is out of range) returns ``refIndex=None`` so clients must not
     invent an inline binding.
     """
-    if status == "no_reliable_evidence":
-        return []
+    del status  # Citation evidence is independent from the message business state.
     indexes = cited_chunk_indexes(answer)
     selected: list[tuple[dict, int | None]] = []
     for index in indexes:
@@ -244,5 +243,5 @@ def select_cited_chunks(
     chunks: list[dict],
     status: str,
 ) -> list[dict]:
-    """Return cited chunks, or none when the run has no reliable evidence."""
+    """Return cited chunks independently from the message business state."""
     return [chunk for chunk, _ref in select_cited_chunk_refs(answer, chunks, status)]

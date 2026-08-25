@@ -5,7 +5,7 @@ info:
   description: >-
     Frozen local-integration contract for registering immutable PDFs already
     stored on an external file share. Device systems use only the public v3
-    document routes and never call RAGFlow or the internal source-ticket route.
+    document routes and never call RAGFlow directly.
     Registration HTTP 202 is an acceptance receipt only; terminal processing
     results are delivered by the outbound FILE_SHARE callback contract
     (file-share-callback-v1.yaml). GET status remains available for console
@@ -14,7 +14,6 @@ servers:
   - url: /
 tags:
   - name: documents-v3
-  - name: internal-source
 paths:
   /enterprise/api/v3/documents:
     post:
@@ -106,35 +105,6 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
-  /enterprise/internal/source-tickets/{ticket}:
-    get:
-      tags: [internal-source]
-      summary: Consume one short-lived internal source ticket
-      description: Internal RAGFlow worker route; not available to device systems.
-      operationId: consumeFileShareSourceTicket
-      x-internal: true
-      security:
-        - InternalSourceKey: []
-      parameters:
-        - in: path
-          name: ticket
-          required: true
-          schema: { type: string, minLength: 1 }
-      responses:
-        '200':
-          description: One source stream; the ticket cannot be reused
-          headers:
-            X-Source-SHA256:
-              schema: { type: string, pattern: '^[0-9a-f]{64}$' }
-            X-Source-Version-Id:
-              schema: { type: string }
-          content:
-            application/pdf:
-              schema: { type: string, format: binary }
-        '404':
-          description: Missing, expired, replayed, or unauthorized ticket
-        '409':
-          description: Source bytes changed after registration
 components:
   securitySchemes:
     HmacSignature:
@@ -144,10 +114,6 @@ components:
       description: >-
         v1=<lowercase hex HMAC-SHA256>. Verification also requires
         X-TY-Timestamp, X-TY-Key-Id, and an allowed tenant/source binding.
-    InternalSourceKey:
-      type: apiKey
-      in: header
-      name: X-Internal-Source-Key
   parameters:
     TimestampHeader:
       name: X-TY-Timestamp
