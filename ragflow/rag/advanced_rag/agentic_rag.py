@@ -33,6 +33,7 @@ the fast non-tool-calling path.
 import logging
 import re
 from typing import Any, List
+from urllib.parse import urlsplit
 
 import json_repair
 from api.db.services.doc_metadata_service import DocMetadataService
@@ -149,6 +150,81 @@ class RAGTools:
             return list(self.doc_scope)
         allowed = set(self.doc_scope)
         return [doc_id for doc_id in doc_scope if doc_id in allowed]
+
+    @staticmethod
+    def _source_doc_ids(chunk: dict) -> list[str]:
+        value = chunk.get("source_doc_ids")
+        if isinstance(value, str):
+            try:
+                parsed = json_repair.loads(value)
+                value = parsed if isinstance(parsed, list) else [parsed]
+            except Exception:
+                value = [value]
+        if not isinstance(value, list):
+            return []
+        return list(
+            dict.fromkeys(
+                str(item) for item in value if item is not None and str(item).strip()
+            )
+        )
+
+    def _scoped_chunk(self, chunk: dict) -> dict | None:
+        if self.doc_scope is None:
+            return chunk
+        allowed = set(self.doc_scope)
+        document_id = chunk.get("document_id") or chunk.get("doc_id")
+        if document_id in allowed:
+            return chunk
+        url = str(chunk.get("url") or "").strip()
+        if self.has_web() and url:
+            try:
+                parsed = urlsplit(url)
+            except ValueError:
+                parsed = None
+            if parsed and parsed.scheme in {"http", "https"} and parsed.hostname:
+                return chunk
+        source_doc_ids = self._source_doc_ids(chunk)
+        if len(source_doc_ids) != 1 or source_doc_ids[0] not in allowed:
+            return None
+        normalized = dict(chunk)
+        normalized["doc_id"] = source_doc_ids[0]
+        normalized["document_id"] = source_doc_ids[0]
+        return normalized
+
+    def enforce_doc_scope(self, kbinfos: dict | None) -> dict:
+        if not isinstance(kbinfos, dict) or self.doc_scope is None:
+            return kbinfos or {"chunks": [], "doc_aggs": []}
+        scoped = dict(kbinfos)
+        chunks = [
+            kept
+            for chunk in kbinfos.get("chunks", []) or []
+            if isinstance(chunk, dict)
+            for kept in [self._scoped_chunk(chunk)]
+            if kept is not None
+        ]
+        allowed = set(self.doc_scope)
+        aggs = [
+            agg
+            for agg in kbinfos.get("doc_aggs", []) or []
+            if isinstance(agg, dict) and agg.get("doc_id") in allowed
+        ]
+        seen = {agg.get("doc_id") for agg in aggs}
+        for chunk in chunks:
+            document_id = chunk.get("document_id") or chunk.get("doc_id")
+            if document_id not in allowed or document_id in seen:
+                continue
+            seen.add(document_id)
+            aggs.append(
+                {
+                    "doc_id": document_id,
+                    "doc_name": chunk.get("docnm_kwd")
+                    or chunk.get("document_name")
+                    or "",
+                }
+            )
+        scoped["chunks"] = chunks
+        scoped["doc_aggs"] = aggs
+        return scoped
 
     async def _fit_messages(self, system: str, user: str) -> list:
         """Fit system+user messages into the model's context window."""

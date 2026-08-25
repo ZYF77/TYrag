@@ -433,12 +433,13 @@ def test_quality_gate_fail_closed():
             "required_capabilities": ["text", "position"],
             "quality_expectations": {"declarations_complete": True},
             "parserApplication": {
-                "state": "executed",
+                "state": "ragflow_owned",
                 "readbackMatch": True,
             },
         },
     )
     assert enforce_quality_gate(passed) == (True, None)
+    # Dataset-owned parser differences are no longer a Gateway hard gate.
     parser_mismatch = SimpleNamespace(
         evaluation_state="completed",
         parse_quality_status="passed",
@@ -450,15 +451,12 @@ def test_quality_gate_fail_closed():
             },
         },
     )
-    assert enforce_quality_gate(parser_mismatch) == (
-        False,
-        "DOCUMENT_REVIEW_REQUIRED",
-    )
+    assert enforce_quality_gate(parser_mismatch) == (True, None)
     assert enforce_quality_gate(
         passed_without_evidence,
         strict_mode=False,
         demo_warn_mode=True,
-    ) == (False, "DOCUMENT_REVIEW_REQUIRED")
+    ) == (True, "DOCUMENT_QUALITY_WARN")
     assert enforce_quality_gate(review, strict_mode=False, demo_warn_mode=True) == (
         True,
         "DOCUMENT_QUALITY_WARN",
@@ -561,14 +559,14 @@ async def test_worker_completes_passed_with_chunks():
     )
     assert evaluation.evaluation_state == "completed"
     assert evaluation.parse_quality_status == "passed"
-    assert evaluation.metrics_json["parserApplication"]["state"] == "executed"
+    assert evaluation.metrics_json["parserApplication"]["state"] == "ragflow_owned"
     assert evaluation.parse_repeatability_hash
     assert evaluation.e2e_repeatability_hash
     await db.close()
 
 
 @pytest.mark.asyncio
-async def test_worker_parser_mismatch_cannot_pass():
+async def test_worker_ignores_legacy_parser_mismatch_fields():
     db = await init_db(":memory:")
     client = PassStub()
     client.run_status = "DONE"
@@ -580,13 +578,13 @@ async def test_worker_parser_mismatch_cannot_pass():
         db, doc.tenant_id, doc.source_system,
         doc.external_document_id, doc.source_version_id,
     )
-    assert evaluation.parse_quality_status == "review_required"
-    assert "PARSER_APPLICATION_NOT_EXECUTED" in evaluation.quality_reasons
+    assert evaluation.parse_quality_status == "passed"
+    assert evaluation.metrics_json["parserApplication"]["state"] == "ragflow_owned"
     await db.close()
 
 
 @pytest.mark.asyncio
-async def test_worker_actual_parser_readback_mismatch_cannot_pass():
+async def test_worker_ignores_dataset_parser_config_differences():
     db = await init_db(":memory:")
     client = PassStub()
     client.run_status = "DONE"
@@ -601,17 +599,40 @@ async def test_worker_actual_parser_readback_mismatch_cannot_pass():
         db, doc.tenant_id, doc.source_system,
         doc.external_document_id, doc.source_version_id,
     )
-    assert evaluation.parse_quality_status == "review_required"
-    assert "PARSER_APPLICATION_READBACK_MISMATCH" in evaluation.quality_reasons
+    assert evaluation.parse_quality_status == "passed"
+    assert "PARSER_APPLICATION_READBACK_MISMATCH" not in (
+        evaluation.quality_reasons or []
+    )
     await db.close()
+
+
+class EmptyAfterReadyStub(PassStub):
+    def __init__(self):
+        super().__init__()
+        self.empty_chunks = False
+
+    async def list_chunks(
+        self,
+        dataset_id,
+        document_id,
+        page=1,
+        page_size=30,
+        request_id=None,
+    ):
+        if self.empty_chunks:
+            return {"code": 0, "data": {"total": 0, "chunks": [], "doc": {}}}
+        return await super().list_chunks(
+            dataset_id, document_id, page, page_size, request_id
+        )
 
 
 @pytest.mark.asyncio
 async def test_worker_empty_chunks_is_not_passed():
     db = await init_db(":memory:")
-    client = RAGFlowDocumentStub()
+    client = EmptyAfterReadyStub()
     client.run_status = "DONE"
     doc = await _ready_with_client(db, client)
+    client.empty_chunks = True
     quality = QualityEvaluationService(db, client)
     await QualityEvaluationWorker(quality).run_once()
     evaluation = await quality_models.get_latest_evaluation(
@@ -833,7 +854,7 @@ class TestQualityAPI:
             assert resp.json()["parseQualityStatus"] == "passed"
 
     @pytest.mark.asyncio
-    async def test_unauthorized_user_gets_403(self):
+    async def test_role_group_mismatch_is_open_during_test_stage(self):
         from enterprise.gateway.quality import router as quality_router_module
 
         db = app.dependency_overrides[quality_router_module.get_db]()
@@ -848,8 +869,11 @@ class TestQualityAPI:
                 params={"source_system": "DEMO"},
                 headers={"Authorization": f"Bearer {token_b}"},
             )
-            assert resp.status_code == 403
-            assert resp.json()["code"] == "ACL_DENIED"
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body.get("code") != "ACL_DENIED"
+            # No evaluation row yet — ACL open still allows the endpoint.
+            assert body.get("evaluationState") in {None, "not_started"}
 
     @pytest.mark.asyncio
     async def test_ask_gate_blocks_review_required(self):

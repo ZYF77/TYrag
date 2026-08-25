@@ -107,6 +107,7 @@ async def wiki_query(tools, query: str, keywords: str = "") -> dict:
                     "docnm_kwd": title,
                     "doc_id": slug or row.get("doc_id") or kb_id,
                     "wiki_slug_kwd": slug,
+                    "source_doc_ids": row.get("source_doc_ids") or [],
                 }
             )
 

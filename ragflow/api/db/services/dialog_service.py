@@ -699,6 +699,54 @@ def _normalize_text_from_content(content) -> str:
     return str(content)
 
 
+def filter_kbinfos_to_doc_ids(
+    kbinfos: dict | None,
+    allowed: list[str] | None,
+    *,
+    allow_web: bool = False,
+) -> dict:
+    """Hard-drop chunks/doc_aggs outside Gateway doc_ids (simple-chat path)."""
+    if not isinstance(kbinfos, dict) or not allowed:
+        return kbinfos or {"chunks": [], "doc_aggs": []}
+    allowed_set = set(allowed)
+
+    def _keep_chunk(chunk: dict) -> bool:
+        document_id = chunk.get("document_id") or chunk.get("doc_id")
+        if document_id in allowed_set:
+            return True
+        if not allow_web:
+            return False
+        url = str(chunk.get("url") or "").strip()
+        return url.startswith("http://") or url.startswith("https://")
+
+    chunks = [
+        chunk
+        for chunk in kbinfos.get("chunks", []) or []
+        if isinstance(chunk, dict) and _keep_chunk(chunk)
+    ]
+    aggs = [
+        agg
+        for agg in kbinfos.get("doc_aggs", []) or []
+        if isinstance(agg, dict) and agg.get("doc_id") in allowed_set
+    ]
+    seen = {agg.get("doc_id") for agg in aggs}
+    for chunk in chunks:
+        document_id = chunk.get("document_id") or chunk.get("doc_id")
+        if document_id not in allowed_set or document_id in seen:
+            continue
+        seen.add(document_id)
+        aggs.append(
+            {
+                "doc_id": document_id,
+                "doc_name": chunk.get("docnm_kwd") or chunk.get("document_name") or "",
+            }
+        )
+    scoped = dict(kbinfos)
+    scoped["chunks"] = chunks
+    scoped["doc_aggs"] = aggs
+    return scoped
+
+
 def convert_last_user_msg_to_multimodal(msg: list[dict], image_data_uris: list[str], factory: str) -> None:
     if not msg or not image_data_uris:
         return
@@ -885,6 +933,9 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
             text_attachments, image_files = split_file_attachments(messages[-1]["files"], raw=True)
         attachments_ = "\n\n".join(text_attachments)
 
+    # Gateway-provided doc_ids hard ceiling — meta filter must not UNION-expand it.
+    gateway_doc_ids = list(attachments) if attachments else None
+
     prompt_config = dialog.prompt_config
     if dialog.meta_data_filter:
         attachments = await apply_meta_data_filter(
@@ -896,6 +947,9 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
             kb_ids=dialog.kb_ids,
             metas_loader=lambda: DocMetadataService.get_flatted_meta_by_kbs(dialog.kb_ids),
         )
+        if gateway_doc_ids is not None:
+            allowed = set(gateway_doc_ids)
+            attachments = [doc_id for doc_id in attachments or [] if doc_id in allowed]
 
     include_reference_metadata, metadata_fields = _resolve_reference_metadata(prompt_config, request_payload=kwargs)
     field_map = KnowledgebaseService.get_field_map(dialog.kb_ids)
@@ -906,6 +960,8 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
         ans = await use_sql(questions[-1], field_map, dialog.tenant_id, chat_mdl, prompt_config.get("quote", True), dialog.kb_ids, doc_ids=attachments)
         # For aggregate queries (COUNT, SUM, etc.), chunks may be empty but answer is still valid
         if ans and (ans.get("reference", {}).get("chunks") or ans.get("answer")):
+            if gateway_doc_ids is not None and isinstance(ans.get("reference"), dict):
+                ans["reference"] = filter_kbinfos_to_doc_ids(ans["reference"], gateway_doc_ids)
             if include_reference_metadata and ans.get("reference", {}).get("chunks"):
                 if len(dialog.kb_ids) != 1 and any(not c.get("kb_id") for c in ans["reference"]["chunks"]):
                     logging.warning(
@@ -1060,6 +1116,11 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
             metadata_fields,
         )
         _enrich_chunks_with_document_metadata(kbinfos.get("chunks", []), metadata_fields)
+
+    if gateway_doc_ids is not None:
+        kbinfos = filter_kbinfos_to_doc_ids(
+            kbinfos, gateway_doc_ids, allow_web=use_web_search
+        )
 
     knowledges = kb_prompt(kbinfos, max_tokens)
     retrieved_knowledge_count = len(kbinfos.get("chunks", []))
@@ -2271,7 +2332,8 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
     if "doc_ids" in messages[-1]:
         doc_scope = [doc_id for doc_id in messages[-1]["doc_ids"] if doc_id]
     if dialog.meta_data_filter:
-        doc_scope = await apply_meta_data_filter(
+        initial_doc_scope = None if doc_scope is None else list(doc_scope)
+        filtered_doc_scope = await apply_meta_data_filter(
             dialog.meta_data_filter,
             None,
             messages[-1].get("content", ""),
@@ -2280,6 +2342,13 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
             kb_ids=dialog.kb_ids,
             metas_loader=lambda: DocMetadataService.get_flatted_meta_by_kbs(dialog.kb_ids),
         )
+        if initial_doc_scope is None:
+            doc_scope = filtered_doc_scope
+        else:
+            allowed = set(initial_doc_scope)
+            doc_scope = [
+                doc_id for doc_id in filtered_doc_scope or [] if doc_id in allowed
+            ]
 
     rag_tools = RAGTools(
         tenant_ids,
@@ -2297,6 +2366,8 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
         nonlocal rag_tools, messages
 
         refs = []
+        if hasattr(rag_tools, "enforce_doc_scope"):
+            rag_tools.kbinfos = rag_tools.enforce_doc_scope(rag_tools.kbinfos)
         ans = answer.split("</think>")
         think = ""
         if len(ans) == 2:

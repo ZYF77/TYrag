@@ -82,6 +82,9 @@ router = APIRouter(prefix="/enterprise/api/v2", tags=["query-v2"])
 logger = logging.getLogger(__name__)
 
 IDENTIFIER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._\-]{3,127}")
+PREVIOUS_COMPARISON_RE = re.compile(
+    r"(?:刚才|上一台|前一台).{0,16}(?:比|比较|对比|区别|差异)"
+)
 EQUIPMENT_ID_HINT = (
     "建议补充设备号或固定资产号，我可以只查该设备的资料，回答会更准确。"
 )
@@ -209,57 +212,81 @@ def _candidate_identifiers(question: str) -> list[str]:
     return seen
 
 
-async def _lookup_equipment_metadata(
-    db, tenant_id: str, tokens: list[str]
-) -> tuple[str | None, str | None]:
+def _device_like_identifiers(question: str) -> list[str]:
+    return [
+        token
+        for token in _candidate_identifiers(question)
+        if any(char.isalpha() for char in token)
+        and (any(char.isdigit() for char in token) or any(char in "-_." for char in token))
+    ]
+
+
+def _equipment_index(
+    docs_by_internal_id: dict[str, ExtDocumentMap],
+) -> dict[str, set[str]]:
+    index: dict[str, set[str]] = {}
+    for doc in docs_by_internal_id.values():
+        if not doc.equipment_id:
+            continue
+        for value in (doc.equipment_id, doc.fixed_asset_no):
+            if value:
+                index.setdefault(value, set()).add(doc.equipment_id)
+    return index
+
+
+def _explicit_equipment_ids(
+    question: str,
+    docs_by_internal_id: dict[str, ExtDocumentMap],
+) -> tuple[list[str], bool]:
+    tokens = _device_like_identifiers(question)
     if not tokens:
-        return None, None
-    placeholders = ",".join("?" * len(tokens))
-    async with db.execute(
-        f"""SELECT equipment_id, fixed_asset_no
-            FROM ext_document_map
-            WHERE tenant_id=?
-              AND (equipment_id IN ({placeholders})
-                   OR fixed_asset_no IN ({placeholders}))""",
-        (tenant_id, *tokens, *tokens),
-    ) as cursor:
-        rows = await cursor.fetchall()
-    equipment_ids = {row["equipment_id"] for row in rows if row["equipment_id"]}
-    if len(equipment_ids) != 1:
-        return None, None
-    equipment_id = next(iter(equipment_ids))
-    fixed_nos = {
-        row["fixed_asset_no"]
-        for row in rows
-        if row["equipment_id"] == equipment_id and row["fixed_asset_no"]
+        return [], False
+    index = _equipment_index(docs_by_internal_id)
+    resolved: list[str] = []
+    for token in tokens:
+        matches = index.get(token, set())
+        if len(matches) != 1:
+            return [], True
+        equipment_id = next(iter(matches))
+        if equipment_id not in resolved:
+            resolved.append(equipment_id)
+    return resolved, False
+
+
+def _documents_for_equipment_ids(
+    docs_by_internal_id: dict[str, ExtDocumentMap],
+    equipment_ids: list[str],
+    *,
+    fixed_asset_no: str | None = None,
+) -> dict[str, ExtDocumentMap]:
+    if not equipment_ids:
+        return docs_by_internal_id
+    allowed = set(equipment_ids)
+    selected = {
+        document_id: doc
+        for document_id, doc in docs_by_internal_id.items()
+        if doc.equipment_id in allowed
     }
-    fixed_asset_no = next(iter(fixed_nos)) if len(fixed_nos) == 1 else None
-    return equipment_id, fixed_asset_no
+    # When EAM submits a single active equipment with fixedAssetNo, keep the
+    # stricter identity match for that primary entity only.
+    if fixed_asset_no and len(equipment_ids) == 1:
+        selected = {
+            document_id: doc
+            for document_id, doc in selected.items()
+            if doc.fixed_asset_no == fixed_asset_no
+        }
+    return selected
 
 
-async def _bind_from_question(
-    db, principal: UserPrincipal, conversation: dict, question: str
-) -> dict:
-    equipment_id, fixed_asset_no = await _lookup_equipment_metadata(
-        db, principal.tenant_id, _candidate_identifiers(question)
-    )
-    if not equipment_id:
-        return conversation
-    updated = await v2_store.update_context(
-        db,
-        conversation_id=conversation["conversation_id"],
-        tenant_id=principal.tenant_id,
-        business_user_id=principal.business_user_id,
-        equipment_id=equipment_id,
-        fixed_asset_no=fixed_asset_no,
-        fault_code=conversation.get("fault_code"),
-        context_version=conversation["context_version"] + 1,
-        asset_id=None,
-        registry_version=None,
-        context_resolved_at=v2_store.utc_now(),
-        expected_context_version=conversation["context_version"],
-    )
-    return updated or conversation
+def _fixed_asset_for_equipment(
+    docs_by_internal_id: dict[str, ExtDocumentMap], equipment_id: str
+) -> str | None:
+    values = {
+        doc.fixed_asset_no
+        for doc in docs_by_internal_id.values()
+        if doc.equipment_id == equipment_id and doc.fixed_asset_no
+    }
+    return next(iter(values)) if len(values) == 1 else None
 
 
 def _submitted_snapshot(
@@ -274,7 +301,12 @@ def _submitted_snapshot(
             "fixed_asset_no": None,
             "asset_id": None,
             "registry_version": None,
-            "context_resolved_at": None,
+            "context_resolved_at": (
+                v2_store.utc_now()
+                if previous
+                and (previous.get("equipment_id") or previous.get("fixed_asset_no"))
+                else None
+            ),
         }
     keep = (
         previous is not None
@@ -312,12 +344,14 @@ def _with_equipment_hint(conversation: dict, answer: str, status: str) -> str:
 
 def _allowed_identifiers(conversation: dict, question: str) -> list[str]:
     allowed: list[str] = []
+    for value in conversation.get("_turn_entity_ids") or []:
+        if value and value not in allowed:
+            allowed.append(value)
     for key in ("equipment_id", "fixed_asset_no"):
         value = _conversation_value(conversation, key)
-        if value:
+        if value and value not in allowed:
             allowed.append(value)
-    if question and question.strip():
-        allowed.append(question)
+    del question
     return allowed
 
 
@@ -562,20 +596,6 @@ async def patch_context(
         }
         for field in req.model_fields_set:
             values[field] = getattr(req, field)
-        has_started = row.get("first_message_at") is not None
-        bound = bool(row["equipment_id"])
-        if has_started and bound and values["equipmentId"] != row["equipment_id"]:
-            return _error(
-                409,
-                "CONVERSATION_CONTEXT_STALE",
-                "Canonical equipment cannot change after the first message",
-            )
-        if has_started and bound and not values["equipmentId"]:
-            return _error(
-                409,
-                "CONVERSATION_CONTEXT_STALE",
-                "Canonical equipment cannot be cleared after the first message",
-            )
         snapshot = _submitted_snapshot(
             values["equipmentId"],
             values["fixedAssetNo"],
@@ -717,7 +737,7 @@ async def list_suggestions(
     return {"items": _suggestions(row), "contextVersion": row["context_version"]}
 
 
-async def _context_scope(
+async def _available_context_scope(
     db, principal: UserPrincipal, conversation: dict
 ) -> tuple[AclScope, dict[str, ExtDocumentMap]]:
     from enterprise.gateway.acl.context import AclContext
@@ -727,17 +747,8 @@ async def _context_scope(
     acl_scope = await compile_scope(AclContext(principal=principal), resolver)
     if acl_scope.is_empty:
         return acl_scope, {}
-    equipment = conversation["equipment_id"]
-    fixed = conversation["fixed_asset_no"]
-    asset_id = conversation.get("asset_id")
     filtered: dict[str, ExtDocumentMap] = {}
     for internal_id, doc in resolver._docs.items():
-        if equipment and doc.equipment_id != equipment:
-            continue
-        if equipment and fixed and doc.fixed_asset_no != fixed:
-            continue
-        if equipment and asset_id and doc.asset_id != asset_id:
-            continue
         readiness, _quality_status = await document_candidate_readiness_from_db(
             db, doc
         )
@@ -754,6 +765,158 @@ async def _context_scope(
         ),
         filtered,
     )
+
+
+async def _context_scope(
+    db, principal: UserPrincipal, conversation: dict
+) -> tuple[AclScope, dict[str, ExtDocumentMap]]:
+    acl_scope, available = await _available_context_scope(db, principal, conversation)
+    if acl_scope.is_empty:
+        return acl_scope, {}
+    if conversation.get("_turn_scope_resolved"):
+        allowed = set(conversation.get("_turn_document_ids") or [])
+        filtered = {
+            document_id: doc
+            for document_id, doc in available.items()
+            if document_id in allowed
+        }
+    else:
+        equipment = conversation["equipment_id"]
+        fixed = conversation["fixed_asset_no"]
+        asset_id = conversation.get("asset_id")
+        filtered = {
+            document_id: doc
+            for document_id, doc in available.items()
+            if not equipment
+            or (
+                doc.equipment_id == equipment
+                and (not fixed or doc.fixed_asset_no == fixed)
+                and (not asset_id or doc.asset_id == asset_id)
+            )
+        }
+    if not filtered:
+        return AclScope.empty(acl_scope.policy_version), {}
+    return (
+        AclScope.materialized(
+            tuple(sorted({doc.ragflow_dataset_id for doc in filtered.values()})),
+            tuple(sorted(filtered)),
+            policy_version=acl_scope.policy_version,
+        ),
+        filtered,
+    )
+
+
+async def _resolve_turn_scope(
+    db,
+    principal: UserPrincipal,
+    conversation: dict,
+    question: str,
+) -> dict:
+    _scope, available = await _available_context_scope(db, principal, conversation)
+    explicit, unresolved = _explicit_equipment_ids(question, available)
+    recent_records = await v2_store.list_recent_entity_scopes(
+        db,
+        conversation_id=conversation["conversation_id"],
+        tenant_id=principal.tenant_id,
+        business_user_id=principal.business_user_id,
+        limit=2,
+    )
+    recent = [record["entity_ids"] for record in recent_records]
+    context_resolved_at = conversation.get("context_resolved_at") or ""
+    latest_scope_at = recent_records[0]["created_at"] if recent_records else ""
+    context_is_newer = bool(context_resolved_at and context_resolved_at > latest_scope_at)
+    conversation_fixed = conversation.get("fixed_asset_no")
+    if unresolved:
+        entity_ids: list[str] = []
+        selected: dict[str, ExtDocumentMap] = {}
+    elif explicit:
+        entity_ids = explicit
+        selected = _documents_for_equipment_ids(available, entity_ids)
+    elif PREVIOUS_COMPARISON_RE.search(question or ""):
+        entity_ids = []
+        for scope in recent:
+            for equipment_id in scope:
+                if equipment_id not in entity_ids:
+                    entity_ids.append(equipment_id)
+                if len(entity_ids) == 2:
+                    break
+            if len(entity_ids) == 2:
+                break
+        if not entity_ids and conversation.get("equipment_id"):
+            entity_ids = [conversation["equipment_id"]]
+        selected = _documents_for_equipment_ids(
+            available,
+            entity_ids,
+            fixed_asset_no=conversation_fixed if len(entity_ids) == 1 else None,
+        )
+    elif context_is_newer:
+        entity_ids = (
+            [conversation["equipment_id"]]
+            if conversation.get("equipment_id")
+            else []
+        )
+        selected = _documents_for_equipment_ids(
+            available,
+            entity_ids,
+            fixed_asset_no=conversation_fixed,
+        )
+    elif recent:
+        entity_ids = list(recent[0])
+        selected = _documents_for_equipment_ids(
+            available,
+            entity_ids,
+            fixed_asset_no=(
+                conversation_fixed
+                if len(entity_ids) == 1
+                and entity_ids[0] == conversation.get("equipment_id")
+                else None
+            ),
+        )
+    elif conversation.get("equipment_id"):
+        entity_ids = [conversation["equipment_id"]]
+        selected = _documents_for_equipment_ids(
+            available,
+            entity_ids,
+            fixed_asset_no=conversation_fixed,
+        )
+    else:
+        entity_ids = []
+        selected = available
+
+    if explicit:
+        primary = explicit[-1]
+        fixed_asset_no = _fixed_asset_for_equipment(available, primary)
+        changed = (
+            conversation.get("equipment_id") != primary
+            or conversation.get("fixed_asset_no") != fixed_asset_no
+        )
+        if changed:
+            updated = await v2_store.update_context(
+                db,
+                conversation_id=conversation["conversation_id"],
+                tenant_id=principal.tenant_id,
+                business_user_id=principal.business_user_id,
+                equipment_id=primary,
+                fixed_asset_no=fixed_asset_no,
+                fault_code=conversation.get("fault_code"),
+                context_version=conversation["context_version"] + 1,
+                asset_id=None,
+                registry_version=None,
+                context_resolved_at=v2_store.utc_now(),
+                expected_context_version=conversation["context_version"],
+            )
+            if updated is None:
+                raise _FormalQueryError(
+                    "CONVERSATION_CONTEXT_CONFLICT",
+                    409,
+                    "Conversation context version changed",
+                )
+            conversation = updated
+
+    conversation["_turn_scope_resolved"] = True
+    conversation["_turn_entity_ids"] = list(entity_ids)
+    conversation["_turn_document_ids"] = sorted(selected)
+    return conversation
 
 
 def _external_citations(
@@ -1013,8 +1176,9 @@ async def _prepare_message_run(
         question = definition["displayPrompt"]
     else:
         question = req.question or ""
-    if not conversation.get("equipment_id"):
-        conversation = await _bind_from_question(db, principal, conversation, question)
+    conversation = await _resolve_turn_scope(
+        db, principal, conversation, question
+    )
     title = " ".join(question.split())[:80] or (
         pending[0].file_name if pending else "New conversation"
     )
@@ -1030,6 +1194,8 @@ async def _prepare_message_run(
         assistant_message_id=str(uuid.uuid4()),
         question=question,
         title=title,
+        entity_scope=conversation.get("_turn_entity_ids") or [],
+        allowed_doc_ids=conversation.get("_turn_document_ids") or [],
     )
     if run is None:
         replay, response = await _replay_or_pending(db, principal, conversation, req, pending)
@@ -1299,6 +1465,8 @@ async def _stream_run_events(
     splitter = StreamThinkSplitter()
     pending = pending or []
     client = None
+    live_streamed = False
+    emitted_answer = ""
     try:
         question, observe_error, client, observations = await _retrieval_question(
             db, principal, conversation, question, pending
@@ -1320,8 +1488,6 @@ async def _stream_run_events(
             )
             return
         scope, docs_by_internal_id = await _context_scope(db, principal, conversation)
-        live_streamed = False
-        emitted_answer = ""
         if not scope.is_empty:
             client = client or _query_client()
             chat_id, chat = await _ensure_chat_info(client, principal, scope)
@@ -1346,8 +1512,6 @@ async def _stream_run_events(
                 session_id=session_id,
                 reasoning_mode=req.reasoningMode,
             )
-            live_streamed = False
-            emitted_answer = ""
             async for payload in client.chat_completion_stream(
                 chat_id,
                 _ragflow_question(conversation, question),
@@ -1535,6 +1699,15 @@ async def _stream_run_events(
             db, principal, conversation, req, run, assistant_message_id,
             code=code, status_code=status_code, message=message,
         )
+        if live_streamed and emitted_answer:
+            yield _sse(
+                "answer.replaced",
+                {
+                    "conversationId": conversation_id,
+                    "runId": run["run_id"],
+                    "content": "",
+                },
+            )
         yield _sse(
             "run.failed",
             {
@@ -1550,6 +1723,15 @@ async def _stream_run_events(
             code="RAGFLOW_UNAVAILABLE", status_code=503,
             message="Query engine unavailable",
         )
+        if live_streamed and emitted_answer:
+            yield _sse(
+                "answer.replaced",
+                {
+                    "conversationId": conversation_id,
+                    "runId": run["run_id"],
+                    "content": "",
+                },
+            )
         yield _sse(
             "run.failed",
             {
@@ -1565,6 +1747,15 @@ async def _stream_run_events(
             db, principal, conversation, req, run, assistant_message_id,
             code="INTERNAL_ERROR", status_code=500, message="Message run failed",
         )
+        if live_streamed and emitted_answer:
+            yield _sse(
+                "answer.replaced",
+                {
+                    "conversationId": conversation_id,
+                    "runId": run["run_id"],
+                    "content": "",
+                },
+            )
         yield _sse(
             "run.failed",
             {

@@ -21,7 +21,6 @@ import aiosqlite
 from enterprise.gateway.auth.service_principal import ServicePrincipal
 from enterprise.gateway.auth.user_principal import UserPrincipal
 from enterprise.gateway.quality.models import get_latest_evaluation
-from enterprise.gateway.quality.routing import parser_application_readback_match
 from enterprise.gateway.sync.models import (
     OutboxEvent,
     get_mapping,
@@ -1396,12 +1395,6 @@ class HistoricalImportService:
             "sync_status": getattr(doc, "sync_status", None),
             "business_status": getattr(doc, "business_status", None),
             "current_version": bool(getattr(doc, "current_version", 0)),
-            "parser_application_status": getattr(
-                doc, "parser_application_status", None,
-            ),
-            "parser_profile": getattr(doc, "parser_profile", None),
-            "parser_profile_version": getattr(doc, "parser_profile_version", None),
-            "parser_readback_match": parser_application_readback_match(doc),
             "quality_status": getattr(evaluation, "parse_quality_status", None),
             "source_version_id": getattr(doc, "source_version_id", None),
         }
@@ -1411,8 +1404,6 @@ class HistoricalImportService:
         if doc is not None and (
             doc.business_status == "review_required"
             or doc.sync_status == "review_required"
-            or doc.parser_application_status in {"mismatch", "legacy_unverified"}
-            or not parser_application_readback_match(doc)
         ):
             return True
         return bool(
@@ -1428,12 +1419,6 @@ class HistoricalImportService:
                 reasons.append("DOCUMENT_BUSINESS_REVIEW_REQUIRED")
             if doc.sync_status == "review_required":
                 reasons.append("DOCUMENT_SYNC_REVIEW_REQUIRED")
-            if doc.parser_application_status in {"mismatch", "legacy_unverified"}:
-                reasons.append(
-                    f"PARSER_APPLICATION_{doc.parser_application_status.upper()}"
-                )
-            elif not parser_application_readback_match(doc):
-                reasons.append("PARSER_APPLICATION_NOT_VERIFIED")
         if evaluation and evaluation.parse_quality_status in {"review_required", "failed"}:
             reasons.append(
                 f"PARSE_QUALITY_{evaluation.parse_quality_status.upper()}"

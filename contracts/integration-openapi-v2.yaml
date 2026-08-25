@@ -6,7 +6,10 @@ info:
     Frozen external contract for the Equipment Management System. Version 2.9
     additively accepts per-message `reasoningMode` (`simple`/`low`/`medium`/`high`/`ultra`)
     and may emit `answer.replaced` after live `answer.delta` frames when Gateway
-    rewrites the streamed body. Version 2.8
+    rewrites the streamed body. Conversation equipment fields represent the
+    current active entity and may be changed between turns through the existing
+    context PATCH; each message resolves its own immutable document scope.
+    Version 2.8
     additively returns `refIndex` on each citation so clients can bind inline
     answer markers `[ID:n]` / `[n]` to `citations[]` without using array
     position as `n`. Version 2.7
@@ -794,6 +797,9 @@ components:
     ConversationContext:
       type: object
       additionalProperties: false
+      description: >-
+        Current active equipment context. It initializes and helps resolve the
+        next turn, but it is not a permanent retrieval boundary.
       required: [equipmentId, fixedAssetNo, faultCode, contextVersion, registryVersion]
       properties:
         equipmentId: { type: [string, 'null'], maxLength: 128 }
@@ -812,6 +818,10 @@ components:
       type: object
       additionalProperties: false
       minProperties: 1
+      description: >-
+        Changes the active context for subsequent turns. Equipment may be
+        switched after messages already exist; a successful change increments
+        contextVersion and makes older suggestions stale.
       properties:
         equipmentId: { type: [string, 'null'], maxLength: 128 }
         fixedAssetNo: { type: [string, 'null'], maxLength: 128 }

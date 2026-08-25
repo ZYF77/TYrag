@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS ext_document_map (
     source_state TEXT NOT NULL DEFAULT 'AVAILABLE',
     source_state_reason TEXT,
     attempt_count INTEGER NOT NULL DEFAULT 0,
+    parse_retry_count INTEGER NOT NULL DEFAULT 0,
     next_retry_at TEXT,
     batch_id TEXT,
     last_error_code TEXT,
@@ -173,6 +174,7 @@ _MIGRATION_COLUMNS = {
     "source_state": "TEXT NOT NULL DEFAULT 'AVAILABLE'",
     "source_state_reason": "TEXT",
     "attempt_count": "INTEGER NOT NULL DEFAULT 0",
+    "parse_retry_count": "INTEGER NOT NULL DEFAULT 0",
     "next_retry_at": "TEXT",
     "batch_id": "TEXT",
 }
@@ -226,6 +228,7 @@ class ExtDocumentMap:
     source_state: str = "AVAILABLE"
     source_state_reason: str | None = None
     attempt_count: int = 0
+    parse_retry_count: int = 0
     next_retry_at: str | None = None
     batch_id: str | None = None
     last_error_code: str | None = None
@@ -330,6 +333,7 @@ def _row_to_mapping(row: aiosqlite.Row) -> ExtDocumentMap:
         source_state=row["source_state"] or "AVAILABLE",
         source_state_reason=row["source_state_reason"],
         attempt_count=row["attempt_count"],
+        parse_retry_count=row["parse_retry_count"],
         next_retry_at=row["next_retry_at"],
         batch_id=row["batch_id"],
         last_error_code=row["last_error_code"],
@@ -683,6 +687,7 @@ async def update_mapping_status(
     business_status: str | None = None,
     current_version: int | None = None,
     attempt_count: int | None = None,
+    parse_retry_count: int | None = None,
     next_retry_at: str | None = None,
     event_type: str | None = None,
     document_type: str | None = None,
@@ -707,9 +712,10 @@ async def update_mapping_status(
                last_error_message=?,
                event_status=COALESCE(?, event_status),
                business_status=COALESCE(?, business_status),
-               current_version=COALESCE(?, current_version),
-               attempt_count=COALESCE(?, attempt_count),
-               next_retry_at=?,
+                current_version=COALESCE(?, current_version),
+                attempt_count=COALESCE(?, attempt_count),
+                parse_retry_count=COALESCE(?, parse_retry_count),
+                next_retry_at=?,
                 event_type=COALESCE(?, event_type),
                 document_type=COALESCE(?, document_type),
                 source_page_count=COALESCE(?, source_page_count),
@@ -732,7 +738,7 @@ async def update_mapping_status(
         (
             sync_status, pipeline_status, error_code, error_message,
             event_status, business_status, current_version, attempt_count,
-             next_retry_at, event_type, document_type, source_page_count,
+             parse_retry_count, next_retry_at, event_type, document_type, source_page_count,
              bucket, object_key,
              asset_id,
              department_id, security_level, allow_group_ids, deny_group_ids,
@@ -755,6 +761,8 @@ async def update_mapping_status(
         doc.current_version = current_version
     if attempt_count is not None:
         doc.attempt_count = attempt_count
+    if parse_retry_count is not None:
+        doc.parse_retry_count = parse_retry_count
     if next_retry_at is not None:
         doc.next_retry_at = next_retry_at
     if event_type is not None:

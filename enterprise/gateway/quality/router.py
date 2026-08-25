@@ -16,10 +16,6 @@ from enterprise.gateway.acl.policy import evaluate_document_acl
 from enterprise.gateway.acl.schema import DocumentAclFacts
 from enterprise.gateway.quality import models as quality_models
 from enterprise.gateway.quality.gate import quality_dimensions, safe_metric_summary
-from enterprise.gateway.quality.routing import (
-    parser_application_readback_match,
-    route_document_for_mapping,
-)
 from enterprise.gateway.sync.models import get_mapping, get_versions_for_document
 
 logger = logging.getLogger(__name__)
@@ -106,33 +102,14 @@ async def _authorized_document(
 
 
 def _parser_application(doc, metrics: dict) -> dict | None:
-    if doc is None:
-        return metrics.get("parserApplication")
-    def _profile(raw: str | None) -> str | None:
-        if not raw:
-            return None
-        try:
-            value = json.loads(raw)
-        except (TypeError, ValueError):
-            return None
-        return value.get("profile") if isinstance(value, dict) else None
-
-    state = doc.parser_application_status or "legacy_unverified"
-    readback_match = parser_application_readback_match(doc)
-    reason_code = None
-    if not readback_match:
-        reason_code = (
-            f"PARSER_APPLICATION_{state.upper()}"
-            if state != "executed"
-            else "PARSER_APPLICATION_READBACK_MISMATCH"
-        )
-    return {
-        "state": state,
-        "selectedProfile": doc.parser_profile,
-        "configuredProfile": _profile(doc.parser_configured_json),
-        "executedProfile": _profile(doc.parser_executed_json),
-        "readbackMatch": readback_match,
-        "reasonCode": reason_code,
+    del doc
+    return metrics.get("parserApplication") or {
+        "state": "ragflow_owned",
+        "selectedProfile": None,
+        "configuredProfile": None,
+        "executedProfile": None,
+        "readbackMatch": True,
+        "reasonCode": None,
     }
 
 
@@ -242,7 +219,6 @@ async def reevaluate_document_quality(
     )
     if doc is None:
         return _error(404, "DOCUMENT_NOT_FOUND", "Document not found", request_id)
-    routing = route_document_for_mapping(doc)
     version = await quality_models.next_evaluation_version(
         db, doc.tenant_id, doc.source_system,
         doc.external_document_id, doc.source_version_id,
@@ -255,21 +231,18 @@ async def reevaluate_document_quality(
         source_version_id=doc.source_version_id,
         ragflow_dataset_id=doc.ragflow_dataset_id,
         ragflow_document_id=doc.ragflow_document_id,
-        routing=routing,
         evaluation_version=version,
     )
     logger.info(
         "quality reevaluate requested request_id=%s tenant_id=%s "
         "external_document_id=%s source_version_id=%s evaluation_id=%s "
-        "evaluation_version=%s parser_profile=%s routing_reasons=%s",
+        "evaluation_version=%s",
         request_id,
         doc.tenant_id,
         doc.external_document_id,
         doc.source_version_id,
         evaluation.id,
         evaluation.evaluation_version,
-        evaluation.parser_profile,
-        evaluation.routing_reasons,
     )
     return JSONResponse(
         status_code=202,

@@ -54,6 +54,23 @@ class Pipeline:
             elapsed = time.time() - start
             self.trace.append({"tool": tool_name, "args": kwargs, "elapsed": elapsed, "success": True})
             result = self._normalize(raw)
+            if hasattr(self.tools, "enforce_doc_scope"):
+                before = len(result.chunks)
+                scoped = self.tools.enforce_doc_scope(
+                    {
+                        "chunks": result.chunks,
+                        "doc_aggs": result.metadata.get("aggs", []),
+                    }
+                )
+                result.chunks = scoped["chunks"]
+                result.metadata["aggs"] = scoped["doc_aggs"]
+                dropped = before - len(result.chunks)
+                if dropped:
+                    _LOG.warning(
+                        "Agentic scope dropped tool=%s chunks=%d",
+                        tool_name,
+                        dropped,
+                    )
             # A routing tool (e.g. dataset_navigation_by_tree) yields the relevant
             # document IDs; remember them so the scope-consuming tools above can
             # inherit them on later turns.

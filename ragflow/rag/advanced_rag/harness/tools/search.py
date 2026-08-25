@@ -231,6 +231,8 @@ async def hybrid_search(tools, query: str, kb_ids: list[str] | None = None, top_
     if use_compiled and kbinfos.get("chunks"):
         _LOG.info("[Hybrid search] Compiled expansion enabled — enriching with page_index/tree/KG navigation.")
         await _expand_with_compiled(tools, query, keywords, kbinfos, doc_scope)
+    if hasattr(tools, "enforce_doc_scope"):
+        kbinfos = tools.enforce_doc_scope(kbinfos)
     if cache is not None:
         cache[cache_key] = kbinfos
     return kbinfos

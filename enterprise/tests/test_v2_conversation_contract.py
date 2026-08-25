@@ -255,8 +255,7 @@ async def test_contextless_draft_uses_acl_global_retrieval(runtime):
 
     assert response.status_code == 200, response.text
     assert detail.json()["equipmentId"] is None
-    assert _stub_doc_ids(runtime) == {"doc-1", "doc-2"}
-    assert "doc-denied" not in _stub_doc_ids(runtime)
+    assert _stub_doc_ids(runtime) == {"doc-1", "doc-2", "doc-denied"}
     question = runtime.stub._last_completion_body["question"]
     # Unbound drafts must not prepend Gateway identity text into the retrieval
     # query; equipment hint stays on the answer via _with_equipment_hint.
@@ -303,7 +302,7 @@ async def test_first_message_binds_unique_ingested_equipment(runtime):
 
 
 @pytest.mark.asyncio
-async def test_ambiguous_or_unknown_equipment_stays_global(runtime):
+async def test_explicit_compare_and_unknown_equipment_use_turn_scope(runtime):
     await _insert_document(
         runtime.db,
         external_id="DOC-A",
@@ -320,13 +319,14 @@ async def test_ambiguous_or_unknown_equipment_stays_global(runtime):
     )
     async with _client(runtime) as client:
         conversation = await _create_conversation(client)
-        ambiguous = await client.post(
+        compared = await client.post(
             f"{BASE}/conversations/{conversation['conversationId']}/messages",
             json={
-                "clientMessageId": "ambiguous",
+                "clientMessageId": "compare-two",
                 "question": "对比 EQ-A 和 EQ-B 的保养要求",
             },
         )
+        compare_ids = _stub_doc_ids(runtime)
         unknown = await client.post(
             f"{BASE}/conversations/{conversation['conversationId']}/messages",
             json={
@@ -338,10 +338,18 @@ async def test_ambiguous_or_unknown_equipment_stays_global(runtime):
             f"{BASE}/conversations/{conversation['conversationId']}"
         )
 
-    assert ambiguous.status_code == unknown.status_code == 200
-    assert detail.json()["equipmentId"] is None
-    assert _stub_doc_ids(runtime) == {"doc-1", "doc-2"}
-    assert unknown.json()["answer"].endswith(v2_router.EQUIPMENT_ID_HINT)
+    assert compared.status_code == unknown.status_code == 200
+    assert compare_ids == {"doc-1", "doc-2"}
+    assert detail.json()["equipmentId"] == "EQ-B"
+    assert unknown.json()["status"] == "无可靠依据"
+    async with runtime.db.execute(
+        """SELECT entity_scope_json, allowed_doc_ids_json
+             FROM ext_v2_message_run
+            WHERE client_message_id='unknown'"""
+    ) as cursor:
+        snapshot = await cursor.fetchone()
+    assert json.loads(snapshot["entity_scope_json"]) == []
+    assert json.loads(snapshot["allowed_doc_ids_json"]) == []
 
 
 @pytest.mark.asyncio
@@ -409,7 +417,7 @@ async def test_patch_can_bind_equipment_after_unbound_first_message(runtime):
 
 
 @pytest.mark.asyncio
-async def test_empty_acl_draft_returns_no_reliable_evidence(runtime):
+async def test_role_acl_is_open_within_tenant_during_test_stage(runtime):
     await _insert_document(
         runtime.db,
         external_id="DOC-DENIED",
@@ -426,9 +434,7 @@ async def test_empty_acl_draft_returns_no_reliable_evidence(runtime):
         )
 
     assert response.status_code == 200
-    assert response.json()["status"] == "无可靠依据"
-    assert runtime.stub._last_completion_body is None
-    assert v2_router.EQUIPMENT_ID_HINT not in response.json()["answer"]
+    assert _stub_doc_ids(runtime) == {"doc-denied"}
 
 
 @pytest.mark.asyncio
@@ -564,7 +570,7 @@ async def test_context_version_and_eam_fields_are_persisted_as_submitted(runtime
 
 
 @pytest.mark.asyncio
-async def test_equipment_identity_is_immutable_after_first_message(runtime):
+async def test_equipment_context_can_switch_after_first_message(runtime):
     await _insert_document(
         runtime.db,
         external_id="DOC-IMMUTABLE-A",
@@ -591,10 +597,112 @@ async def test_equipment_identity_is_immutable_after_first_message(runtime):
             f"{BASE}/conversations/{conversation['conversationId']}/context",
             json={"equipmentId": "EQ-IMMUTABLE-B"},
         )
+        after_switch = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={"clientMessageId": "after-patch-switch", "question": "它呢？"},
+        )
 
     assert message.status_code == 200
-    assert changed.status_code == 409
-    assert changed.json()["code"] == "CONVERSATION_CONTEXT_STALE"
+    assert changed.status_code == 200
+    assert changed.json()["equipmentId"] == "EQ-IMMUTABLE-B"
+    assert after_switch.status_code == 200
+    assert _stub_doc_ids(runtime) == {"doc-immutable-b"}
+
+
+@pytest.mark.asyncio
+async def test_turn_scope_switch_compare_and_snapshot(runtime):
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-TURN-A",
+        ragflow_id="doc-turn-a",
+        equipment_id="EQ-A",
+        fixed_asset_no="FA-A",
+    )
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-TURN-B",
+        ragflow_id="doc-turn-b",
+        equipment_id="EQ-B",
+        fixed_asset_no="FA-B",
+    )
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(client, equipmentId="EQ-A")
+        conversation_id = conversation["conversationId"]
+        first = await client.post(
+            f"{BASE}/conversations/{conversation_id}/messages",
+            json={"clientMessageId": "turn-a", "question": "它怎么维护？"},
+        )
+        second = await client.post(
+            f"{BASE}/conversations/{conversation_id}/messages",
+            json={"clientMessageId": "turn-b", "question": "那 EQ-B 呢？"},
+        )
+        compared = await client.post(
+            f"{BASE}/conversations/{conversation_id}/messages",
+            json={
+                "clientMessageId": "turn-compare",
+                "question": "和刚才那台比有什么区别？",
+            },
+        )
+        previous_compare_ids = _stub_doc_ids(runtime)
+        explicit_compare = await client.post(
+            f"{BASE}/conversations/{conversation_id}/messages",
+            json={
+                "clientMessageId": "turn-explicit-compare",
+                "question": "直接比较 EQ-A 和 EQ-B",
+            },
+        )
+        detail = await client.get(f"{BASE}/conversations/{conversation_id}")
+
+    assert (
+        first.status_code
+        == second.status_code
+        == compared.status_code
+        == explicit_compare.status_code
+        == 200
+    )
+    assert detail.json()["equipmentId"] == "EQ-B"
+    assert previous_compare_ids == {"doc-turn-a", "doc-turn-b"}
+    assert _stub_doc_ids(runtime) == {"doc-turn-a", "doc-turn-b"}
+    async with runtime.db.execute(
+        """SELECT entity_scope_json, allowed_doc_ids_json
+             FROM ext_v2_message_run
+            WHERE client_message_id='turn-explicit-compare'"""
+    ) as cursor:
+        snapshot = await cursor.fetchone()
+    assert set(json.loads(snapshot["entity_scope_json"])) == {"EQ-A", "EQ-B"}
+    assert set(json.loads(snapshot["allowed_doc_ids_json"])) == {
+        "doc-turn-a",
+        "doc-turn-b",
+    }
+
+
+@pytest.mark.asyncio
+async def test_unknown_explicit_equipment_fails_closed(runtime):
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-KNOWN",
+        ragflow_id="doc-known",
+        equipment_id="EQ-KNOWN",
+        fixed_asset_no="FA-KNOWN",
+    )
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(client, equipmentId="EQ-KNOWN")
+        response = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={
+                "clientMessageId": "unknown-equipment",
+                "question": "请查询 EQ-UNKNOWN 的资料",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "无可靠依据"
+    async with runtime.db.execute(
+        """SELECT allowed_doc_ids_json FROM ext_v2_message_run
+            WHERE client_message_id='unknown-equipment'"""
+    ) as cursor:
+        snapshot = await cursor.fetchone()
+    assert json.loads(snapshot["allowed_doc_ids_json"]) == []
 
 
 @pytest.mark.asyncio
@@ -1309,6 +1417,52 @@ class _TransportFailureStub(RAGFlowQueryStub):
         raise RAGFlowAPIError("stream transport failed", 0)
 
 
+class _ScopeViolationAfterDeltaStub(RAGFlowQueryStub):
+    async def chat_completion_stream(
+        self,
+        chat_id: str,
+        question: str,
+        session_id: str | None = None,
+        doc_ids: list[str] | None = None,
+        request_id: str | None = None,
+        messages: list[dict] | None = None,
+        store_history_messages: bool | None = None,
+        pass_all_history_messages: bool | None = None,
+        grounding_version: int | None = None,
+        **kwargs,
+    ):
+        del chat_id, question, session_id, doc_ids, request_id
+        del messages, store_history_messages, pass_all_history_messages, kwargs
+        yield {
+            "code": 0,
+            "data": {
+                "answer": "脏答案引用越权设备。[ID:0]",
+                "final": False,
+                "session_id": "s",
+            },
+        }
+        yield {
+            "code": 0,
+            "data": {
+                "answer": "",
+                "final": True,
+                "session_id": "s",
+                "status": "completed",
+                "reference": {
+                    "chunks": [
+                        {
+                            "id": "leak-chunk",
+                            "document_id": "outside-scope-doc",
+                            "content": "越权内容",
+                        }
+                    ]
+                },
+                "grounding": _grounding(grounding_version),
+            },
+        }
+        yield {"code": 0, "data": True}
+
+
 class _ExplicitStreamOutcomeStub(RAGFlowQueryStub):
     async def chat_completion_stream(
         self,
@@ -1426,8 +1580,40 @@ async def test_v2_sse_transport_failure_is_stable_and_replayable(runtime):
     assert response.status_code == 200
     assert "event: run.failed" in response.text
     assert '"code": "RAGFLOW_UNAVAILABLE"' in response.text
+    assert "event: answer.replaced" not in response.text
     assert replay.status_code == 503
     assert replay.json()["code"] == "RAGFLOW_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_v2_sse_scope_violation_clears_streamed_answer(runtime):
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-SCOPE-SSE",
+        ragflow_id="doc-scope-sse",
+        equipment_id="EQ-SCOPE-SSE",
+        fixed_asset_no="FA-SCOPE-SSE",
+    )
+    formal_router._query_stub = _ScopeViolationAfterDeltaStub()
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(
+            client, equipmentId="EQ-SCOPE-SSE"
+        )
+        response = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            headers={"Accept": "text/event-stream"},
+            json={"clientMessageId": "scope-sse", "question": "stream"},
+        )
+
+    assert response.status_code == 200
+    assert "event: answer.delta" in response.text
+    assert "event: answer.replaced" in response.text
+    assert '"content": ""' in response.text
+    assert "event: run.failed" in response.text
+    assert '"code": "RAGFLOW_SCOPE_VIOLATION"' in response.text
+    replaced_at = response.text.index("event: answer.replaced")
+    failed_at = response.text.index("event: run.failed")
+    assert replaced_at < failed_at
 
 
 @pytest.mark.asyncio
@@ -1950,7 +2136,7 @@ async def test_completed_state_does_not_require_citations(runtime):
 
 
 @pytest.mark.asyncio
-async def test_history_filters_citations_after_acl_revocation(runtime):
+async def test_role_group_change_does_not_hide_test_stage_citation(runtime):
     document = await _insert_document(
         runtime.db,
         external_id="EXT-DOC-ACL",
@@ -1980,9 +2166,8 @@ async def test_history_filters_citations_after_acl_revocation(runtime):
         citation = await client.get(f"{BASE}/citations/{citation_id}")
 
     assistant = [item for item in history.json()["items"] if item["role"] == "assistant"][0]
-    assert assistant["citations"] == []
-    assert citation.status_code == 403
-    assert citation.json()["code"] == "ACL_DENIED"
+    assert assistant["citations"]
+    assert citation.status_code == 200
 
 
 @pytest.mark.asyncio

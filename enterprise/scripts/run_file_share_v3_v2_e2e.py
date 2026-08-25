@@ -427,6 +427,23 @@ def _document_equipment(db_path: str, tenant: str, document: str, version: str) 
     return row[0] if row else None
 
 
+def _assert_gateway_did_not_own_parser(
+    db_path: str, tenant: str, document: str, version: str,
+) -> None:
+    with sqlite3.connect(Path(db_path).resolve().as_uri() + "?mode=ro", uri=True) as db:
+        row = db.execute(
+            """SELECT parser_profile,parser_profile_version,parser_expected_json,
+                      parser_configured_json,parser_executed_json,parse_retry_count
+                 FROM ext_document_map
+                WHERE tenant_id=? AND external_document_id=? AND source_version_id=?""",
+            (tenant, document, version),
+        ).fetchone()
+    if not row or any(value is not None for value in row[:5]):
+        raise LiveAssertionError("gateway_parser_ownership_not_removed")
+    if int(row[5] or 0) != 0:
+        raise LiveAssertionError("normal_document_unexpected_parse_retry")
+
+
 def _post_feed(client: httpx.Client, gateway: str, key: str, secret: str, payload: dict, artifacts: Artifacts, name: str) -> httpx.Response:
     body, path = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode(), "/enterprise/api/v3/documents"
     response = client.post(gateway + path, content=body, headers=_service_headers(key_id=key, secret=secret, method="POST", relative_url=path, body=body))
@@ -467,6 +484,13 @@ def _verify_native_upload(client: httpx.Client, ragflow: str, api_key: str, data
     doc = next((x for x in docs if isinstance(x, dict) and x.get("id") == document), None)
     if not isinstance(doc, dict) or not isinstance(doc.get("location"), str) or not doc["location"] or doc["location"].startswith("external://"):
         raise LiveAssertionError("ragflow_document_not_native_upload")
+    expected_method = os.getenv("ENTERPRISE_E2E_EXPECTED_CHUNK_METHOD", "").strip()
+    if expected_method and doc.get("chunk_method") != expected_method:
+        raise LiveAssertionError("ragflow_chunk_method_was_overridden")
+    expected_layout = os.getenv("ENTERPRISE_E2E_EXPECTED_LAYOUT_RECOGNIZE", "").strip()
+    parser_config = doc.get("parser_config") if isinstance(doc.get("parser_config"), dict) else {}
+    if expected_layout and parser_config.get("layout_recognize") != expected_layout:
+        raise LiveAssertionError("ragflow_parser_config_was_overridden")
     chunks_url = f"{ragflow}/api/v1/datasets/{quote(dataset, safe='')}/documents/{quote(document, safe='')}/chunks?page=1&page_size=10"
     chunks_response = client.get(chunks_url, headers=headers); artifacts.record("ragflow_chunks_parse", "GET", chunks_url, chunks_response.status_code)
     chunks_data = _ragflow_data(chunks_response)
@@ -660,6 +684,10 @@ def run_live(artifacts: Artifacts, *, target_mode: str = "local",
                 _poll_status(client, gateway, key, hmac_secret, status_url, artifacts)
             dataset, rag_document = _document_scope(db_path, tenant, document, version)
             if not dataset or not rag_document: raise LiveAssertionError("ragflow_mapping_missing")
+            if not resume_document:
+                _assert_gateway_did_not_own_parser(
+                    db_path, tenant, document, version,
+                )
             _verify_native_upload(client, ragflow, api_key, dataset, rag_document, artifacts)
             traversal_id = f"LOCAL-PATH-{uuid.uuid4().hex}"
             traversal = {
@@ -790,7 +818,8 @@ def run_live(artifacts: Artifacts, *, target_mode: str = "local",
             large_checked = _large_file_check(root, artifacts)
         summary = {"fileShareFeed": not resume_document, "businessIdempotency": not resume_document,
                    "resumedExistingDocument": bool(resume_document), "nativeUpload": True, "chunksParse": True,
-                   "qualityGate": True, "callbackRetry": True, "authorizedQueryCitationSource": True,
+                   "qualityGate": True, "ragflowOwnedParserConfig": True,
+                   "callbackRetry": True, "authorizedQueryCitationSource": True,
                    "sseSecondTurn": True, "historyReplay": True, "ragflowSession": True,
                    "documentScopedRetrieval": True,
                    "pathTraversalRejected": True, "shaMismatchRejected": True, "aclOverreachRejected": True,

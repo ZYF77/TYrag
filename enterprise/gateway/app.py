@@ -51,7 +51,6 @@ from enterprise.gateway.quality.worker import (
     QualityEvaluationWorker,
     QualityReconciler,
 )
-from enterprise.gateway.quality.routing import parser_application_readback_match
 from enterprise.gateway.audit_log import configure_gateway_file_logging, list_http_events
 from enterprise.gateway.callback_delivery import CallbackDeliveryWorker
 from enterprise.gateway.config import config, require_ragflow_api_key
@@ -395,16 +394,6 @@ def accepted_response(payload: dict) -> JSONResponse:
     return JSONResponse(status_code=202, content=payload)
 
 
-def _parser_profile(raw: str | None) -> str | None:
-    if not raw:
-        return None
-    try:
-        value = json.loads(raw)
-    except (TypeError, ValueError):
-        return None
-    return value.get("profile") if isinstance(value, dict) else None
-
-
 # -- helpers --
 
 def validate_metadata(metadata: dict, request_id: str) -> str | None:
@@ -428,28 +417,18 @@ def make_status_response(doc: ExtDocumentMap, deduplicated: bool = False,
         stage=enterprise_stage(doc.sync_status),
         deduplicated=deduplicated,
     )
-    state = doc.parser_application_status or "legacy_unverified"
-    readback_match = parser_application_readback_match(doc)
     extra = {
         "businessStatus": doc.business_status,
         "currentVersion": bool(doc.current_version),
         "eventStatus": doc.event_status,
         "updatedAt": doc.updated_at,
         "parserApplication": {
-            "state": state,
-            "selectedProfile": doc.parser_profile,
-            "configuredProfile": _parser_profile(doc.parser_configured_json),
-            "executedProfile": _parser_profile(doc.parser_executed_json),
-            "readbackMatch": readback_match,
-            "reasonCode": (
-                None
-                if readback_match
-                else (
-                    f"PARSER_APPLICATION_{state.upper()}"
-                    if state != "executed"
-                    else "PARSER_APPLICATION_READBACK_MISMATCH"
-                )
-            ),
+            "state": "ragflow_owned",
+            "selectedProfile": None,
+            "configuredProfile": None,
+            "executedProfile": None,
+            "readbackMatch": True,
+            "reasonCode": None,
         },
     }
     resp = resp.model_dump()

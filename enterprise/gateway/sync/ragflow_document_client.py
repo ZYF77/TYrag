@@ -474,11 +474,21 @@ class RAGFlowDocumentStub(RAGFlowDocumentClient):
         page_size: int = 30,
         request_id: str | None = None,
     ) -> dict:
+        del dataset_id, page, page_size, request_id
+        doc = self._documents.get(document_id)
+        run = ""
+        if doc and doc.get("data"):
+            run = str(doc["data"][0].get("run") or "").upper()
+        # Happy-path stubs that finish as DONE need at least one usable chunk;
+        # empty-result retry tests override this method explicitly.
+        chunks = []
+        if run in {"DONE", "3"}:
+            chunks = [{"id": f"{document_id}-c1", "content": "usable stub chunk"}]
         return {
             "code": 0,
             "data": {
-                "total": 0,
-                "chunks": [],
+                "total": len(chunks),
+                "chunks": chunks,
                 "doc": {},
             },
         }

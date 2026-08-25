@@ -62,7 +62,8 @@ HMAC secret、JWT 私钥、RAGFlow API key **必须互相独立**，不可混用
 
 - UI 在 **EAM 侧**；Gateway 只提供 API 与 chips 定义。
 - EAM **不**传 RAGFlow `session_id` / `chat_id`；只使用 Gateway 的 `conversationId`。
-- 未带 `equipmentId` 的草稿会话可以提问：句中唯一命中已投喂设备号则按该设备检索，否则在当前用户 ACL 可见文档内全局检索，并在回答末尾建议补充设备号。
+- 未带 `equipmentId` 的草稿会话可以提问：句中完整设备号唯一命中可用文档时按该设备检索，否则在同租户可用文档内全局检索，并在回答末尾建议补充设备号。
+- 同一 `conversationId` 可以切换设备：EAM 页面切换时先 `PATCH .../context`；用户在问题中明确写出另一设备号时，Gateway 也会为该轮确定性切换。明确写出多个设备号可进行跨设备比较。
 - 建议仅在对应设备文档已 `retrievable` 后开放问询入口（以投喂回调为准，见投喂 handoff）。
 
 ---
@@ -132,12 +133,12 @@ EAM 已确认并写入 Gateway 的参数：
 | 租户 | `tenant` | 联调环境固定 `wp04e2e` |
 | 角色 | `roles` | 提问至少含 `end_user` |
 | 部门 | `department` | 数组；用户所属部门。**不参与硬 ACL**，不必等于投喂 `department_id` |
-| 用户组 | `groups` | 数组；须与文档投喂 `allow_group_ids` 对齐 |
-| 安全等级 | `security_level` | 整数；须 ≥ 文档投喂 `security_level` |
+| 用户组 | `groups` | 数组；测试阶段可缺省，暂不参与文档可见性判断 |
+| 安全等级 | `security_level` | 整数；测试阶段可缺省，暂不参与文档可见性判断 |
 | 显示名 | `name` | 可选 |
 | 业务用户 ID | `business_user_id` | 可选；缺省则用 `sub` |
 
-**ACL：** JWT 的 `tenant` / `groups` / `security_level` 必须与该用户可见文档的投喂 metadata 一致，否则检索会被 deny-first ACL 拒绝（空范围 → `无可靠依据`，或 `ACL_DENIED`）。问询范围另受会话 `equipmentId` 约束。`department` 可缺省、可与文档部门不一致（用户部门 ≠ 设备归属部门是预期情况）。投喂仍写 `department_id`，只是问询不再拿它做硬拒绝。见 `docs/adr/acl-department-not-hard-deny.md`。
+**ACL（联调阶段）：** Gateway 仍校验 JWT、接口 capability 和 tenant；跨租户始终拒绝。文档角色权限暂为空实现，`department/groups/security_level` 不参与文档可见性判断。同租户文档仍必须是 active/current、通过解析质量门，并受本轮设备 Scope 约束。正式角色 ACL 后续单独恢复。
 
 EAM 签发最小 payload 约定（联调常用示例）：
 
@@ -244,6 +245,8 @@ Gateway **不做**跨系统设备一致性回查。设备身份由 EAM 保证。
 - `contextCompacted` 仅表示是否做过滚动摘要（排障用）；**不**返回摘要正文
 - 也可 `GET .../conversations/{id}/suggestions` 单独刷新 chips
 - `PATCH .../context` 成功后 `contextVersion` 递增；旧 chip 会 `409 SUGGESTION_STALE`
+- 首条消息后仍可 PATCH 切换设备；不需要为另一设备新建 conversation
+- 每轮检索范围在消息开始时冻结，随后对同一 `clientMessageId` 的回放不会重新计算设备范围
 
 ### 4.2 提问 / 续问（JSON，推荐首期）
 
@@ -438,12 +441,13 @@ Accept: application/pdf
 ### 必须做
 
 - [ ] 正式环境签发 RS256 JWT；**私钥自持**；JWKS / iss / aud / kid 已按 §3.2 对接
-- [ ] JWT claims 按 §3.4 默认字段名签发；`groups` / `security_level` 与投喂对齐；`department` 填用户真实部门即可
+- [ ] JWT claims 按 §3.4 默认字段名签发；联调阶段 `groups` / `security_level` 可缺省，`department` 填用户真实部门即可
 - [ ] 保持 JWKS 公钥端点 Gateway 可达（**无需** validate-token 接口，**无需**开通名单）
 - [ ] 请求一律打到 Gateway v2，携带 `Authorization: Bearer`
 - [ ] 创建会话建议提交 `equipmentId`（也可先建草稿，在问题里写设备号或走全局检索）
 - [ ] 渲染服务端 `suggestions`；点选传 `suggestionId` + `contextVersion`
 - [ ] 支持自由 `question` 与同 `conversationId` 续问
+- [ ] 页面切换设备时先 PATCH context；完整设备号也可在同一会话中自然切换或比较
 - [ ] 用 `clientMessageId` 做提问幂等
 - [ ] 按消息 `status` 展示结果，不按 citation 数量改判
 - [ ] 会话/历史按当前登录用户隔离展示
@@ -528,6 +532,8 @@ run.started
 | `docs/integration/eam-inquiry-citation-marker-notice.md` | **给 EAM 的正文 `[ID:n]` 角标绑定**（v2.7 → v2.8，`refIndex`） |
 | `docs/integration/eam-inquiry-reasoning-notice.md` | **给 EAM 的思考过程与正文拆分**（v2.4 → v2.5，可选 `reasoning`） |
 | `docs/integration/eam-inquiry-streaming-reasoning-mode-notice.md` | **给 EAM 的真流式与推理档位**（v2.8 → v2.9，`reasoningMode` / `answer.replaced`） |
+| `docs/integration/eam-conversation-entity-scope-change.md` | **给 EAM 的会话设备 Scope 变更**（活动实体可切换、本轮 `allowed_doc_ids`、联调 ACL） |
+| `docs/integration/eam-grounding-guard-overview.md` | **Grounding Guard 现状与设计**（哪些 Guard 生效、三旋钮、拒答链路） |
 | `docs/integration/eam-file-feed-handoff-3.1.md` | 文件投喂 + 终态回调 |
 | `docs/integration/eam-device-integration-guide.md` | 综合对接总册（含问询细节示例） |
 | `docs/设备管理系统—企业知识库对接协议.md` | 协议/验收底稿 |

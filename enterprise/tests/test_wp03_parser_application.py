@@ -2,18 +2,12 @@ import pytest
 from types import SimpleNamespace
 
 from enterprise.gateway.app import make_status_response
-from enterprise.gateway.quality.routing import (
-    parser_application_readback_match,
-    route_document,
+from enterprise.gateway.quality.routing import route_document
+from enterprise.gateway.sync.models import get_mapping, init_db
+from enterprise.gateway.sync.ragflow_document_client import (
+    RAGFlowAPIError,
+    RAGFlowDocumentStub,
 )
-from enterprise.gateway.sync.models import (
-    get_mapping,
-    init_db,
-    update_parser_application,
-    update_mapping_status,
-)
-from enterprise.gateway.sync.ragflow_document_client import RAGFlowDocumentStub
-from enterprise.gateway.sync.ragflow_document_client import RAGFlowAPIError
 from enterprise.gateway.sync.source_adapter import SourceStub
 from enterprise.gateway.sync.sync_service import (
     RetryableDocumentSyncError,
@@ -23,7 +17,8 @@ from enterprise.gateway.sync.sync_service import (
 from enterprise.tests.test_wp02b import make_event
 
 
-def test_safe_parser_profiles():
+def test_safe_parser_profiles_remain_available_for_admin_docs_only():
+    """Routing helpers stay for Dataset/admin tooling; Gateway sync no longer applies them."""
     for name in ("scan.pdf", "table.pdf", "flowchart.pdf"):
         route = route_document(media_type="application/pdf", file_name=name)
         assert route["selected_parser_profile"] == "pdf_deepdoc_v1"
@@ -50,7 +45,7 @@ def test_client_profile_override_is_ignored_by_server_routing():
 
 
 @pytest.mark.asyncio
-async def test_profile_is_read_back_before_parse_and_not_activated():
+async def test_sync_writes_enterprise_metadata_without_parser_override():
     db = await init_db(":memory:")
     client = RAGFlowDocumentStub()
     client.run_status = "DONE"
@@ -60,69 +55,35 @@ async def test_profile_is_read_back_before_parse_and_not_activated():
 
     assert doc.sync_status == "ready"
     assert doc.current_version == 0
-    assert doc.parser_application_status == "executed"
     assert doc.equipment_id == "EQ-001"
-    assert '"chunk_method":"naive"' in doc.parser_configured_json
-    assert '"layout_recognize":"DeepDOC"' in doc.parser_executed_json
+    assert "patch" in client._operation_log
     assert client._operation_log.index("patch") < client._operation_log.index("parse")
-    assert "get" in client._operation_log[
-        client._operation_log.index("patch") + 1:client._operation_log.index("parse")
-    ]
+    ragflow_doc = client._documents[doc.ragflow_document_id]["data"][0]
+    assert ragflow_doc["meta_fields"]["enterprise_external_document_id"] == "DOC-1"
+    assert ragflow_doc["meta_fields"]["equipment_id"] == "EQ-001"
+    # Dataset/RAGFlow retains whatever parser settings already exist; Gateway
+    # must not force a profile through the upload path.
+    assert ragflow_doc["chunk_method"] == "naive"
+    assert ragflow_doc["parser_config"] == {}
     await db.close()
 
 
 @pytest.mark.asyncio
-async def test_reindex_preserves_persisted_profile_version():
+async def test_reindex_does_not_require_legacy_parser_evidence():
     db = await init_db(":memory:")
     client = RAGFlowDocumentStub()
     client.run_status = "DONE"
     service = SyncService(db, SourceStub(b"manual"), client)
 
     doc, _ = await service.process_event(make_event(b"manual"))
-    assert doc.parser_profile == "pdf_deepdoc_v1"
-    assert doc.parser_profile_version == "1"
-
     await service.reindex_document("tenant-1", "EAM", "DOC-1", "v1")
     current = await get_mapping(db, "tenant-1", "EAM", "DOC-1", "v1")
-    assert current.parser_profile == "pdf_deepdoc_v1"
-    assert current.parser_profile_version == "1"
-    assert current.parser_application_status == "executed"
-    assert client._documents[current.ragflow_document_id]["data"][0][
-        "chunk_method"
-    ] == "naive"
+    assert current.sync_status in {"ready", "queued", "parsing", "registered"}
+    assert len(client._parse_calls) >= 2
     await db.close()
 
 
-def test_parser_readback_requires_executed_state_and_matching_evidence():
-    doc = type(
-        "Doc",
-        (),
-        {
-            "parser_application_status": "executed",
-            "parser_profile": "pdf_deepdoc_v1",
-            "parser_profile_version": "1",
-            "parser_expected_json": (
-                '{"profile":"pdf_deepdoc_v1","profile_version":"1",'
-                '"policy_version":"2","chunk_method":"naive",'
-                '"owned_parser_config":{"layout_recognize":"DeepDOC"}}'
-            ),
-            "parser_executed_json": (
-                '{"profile":"pdf_deepdoc_v1","profile_version":"1",'
-                '"policy_version":"2","chunk_method":"naive",'
-                '"owned_parser_config":{"layout_recognize":"DeepDOC"}}'
-            ),
-        },
-    )()
-    assert parser_application_readback_match(doc) is True
-    doc.parser_executed_json = '{"profile":"tabular_table_v1","profile_version":"1"}'
-    assert parser_application_readback_match(doc) is False
-    doc.parser_executed_json = (
-        '{"profile":"pdf_deepdoc_v1","profile_version":"1"}'
-    )
-    assert parser_application_readback_match(doc) is False
-
-
-def test_status_response_does_not_trust_executed_state_alone():
+def test_status_response_reports_ragflow_owned_parser_application():
     doc = SimpleNamespace(
         external_document_id="DOC-1",
         source_version_id="v1",
@@ -133,36 +94,25 @@ def test_status_response_does_not_trust_executed_state_alone():
         current_version=1,
         event_status="completed",
         updated_at="",
-        parser_application_status="executed",
-        parser_profile="pdf_deepdoc_v1",
-        parser_configured_json=None,
-        parser_executed_json=None,
-        parser_expected_json=None,
     )
     parser_application = make_status_response(doc)["parserApplication"]
-    assert parser_application["readbackMatch"] is False
-    assert parser_application["reasonCode"] == (
-        "PARSER_APPLICATION_READBACK_MISMATCH"
-    )
+    assert parser_application["state"] == "ragflow_owned"
+    assert parser_application["readbackMatch"] is True
+    assert parser_application["reasonCode"] is None
+    assert parser_application["selectedProfile"] is None
 
 
-class MismatchStub(RAGFlowDocumentStub):
-    async def update_document(self, *args, **kwargs):
-        result = await super().update_document(*args, **kwargs)
-        result["data"][0]["parser_config"]["layout_recognize"] = "Plain Text"
-        return result
-
-
-class TerminalMismatchStub(RAGFlowDocumentStub):
-    async def start_parsing(
-        self, dataset_id, document_ids, request_id=None,
+class EmptyChunksStub(RAGFlowDocumentStub):
+    async def list_chunks(
+        self,
+        dataset_id,
+        document_id,
+        page=1,
+        page_size=30,
+        request_id=None,
     ):
-        result = await super().start_parsing(dataset_id, document_ids, request_id)
-        for document_id in document_ids:
-            self._documents[document_id]["data"][0]["parser_config"] = {
-                "layout_recognize": "Plain Text",
-            }
-        return result
+        del dataset_id, document_id, page, page_size, request_id
+        return {"code": 0, "data": {"total": 0, "chunks": [], "doc": {}}}
 
 
 class IncorrectDigestSource(SourceStub):
@@ -210,26 +160,23 @@ class BatchStatusErrorStub(RAGFlowDocumentStub):
 
 
 @pytest.mark.asyncio
-async def test_parser_readback_mismatch_fails_before_parse():
+async def test_done_with_empty_chunks_retries_parse_once():
     db = await init_db(":memory:")
-    client = MismatchStub()
+    client = EmptyChunksStub()
+    client.run_status = "DONE"
     service = SyncService(db, SourceStub(b"manual"), client)
-    event = make_event(b"manual")
 
-    with pytest.raises(TerminalDocumentSyncError) as error:
-        await service.process_event(event)
+    doc, _ = await service.process_event(make_event(b"manual"))
 
-    assert error.value.code == "PARSER_APPLICATION_MISMATCH"
-    doc = await get_mapping(
-        db, "tenant-1", "EAM", "DOC-1", "v1",
-    )
-    assert doc.parser_application_status == "mismatch"
-    assert client._parse_calls == []
+    assert doc.sync_status == "queued"
+    assert doc.parse_retry_count == 1
+    assert doc.pipeline_status == "RUNNING"
+    assert len(client._parse_calls) == 2
     await db.close()
 
 
 @pytest.mark.asyncio
-async def test_terminal_parser_readback_mismatch_cannot_become_ready():
+async def test_parser_config_mismatch_no_longer_blocks_ready():
     db = await init_db(":memory:")
     client = RAGFlowDocumentStub()
     client.run_status = "DONE"
@@ -241,64 +188,8 @@ async def test_terminal_parser_readback_mismatch_cannot_become_ready():
     client._documents[doc.ragflow_document_id]["data"][0]["parser_config"] = {
         "layout_recognize": "Plain Text",
     }
-    with pytest.raises(TerminalDocumentSyncError) as error:
-        await service.refresh_status(doc)
-
-    assert error.value.code == "PARSER_APPLICATION_MISMATCH"
-    doc = await get_mapping(db, "tenant-1", "EAM", "DOC-1", "v1")
-    assert doc.sync_status == "review_required"
-    assert doc.business_status == "review_required"
-    assert doc.current_version == 0
-    assert doc.parser_application_status == "mismatch"
-    await db.close()
-
-
-@pytest.mark.asyncio
-async def test_terminal_parser_requires_persisted_evidence_before_ready():
-    db = await init_db(":memory:")
-    client = RAGFlowDocumentStub()
-    client.run_status = "DONE"
-    service = SyncService(db, SourceStub(b"manual"), client)
-
-    doc, _ = await service.process_event(make_event(b"manual"))
-    await db.execute(
-        "UPDATE ext_document_map SET parser_expected_json=NULL WHERE id=?",
-        (doc.id,),
-    )
-    await db.commit()
-    doc.parser_expected_json = None
-
-    with pytest.raises(TerminalDocumentSyncError) as error:
-        await service.refresh_status(doc)
-
-    assert error.value.code == "PARSER_APPLICATION_MISMATCH"
-    current = await get_mapping(db, "tenant-1", "EAM", "DOC-1", "v1")
-    assert current.sync_status == "review_required"
-    assert current.business_status == "review_required"
-    await db.close()
-
-
-@pytest.mark.asyncio
-async def test_parser_mismatch_from_retry_wait_uses_valid_failure_state():
-    db = await init_db(":memory:")
-    client = RAGFlowDocumentStub()
-    client.run_status = "DONE"
-    service = SyncService(db, SourceStub(b"manual"), client)
-
-    doc, _ = await service.process_event(make_event(b"manual"))
-    await update_mapping_status(db, doc, "failed")
-    await update_mapping_status(db, doc, "retry_wait")
-    client._documents[doc.ragflow_document_id]["data"][0]["parser_config"] = {
-        "layout_recognize": "Plain Text",
-    }
-
-    with pytest.raises(TerminalDocumentSyncError) as error:
-        await service.refresh_status(doc)
-
-    assert error.value.code == "PARSER_APPLICATION_MISMATCH"
-    current = await get_mapping(db, "tenant-1", "EAM", "DOC-1", "v1")
-    assert current.sync_status == "failed"
-    assert current.sync_status != "ready"
+    refreshed = await service.refresh_status(doc)
+    assert refreshed.sync_status == "ready"
     await db.close()
 
 
@@ -322,7 +213,7 @@ async def test_source_digest_is_verified_before_ragflow_registration():
 
 
 @pytest.mark.asyncio
-async def test_parse_failure_is_not_active_or_promotable():
+async def test_parse_failure_retries_once_then_can_fail():
     db = await init_db(":memory:")
     client = RAGFlowDocumentStub()
     client.run_status = "FAIL"
@@ -330,12 +221,18 @@ async def test_parse_failure_is_not_active_or_promotable():
 
     doc, _ = await service.process_event(make_event(b"manual"))
 
-    assert doc.sync_status == "failed"
-    assert doc.business_status == "review_required"
-    assert doc.current_version == 0
-    assert doc.last_error_code == "DOCUMENT_PARSE_FAILED"
-    assert await service.promote_quality_passed_version(doc, "passed") is False
-    assert not any(enabled for _, _, enabled in client._status_updates)
+    # First FAIL triggers one technical retry and leaves the document queued.
+    assert doc.sync_status == "queued"
+    assert doc.parse_retry_count == 1
+    assert len(client._parse_calls) == 2
+
+    # Simulate the retried parse finishing as FAIL again.
+    client._documents[doc.ragflow_document_id]["data"][0]["run"] = "FAIL"
+    refreshed = await service.refresh_status(doc)
+    assert refreshed.sync_status == "failed"
+    assert refreshed.business_status == "review_required"
+    assert refreshed.current_version == 0
+    assert await service.promote_quality_passed_version(refreshed, "passed") is False
     await db.close()
 
 
@@ -391,24 +288,7 @@ async def test_lifecycle_does_not_commit_when_ragflow_reports_document_error():
 
 
 @pytest.mark.asyncio
-async def test_reindex_rejects_legacy_unverified_parser_before_parse():
-    db = await init_db(":memory:")
-    client = RAGFlowDocumentStub()
-    client.run_status = "DONE"
-    service = SyncService(db, SourceStub(b"manual"), client)
-    doc, _ = await service.process_event(make_event(b"manual"))
-    await update_parser_application(db, doc, status="legacy_unverified")
-
-    with pytest.raises(TerminalDocumentSyncError) as error:
-        await service.reindex_document("tenant-1", "EAM", "DOC-1", "v1")
-
-    assert error.value.code == "PARSER_APPLICATION_UNVERIFIABLE"
-    assert client._parse_calls == [(doc.ragflow_dataset_id, [doc.ragflow_document_id])]
-    await db.close()
-
-
-@pytest.mark.asyncio
-async def test_only_quality_passed_executed_latest_version_is_promoted():
+async def test_only_quality_passed_latest_version_is_promoted():
     db = await init_db(":memory:")
     client = RAGFlowDocumentStub()
     client.run_status = "DONE"

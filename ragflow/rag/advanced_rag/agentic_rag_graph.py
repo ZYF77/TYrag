@@ -135,6 +135,8 @@ def _merge_result_into_kbinfos(tools, result: dict) -> None:
     Mirrors the orchestrators' merge so seed evidence and orchestrator evidence
     share one deduplicated pool.
     """
+    if hasattr(tools, "enforce_doc_scope"):
+        result = tools.enforce_doc_scope(result)
     if not result or not result.get("chunks"):
         return
     kb = tools.kbinfos
@@ -225,6 +227,8 @@ def build_agentic_graph(tools, token_queue: asyncio.Queue, gen_conf: dict | None
     # ── Node: formalize_answer ──
     async def formalize_answer(state: AgenticState) -> dict:
         kbinfos = state.get("kbinfos") or {"chunks": [], "doc_aggs": []}
+        if hasattr(tools, "enforce_doc_scope"):
+            kbinfos = tools.enforce_doc_scope(kbinfos)
         question = state.get("question") or ""
         partial = state.get("partial_answer", False)
         abstain = state.get("abstain", False)
@@ -341,6 +345,8 @@ async def run_agentic_rag(tools, messages: list, max_loops: int = 3, gen_conf: d
     state = holder.get("state") or {}
     final_kb = state.get("kbinfos")
     if isinstance(final_kb, dict) and final_kb.get("chunks"):
+        if hasattr(tools, "enforce_doc_scope"):
+            final_kb = tools.enforce_doc_scope(final_kb)
         tools.kbinfos = final_kb
 
     _LOG.info("[Agentic RAG] Research complete — %d passage(s) gathered after %d round(s).", len((state.get("kbinfos") or {}).get("chunks", [])), state.get("loop", 0))
