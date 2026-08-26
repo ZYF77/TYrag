@@ -88,19 +88,13 @@ async def require_v3_service_principal(
 
 
 def _error(status_code: int, code: str, request_id: str) -> JSONResponse:
-    messages = {
-        "ACL_DENIED": "Access denied",
-        "DOCUMENT_METADATA_INVALID": "Metadata validation failed",
-        "DOCUMENT_NOT_FOUND": "Document not found",
-        "DOCUMENT_VERSION_CONFLICT": "Document version already has different content",
-        "DOCUMENT_SOURCE_NOT_FOUND": "Document source is unavailable",
-        "VALIDATION_ERROR": "Request validation failed",
-    }
+    from enterprise.gateway.app import safe_error_message
+
     return JSONResponse(
         status_code=status_code,
         content={
             "code": code,
-            "message": messages.get(code, "Request failed"),
+            "message": safe_error_message(code),
             "requestId": request_id,
             "retryable": code in {"DOCUMENT_SOURCE_NOT_FOUND"},
         },
@@ -108,12 +102,13 @@ def _error(status_code: int, code: str, request_id: str) -> JSONResponse:
 
 
 _STATUS_ERROR_MESSAGES = {
-    "DOCUMENT_SOURCE_NOT_FOUND": "Document source is unavailable",
-    "DOCUMENT_HASH_MISMATCH": "Document content hash mismatch",
-    "DOCUMENT_PARSE_FAILED": "Document parsing failed",
-    "PARSER_APPLICATION_MISMATCH": "Document parser verification failed",
-    "DOCUMENT_SYNC_FAILED": "Document synchronization failed",
-    "RAGFLOW_UNAVAILABLE": "Document processing service is unavailable",
+    "DOCUMENT_SOURCE_NOT_FOUND": "找不到源文件。",
+    "DOCUMENT_HASH_MISMATCH": "文件校验值与登记内容不一致。",
+    "DOCUMENT_PARSE_FAILED": "文档解析失败。",
+    "PARSER_APPLICATION_MISMATCH": "文档解析配置校验未通过。",
+    "DOCUMENT_SYNC_FAILED": "文档同步失败，请稍后重试。",
+    "RAGFLOW_UNAVAILABLE": "文档处理服务暂时不可用，请稍后重试。",
+    "INTERNAL_ERROR": "服务开小差了，请稍后重试。",
 }
 _STATUS_ERROR_RETRYABLE = {
     "DOCUMENT_SOURCE_NOT_FOUND",

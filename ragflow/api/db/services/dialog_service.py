@@ -41,6 +41,11 @@ from api.utils.reference_metadata_utils import (
     enrich_chunks_with_document_metadata,
     resolve_reference_metadata_preferences,
 )
+from api.utils.scope_identity_prompt import (
+    _build_scope_identity_knowledge_block,
+    _filter_scope_device_identifiers,
+    _prepend_scope_identity_knowledge,
+)
 from api.db.joint_services.tenant_model_service import get_tenant_default_model_by_type, resolve_model_config, resolve_model_type, get_model_config_by_id
 from common.time_utils import current_timestamp, datetime_format
 from common.text_utils import normalize_arabic_digits
@@ -865,7 +870,12 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
     logging.debug("Begin async_chat")
     assert messages[-1]["role"] == "user", "The last content of this conversation is not from user."
     grounding_enabled = _grounding_requested(kwargs.get("grounding_version"))
+    # Prefer Gateway scope_identifiers for the generation-side identity block.
+    # Fall back to a copy of allowed_identifiers taken BEFORE appending last_user
+    # (grounding appends the full question; that must never become an equipment id).
+    scope_identifiers = list(kwargs.pop("scope_identifiers", None) or [])
     allowed_identifiers = list(kwargs.pop("allowed_identifiers", None) or [])
+    scope_id_sources = list(scope_identifiers) if scope_identifiers else list(allowed_identifiers)
     attachment_observations = kwargs.pop("attachment_observations", None)
     last_user = str(messages[-1].get("content") or "")
     if last_user:
@@ -1123,6 +1133,11 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
         )
 
     knowledges = kb_prompt(kbinfos, max_tokens)
+    knowledges = _prepend_scope_identity_knowledge(
+        knowledges,
+        scope_id_sources,
+        reject_values=(last_user,),
+    )
     retrieved_knowledge_count = len(kbinfos.get("chunks", []))
     if grounding_enabled:
         logging.debug("retrieval completed: grounding_version=%s knowledge_count=%d", 1, len(knowledges))
@@ -2350,6 +2365,9 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
                 doc_id for doc_id in filtered_doc_scope or [] if doc_id in allowed
             ]
 
+    scope_identifiers = list(kwargs.get("scope_identifiers") or []) or list(
+        kwargs.get("allowed_identifiers") or []
+    )
     rag_tools = RAGTools(
         tenant_ids,
         chat_mdl,
@@ -2360,6 +2378,7 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
         doc_scope=doc_scope,
         do_refer=False,
         thinking_mode=thinking_mode,
+        scope_identifiers=scope_identifiers,
     )
 
     async def decorate_answer(answer):

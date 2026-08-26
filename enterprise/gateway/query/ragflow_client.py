@@ -334,6 +334,7 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
         pass_all_history_messages: bool | None = None,
         grounding_version: int | None = None,
         allowed_identifiers: list[str] | None = None,
+        scope_identifiers: list[str] | None = None,
         attachment_observations: list[str] | None = None,
         reasoning: int | None = None,
     ) -> dict:
@@ -372,6 +373,8 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
             body["grounding_version"] = grounding_version
         if allowed_identifiers:
             body["allowed_identifiers"] = [str(item) for item in allowed_identifiers if str(item)]
+        if scope_identifiers:
+            body["scope_identifiers"] = [str(item) for item in scope_identifiers if str(item)]
         if attachment_observations:
             body["attachment_observations"] = [
                 str(item) for item in attachment_observations if str(item)
@@ -521,6 +524,7 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
         pass_all_history_messages: bool | None = None,
         grounding_version: int | None = None,
         allowed_identifiers: list[str] | None = None,
+        scope_identifiers: list[str] | None = None,
         attachment_observations: list[str] | None = None,
         reasoning: int | None = None,
     ):
@@ -561,6 +565,8 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
             body["grounding_version"] = grounding_version
         if allowed_identifiers:
             body["allowed_identifiers"] = [str(item) for item in allowed_identifiers if str(item)]
+        if scope_identifiers:
+            body["scope_identifiers"] = [str(item) for item in scope_identifiers if str(item)]
         if attachment_observations:
             body["attachment_observations"] = [
                 str(item) for item in attachment_observations if str(item)
@@ -822,6 +828,7 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         pass_all_history_messages: bool | None = None,
         grounding_version: int | None = None,
         allowed_identifiers: list[str] | None = None,
+        scope_identifiers: list[str] | None = None,
         attachment_observations: list[str] | None = None,
         reasoning: int | None = None,
     ) -> dict:
@@ -844,6 +851,7 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
             "pass_all_history_messages": pass_all_history_messages,
             "grounding_version": grounding_version,
             "allowed_identifiers": list(allowed_identifiers or []),
+            "scope_identifiers": list(scope_identifiers or []),
             "attachment_observations": list(attachment_observations or []),
         }
         if reasoning is not None:
@@ -969,6 +977,7 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         pass_all_history_messages: bool | None = None,
         grounding_version: int | None = None,
         allowed_identifiers: list[str] | None = None,
+        scope_identifiers: list[str] | None = None,
         attachment_observations: list[str] | None = None,
         reasoning: int | None = None,
     ):
@@ -986,6 +995,7 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
                 pass_all_history_messages=pass_all_history_messages,
                 grounding_version=grounding_version,
                 allowed_identifiers=allowed_identifiers,
+                scope_identifiers=scope_identifiers,
                 attachment_observations=attachment_observations,
                 reasoning=reasoning,
             )

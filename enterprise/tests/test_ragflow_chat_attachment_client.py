@@ -2,11 +2,60 @@
 
 from __future__ import annotations
 
-import io
+import json
 
 import pytest
 
 from enterprise.gateway.query.ragflow_client import RAGFlowQueryClient
+
+
+@pytest.mark.asyncio
+async def test_upload_chat_file_multipart_reaches_documents_upload(monkeypatch):
+    """Regression: upload_chat_file must pass files= that _sync_request accepts."""
+    client = RAGFlowQueryClient(base_url="http://ragflow.test", api_key="k")
+    captured: dict = {}
+
+    class _Resp:
+        def read(self):
+            return json.dumps(
+                {
+                    "code": 0,
+                    "data": {
+                        "id": "att-1",
+                        "name": "paste.png",
+                        "mime_type": "image/png",
+                        "created_by": "tenant-1",
+                        "size": 9,
+                    },
+                }
+            ).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        captured["method"] = req.get_method()
+        captured["content_type"] = req.headers.get("Content-type") or req.headers.get(
+            "Content-Type"
+        )
+        captured["body"] = req.data
+        return _Resp()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    desc = await client.upload_chat_file("paste.png", b"png-bytes", "image/png")
+    assert captured["method"] == "POST"
+    assert captured["url"].endswith("/api/v1/documents/upload")
+    assert captured["url"].endswith("/api/v1/files") is False
+    assert "multipart/form-data" in str(captured["content_type"])
+    assert b"png-bytes" in captured["body"]
+    assert desc["id"] == "att-1"
+    assert desc["mime_type"] == "image/png"
+    assert desc["created_by"] == "tenant-1"
+    assert desc["name"] == "paste.png"
 
 
 @pytest.mark.asyncio

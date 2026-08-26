@@ -86,13 +86,31 @@ class RAGFlowDocumentClient:
         return str(uuid.uuid4())
 
     def _sync_request(self, method: str, path: str, request_id: str,
-                      json_data: dict | None = None) -> dict:
+                      json_data: dict | None = None,
+                      files: dict | None = None) -> dict:
         import urllib.request, urllib.error
         url = f"{self.base_url}{path}"
         headers = self._headers(request_id)
         body = None
 
-        if json_data:
+        if files:
+            # Chat attachments still upload via multipart on _sync_request;
+            # dataset docs use _sync_upload_document (httpx) instead.
+            boundary = "----FormBoundary" + uuid.uuid4().hex
+            body_parts = []
+            for name, (fname, fobj, ctype) in files.items():
+                body_parts.append(f"--{boundary}\r\n".encode())
+                body_parts.append(
+                    f'Content-Disposition: form-data; name="{name}"; '
+                    f'filename="{fname}"\r\n'.encode()
+                )
+                body_parts.append(f"Content-Type: {ctype}\r\n\r\n".encode())
+                body_parts.append(fobj.read() if hasattr(fobj, "read") else fobj)
+                body_parts.append(b"\r\n")
+            body_parts.append(f"--{boundary}--\r\n".encode())
+            body = b"".join(body_parts)
+            headers["Content-Type"] = f"multipart/form-data; boundary={boundary}"
+        elif json_data:
             body = json.dumps(json_data).encode()
             headers["Content-Type"] = "application/json"
 

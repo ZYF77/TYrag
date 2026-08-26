@@ -3,6 +3,7 @@
 import logging
 import re
 import hashlib
+from collections.abc import Sequence
 from common import settings
 from .navigation import _kg_scopes
 
@@ -117,12 +118,39 @@ def _highlight_keywords(text: str, kwds: list[str]) -> str:
     return pattern.sub(lambda m: f"<em>{m.group(0)}</em>", text)
 
 
-def _narrow_by_keywords(chunks: list[dict], keywords: str) -> list[dict]:
+def _filter_ignored_kwds(kwds: list[str], ignore_tokens: Sequence[str]) -> list[str]:
+    """Drop keywords that are scope identity tokens (case-insensitive).
+
+    For space-joined bigrams, discard the bigram if either side is ignored.
+    """
+    ignore = {str(t).strip().lower() for t in (ignore_tokens or ()) if t and str(t).strip()}
+    if not ignore:
+        return kwds
+    kept: list[str] = []
+    for kw in kwds:
+        parts = kw.split()
+        if any(p in ignore for p in parts):
+            continue
+        kept.append(kw)
+    return kept
+
+
+def _narrow_by_keywords(
+    chunks: list[dict],
+    keywords: str,
+    ignore_tokens: Sequence[str] = (),
+    keep_unmatched_when_scoped: bool = False,
+) -> list[dict]:
     """Narrow each chunk to its keyword-bearing sentences (+/- 1 neighbour) and
     drop keyword-less chunks.
 
     Keywords are the comma-separated terms (with close synonyms) produced by
     ``formalize``; matching is case-insensitive substring.
+
+    ``ignore_tokens`` removes scope identity tokens (e.g. DeviceCode) so they are
+    not required to appear in chunk body text. When ``keep_unmatched_when_scoped``
+    is True and no keyword hits remain, return the original chunks instead of
+    dropping everything (Gateway ``doc_scope`` already bounds the set).
     """
     kwds = [k.strip().lower() for k in (keywords or "").split(",") if k.strip()]
     if not kwds or not chunks:
@@ -133,6 +161,10 @@ def _narrow_by_keywords(chunks: list[dict], keywords: str) -> list[dict]:
         for i in range(len(kwds) - 1):
             _kwds.append(kwds[i] + " " + kwds[i + 1])
         kwds = _kwds
+
+    kwds = _filter_ignored_kwds(kwds, ignore_tokens)
+    if not kwds:
+        return chunks
 
     scored = [(ck, _narrow_content(ck.get("content_with_weight") or ck.get("content") or "", kwds)) for ck in chunks]
     out: list[dict] = []
@@ -148,6 +180,8 @@ def _narrow_by_keywords(chunks: list[dict], keywords: str) -> list[dict]:
                 ck["content"] = nc
             ck.pop("highlight", None)
             out.append(ck)
+    if not out and keep_unmatched_when_scoped:
+        return chunks
     return out
 
 
@@ -226,7 +260,14 @@ async def hybrid_search(tools, query: str, kb_ids: list[str] | None = None, top_
     kbinfos = _normalize(kbinfos, tools.tenant_ids)
     if keywords:
         length = len(kbinfos["chunks"])
-        kbinfos["chunks"] = _narrow_by_keywords(kbinfos.get("chunks", []), keywords)
+        ignore = list(getattr(tools, "scope_identifiers", None) or [])
+        scoped = bool(doc_scope)
+        kbinfos["chunks"] = _narrow_by_keywords(
+            kbinfos.get("chunks", []),
+            keywords,
+            ignore_tokens=ignore,
+            keep_unmatched_when_scoped=scoped,
+        )
         _LOG.info(f"[Hybrid search] Kept {len(kbinfos['chunks'])} of {length} passage(s) that actually mention the keywords.")
     if use_compiled and kbinfos.get("chunks"):
         _LOG.info("[Hybrid search] Compiled expansion enabled — enriching with page_index/tree/KG navigation.")
@@ -269,7 +310,14 @@ async def vector_search(tools, query: str, kb_ids: list[str] | None = None, top_
     kbinfos = _normalize(kbinfos, tools.tenant_ids)
     if keywords:
         length = len(kbinfos["chunks"])
-        kbinfos["chunks"] = _narrow_by_keywords(kbinfos.get("chunks", []), keywords)
+        ignore = list(getattr(tools, "scope_identifiers", None) or [])
+        scoped = bool(doc_scope)
+        kbinfos["chunks"] = _narrow_by_keywords(
+            kbinfos.get("chunks", []),
+            keywords,
+            ignore_tokens=ignore,
+            keep_unmatched_when_scoped=scoped,
+        )
         _LOG.info(f"[Vector search] Kept {len(kbinfos['chunks'])} of {length} passage(s) that actually mention the keywords.")
     return kbinfos
 
@@ -301,7 +349,14 @@ async def bm25_search(tools, query: str, kb_ids: list[str] | None = None, top_n:
     kbinfos = _normalize(kbinfos, tools.tenant_ids)
     if keywords:
         length = len(kbinfos["chunks"])
-        kbinfos["chunks"] = _narrow_by_keywords(kbinfos.get("chunks", []), keywords)
+        ignore = list(getattr(tools, "scope_identifiers", None) or [])
+        scoped = bool(doc_scope)
+        kbinfos["chunks"] = _narrow_by_keywords(
+            kbinfos.get("chunks", []),
+            keywords,
+            ignore_tokens=ignore,
+            keep_unmatched_when_scoped=scoped,
+        )
         _LOG.info(f"[BM25 search] Kept {len(kbinfos['chunks'])} of {length} passage(s) that actually mention the keywords.")
     return kbinfos
 

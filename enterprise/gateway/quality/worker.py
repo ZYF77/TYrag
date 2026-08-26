@@ -645,7 +645,7 @@ class QualityEvaluationService:
             await self._emit_terminal_failed(
                 fresh,
                 code="DOCUMENT_QUALITY_FAILED",
-                message="Document quality evaluation failed",
+                message="文档质检未通过。",
             )
 
     async def _emit_terminal_failed(

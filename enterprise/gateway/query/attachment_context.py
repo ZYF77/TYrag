@@ -206,9 +206,10 @@ async def _upload_pending(
         )
     except Exception as exc:
         logger.warning(
-            "attachment upload failed name=%s err=%s",
+            "attachment upload failed name=%s err=%s: %s",
             item.file_name,
             type(exc).__name__,
+            exc,
         )
         return None
     if not isinstance(file_desc, dict):

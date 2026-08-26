@@ -48,12 +48,30 @@ class OutboxWorker:
                     await mark_outbox_failed(
                         self.service.db, event, e.code, str(e),
                     )
+                    try:
+                        await self.service.finalize_outbox_exhausted(
+                            event, e.code, str(e),
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Outbox exhausted finalization failed event_id=%s",
+                            event.event_id,
+                        )
             except Exception:
                 logger.exception("Outbox processing failed event_id=%s", event.event_id)
                 await mark_outbox_failed(
                     self.service.db, event, "INTERNAL_ERROR",
-                    "Unexpected outbox failure",
+                    "服务开小差了，请稍后重试。",
                 )
+                try:
+                    await self.service.finalize_outbox_exhausted(
+                        event, "INTERNAL_ERROR", "服务开小差了，请稍后重试。",
+                    )
+                except Exception:
+                    logger.exception(
+                        "Outbox exhausted finalization failed event_id=%s",
+                        event.event_id,
+                    )
         return len(events)
 
     async def run_forever(self, interval_seconds: float = 2.0) -> None:

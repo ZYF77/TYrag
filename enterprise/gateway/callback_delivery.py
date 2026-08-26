@@ -180,6 +180,21 @@ def resolve_callback_endpoint(
     return None
 
 
+def _localize_callback_error(error: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Expose Chinese user-facing messages to EAM; keep code/retryable unchanged."""
+    if not error:
+        return None
+    from enterprise.gateway.app import safe_error_message
+
+    code = str(error.get("code") or "").strip()
+    raw_message = str(error.get("message") or "").strip()
+    localized = {
+        **error,
+        "message": safe_error_message(code, raw_message or "请求失败，请稍后重试。"),
+    }
+    return localized
+
+
 def build_terminal_payload(
     *,
     delivery_id: str,
@@ -204,7 +219,7 @@ def build_terminal_payload(
         "sourceSystem": doc.source_system,
         "qualityStatus": quality_status,
         "retrievable": bool(retrievable),
-        "error": error,
+        "error": _localize_callback_error(error),
     }
 
 

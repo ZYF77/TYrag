@@ -86,6 +86,8 @@ async def test_v2_creates_and_reuses_ragflow_session(runtime):
     assert body["pass_all_history_messages"] is None
     assert body["grounding_version"] == 1
     assert "EQ-GROUNDING-HISTORY" in body["allowed_identifiers"]
+    assert "EQ-GROUNDING-HISTORY" in body["scope_identifiers"]
+    assert body["scope_identifiers"] == body["allowed_identifiers"]
     assert body["question"] == "第二轮"
     async with runtime.db.execute(
         "SELECT ragflow_session_id FROM ext_v2_conversation WHERE conversation_id=?",
@@ -289,6 +291,11 @@ async def test_v2_bound_equipment_id_is_sent_as_allowed_identifier(runtime):
     assert body["answer"] == "设备 EQ-GNDJSON-104 有发票和收据。"
     _assert_no_grounding_leak(body)
     assert "EQ-GNDJSON-104" in runtime.stub._last_completion_body["allowed_identifiers"]
+    assert "EQ-GNDJSON-104" in runtime.stub._last_completion_body["scope_identifiers"]
+    assert (
+        runtime.stub._last_completion_body["scope_identifiers"]
+        == runtime.stub._last_completion_body["allowed_identifiers"]
+    )
 
 
 @pytest.mark.asyncio

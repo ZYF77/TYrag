@@ -324,8 +324,21 @@ class TestSyncService:
         await db.close()
 
     @pytest.mark.asyncio
-    async def test_worker_dead_letter_after_max_attempts(self):
+    async def test_worker_dead_letter_after_max_attempts(self, monkeypatch):
         db = await init_db(":memory:")
+        monkeypatch.setenv("ENTERPRISE_CALLBACK_ENABLED", "true")
+        monkeypatch.setenv("ENTERPRISE_CALLBACK_HMAC_SECRET", "cb-secret")
+        monkeypatch.setenv(
+            "ENTERPRISE_CALLBACK_ENDPOINTS",
+            json.dumps({"EAM": "https://eam.example/callback"}),
+        )
+        from enterprise.gateway import config as config_module
+        from enterprise.gateway.callback_delivery import get_callback_delivery
+
+        monkeypatch.setattr(config_module.config, "callback_enabled", True)
+        monkeypatch.setattr(config_module.config, "callback_hmac_secret", "cb-secret")
+        monkeypatch.setattr(config_module.config, "quality_worker_enabled", False)
+
         client = RAGFlowDocumentStub()
         client._fail_next = True
         service = SyncService(db, SourceStub(b"dead"), client)
@@ -335,6 +348,59 @@ class TestSyncService:
         await enqueue_outbox(db, event)
         await worker.run_once()
         assert (await get_outbox_by_event_id(db, "evt-1")).status == "dead"
+        doc = await get_mapping_by_event_id(db, "evt-1")
+        assert doc is not None
+        assert doc.sync_status == "failed"
+        assert doc.event_status == "failed"
+        delivery = await get_callback_delivery(
+            db,
+            tenant_id="tenant-1",
+            source_system="EAM",
+            external_document_id="DOC-1",
+            source_version_id="v1",
+            terminal_status="failed",
+        )
+        assert delivery is not None
+        assert delivery.state == "pending"
+        await db.close()
+
+    @pytest.mark.asyncio
+    async def test_finalize_outbox_exhausted_skips_terminal_document(
+        self, monkeypatch,
+    ):
+        db = await init_db(":memory:")
+        monkeypatch.setenv("ENTERPRISE_CALLBACK_ENABLED", "true")
+        monkeypatch.setenv("ENTERPRISE_CALLBACK_HMAC_SECRET", "cb-secret")
+        monkeypatch.setenv(
+            "ENTERPRISE_CALLBACK_ENDPOINTS",
+            json.dumps({"EAM": "https://eam.example/callback"}),
+        )
+        from enterprise.gateway import config as config_module
+        from enterprise.gateway.callback_delivery import get_callback_delivery
+
+        monkeypatch.setattr(config_module.config, "callback_enabled", True)
+        monkeypatch.setattr(config_module.config, "callback_hmac_secret", "cb-secret")
+
+        content = b"already-ready"
+        client = RAGFlowDocumentStub()
+        client.run_status = "DONE"
+        service = SyncService(db, SourceStub(content), client)
+        event = make_event(content)
+        doc, _ = await service.process_event(event)
+        assert doc.sync_status == "ready"
+        await service.finalize_outbox_exhausted(
+            event, "INTERNAL_ERROR", "should not demote ready",
+        )
+        refreshed = await get_mapping_by_event_id(db, "evt-1")
+        assert refreshed.sync_status == "ready"
+        assert await get_callback_delivery(
+            db,
+            tenant_id="tenant-1",
+            source_system="EAM",
+            external_document_id="DOC-1",
+            source_version_id="v1",
+            terminal_status="failed",
+        ) is None
         await db.close()
 
     @pytest.mark.asyncio

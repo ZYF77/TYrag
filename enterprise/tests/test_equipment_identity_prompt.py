@@ -24,12 +24,21 @@ def test_enterprise_prompt_has_knowledge_and_two_tier_relevance():
     system = cfg["system"]
 
     assert "{knowledge}" in system
-    assert ENTERPRISE_PROMPT_MARKER == "enterprise_identity_metadata_v9"
+    assert ENTERPRISE_PROMPT_MARKER == "enterprise_identity_metadata_v13"
     assert ENTERPRISE_PROMPT_MARKER in system
     assert "document_metadata" in system
     assert "equipment_id" in system
     assert "fixed_asset_no" in system
     assert "正文未出现设备编号" in system
+    assert "禁止因正文未出现该设备号而写「无法按该编号匹配」" in system
+    assert "正文未找到该设备号" in system
+    assert "应依据该文档 Content 回答其中能够确认的事实" in system
+    assert "明确支持该型号/部件与属性值之间的关系" in system
+    assert "禁止仅因文档中存在「出厂编号」「型号」「厂家」" in system
+    assert "部件的型号、厂家或编号不得作为整机信息" in system
+    assert "无法确认某个候选值是否属于用户点名的型号或部件" in system
+    assert "不得附带本范围内其它型号、出厂编号、项号" in system
+    assert "引用必须支持其紧邻的事实" in system
     assert "metadata 只证明文档归属" in system
     assert "必须由 Content 实际内容支持" in system
     assert ABSTAIN_PHRASE in system
@@ -74,6 +83,10 @@ def test_needs_enterprise_prompt_upgrade_detects_default_chat():
         "enterprise_identity_metadata_v6",
         "enterprise_identity_metadata_v7",
         "enterprise_identity_metadata_v8",
+        "enterprise_identity_metadata_v9",
+        "enterprise_identity_metadata_v10",
+        "enterprise_identity_metadata_v11",
+        "enterprise_identity_metadata_v12",
     ):
         legacy = build_enterprise_prompt_config()
         legacy["system"] = legacy["system"].replace(
@@ -221,7 +234,7 @@ async def test_ensure_chat_preserves_v6_operator_prompt():
     assert ensured == chat_id
     chat = client._chats[chat_id]
     assert chat["prompt_config"]["system"] == operator_system
-    assert "enterprise_identity_metadata_v9" not in chat["prompt_config"]["system"]
+    assert "enterprise_identity_metadata_v13" not in chat["prompt_config"]["system"]
     args, kwargs = updates[0]
     assert kwargs.get("prompt_config") is None
     assert not any(isinstance(arg, dict) and "system" in arg for arg in args)

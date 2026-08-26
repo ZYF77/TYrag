@@ -61,6 +61,16 @@ def resolve_reference_metadata_preferences(
     return include_metadata, {f for f in fields if isinstance(f, str)}
 
 
+def _resolve_chunk_doc_id(chunk: dict, doc_field: str = "doc_id") -> str | None:
+    """Prefer ``doc_field``; fall back to ``document_id`` when doc_id is missing."""
+    doc_id = chunk.get(doc_field)
+    if doc_id:
+        return doc_id
+    if doc_field != "document_id":
+        return chunk.get("document_id") or None
+    return None
+
+
 def enrich_chunks_with_document_metadata(
     chunks: list[dict],
     metadata_fields: set[str] | None = None,
@@ -79,7 +89,7 @@ def enrich_chunks_with_document_metadata(
     doc_ids_by_kb: dict[str, set[str]] = {}
     for chunk in chunks:
         kb_ids = chunk.get(kb_field)
-        doc_id = chunk.get(doc_field)
+        doc_id = _resolve_chunk_doc_id(chunk, doc_field)
         if not kb_ids or not doc_id:
             continue
         if isinstance(kb_ids, (list, tuple)):
@@ -109,7 +119,7 @@ def enrich_chunks_with_document_metadata(
             logging.debug("Fetched metadata for %d docs in kb_id=%s", len(meta_map), kb_id)
 
     for chunk in chunks:
-        doc_id = chunk.get(doc_field)
+        doc_id = _resolve_chunk_doc_id(chunk, doc_field)
         if not doc_id:
             continue
         meta = meta_by_doc.get(doc_id)

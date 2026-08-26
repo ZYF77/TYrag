@@ -67,6 +67,7 @@ from enterprise.gateway.query.formal_router import (
     _query_client,
     _sse,
 )
+from enterprise.gateway.query.llm_provider_errors import classify_llm_provider_error
 from enterprise.gateway.query.ragflow_client import RAGFlowAPIError
 from enterprise.gateway.query.source_access import source_response
 from enterprise.gateway.sync.models import ExtDocumentMap
@@ -84,6 +85,16 @@ logger = logging.getLogger(__name__)
 IDENTIFIER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._\-]{3,127}")
 PREVIOUS_COMPARISON_RE = re.compile(
     r"(?:刚才|上一台|前一台).{0,16}(?:比|比较|对比|区别|差异)"
+)
+# True equipment lookups (unknown ids fail-closed). Product models/serials do not.
+EQUIPMENT_QUERY_CUE_RE = re.compile(
+    r"(?:设备号|设备编号|固定资产号|设备是|"
+    r"(?:查|查询|查找|检索).{0,32}"
+    r"(?:资料|文档|档案|图纸|说明书|手册))"
+)
+# Labels that mark a nearby token as型号/出厂编号, not an equipment id.
+MODEL_OR_SERIAL_LABEL_RE = re.compile(
+    r"(?:产品型号|整机型号|规格型号|出厂编号|产品编号|型号)"
 )
 EQUIPMENT_ID_HINT = (
     "建议补充设备号或固定资产号，我可以只查该设备的资料，回答会更准确。"
@@ -118,6 +129,21 @@ def _error(status_code: int, code: str, message: str) -> JSONResponse:
             },
         },
     )
+
+
+def _mapped_llm_provider_failure(text: str) -> tuple[str, int, str] | None:
+    """If text is a LiteLLM/Dashscope error payload, return safe failed-run fields."""
+    classified = classify_llm_provider_error(text)
+    if classified is None:
+        return None
+    from enterprise.gateway.app import safe_error_message
+
+    code, status_code = classified
+    logger.info(
+        "llm provider error remapped code=%s err_type=provider_payload",
+        code,
+    )
+    return code, status_code, safe_error_message(code)
 
 
 def _public_run_payload(result: dict, citations: list[dict] | None = None) -> dict:
@@ -221,6 +247,22 @@ def _device_like_identifiers(question: str) -> list[str]:
     ]
 
 
+def _token_near_model_or_serial(question: str, token: str) -> bool:
+    """True when token sits next to 型号/出厂编号 — treat as product fact, not equipment id."""
+    text = question or ""
+    if not text or not token:
+        return False
+    for match in re.finditer(re.escape(token), text):
+        window = text[max(0, match.start() - 24) : match.start()]
+        if MODEL_OR_SERIAL_LABEL_RE.search(window):
+            return True
+    return False
+
+
+def _has_equipment_query_cue(question: str) -> bool:
+    return bool(EQUIPMENT_QUERY_CUE_RE.search(question or ""))
+
+
 def _equipment_index(
     docs_by_internal_id: dict[str, ExtDocumentMap],
 ) -> dict[str, set[str]]:
@@ -238,18 +280,39 @@ def _explicit_equipment_ids(
     question: str,
     docs_by_internal_id: dict[str, ExtDocumentMap],
 ) -> tuple[list[str], bool]:
+    """Resolve explicit equipment ids from the question.
+
+    A device-like token counts as an explicit equipment reference only when:
+    - it uniquely hits the equipment index, or
+    - it is unmatched AND the question has equipment-query cues
+      (设备号/设备编号/固定资产号/查…资料/设备是).
+
+    Tokens adjacent to 型号/出厂编号 are ignored so product-model confirmations
+    (e.g. XT30D) do not clear turn scope. Unknown ids with cues fail-closed.
+    """
     tokens = _device_like_identifiers(question)
     if not tokens:
         return [], False
     index = _equipment_index(docs_by_internal_id)
+    has_cue = _has_equipment_query_cue(question)
     resolved: list[str] = []
+    unresolved_explicit = False
     for token in tokens:
+        if _token_near_model_or_serial(question, token):
+            continue
         matches = index.get(token, set())
-        if len(matches) != 1:
+        if len(matches) == 1:
+            equipment_id = next(iter(matches))
+            if equipment_id not in resolved:
+                resolved.append(equipment_id)
+            continue
+        if len(matches) > 1:
             return [], True
-        equipment_id = next(iter(matches))
-        if equipment_id not in resolved:
-            resolved.append(equipment_id)
+        # Unmatched: only fail-closed when the question is clearly an equipment lookup.
+        if has_cue:
+            unresolved_explicit = True
+    if unresolved_explicit:
+        return [], True
     return resolved, False
 
 
@@ -386,9 +449,14 @@ def _v2_completion_kwargs(
     session_id: str | None = None,
     reasoning_mode: str = "simple",
 ) -> dict[str, Any]:
+    # scope_identifiers mirrors allowed_identifiers so RAGFlow can inject a
+    # generation-side identity block without mistaking the user question for a
+    # device token (allowed_identifiers also feeds Identifier Guard grounding).
+    identifiers = _allowed_identifiers(conversation, question)
     kwargs: dict[str, Any] = {
         "grounding_version": 1,
-        "allowed_identifiers": _allowed_identifiers(conversation, question),
+        "allowed_identifiers": identifiers,
+        "scope_identifiers": list(identifiers),
     }
     if session_id:
         kwargs["session_id"] = session_id
@@ -1340,6 +1408,13 @@ async def _execute_json_run(
                     if isinstance(item, dict)
                 ]
                 split = split_assistant_output(str(data.get("answer") or ""))
+                mapped = _mapped_llm_provider_failure(split.answer)
+                if mapped is not None:
+                    code, status_code, message = mapped
+                    return None, await _save_failed_run(
+                        db, principal, conversation, req, run, assistant_message_id,
+                        code=code, status_code=status_code, message=message,
+                    )
                 answer = sanitize_citation_markers(split.answer)
                 reasoning = public_reasoning(split.reasoning)
                 status = _business_status(completion, answer, question)
@@ -1412,13 +1487,17 @@ async def _execute_json_run(
             if isinstance(exc, _FormalQueryError):
                 code, status_code, message = exc.code, exc.status_code, exc.message
             else:
-                code = (
-                    "RAGFLOW_API_INCOMPATIBLE"
-                    if exc.status_code and 400 <= exc.status_code < 500
-                    else "RAGFLOW_UNAVAILABLE"
-                )
-                status_code = 503
-                message = "Query engine unavailable"
+                mapped = _mapped_llm_provider_failure(str(exc))
+                if mapped is not None:
+                    code, status_code, message = mapped
+                else:
+                    code = (
+                        "RAGFLOW_API_INCOMPATIBLE"
+                        if exc.status_code and 400 <= exc.status_code < 500
+                        else "RAGFLOW_UNAVAILABLE"
+                    )
+                    status_code = 503
+                    message = "Query engine unavailable"
             return None, await _save_failed_run(
                 db, principal, conversation, req, run, assistant_message_id,
                 code=code, status_code=status_code, message=message,
@@ -1563,6 +1642,32 @@ async def _stream_run_events(
 
             conversation["ragflow_chat_id"] = chat_id
             conversation["ragflow_session_id"] = session_id
+            mapped = _mapped_llm_provider_failure(accumulated)
+            if mapped is not None:
+                code, status_code, message = mapped
+                await _save_failed_run(
+                    db, principal, conversation, req, run, assistant_message_id,
+                    code=code, status_code=status_code, message=message,
+                )
+                if live_streamed and emitted_answer:
+                    yield _sse(
+                        "answer.replaced",
+                        {
+                            "conversationId": conversation_id,
+                            "runId": run["run_id"],
+                            "content": "",
+                        },
+                    )
+                yield _sse(
+                    "run.failed",
+                    {
+                        "conversationId": conversation_id,
+                        "runId": run["run_id"],
+                        "code": code,
+                        "message": message,
+                    },
+                )
+                return
             accumulated = sanitize_citation_markers(accumulated)
             status = force_abstain_outcome(
                 accumulated,
@@ -1687,14 +1792,19 @@ async def _stream_run_events(
     except (RAGFlowAPIError, _FormalQueryError) as exc:
         if isinstance(exc, _FormalQueryError):
             code, message = exc.code, exc.message
+            status_code = exc.status_code
         else:
-            code = (
-                "RAGFLOW_API_INCOMPATIBLE"
-                if exc.status_code and 400 <= exc.status_code < 500
-                else "RAGFLOW_UNAVAILABLE"
-            )
-            message = "Query engine unavailable"
-        status_code = exc.status_code if isinstance(exc, _FormalQueryError) else 503
+            mapped = _mapped_llm_provider_failure(str(exc))
+            if mapped is not None:
+                code, status_code, message = mapped
+            else:
+                code = (
+                    "RAGFLOW_API_INCOMPATIBLE"
+                    if exc.status_code and 400 <= exc.status_code < 500
+                    else "RAGFLOW_UNAVAILABLE"
+                )
+                message = "Query engine unavailable"
+                status_code = 503
         await _save_failed_run(
             db, principal, conversation, req, run, assistant_message_id,
             code=code, status_code=status_code, message=message,

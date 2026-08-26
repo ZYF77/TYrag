@@ -82,11 +82,13 @@ class RAGTools:
         user_defined_prompts: dict | None = None,
         do_refer: bool | None = True,
         thinking_mode: str = "medium",
+        scope_identifiers: list[str] | None = None,
     ):
         self.tenant_ids = tenant_ids
         self.chat_mdl = chat_mdl.clone()
         self.embed_mdl = embed_mdl
         self.thinking_mode = thinking_mode
+        self.scope_identifiers = list(scope_identifiers or [])
         self.field_map = {}
         self.sql_kbs = []
         self.kbs = []

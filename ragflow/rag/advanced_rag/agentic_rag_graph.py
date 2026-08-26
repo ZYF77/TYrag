@@ -43,6 +43,32 @@ from rag.prompts.generator import form_message, kb_prompt, message_fit_in
 _LOG = logging.getLogger(__name__)
 
 
+def _build_formalize_evidence_text(tools, kbinfos) -> str:
+    """Compose Evidence text: optional metadata enrich + kb_prompt + scope identity block.
+
+    When ``tools.scope_identifiers`` is non-empty, enrich chunks with
+    ``equipment_id`` / ``fixed_asset_no`` and prepend the shared Chinese identity
+    preamble so Agentic answers match the simple-path D2 contract.
+    """
+    scope_ids = list(getattr(tools, "scope_identifiers", None) or [])
+    if scope_ids:
+        from api.utils.reference_metadata_utils import enrich_chunks_with_document_metadata
+
+        enrich_chunks_with_document_metadata(
+            kbinfos.get("chunks", []), {"equipment_id", "fixed_asset_no"}
+        )
+    blocks = kb_prompt(kbinfos, tools.chat_mdl.max_length)
+    if not isinstance(blocks, list):
+        blocks = [blocks] if blocks else []
+    if scope_ids:
+        from api.utils.scope_identity_prompt import _build_scope_identity_knowledge_block
+
+        block = _build_scope_identity_knowledge_block(scope_ids)
+        if block:
+            blocks = [block, *blocks]
+    return "\n".join(blocks)
+
+
 def _snip(value: Any, limit: int = 240) -> str:
     try:
         s = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
@@ -251,8 +277,8 @@ def build_agentic_graph(tools, token_queue: asyncio.Queue, gen_conf: dict | None
             token_queue.put_nowait(msg)
             return {"final_answer": msg}
 
-        # Build evidence
-        evidence = kb_prompt(kbinfos, tools.chat_mdl.max_length)
+        # Build evidence (enrich + scope identity when scoped)
+        evidence = _build_formalize_evidence_text(tools, kbinfos)
         parts = [f"Question:\n{question}\n"]
 
         # Include pre_summary from agent results if available

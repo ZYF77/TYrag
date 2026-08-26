@@ -294,7 +294,7 @@ class SyncService:
         except Exception as e:
             logger.exception("Unexpected sync failure event_id=%s", event.event_id)
             raise RetryableDocumentSyncError(
-                "INTERNAL_ERROR", "Unexpected sync failure"
+                "INTERNAL_ERROR", "服务开小差了，请稍后重试。"
             ) from e
 
     @staticmethod
@@ -418,7 +418,7 @@ class SyncService:
             failure_fields = {
                 "pipeline_status": doc.pipeline_status,
                 "error_code": "DOCUMENT_PARSE_FAILED",
-                "error_message": "RAGFlow parsing failed",
+                "error_message": "文档解析失败。",
                 "event_status": "failed",
             }
             if not doc.current_version:
@@ -452,8 +452,12 @@ class SyncService:
 
         if config.quality_worker_enabled and doc.ragflow_document_id:
             return
+        from enterprise.gateway.app import safe_error_message
+
         code = doc.last_error_code or "DOCUMENT_SYNC_FAILED"
-        message = doc.last_error_message or "Document synchronization failed"
+        message = safe_error_message(
+            code, doc.last_error_message or "文档同步失败，请稍后重试。"
+        )
         await emit_terminal_callback_safe(
             self.db,
             doc,
@@ -462,6 +466,59 @@ class SyncService:
             retrievable=False,
             error={"code": code, "message": message, "retryable": False},
         )
+
+    async def finalize_outbox_exhausted(
+        self,
+        event: OutboxEvent,
+        error_code: str | None,
+        error_message: str | None,
+    ) -> None:
+        """Mark the document failed and enqueue EAM failed callback after outbox death.
+
+        Retryable sync errors leave the mapping in ``retry_wait`` until attempts
+        are exhausted. Without this finalizer, outbox ``dead`` would leave the
+        document non-terminal and never notify EAM.
+        """
+        doc = await get_mapping_by_event_id(self.db, event.event_id)
+        if doc is None:
+            doc = await get_mapping(
+                self.db,
+                event.tenant_id,
+                event.source_system,
+                event.external_document_id,
+                event.source_version_id,
+            )
+        if doc is None:
+            logger.warning(
+                "Outbox exhausted with no mapping event_id=%s external_document_id=%s",
+                event.event_id,
+                event.external_document_id,
+            )
+            return
+        if is_terminal_document_status(doc.sync_status):
+            return
+
+        from enterprise.gateway.app import safe_error_message
+
+        code = error_code or doc.last_error_code or "DOCUMENT_SYNC_FAILED"
+        message = safe_error_message(
+            code,
+            error_message
+            or doc.last_error_message
+            or "文档同步失败，请稍后重试。",
+        )
+        failure_fields = {
+            "error_code": code,
+            "error_message": message,
+            "attempt_count": event.attempts,
+        }
+        if not doc.current_version:
+            failure_fields["business_status"] = "review_required"
+        await self._set_status(
+            doc, "failed", event_status="failed", **failure_fields,
+        )
+        await self._ensure_quality_evaluation(doc)
+        await self._emit_terminal_failed_if_no_quality(doc)
 
     async def _ensure_dataset(self, tenant_id: str) -> dict:
         name = (
@@ -891,7 +948,7 @@ class SyncService:
                 failure_fields = {
                     "pipeline_status": run,
                     "error_code": "DOCUMENT_PARSE_FAILED",
-                    "error_message": "RAGFlow parsing failed",
+                    "error_message": "文档解析失败。",
                     "event_status": "failed",
                 }
                 if not doc.current_version:
@@ -942,7 +999,7 @@ class SyncService:
             event_status="completed",
             business_status=business_status,
             error_code="RAGFLOW_DOCUMENT_MISSING",
-            error_message="Document was removed from RAGFlow",
+            error_message="文档已从知识库中移除",
         )
         await self._clear_ragflow_binding(doc)
         return await get_mapping(

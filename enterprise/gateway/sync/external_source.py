@@ -109,7 +109,7 @@ class FileShareSourceAdapter:
         except ValueError as exc:
             raise FileShareConfigurationError("FILE_SHARE path escapes configured root") from exc
         if not candidate.is_file():
-            raise SourceFetchError("FILE_SHARE source file was not found")
+            raise SourceFetchError("共享盘源文件不存在")
         return candidate
 
     def stat_source(self, storage_root_id: str, relative_path: str) -> SourceStat:

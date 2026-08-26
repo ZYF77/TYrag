@@ -706,6 +706,165 @@ async def test_unknown_explicit_equipment_fails_closed(runtime):
 
 
 @pytest.mark.asyncio
+async def test_product_model_in_bound_question_keeps_scope(runtime):
+    """A3/F2: 型号 XT30D must not clear bound equipment scope or skip RAGFlow."""
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-XT30D",
+        ragflow_id="doc-xt30d",
+        equipment_id="GQ01250024",
+        fixed_asset_no="GQ01250024",
+    )
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(
+            client, equipmentId="GQ01250024", fixedAssetNo="GQ01250024"
+        )
+        response = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={
+                "clientMessageId": "model-confirm-bound",
+                "question": "合格证上的出厂编号是否为 250606？产品型号是否为 XT30D？",
+            },
+        )
+
+    assert response.status_code == 200
+    assert _stub_doc_ids(runtime) == {"doc-xt30d"}
+    assert runtime.stub._last_completion_body is not None
+    async with runtime.db.execute(
+        """SELECT entity_scope_json, allowed_doc_ids_json
+             FROM ext_v2_message_run
+            WHERE client_message_id='model-confirm-bound'"""
+    ) as cursor:
+        snapshot = await cursor.fetchone()
+    assert set(json.loads(snapshot["entity_scope_json"])) == {"GQ01250024"}
+    assert set(json.loads(snapshot["allowed_doc_ids_json"])) == {"doc-xt30d"}
+
+
+@pytest.mark.asyncio
+async def test_product_model_comparison_question_keeps_bound_scope(runtime):
+    """A3-style: 整机型号 XT30D in a comparison question must not empty scope."""
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-XT30D-CMP",
+        ragflow_id="doc-xt30d-cmp",
+        equipment_id="GQ01250024",
+        fixed_asset_no="GQ01250024",
+    )
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(
+            client, equipmentId="GQ01250024", fixedAssetNo="GQ01250024"
+        )
+        response = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={
+                "clientMessageId": "model-compare-bound",
+                "question": (
+                    "操作说明书里控制器相关文档标题或型号是什么？"
+                    "它和合格证上的整机型号 XT30D 是否来自同一类附件？"
+                ),
+            },
+        )
+
+    assert response.status_code == 200
+    assert _stub_doc_ids(runtime) == {"doc-xt30d-cmp"}
+    assert runtime.stub._last_completion_body is not None
+    async with runtime.db.execute(
+        """SELECT entity_scope_json, allowed_doc_ids_json
+             FROM ext_v2_message_run
+            WHERE client_message_id='model-compare-bound'"""
+    ) as cursor:
+        snapshot = await cursor.fetchone()
+    assert set(json.loads(snapshot["entity_scope_json"])) == {"GQ01250024"}
+    assert set(json.loads(snapshot["allowed_doc_ids_json"])) == {"doc-xt30d-cmp"}
+
+
+@pytest.mark.asyncio
+async def test_unbound_model_confirm_does_not_empty_acl_scope(runtime):
+    """Unbound + pure model confirm must not fail-closed to empty doc scope."""
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-ACL-A",
+        ragflow_id="doc-acl-a",
+        equipment_id="EQ-ACL-A",
+        fixed_asset_no="FA-ACL-A",
+    )
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-ACL-B",
+        ragflow_id="doc-acl-b",
+        equipment_id="EQ-ACL-B",
+        fixed_asset_no="FA-ACL-B",
+    )
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(client)
+        response = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={
+                "clientMessageId": "model-confirm-unbound",
+                "question": "产品型号是否为 XT30D？",
+            },
+        )
+
+    assert response.status_code == 200
+    assert _stub_doc_ids(runtime) == {"doc-acl-a", "doc-acl-b"}
+    async with runtime.db.execute(
+        """SELECT allowed_doc_ids_json FROM ext_v2_message_run
+            WHERE client_message_id='model-confirm-unbound'"""
+    ) as cursor:
+        snapshot = await cursor.fetchone()
+    assert set(json.loads(snapshot["allowed_doc_ids_json"])) == {
+        "doc-acl-a",
+        "doc-acl-b",
+    }
+
+
+@pytest.mark.asyncio
+async def test_indexed_equipment_id_still_resolves_with_model_token(runtime):
+    """Indexed ids like GQ01250024 still rebind even when XT30D appears nearby."""
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-INDEXED",
+        ragflow_id="doc-indexed",
+        equipment_id="GQ01250024",
+        fixed_asset_no="GQ01250024",
+    )
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-OTHER",
+        ragflow_id="doc-other",
+        equipment_id="EQ-OTHER",
+        fixed_asset_no="FA-OTHER",
+    )
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(client, equipmentId="EQ-OTHER")
+        response = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={
+                "clientMessageId": "indexed-rebind",
+                "question": "GQ01250024 合格证上的产品型号是什么？是否为 XT30D？",
+            },
+        )
+
+    assert response.status_code == 200
+    assert _stub_doc_ids(runtime) == {"doc-indexed"}
+    body = runtime.stub._last_completion_body
+    assert body is not None
+    assert body["doc_ids"]
+    assert "GQ01250024" in body["allowed_identifiers"]
+    assert "GQ01250024" in body["scope_identifiers"]
+    assert body["scope_identifiers"] == body["allowed_identifiers"]
+    assert body["question"] == "GQ01250024 合格证上的产品型号是什么？是否为 XT30D？"
+    async with runtime.db.execute(
+        """SELECT entity_scope_json, allowed_doc_ids_json
+             FROM ext_v2_message_run
+            WHERE client_message_id='indexed-rebind'"""
+    ) as cursor:
+        snapshot = await cursor.fetchone()
+    assert set(json.loads(snapshot["entity_scope_json"])) == {"GQ01250024"}
+    assert set(json.loads(snapshot["allowed_doc_ids_json"])) == {"doc-indexed"}
+
+
+@pytest.mark.asyncio
 async def test_create_with_equipment_ignores_unconfigured_asset_registry(
     runtime, monkeypatch
 ):
@@ -1614,6 +1773,77 @@ async def test_v2_sse_scope_violation_clears_streamed_answer(runtime):
     replaced_at = response.text.index("event: answer.replaced")
     failed_at = response.text.index("event: run.failed")
     assert replaced_at < failed_at
+
+
+@pytest.mark.asyncio
+async def test_v2_sse_modality_error_clears_streamed_answer(runtime):
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-LLM-MODALITY",
+        ragflow_id="doc-llm-modality",
+        equipment_id="EQ-LLM-MODALITY",
+        fixed_asset_no="FA-LLM-MODALITY",
+    )
+    runtime.stub.forced_answer = (
+        '**ERROR**: INVALID_REQUEST - litellm.BadRequestError: DashscopeException - '
+        'data: {"error":{"code":"invalid_parameter_error","message":'
+        '"The provided messages input is invalid. The error info is '
+        '[Unexpected item type in content.]"}} LiteLLM Retried: 5 times'
+    )
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(
+            client, equipmentId="EQ-LLM-MODALITY"
+        )
+        response = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            headers={"Accept": "text/event-stream"},
+            json={"clientMessageId": "llm-modality-sse", "question": "这是什么"},
+        )
+
+    assert response.status_code == 200
+    assert "event: answer.delta" in response.text
+    assert "event: answer.replaced" in response.text
+    assert '"content": ""' in response.text
+    assert "event: run.failed" in response.text
+    assert '"code": "LLM_MODALITY_UNSUPPORTED"' in response.text
+    assert "不支持图片" in response.text
+    failed_payload = response.text.split("event: run.failed", 1)[1]
+    assert "litellm" not in failed_payload.lower()
+    assert "Unexpected item type" not in failed_payload
+    replaced_at = response.text.index("event: answer.replaced")
+    failed_at = response.text.index("event: run.failed")
+    assert replaced_at < failed_at
+
+
+@pytest.mark.asyncio
+async def test_v2_json_billing_error_maps_to_safe_message(runtime):
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-LLM-BILLING",
+        ragflow_id="doc-llm-billing",
+        equipment_id="EQ-LLM-BILLING",
+        fixed_asset_no="FA-LLM-BILLING",
+    )
+    runtime.stub.forced_answer = (
+        "**ERROR**: litellm.BadRequestError: DashscopeException - "
+        "Arrearage / Access denied, please make sure your account has enough quota"
+    )
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(
+            client, equipmentId="EQ-LLM-BILLING"
+        )
+        response = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            headers={"Accept": "application/json"},
+            json={"clientMessageId": "llm-billing-json", "question": "查询手册"},
+        )
+
+    assert response.status_code == 502
+    body = response.json()
+    assert body["code"] == "LLM_PROVIDER_BILLING"
+    assert "欠费" in body["message"]
+    assert "litellm" not in body["message"].lower()
+    assert "Arrearage" not in body["message"]
 
 
 @pytest.mark.asyncio

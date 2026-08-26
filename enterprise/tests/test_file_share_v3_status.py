@@ -597,7 +597,7 @@ async def test_failed_status_error_is_stable_and_secret_free(
 
     assert response.json()["error"] == {
         "code": "DOCUMENT_SYNC_FAILED",
-        "message": "Document synchronization failed",
+        "message": "文档同步失败，请稍后重试。",
         "retryable": True,
     }
     assert response.json()["errorCode"] == "DOCUMENT_SYNC_FAILED"

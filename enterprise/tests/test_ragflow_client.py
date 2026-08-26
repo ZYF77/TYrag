@@ -98,6 +98,7 @@ async def test_v2_completion_sends_session_without_projected_messages():
         session_id="sess-1",
         grounding_version=1,
         allowed_identifiers=["EQ-1"],
+        scope_identifiers=["EQ-1"],
     )
 
     body = captured["json_data"]
@@ -106,6 +107,7 @@ async def test_v2_completion_sends_session_without_projected_messages():
     assert body["question"] == "current"
     assert body["grounding_version"] == 1
     assert body["allowed_identifiers"] == ["EQ-1"]
+    assert body["scope_identifiers"] == ["EQ-1"]
 
 
 def test_json_missing_payload_treats_code_102_as_missing():

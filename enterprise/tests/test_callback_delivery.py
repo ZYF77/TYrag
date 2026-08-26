@@ -55,6 +55,50 @@ def test_callback_endpoints_resolve_source_and_tenant_binding():
     assert demo.key_id == "demo-key"
 
 
+def test_terminal_callback_error_message_is_chinese():
+    doc = ExtDocumentMap(
+        tenant_id="tenant-a",
+        source_system="EAM",
+        external_document_id="FAC-1244-ATT-39",
+        source_version_id="v1",
+        event_id="evt-1",
+        sha256="a" * 64,
+        file_name="manual.pdf",
+        source_kind="FILE_SHARE",
+    )
+    payload = build_terminal_payload(
+        delivery_id="del-1",
+        originating_event_id="evt-1",
+        doc=doc,
+        terminal_status="failed",
+        quality_status=None,
+        retrievable=False,
+        error={
+            "code": "INTERNAL_ERROR",
+            "message": "Unexpected sync failure",
+            "retryable": False,
+        },
+    )
+    assert payload["error"]["code"] == "INTERNAL_ERROR"
+    assert payload["error"]["message"] == "服务开小差了，请稍后重试。"
+    assert "Unexpected" not in payload["error"]["message"]
+
+    source_missing = build_terminal_payload(
+        delivery_id="del-2",
+        originating_event_id="evt-2",
+        doc=doc,
+        terminal_status="failed",
+        quality_status=None,
+        retrievable=False,
+        error={
+            "code": "DOCUMENT_SOURCE_NOT_FOUND",
+            "message": "FILE_SHARE source file was not found",
+            "retryable": False,
+        },
+    )
+    assert source_missing["error"]["message"] == "找不到源文件。"
+
+
 def test_internal_fixture_ids_are_skipped():
     assert is_internal_callback_document("PROBE-GE22002-CERT-1")
     assert is_internal_callback_document("tyrag-e2e-1786517725268433017")
