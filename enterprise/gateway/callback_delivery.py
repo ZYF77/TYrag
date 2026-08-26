@@ -181,17 +181,27 @@ def resolve_callback_endpoint(
 
 
 def _localize_callback_error(error: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Expose Chinese user-facing messages to EAM; keep code/retryable unchanged."""
+    """Expose Chinese user-facing messages to EAM; keep code/retryable/reasonCodes."""
     if not error:
         return None
     from enterprise.gateway.app import safe_error_message
 
     code = str(error.get("code") or "").strip()
     raw_message = str(error.get("message") or "").strip()
-    localized = {
-        **error,
+    localized: dict[str, Any] = {
+        "code": code,
         "message": safe_error_message(code, raw_message or "请求失败，请稍后重试。"),
+        "retryable": bool(error.get("retryable")),
     }
+    reason_codes = error.get("reasonCodes")
+    if isinstance(reason_codes, list):
+        cleaned = [
+            str(item).strip()
+            for item in reason_codes
+            if str(item).strip()
+        ][:32]
+        if cleaned:
+            localized["reasonCodes"] = cleaned
     return localized
 
 

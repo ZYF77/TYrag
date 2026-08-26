@@ -242,15 +242,15 @@ expected = "sha256=" + hex(HMAC-SHA256(outboundSecret, UTF-8(signed)))
 | `status` | **仅三值**：`retrievable` / `failed` / `review_required` |
 | `retrievable` | 成功终态为 `true`；否则 `false` |
 | `qualityStatus` | `passed` / `review_required` / `failed` / `unknown` / `null` |
-| `error` | 失败时可选：`{code,message,retryable}` |
+| `error` | `failed` / `review_required` 时必填语义：`{code,message,retryable[,reasonCodes]}`；`retrievable` 为 `null` |
 
 **EAM 应如何处理 `status`：**
 
 | status | 业务含义 | EAM 建议动作 |
 |---|---|---|
 | `retrievable` | 已解析且质量通过，已提升为可检索版本 | 标记文档可问答/已入库成功 |
-| `failed` | 处理失败（源文件、哈希、解析、质量失败等） | 标记失败；可读 `error.code` |
-| `review_required` | 质量门要求人工复核；**不会**自动变成可检索 | 进入复核流程；不要当成功 |
+| `failed` | 处理失败（源文件、哈希、解析、质量失败等） | 标记失败；读 `error.code` / `error.message` |
+| `review_required` | 质量门要求人工复核；**不会**自动变成可检索 | 进入复核；读 `error`（`DOCUMENT_REVIEW_REQUIRED`，可选 `reasonCodes`）；不要当成功 |
 
 ### 4.3 EAM 回调接口响应约定
 
@@ -327,7 +327,7 @@ EAM 实现要求：
 | `PARSER_APPLICATION_MISMATCH` | 解析配置读回不一致 | 联系知识库侧 |
 | `RAGFLOW_UNAVAILABLE` | 解析服务暂不可用 | 可稍后以新事件重试（视业务约定） |
 
-`status=review_required`：不是传输错误，而是**质量需人工复核**；此时 `retrievable=false`，EAM 不应当作入库成功。
+`status=review_required`：不是传输错误，而是**质量需人工复核**；此时 `retrievable=false`，且回调带 `error.code=DOCUMENT_REVIEW_REQUIRED`（可选 `reasonCodes`），EAM 不应当作入库成功。
 
 ### 5.3 回调通道本身的问题（EAM 侧）
 

@@ -99,6 +99,44 @@ def test_terminal_callback_error_message_is_chinese():
     assert source_missing["error"]["message"] == "找不到源文件。"
 
 
+def test_review_required_callback_includes_error_and_reason_codes():
+    from enterprise.gateway.quality.worker import QualityEvaluationService
+
+    doc = ExtDocumentMap(
+        tenant_id="wp04e2e",
+        source_system="EAM",
+        external_document_id="FAC-2682-ATT-77",
+        source_version_id="v1-947b4ef61e1d",
+        event_id="FAC-2682-ATT-77-v1-947b4ef61e1d",
+        sha256="b" * 64,
+        file_name="scan.pdf",
+        source_kind="FILE_SHARE",
+    )
+    built = QualityEvaluationService._review_required_error(
+        reason_codes=["REQUIRED_CAPABILITY_NOT_PASSED", ""],
+    )
+    assert built == {
+        "code": "DOCUMENT_REVIEW_REQUIRED",
+        "message": "文档需要人工复核后才能使用。",
+        "retryable": False,
+        "reasonCodes": ["REQUIRED_CAPABILITY_NOT_PASSED"],
+    }
+    payload = build_terminal_payload(
+        delivery_id="a26db13b-6a67-4a70-9cd3-95cb392c385b",
+        originating_event_id=doc.event_id,
+        doc=doc,
+        terminal_status="review_required",
+        quality_status="review_required",
+        retrievable=False,
+        error=built,
+    )
+    assert payload["status"] == "review_required"
+    assert payload["error"]["code"] == "DOCUMENT_REVIEW_REQUIRED"
+    assert payload["error"]["message"] == "文档需要人工复核后才能使用。"
+    assert payload["error"]["retryable"] is False
+    assert payload["error"]["reasonCodes"] == ["REQUIRED_CAPABILITY_NOT_PASSED"]
+
+
 def test_internal_fixture_ids_are_skipped():
     assert is_internal_callback_document("PROBE-GE22002-CERT-1")
     assert is_internal_callback_document("tyrag-e2e-1786517725268433017")

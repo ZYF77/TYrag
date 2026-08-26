@@ -93,7 +93,7 @@ expected       = "sha256=" + hex(HMAC-SHA256(outboundSecret, UTF-8(signed)))
 | `sourceSystem` | 建议 | `EAM` |
 | `qualityStatus` | 建议 | `passed` / `review_required` / `failed` / `unknown` / `null` |
 | `retrievable` | 建议 | 成功终态 `true`，否则 `false` |
-| `error` | 失败时 | `{code,message,retryable}` |
+| `error` | `failed` / `review_required` | `{code,message,retryable[,reasonCodes]}`；成功为 `null` |
 
 EAM 登记侧 ID 规则（回调应对齐）：
 
@@ -113,7 +113,7 @@ eventId            = {externalDocumentId}-{sourceVersionId}
 |---|---|---|---|
 | `retrievable` | 已解析且质量通过，可检索 | 主日志 Success | **可问答**，开放问询 |
 | `failed` | 处理失败 | 主日志 Failed，写入 `error` | **失败** |
-| `review_required` | 质量门要人工复核，不会自动变可检索 | 主日志 ReviewRequired | **待复核**，不当成功 |
+| `review_required` | 质量门要人工复核，不会自动变可检索 | 主日志 ReviewRequired，写入 `error` | **待复核**，不当成功 |
 
 不要用 `retrievable` 布尔或 citation 数量反推 `status`。
 
@@ -231,10 +231,16 @@ X-TY-Signature: sha256=<hex>
   "sourceSystem": "EAM",
   "qualityStatus": "review_required",
   "retrievable": false,
-  "error": null
+  "error": {
+    "code": "DOCUMENT_REVIEW_REQUIRED",
+    "message": "文档需要人工复核后才能使用。",
+    "retryable": false,
+    "reasonCodes": ["REQUIRED_CAPABILITY_NOT_PASSED"]
+  }
 }
 ```
 
+`review_required` 与 `failed` 一样会带 `error`。`reasonCodes` 为可选机器码（质量门原因）；台账展示优先用 `message`。
 ---
 
 ## 10. 联调检查清单

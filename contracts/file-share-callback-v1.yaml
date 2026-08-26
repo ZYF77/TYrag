@@ -67,11 +67,18 @@ components:
     CallbackError:
       type: object
       additionalProperties: false
+      description: >-
+        Present when status is failed or review_required. Null for retrievable.
+        reasonCodes are optional machine codes from the quality gate.
       required: [code, message, retryable]
       properties:
         code: { type: string }
         message: { type: string }
         retryable: { type: boolean }
+        reasonCodes:
+          type: array
+          maxItems: 32
+          items: { type: string, minLength: 1, maxLength: 128 }
     FileShareTerminalCallback:
       type: object
       additionalProperties: false
@@ -112,3 +119,6 @@ components:
           allOf:
             - $ref: '#/components/schemas/CallbackError'
           nullable: true
+          description: >-
+            Null when status=retrievable. Required in practice for failed and
+            review_required so EAM can show a reason.

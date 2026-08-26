@@ -600,6 +600,26 @@ class QualityEvaluationService:
         )
         return hashlib.sha256(stable.encode("utf-8")).hexdigest()
 
+    @staticmethod
+    def _review_required_error(
+        *,
+        reason_codes: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Populate callback error for review_required (EAM needs a reason)."""
+        codes = [
+            str(item).strip()
+            for item in (reason_codes or [])
+            if str(item).strip()
+        ]
+        error: dict[str, Any] = {
+            "code": "DOCUMENT_REVIEW_REQUIRED",
+            "message": "文档需要人工复核后才能使用。",
+            "retryable": False,
+        }
+        if codes:
+            error["reasonCodes"] = codes
+        return error
+
     async def _emit_terminal_callback(self, doc, result: dict[str, Any]) -> None:
         from enterprise.gateway.callback_delivery import emit_terminal_callback_safe
         from enterprise.gateway.sync.readiness import document_candidate_readiness_from_db
@@ -630,15 +650,25 @@ class QualityEvaluationService:
                     "review_required",
                     quality_status="passed",
                     retrievable=False,
+                    error=self._review_required_error(
+                        reason_codes=["VERSION_NOT_RETRIEVABLE"],
+                    ),
                 )
             return
         if quality_status == "review_required":
+            raw_reasons = result.get("quality_reasons") or []
+            reason_codes = (
+                [str(item) for item in raw_reasons]
+                if isinstance(raw_reasons, list)
+                else []
+            )
             await emit_terminal_callback_safe(
                 self.db,
                 fresh,
                 "review_required",
                 quality_status="review_required",
                 retrievable=False,
+                error=self._review_required_error(reason_codes=reason_codes),
             )
             return
         if quality_status == "failed":
