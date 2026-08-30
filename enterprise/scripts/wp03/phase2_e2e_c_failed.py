@@ -25,7 +25,7 @@ from enterprise.gateway.models.ext_user_map import (  # noqa: E402
     ExtUserMapRepo,
 )
 from enterprise.gateway.query import acl_store  # noqa: E402
-from enterprise.gateway.sync.models import init_db  # noqa: E402
+from enterprise.gateway.db.database import GatewayDatabase
 
 LOG_PATH = ROOT / "artifacts" / "wp03-phase2-e2e-c-failed.log"
 REPORT_PATH = ROOT / "artifacts" / "wp03-phase2-e2e-c-failed.json"
@@ -36,7 +36,6 @@ logger = logging.getLogger("wp03-phase2-e2e-c")
 GATEWAY = os.environ.get("GATEWAY_URL", "http://127.0.0.1:5190").rstrip("/")
 SERVICE_TOKEN = os.environ.get("ENTERPRISE_SYNC_SERVICE_TOKEN", "")
 JWT_SECRET = os.environ.get("JWT_SHARED_SECRET", "")
-DB_PATH = os.environ.get("ENTERPRISE_SYNC_DB_PATH", "")
 TENANT = "phase2-e2e"
 SOURCE_SYSTEM = "DEMO"
 USER = "p2-user"
@@ -78,15 +77,18 @@ def get(path: str, headers: dict, params: dict | None = None) -> httpx.Response:
 
 
 async def grant_acl() -> None:
-    db = await init_db(DB_PATH)
-    await acl_store.ensure_schema(db)
-    await acl_store.grant(
-        db,
-        tenant_id=TENANT,
-        external_document_id=DOC_ID,
-        business_user_id=USER,
-    )
-    await db.close()
+    gateway = GatewayDatabase.from_env()
+    try:
+        await gateway.initialize()
+        async with gateway.transaction(write=True) as conn:
+            await acl_store.grant(
+                conn,
+                tenant_id=TENANT,
+                external_document_id=DOC_ID,
+                business_user_id=USER,
+            )
+    finally:
+        await gateway.dispose()
 
 
 def wait_status(timeout_seconds: int = 120) -> dict:
@@ -139,8 +141,8 @@ def ask() -> tuple[int, dict]:
 
 
 async def main() -> int:
-    if not (SERVICE_TOKEN and JWT_SECRET and DB_PATH):
-        raise RuntimeError("service token, JWT secret and DB path are required")
+    if not (SERVICE_TOKEN and JWT_SECRET):
+        raise RuntimeError("service token and JWT secret are required")
     await grant_acl()
     content = b"this is not a pdf fixture for phase2 e2e\n" * 64
     s3 = boto3.client(

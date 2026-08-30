@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import hashlib
+import asyncio
 import json
 import os
-import sqlite3
 import sys
 import time
 import uuid
@@ -21,8 +21,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from enterprise.gateway.auth.service_auth import sign_request  # noqa: E402
+from enterprise.gateway.db.database import GatewayDatabase  # noqa: E402
+from enterprise.gateway.db.dialect import fetchone  # noqa: E402
 from enterprise.gateway.models.ext_user_map import ExtUserMap, ExtUserMapRepo  # noqa: E402
-from enterprise.gateway.sync.models import init_db  # noqa: E402
 
 EQUIPMENT_ID = "LOCAL-TEST-EQ-002"
 FIXED_ASSET_NO = "LOCAL-FA-002"
@@ -78,12 +79,10 @@ def main() -> int:
     key_id, secret = _hmac()
 
     async def seed() -> None:
-        db_path = os.environ["ENTERPRISE_SYNC_DB_PATH"]
-        db = await init_db(db_path)
-        await db.close()
-        repo = ExtUserMapRepo(db_path=db_path)
+        gateway = GatewayDatabase.from_env()
         try:
-            await repo.ensure_table()
+            await gateway.initialize()
+            repo = ExtUserMapRepo(gateway=gateway)
             await repo.insert_mapping(
                 ExtUserMap(
                     tenant_id=TENANT_ID,
@@ -93,9 +92,7 @@ def main() -> int:
                 )
             )
         finally:
-            await repo.close()
-
-    import asyncio
+            await gateway.dispose()
 
     asyncio.run(seed())
 
@@ -187,14 +184,22 @@ def main() -> int:
             print("timeout", status)
             return 2
 
-        db = sqlite3.connect(os.environ["ENTERPRISE_SYNC_DB_PATH"])
-        db.row_factory = sqlite3.Row
-        row = db.execute(
-            "SELECT ragflow_document_id, ragflow_dataset_id FROM ext_document_map "
-            "WHERE external_document_id=?",
-            (ext,),
-        ).fetchone()
-        db.close()
+        async def mapping() -> dict | None:
+            gateway = GatewayDatabase.from_env()
+            try:
+                async with gateway.transaction() as conn:
+                    return await fetchone(
+                        conn,
+                        "SELECT ragflow_document_id, ragflow_dataset_id "
+                        "FROM ext_document_map WHERE external_document_id=?",
+                        (ext,),
+                    )
+            finally:
+                await gateway.dispose()
+
+        row = asyncio.run(mapping())
+        if not row:
+            raise RuntimeError("gateway mapping missing")
         chunks = client.get(
             f"{RAGFLOW}/api/v1/datasets/{row['ragflow_dataset_id']}/documents/"
             f"{row['ragflow_document_id']}/chunks",

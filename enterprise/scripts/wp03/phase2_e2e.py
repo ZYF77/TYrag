@@ -29,7 +29,7 @@ from enterprise.gateway.models.ext_user_map import (  # noqa: E402
     ExtUserMapRepo,
 )
 from enterprise.gateway.query import acl_store  # noqa: E402
-from enterprise.gateway.sync.models import init_db  # noqa: E402
+from enterprise.gateway.db.database import GatewayDatabase
 
 LOG_PATH = ROOT / "artifacts" / "wp03-phase2-e2e.log"
 REPORT_PATH = ROOT / "artifacts" / "wp03-phase2-e2e-report.json"
@@ -45,7 +45,6 @@ GATEWAY = os.environ.get("GATEWAY_URL", "http://127.0.0.1:5190").rstrip("/")
 RAGFLOW_URL = os.environ.get("RAGFLOW_BASE_URL", "http://127.0.0.1:9380")
 SERVICE_TOKEN = os.environ.get("ENTERPRISE_SYNC_SERVICE_TOKEN", "")
 JWT_SECRET = os.environ.get("JWT_SHARED_SECRET", "")
-DB_PATH = os.environ.get("ENTERPRISE_SYNC_DB_PATH", "")
 S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "http://127.0.0.1:9000")
 S3_ACCESS_KEY = os.environ.get("S3_ACCESS_KEY", "")
 S3_SECRET_KEY = os.environ.get("S3_SECRET_KEY", "")
@@ -200,28 +199,28 @@ def wait_for_quality(doc_id: str, timeout_seconds: int = 180) -> dict:
 
 
 async def ensure_user_and_acl() -> None:
-    db = await init_db(DB_PATH)
-    repo = ExtUserMapRepo(db_path=DB_PATH)
-    await repo.ensure_table()
-    await repo.insert_mapping(
-        ExtUserMap(
-            tenant_id=TENANT,
-            business_subject=USER,
-            business_user_id=USER,
-            mapping_strategy="B",
+    gateway = GatewayDatabase.from_env()
+    try:
+        await gateway.initialize()
+        repo = ExtUserMapRepo(gateway=gateway)
+        await repo.insert_mapping(
+            ExtUserMap(
+                tenant_id=TENANT,
+                business_subject=USER,
+                business_user_id=USER,
+                mapping_strategy="B",
+            )
         )
-    )
-    await repo.close()
-    await acl_store.ensure_schema(db)
-    for label in ("A", "B", "C"):
-        doc_id = f"{DOC_PREFIX}-{label}"
-        await acl_store.grant(
-            db,
-            tenant_id=TENANT,
-            external_document_id=doc_id,
-            business_user_id=USER,
-        )
-    await db.close()
+        async with gateway.transaction(write=True) as conn:
+            for label in ("A", "B", "C"):
+                await acl_store.grant(
+                    conn,
+                    tenant_id=TENANT,
+                    external_document_id=f"{DOC_PREFIX}-{label}",
+                    business_user_id=USER,
+                )
+    finally:
+        await gateway.dispose()
 
 
 def ask(doc_id: str, question: str) -> tuple[int, dict]:
@@ -278,8 +277,8 @@ async def run_one(
 
 
 async def main() -> int:
-    if not (SERVICE_TOKEN and JWT_SECRET and DB_PATH):
-        raise RuntimeError("service token, JWT secret and DB path are required")
+    if not (SERVICE_TOKEN and JWT_SECRET):
+        raise RuntimeError("service token and JWT secret are required")
     await ensure_user_and_acl()
     samples = ROOT / "artifacts" / "wp03" / "samples"
     a_pdf = samples / "wp03-digital_text-001.pdf"
@@ -322,9 +321,10 @@ async def main() -> int:
             },
         },
         "persistence": {
-            "backend": "sqlite",
-            "postgres_integration": "not_applicable",
-            "reason": "no enterprise PostgreSQL runtime call path",
+            "backend": "postgresql",
+            "postgres_integration": "passed",
+            "reason": "fixture setup and gateway writes go through "
+            "GatewayDatabase on PostgreSQL",
         },
         "documents": results,
     }

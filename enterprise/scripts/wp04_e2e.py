@@ -31,7 +31,8 @@ from enterprise.gateway.models.ext_user_map import (  # noqa: E402
 from enterprise.gateway.query.ragflow_client import (  # noqa: E402
     RAGFlowQueryClient,
 )
-from enterprise.gateway.sync.models import init_db  # noqa: E402
+from enterprise.gateway.db.database import GatewayDatabase
+from enterprise.gateway.query import acl_store
 
 GATEWAY = os.environ.get("GATEWAY_URL", "http://127.0.0.1:5188").rstrip("/")
 RAGFLOW_URL = os.environ.get("RAGFLOW_BASE_URL", "http://127.0.0.1:9380").rstrip("/")
@@ -47,7 +48,6 @@ ADMIN_PASSWORD = os.environ.get("RAGFLOW_ADMIN_PASSWORD", "")
 API_KEY = os.environ.get("RAGFLOW_API_KEY", "").strip()
 SERVICE_TOKEN = os.environ.get("ENTERPRISE_SYNC_SERVICE_TOKEN", "")
 JWT_SECRET = os.environ.get("JWT_SHARED_SECRET", "")
-DB_PATH = os.environ.get("ENTERPRISE_SYNC_DB_PATH", "")
 
 S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "")
 S3_ACCESS_KEY = os.environ.get("S3_ACCESS_KEY", "")
@@ -289,58 +289,44 @@ def sync_payload(
     }
 
 
-async def ensure_users(db_path: str) -> None:
-    repo = ExtUserMapRepo(db_path=db_path)
-    await repo.ensure_table()
-    for user in (USER_A, USER_B, USER_C):
-        await repo.insert_mapping(
-            ExtUserMap(
-                tenant_id=TENANT,
-                business_subject=user,
-                business_user_id=user,
-                mapping_strategy="B",
-            )
-        )
-    await repo.close()
-
-
-async def ensure_db_schema(db_path: str) -> None:
-    db = await init_db(db_path)
-    await db.close()
-
-
-def grant_acl(db_path: str, external_document_id: str, user: str) -> None:
-    import sqlite3
-
-    conn = sqlite3.connect(db_path, timeout=30)
+async def ensure_users() -> None:
+    gateway = GatewayDatabase.from_env()
     try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS demo_document_acl (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                tenant_id TEXT NOT NULL,
-                external_document_id TEXT NOT NULL,
-                business_user_id TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                UNIQUE(tenant_id, external_document_id, business_user_id)
-            )"""
-        )
-        conn.execute(
-            """INSERT INTO demo_document_acl
-               (tenant_id, external_document_id, business_user_id, created_at)
-               VALUES (?, ?, ?, ?)
-               ON CONFLICT(tenant_id, external_document_id, business_user_id)
-               DO NOTHING""",
-            (
-                TENANT,
-                external_document_id,
-                user,
-                time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            ),
-        )
-        conn.commit()
+        await gateway.initialize()
+        repo = ExtUserMapRepo(gateway=gateway)
+        for user in (USER_A, USER_B, USER_C):
+            await repo.insert_mapping(
+                ExtUserMap(
+                    tenant_id=TENANT,
+                    business_subject=user,
+                    business_user_id=user,
+                    mapping_strategy="B",
+                )
+            )
     finally:
-        conn.close()
+        await gateway.dispose()
+
+
+async def ensure_db_schema() -> None:
+    gateway = GatewayDatabase.from_env()
+    try:
+        await gateway.initialize()
+    finally:
+        await gateway.dispose()
+
+
+async def grant_acl(external_document_id: str, user: str) -> None:
+    gateway = GatewayDatabase.from_env()
+    try:
+        async with gateway.transaction(write=True) as conn:
+            await acl_store.grant(
+                conn,
+                tenant_id=TENANT,
+                external_document_id=external_document_id,
+                business_user_id=user,
+            )
+    finally:
+        await gateway.dispose()
 
 
 def wait_ready(doc_id: str, timeout_seconds: int = 600) -> dict:
@@ -383,18 +369,17 @@ def wait_quality(doc_id: str, headers: dict, timeout_seconds: int = 300) -> dict
 
 
 def main() -> int:
-    if not SERVICE_TOKEN or not JWT_SECRET or not DB_PATH:
+    if not SERVICE_TOKEN or not JWT_SECRET:
         raise RuntimeError(
-            "ENTERPRISE_SYNC_SERVICE_TOKEN, JWT_SHARED_SECRET and "
-            "ENTERPRISE_SYNC_DB_PATH are required"
+            "ENTERPRISE_SYNC_SERVICE_TOKEN and JWT_SHARED_SECRET are required"
         )
     if not (S3_ENDPOINT and S3_ACCESS_KEY and S3_SECRET_KEY):
         raise RuntimeError("S3 endpoint/credentials are required")
 
     import asyncio
 
-    asyncio.run(ensure_db_schema(DB_PATH))
-    asyncio.run(ensure_users(DB_PATH))
+    asyncio.run(ensure_db_schema())
+    asyncio.run(ensure_users())
 
     if API_KEY:
         key = API_KEY
@@ -470,9 +455,9 @@ def main() -> int:
     dedup = resp.json()
     assert dedup["deduplicated"] is True, dedup
 
-    grant_acl(DB_PATH, doc_a_id, USER_A)
-    grant_acl(DB_PATH, doc_b_id, USER_B)
-    grant_acl(DB_PATH, doc_a_id, USER_C)
+    asyncio.run(grant_acl(doc_a_id, USER_A))
+    asyncio.run(grant_acl(doc_b_id, USER_B))
+    asyncio.run(grant_acl(doc_a_id, USER_C))
 
     blocked = gateway_post(
         "/enterprise/api/v1/demo/ask",

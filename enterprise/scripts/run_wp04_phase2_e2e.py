@@ -7,7 +7,7 @@ deployed RAGFlow/MinIO:
 
     python enterprise/scripts/run_wp04_phase2_e2e.py
 
-Local evidence (SQLite DB, JSON report, doc_ids trace, gateway log) is written
+Local evidence (JSON report, doc_ids trace, gateway log) is written
 under artifacts/ and is intentionally not committed.
 """
 
@@ -43,8 +43,11 @@ RAGFLOW_ADMIN_PASSWORD = os.environ.get("RAGFLOW_ADMIN_PASSWORD", "")
 S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "")
 S3_ACCESS_KEY = os.environ.get("S3_ACCESS_KEY", "")
 S3_SECRET_KEY = os.environ.get("S3_SECRET_KEY", "")
-DB_STEM = f"wp04-phase2-e2e-{time.strftime('%Y%m%d-%H%M%S')}"
-DB_PATH = str(ARTIFACTS / f"{DB_STEM}.db")
+DB_SCHEMA = f"gw_wp04_phase2_{time.strftime('%Y%m%d_%H%M%S')}"
+DATABASE_URL = os.environ.get(
+    "ENTERPRISE_GATEWAY_DATABASE_URL",
+    "postgresql+asyncpg://tyrag_gateway_test:tyrag_gateway_test@127.0.0.1:55432/tyrag_gateway_test",
+)
 REPORT_PATH = str(ARTIFACTS / "wp04-phase2-e2e.json")
 QUERY_TRACE = ARTIFACTS / "wp04-phase2-docids-trace.log"
 RUN_LOG = ARTIFACTS / "wp04-phase2-run.log"
@@ -179,8 +182,8 @@ def _gateway_env() -> dict[str, str]:
         {
             "GATEWAY_PORT": GATEWAY_PORT,
             "ENTERPRISE_DEMO_ROUTES_ENABLED": "true",
-            "ENTERPRISE_SYNC_DB_PATH": DB_PATH,
-            "ENTERPRISE_DB_PATH": DB_PATH,
+            "ENTERPRISE_GATEWAY_DATABASE_URL": DATABASE_URL,
+            "ENTERPRISE_GATEWAY_DATABASE_SCHEMA": DB_SCHEMA,
             "ENTERPRISE_SYNC_SERVICE_TOKEN": SERVICE_TOKEN,
             "JWT_ISSUER": JWT_ISSUER,
             "JWT_AUDIENCE": JWT_AUDIENCE,
@@ -214,8 +217,8 @@ def _e2e_env() -> dict[str, str]:
             "JWT_JWKS_URL": "",
             "JWT_ISSUER": JWT_ISSUER,
             "JWT_AUDIENCE": JWT_AUDIENCE,
-            "ENTERPRISE_DB_PATH": DB_PATH,
-            "ENTERPRISE_SYNC_DB_PATH": DB_PATH,
+            "ENTERPRISE_GATEWAY_DATABASE_URL": DATABASE_URL,
+            "ENTERPRISE_GATEWAY_DATABASE_SCHEMA": DB_SCHEMA,
             "S3_ENDPOINT": S3_ENDPOINT,
             "S3_ACCESS_KEY": S3_ACCESS_KEY,
             "S3_SECRET_KEY": S3_SECRET_KEY,

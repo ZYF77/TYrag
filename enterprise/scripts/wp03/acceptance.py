@@ -346,9 +346,10 @@ def _environment() -> dict[str, Any]:
         "s3_endpoint": _safe_url(os.environ.get("S3_ENDPOINT", "")),
         "s3_bucket": os.environ.get("S3_BUCKET", ""),
         "credential_presence": {name: bool(os.environ.get(name, "").strip()) for name in REQUIRED_ENV},
-        "persistence_backend": "sqlite",
+        "persistence_backend": "postgresql",
         "postgres_integration": "not_applicable",
-        "postgres_reason": "no enterprise PostgreSQL runtime call path",
+        "postgres_reason": "gateway under test persists via PostgreSQL; "
+        "this script only calls the live gateway over HTTP",
     }
 
 

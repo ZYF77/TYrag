@@ -623,9 +623,9 @@ function Write-Reports {
         m3LiveIntegrationEvidence = $false
         m3LiveIntegrationEvidenceReason = 'Legacy M3/v1/S3/demo regression is outside the Required Integration evidence profile'
         persistence = [ordered]@{
-            backend = 'sqlite'
-            postgresIntegration = 'not_applicable'
-            reason = 'no enterprise PostgreSQL runtime call path'
+            backend = 'postgresql'
+            postgresIntegration = if ($DesiredExitCode -eq 0) { 'passed' } else { 'not_passed' }
+            reason = 'Gateway tests execute against the configured PostgreSQL test database'
         }
         p1TestsRequested = [bool]$offlineImplementationTestsRequested
         p1Status = if ($offlineImplementationTestsExecuted) {
@@ -667,8 +667,8 @@ function Write-Reports {
     $lines.Add("- Required Integration evidence: $requiredIntegrationEvidence ($requiredIntegrationEvidenceReason)")
     $lines.Add("- Offline implementation tests exist in repository; requested=$offlineImplementationTestsRequested; executed=$offlineImplementationTestsExecuted; status=$offlineImplementationTestStatus")
     $lines.Add('- Legacy v1/S3/demo regression is not counted as Required Integration evidence')
-    $lines.Add('- Persistence backend: sqlite')
-    $lines.Add('- PostgreSQL integration: N/A (no enterprise PostgreSQL runtime call path)')
+    $lines.Add('- Persistence backend: postgresql')
+    $lines.Add("- PostgreSQL integration: $($summary.persistence.postgresIntegration)")
     $lines.Add("- P1 status: $($summary.p1Status)")
     $lines.Add('')
     $lines.Add('| Step | Status | Exit | Detail |')
@@ -733,7 +733,7 @@ try {
     [Environment]::SetEnvironmentVariable('TMP', $RunTempDir, 'Process')
     [Environment]::SetEnvironmentVariable('TMPDIR', $RunTempDir, 'Process')
 
-    $importCheck = 'import aiosqlite, fastapi, httpx, jsonschema, jwt, pydantic, pytest, pytest_asyncio, yaml'
+    $importCheck = 'import asyncpg, fastapi, httpx, jsonschema, jwt, pydantic, pytest, pytest_asyncio, sqlalchemy, yaml'
     $dependencyCode = Invoke-Logged -FilePath $PythonRuntime.path -Arguments @('-c', $importCheck) -Label 'python-dependencies'
     if ($dependencyCode -ne 0) {
         throw [DependencyException]::new('Python test dependencies are missing; use enterprise/requirements-test.txt explicitly')

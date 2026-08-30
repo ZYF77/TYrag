@@ -33,7 +33,7 @@ from enterprise.gateway.models.ext_user_map import (  # noqa: E402
 from enterprise.gateway.query.ragflow_client import (  # noqa: E402
     RAGFlowQueryClient,
 )
-from enterprise.gateway.sync.models import init_db  # noqa: E402
+from enterprise.gateway.db.database import GatewayDatabase
 
 GATEWAY = os.environ.get("GATEWAY_URL", "http://127.0.0.1:5188").rstrip("/")
 RAGFLOW_URL = os.environ.get("RAGFLOW_BASE_URL", "http://127.0.0.1:9380").rstrip("/")
@@ -49,7 +49,6 @@ ADMIN_PASSWORD = os.environ.get("RAGFLOW_ADMIN_PASSWORD", "")
 API_KEY = os.environ.get("RAGFLOW_API_KEY", "").strip()
 SERVICE_TOKEN = os.environ.get("ENTERPRISE_SYNC_SERVICE_TOKEN", "")
 JWT_SECRET = os.environ.get("JWT_SHARED_SECRET", "")
-DB_PATH = os.environ.get("ENTERPRISE_SYNC_DB_PATH", "")
 QUERY_TRACE = os.environ.get(
     "WP04_QUERY_TRACE",
     str(ROOT / "artifacts" / "wp04-phase2-docids-trace.log"),
@@ -330,24 +329,30 @@ def sync_payload(
     }
 
 
-async def ensure_users(db_path: str) -> None:
-    repo = ExtUserMapRepo(db_path=db_path)
-    await repo.ensure_table()
-    for user in (USER_A, USER_B, USER_C):
-        await repo.insert_mapping(
-            ExtUserMap(
-                tenant_id=TENANT,
-                business_subject=user,
-                business_user_id=user,
-                mapping_strategy="B",
+async def ensure_users() -> None:
+    gateway = GatewayDatabase.from_env()
+    try:
+        await gateway.initialize()
+        repo = ExtUserMapRepo(gateway=gateway)
+        for user in (USER_A, USER_B, USER_C):
+            await repo.insert_mapping(
+                ExtUserMap(
+                    tenant_id=TENANT,
+                    business_subject=user,
+                    business_user_id=user,
+                    mapping_strategy="B",
+                )
             )
-        )
-    await repo.close()
+    finally:
+        await gateway.dispose()
 
 
-async def ensure_db_schema(db_path: str) -> None:
-    db = await init_db(db_path)
-    await db.close()
+async def ensure_db_schema() -> None:
+    gateway = GatewayDatabase.from_env()
+    try:
+        await gateway.initialize()
+    finally:
+        await gateway.dispose()
 
 
 def trace_entries(path: str) -> list[dict]:
@@ -640,10 +645,9 @@ def verify_stream_gateway_failure(
 
 
 def main() -> int:
-    if not SERVICE_TOKEN or not JWT_SECRET or not DB_PATH:
+    if not SERVICE_TOKEN or not JWT_SECRET:
         raise RuntimeError(
-            "ENTERPRISE_SYNC_SERVICE_TOKEN, JWT_SHARED_SECRET and "
-            "ENTERPRISE_SYNC_DB_PATH are required"
+            "ENTERPRISE_SYNC_SERVICE_TOKEN and JWT_SHARED_SECRET are required"
         )
     if not (S3_ENDPOINT and S3_ACCESS_KEY and S3_SECRET_KEY):
         raise RuntimeError("S3 endpoint/credentials are required")
@@ -655,8 +659,8 @@ def main() -> int:
 
     import asyncio
 
-    asyncio.run(ensure_db_schema(DB_PATH))
-    asyncio.run(ensure_users(DB_PATH))
+    asyncio.run(ensure_db_schema())
+    asyncio.run(ensure_users())
 
     if API_KEY:
         key = API_KEY

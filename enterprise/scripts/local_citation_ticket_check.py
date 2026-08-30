@@ -12,9 +12,9 @@ Run inside the enterprise-gateway container.
 from __future__ import annotations
 
 import hashlib
+import asyncio
 import json
 import os
-import sqlite3
 import sys
 import time
 import uuid
@@ -31,8 +31,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from enterprise.gateway.auth.service_auth import sign_request  # noqa: E402
+from enterprise.gateway.db.database import GatewayDatabase  # noqa: E402
+from enterprise.gateway.db.dialect import fetchall  # noqa: E402
 from enterprise.gateway.models.ext_user_map import ExtUserMap, ExtUserMapRepo  # noqa: E402
-from enterprise.gateway.sync.models import init_db  # noqa: E402
 
 EQUIPMENT_ID = "LOCAL-CITE-EQ-001"
 FIXED_ASSET_NO = "LOCAL-CITE-FA-001"
@@ -107,14 +108,11 @@ def _jwt() -> str:
 
 
 def _ensure_user() -> None:
-    db_path = os.environ["ENTERPRISE_SYNC_DB_PATH"]
-
     async def seed() -> None:
-        db = await init_db(db_path)
-        await db.close()
-        repo = ExtUserMapRepo(db_path=db_path)
+        gateway = GatewayDatabase.from_env()
         try:
-            await repo.ensure_table()
+            await gateway.initialize()
+            repo = ExtUserMapRepo(gateway=gateway)
             await repo.insert_mapping(
                 ExtUserMap(
                     tenant_id=TENANT_ID,
@@ -124,9 +122,7 @@ def _ensure_user() -> None:
                 )
             )
         finally:
-            await repo.close()
-
-    import asyncio
+            await gateway.dispose()
 
     asyncio.run(seed())
 
@@ -346,14 +342,21 @@ def main() -> int:
         if ans2.get("status") not in {"无可靠依据", "已完成", "失败"}:
             failures.append(f"unexpected status {ans2.get('status')}")
 
-        db = sqlite3.connect(os.environ["ENTERPRISE_SYNC_DB_PATH"])
-        tables = [
-            row[0]
-            for row in db.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%citation%'"
-            )
-        ]
-        db.close()
+        async def citation_tables() -> list[str]:
+            gateway = GatewayDatabase.from_env()
+            try:
+                async with gateway.transaction() as conn:
+                    rows = await fetchall(
+                        conn,
+                        "SELECT table_name FROM information_schema.tables "
+                        "WHERE table_schema=current_schema() "
+                        "AND table_name LIKE '%citation%'",
+                    )
+                return [str(row["table_name"]) for row in rows]
+            finally:
+                await gateway.dispose()
+
+        tables = asyncio.run(citation_tables())
         print("citation tables=", tables)
         if "ext_citation_file_ticket" not in tables:
             failures.append("ext_citation_file_ticket table missing")

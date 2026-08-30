@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -19,9 +20,10 @@ sys.path.insert(0, str(ROOT))
 
 from enterprise.gateway.quality.models import get_or_create_evaluation  # noqa: E402
 from enterprise.gateway.quality.routing import route_document  # noqa: E402
+from enterprise.gateway.db.database import GatewayDatabase
+from enterprise.gateway.db.dialect import exec_sql, fetchone
 from enterprise.gateway.sync.models import (  # noqa: E402
     ExtDocumentMap,
-    init_db,
     insert_mapping,
     update_mapping_status,
 )
@@ -34,7 +36,6 @@ logger = logging.getLogger("wp03-phase2-worker-restart")
 
 GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://127.0.0.1:5190").rstrip("/")
 PORT = int(os.environ.get("GATEWAY_PORT", "5190"))
-DB_PATH = os.environ.get("ENTERPRISE_SYNC_DB_PATH", "")
 PYTHON = os.environ.get("PYTHON_EXE", sys.executable)
 TENANT = "phase2-e2e"
 SOURCE_SYSTEM = "DEMO"
@@ -94,110 +95,107 @@ def start_gateway() -> None:
 
 
 async def prepare_pending_job() -> int:
-    db = await init_db(DB_PATH)
-    async with db.execute(
-        """SELECT * FROM ext_document_map
-           WHERE tenant_id=? AND source_system=? AND external_document_id=?
-             AND sync_status='ready' AND business_status='active'
-           ORDER BY id DESC LIMIT 1""",
-        (TENANT, SOURCE_SYSTEM, f"{os.environ.get('E2E_DOC_PREFIX', 'P2R')}-A"),
-    ) as cursor:
-        row = await cursor.fetchone()
-    if not row:
-        await db.close()
-        raise RuntimeError("source document not found for restart fixture")
-    source = {
-        "tenant_id": row["tenant_id"],
-        "source_system": row["source_system"],
-        "external_document_id": row["external_document_id"],
-        "source_version_id": row["source_version_id"],
-        "event_id": row["event_id"],
-        "sha256": row["sha256"],
-        "file_name": row["file_name"],
-        "media_type": row["media_type"],
-        "ragflow_dataset_id": row["ragflow_dataset_id"],
-        "ragflow_document_id": row["ragflow_document_id"],
-        "source_page_count": row["source_page_count"],
-    }
-    doc = ExtDocumentMap(
-        tenant_id=TENANT,
-        source_system=SOURCE_SYSTEM,
-        external_document_id=DOC_ID,
-        source_version_id="v1",
-        event_id=str(uuid.uuid4()),
-        sha256=source["sha256"],
-        file_name="restart.pdf",
-        media_type=source["media_type"],
-        source_page_count=source["source_page_count"],
-        ragflow_dataset_id=source["ragflow_dataset_id"],
-        ragflow_document_id=source["ragflow_document_id"],
-        sync_status="ready",
-    )
-    doc = await insert_mapping(db, doc)
-    await update_mapping_status(
-        db, doc, "ready", pipeline_status="DONE",
-        business_status="active", current_version=1,
-    )
-    routing = route_document(
-        media_type=doc.media_type,
-        file_name=doc.file_name,
-        source_system=doc.source_system,
-    )
-    evaluation = await get_or_create_evaluation(
-        db,
-        tenant_id=doc.tenant_id,
-        source_system=doc.source_system,
-        external_document_id=doc.external_document_id,
-        source_version_id=doc.source_version_id,
-        ragflow_dataset_id=doc.ragflow_dataset_id,
-        ragflow_document_id=doc.ragflow_document_id,
-        routing=routing,
-        evaluation_version="1",
-    )
-    await db.execute(
-        """UPDATE quality_evaluation_job
-           SET next_retry_at=datetime('now', '+1 day')
-           WHERE evaluation_id=?""",
-        (evaluation.id,),
-    )
-    await db.commit()
-    await db.close()
-    return evaluation.id
+    gateway = GatewayDatabase.from_env()
+    try:
+        await gateway.initialize()
+        async with gateway.transaction(write=True) as db:
+            row = await fetchone(
+                db,
+                """SELECT * FROM ext_document_map
+                   WHERE tenant_id=? AND source_system=? AND external_document_id=?
+                     AND sync_status='ready' AND business_status='active'
+                   ORDER BY id DESC LIMIT 1""",
+                (TENANT, SOURCE_SYSTEM, f"{os.environ.get('E2E_DOC_PREFIX', 'P2R')}-A"),
+            )
+            if not row:
+                raise RuntimeError("source document not found for restart fixture")
+            doc = ExtDocumentMap(
+                tenant_id=TENANT,
+                source_system=SOURCE_SYSTEM,
+                external_document_id=DOC_ID,
+                source_version_id="v1",
+                event_id=str(uuid.uuid4()),
+                sha256=row["sha256"],
+                file_name="restart.pdf",
+                media_type=row["media_type"],
+                source_page_count=row["source_page_count"],
+                ragflow_dataset_id=row["ragflow_dataset_id"],
+                ragflow_document_id=row["ragflow_document_id"],
+                sync_status="ready",
+            )
+            doc = await insert_mapping(db, doc)
+            await update_mapping_status(
+                db, doc, "ready", pipeline_status="DONE",
+                business_status="active", current_version=1,
+            )
+            routing = route_document(
+                media_type=doc.media_type,
+                file_name=doc.file_name,
+                source_system=doc.source_system,
+            )
+            evaluation = await get_or_create_evaluation(
+                db,
+                tenant_id=doc.tenant_id,
+                source_system=doc.source_system,
+                external_document_id=doc.external_document_id,
+                source_version_id=doc.source_version_id,
+                ragflow_dataset_id=doc.ragflow_dataset_id,
+                ragflow_document_id=doc.ragflow_document_id,
+                routing=routing,
+                evaluation_version="1",
+            )
+            await exec_sql(
+                db,
+                "UPDATE quality_evaluation_job SET next_retry_at=? "
+                "WHERE evaluation_id=?",
+                (
+                    (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+                    evaluation.id,
+                ),
+            )
+        return evaluation.id
+    finally:
+        await gateway.dispose()
 
 
 async def wait_completed(evaluation_id: int, timeout_seconds: int = 120) -> dict:
     deadline = time.time() + timeout_seconds
     last: dict = {}
     while time.time() < deadline:
-        db = await init_db(DB_PATH)
-        async with db.execute(
-            """SELECT evaluation_state, parse_quality_status
-               FROM parse_quality_evaluation WHERE id=?""",
-            (evaluation_id,),
-        ) as cursor:
-            row = await cursor.fetchone()
-        await db.close()
+        gateway = GatewayDatabase.from_env()
+        try:
+            async with gateway.transaction() as conn:
+                row = await fetchone(
+                    conn,
+                    """SELECT evaluation_state, parse_quality_status
+                       FROM parse_quality_evaluation WHERE id=?""",
+                    (evaluation_id,),
+                )
+        finally:
+            await gateway.dispose()
         if row:
             last = dict(row)
             if row["evaluation_state"] in ("completed", "failed"):
                 return last
-        time.sleep(3)
+        await asyncio.sleep(3)
     raise TimeoutError(f"quality evaluation did not recover: {last}")
 
 
 async def main() -> int:
-    if not DB_PATH:
-        raise RuntimeError("ENTERPRISE_SYNC_DB_PATH is required")
     evaluation_id = await prepare_pending_job()
     stop_gateway()
     start_gateway()
-    db = await init_db(DB_PATH)
-    await db.execute(
-        "UPDATE quality_evaluation_job SET next_retry_at=NULL WHERE evaluation_id=?",
-        (evaluation_id,),
-    )
-    await db.commit()
-    await db.close()
+    gateway = GatewayDatabase.from_env()
+    try:
+        async with gateway.transaction(write=True) as conn:
+            await exec_sql(
+                conn,
+                "UPDATE quality_evaluation_job SET next_retry_at=NULL "
+                "WHERE evaluation_id=?",
+                (evaluation_id,),
+            )
+    finally:
+        await gateway.dispose()
     result = await wait_completed(evaluation_id)
     report = {
         "doc_id": DOC_ID,

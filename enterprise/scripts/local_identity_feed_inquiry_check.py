@@ -13,6 +13,7 @@ Run inside the enterprise-gateway container (or any host that can reach it).
 from __future__ import annotations
 
 import hashlib
+import asyncio
 import json
 import os
 import sys
@@ -31,8 +32,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from enterprise.gateway.auth.service_auth import sign_request  # noqa: E402
+from enterprise.gateway.db.database import GatewayDatabase  # noqa: E402
+from enterprise.gateway.db.dialect import fetchone  # noqa: E402
 from enterprise.gateway.models.ext_user_map import ExtUserMap, ExtUserMapRepo  # noqa: E402
-from enterprise.gateway.sync.models import init_db  # noqa: E402
 
 EQUIPMENT_ID = "LOCAL-TEST-EQ-001"
 FIXED_ASSET_NO = "LOCAL-FA-001"
@@ -112,14 +114,11 @@ def _jwt() -> str:
 
 
 def _ensure_user() -> None:
-    db_path = os.environ["ENTERPRISE_SYNC_DB_PATH"]
-
     async def seed() -> None:
-        db = await init_db(db_path)
-        await db.close()
-        repo = ExtUserMapRepo(db_path=db_path)
+        gateway = GatewayDatabase.from_env()
         try:
-            await repo.ensure_table()
+            await gateway.initialize()
+            repo = ExtUserMapRepo(gateway=gateway)
             await repo.insert_mapping(
                 ExtUserMap(
                     tenant_id=TENANT_ID,
@@ -129,9 +128,7 @@ def _ensure_user() -> None:
                 )
             )
         finally:
-            await repo.close()
-
-    import asyncio
+            await gateway.dispose()
 
     asyncio.run(seed())
 
@@ -317,19 +314,23 @@ def main() -> int:
         dataset_id = status.get("ragflowDatasetId") or status.get("datasetId")
         # Fall back to gateway DB mapping if status omits ids.
         if not ragflow_document_id or not dataset_id:
-            import sqlite3
+            async def mapping() -> dict | None:
+                gateway = GatewayDatabase.from_env()
+                try:
+                    async with gateway.transaction() as conn:
+                        return await fetchone(
+                            conn,
+                            """SELECT ragflow_document_id, ragflow_dataset_id,
+                                      equipment_id, fixed_asset_no
+                                 FROM ext_document_map
+                                WHERE tenant_id=? AND external_document_id=?
+                                  AND source_version_id=?""",
+                            (TENANT_ID, external_document_id, source_version_id),
+                        )
+                finally:
+                    await gateway.dispose()
 
-            db = sqlite3.connect(os.environ["ENTERPRISE_SYNC_DB_PATH"])
-            db.row_factory = sqlite3.Row
-            row = db.execute(
-                """
-                SELECT ragflow_document_id, ragflow_dataset_id, equipment_id, fixed_asset_no
-                FROM ext_document_map
-                WHERE tenant_id=? AND external_document_id=? AND source_version_id=?
-                """,
-                (TENANT_ID, external_document_id, source_version_id),
-            ).fetchone()
-            db.close()
+            row = asyncio.run(mapping())
             if not row:
                 print("mapping row missing")
                 return 4

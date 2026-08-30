@@ -22,7 +22,8 @@ from enterprise.gateway.models.ext_user_map import (  # noqa: E402
     ExtUserMap,
     ExtUserMapRepo,
 )
-from enterprise.gateway.sync.models import init_db  # noqa: E402
+from enterprise.gateway.db.database import GatewayDatabase
+from enterprise.gateway.db.dialect import fetchall
 
 LOG_PATH = ROOT / "artifacts" / "wp03-phase2-e2e-checks.log"
 REPORT_PATH = ROOT / "artifacts" / "wp03-phase2-e2e-checks.json"
@@ -33,7 +34,6 @@ logger = logging.getLogger("wp03-phase2-e2e-checks")
 GATEWAY = os.environ.get("GATEWAY_URL", "http://127.0.0.1:5190").rstrip("/")
 SERVICE_TOKEN = os.environ.get("ENTERPRISE_SYNC_SERVICE_TOKEN", "")
 JWT_SECRET = os.environ.get("JWT_SHARED_SECRET", "")
-DB_PATH = os.environ.get("ENTERPRISE_SYNC_DB_PATH", "")
 TENANT = "phase2-e2e"
 SOURCE_SYSTEM = "DEMO"
 USER2 = "p2-user-2"
@@ -87,17 +87,20 @@ def post(path: str, body: dict) -> httpx.Response:
 
 
 async def ensure_user2() -> None:
-    repo = ExtUserMapRepo(db_path=DB_PATH)
-    await repo.ensure_table()
-    await repo.insert_mapping(
-        ExtUserMap(
-            tenant_id=TENANT,
-            business_subject=USER2,
-            business_user_id=USER2,
-            mapping_strategy="B",
+    gateway = GatewayDatabase.from_env()
+    try:
+        await gateway.initialize()
+        repo = ExtUserMapRepo(gateway=gateway)
+        await repo.insert_mapping(
+            ExtUserMap(
+                tenant_id=TENANT,
+                business_subject=USER2,
+                business_user_id=USER2,
+                mapping_strategy="B",
+            )
         )
-    )
-    await repo.close()
+    finally:
+        await gateway.dispose()
 
 
 def wait_quality(doc_id: str, version: str, timeout_seconds: int = 180) -> dict:
@@ -135,8 +138,8 @@ def wait_status(doc_id: str, version: str, timeout_seconds: int = 300) -> dict:
 
 
 async def main() -> int:
-    if not (SERVICE_TOKEN and JWT_SECRET and DB_PATH):
-        raise RuntimeError("service token, JWT secret and DB path are required")
+    if not (SERVICE_TOKEN and JWT_SECRET):
+        raise RuntimeError("service token and JWT secret are required")
     await ensure_user2()
     token2 = jwt_for(USER2)
     acl_results = {}
@@ -207,16 +210,19 @@ async def main() -> int:
         raise RuntimeError(f"v2 submit failed: {resp.status_code} {resp.text[:300]}")
     sync = wait_status(doc_id, "v2")
     quality_v2 = wait_quality(doc_id, "v2")
-    db = await init_db(DB_PATH)
-    async with db.execute(
-        """SELECT evaluation_version, evaluation_state, parse_quality_status
-           FROM parse_quality_evaluation
-           WHERE tenant_id=? AND source_system=? AND external_document_id=?
-           ORDER BY evaluation_version""",
-        (TENANT, SOURCE_SYSTEM, doc_id),
-    ) as cursor:
-        evals = [dict(row) for row in await cursor.fetchall()]
-    await db.close()
+    gateway = GatewayDatabase.from_env()
+    try:
+        async with gateway.transaction() as conn:
+            evals = await fetchall(
+                conn,
+                """SELECT evaluation_version, evaluation_state, parse_quality_status
+                   FROM parse_quality_evaluation
+                   WHERE tenant_id=? AND source_system=? AND external_document_id=?
+                   ORDER BY evaluation_version""",
+                (TENANT, SOURCE_SYSTEM, doc_id),
+            )
+    finally:
+        await gateway.dispose()
 
     report = {
         "acl": acl_results,

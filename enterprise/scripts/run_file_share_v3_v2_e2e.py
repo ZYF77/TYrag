@@ -1,4 +1,4 @@
-"""Fail-closed HTTP acceptance for FILE_SHARE 3.1, Query 2.9 and Callback 1.0.
+"""Fail-closed HTTP acceptance for Document Feed 3.2, Query 2.9 and Callback 1.0.
 
 It does not start services or load .env.  Service peers must be literal
 loopback addresses by default. Docker mode permits only the two production
@@ -8,13 +8,13 @@ Authorization, signatures, secrets, prompts, or model responses.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import hmac
 import json
 import os
 import re
 import shutil
-import sqlite3
 import sys
 import threading
 import time
@@ -32,8 +32,11 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from enterprise.gateway.auth.service_auth import sign_request  # noqa: E402
+from enterprise.gateway.db.database import GatewayDatabase  # noqa: E402
+from enterprise.gateway.db.dialect import exec_sql, fetchall, fetchone  # noqa: E402
 
 FILE_SHARE_CONTRACT_VERSION = "3.1.0"
+DOCUMENT_FEED_CONTRACT_VERSION = "3.2.0"
 QUERY_CONTRACT_VERSION = "2.9.0"
 CALLBACK_CONTRACT_VERSION = "1.0.0"
 LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
@@ -48,6 +51,117 @@ class LiveEnvironmentError(RuntimeError):
 
 class LiveAssertionError(RuntimeError):
     pass
+
+
+async def _database_row(sql: str, parameters: tuple[Any, ...] = ()) -> dict | None:
+    gateway = GatewayDatabase.from_env()
+    try:
+        async with gateway.transaction() as conn:
+            row = await fetchone(conn, sql, parameters)
+        return dict(row) if row else None
+    finally:
+        await gateway.dispose()
+
+
+async def _database_rows(sql: str, parameters: tuple[Any, ...] = ()) -> list[dict]:
+    gateway = GatewayDatabase.from_env()
+    try:
+        async with gateway.transaction() as conn:
+            rows = await fetchall(conn, sql, parameters)
+        return [dict(row) for row in rows]
+    finally:
+        await gateway.dispose()
+
+
+def _db_row(sql: str, parameters: tuple[Any, ...] = ()) -> dict | None:
+    return asyncio.run(_database_row(sql, parameters))
+
+
+def _db_rows(sql: str, parameters: tuple[Any, ...] = ()) -> list[dict]:
+    return asyncio.run(_database_rows(sql, parameters))
+
+
+async def _mark_retryable_failure(
+    tenant: str,
+    source_system: str,
+    external_document_id: str,
+    source_version_id: str,
+) -> None:
+    gateway = GatewayDatabase.from_env()
+    try:
+        async with gateway.transaction(write=True) as conn:
+            await exec_sql(
+                conn,
+                """UPDATE ext_document_map
+                      SET sync_status='failed', event_status='failed',
+                          last_error_code='RAGFLOW_UNAVAILABLE',
+                          last_error_message='temporary E2E fault',
+                          last_error_retryable=1
+                    WHERE tenant_id=? AND source_system=?
+                      AND external_document_id=? AND source_version_id=?""",
+                (tenant, source_system, external_document_id, source_version_id),
+            )
+    finally:
+        await gateway.dispose()
+
+
+def _inject_retryable_failure(
+    tenant: str,
+    source_system: str,
+    external_document_id: str,
+    source_version_id: str,
+) -> None:
+    asyncio.run(
+        _mark_retryable_failure(
+            tenant, source_system, external_document_id, source_version_id,
+        )
+    )
+
+
+def _callback_delivery_ids(
+    callback: object,
+    tenant: str,
+    source_system: str,
+    external_document_id: str,
+    source_version_id: str,
+) -> list[str]:
+    events = getattr(callback, "events", None)
+    if isinstance(events, list):
+        with callback.lock:  # type: ignore[attr-defined]
+            return [
+                str(item["deliveryId"])
+                for item in events
+                if item.get("externalDocumentId") == external_document_id
+            ]
+    rows = _db_rows(
+        """SELECT delivery_id FROM callback_delivery
+              WHERE tenant_id=? AND source_system=?
+                AND external_document_id=? AND source_version_id=?
+              ORDER BY id""",
+        (tenant, source_system, external_document_id, source_version_id),
+    )
+    return [str(row["delivery_id"]) for row in rows]
+
+
+def _assert_new_callback_delivery(
+    callback: object,
+    tenant: str,
+    source_system: str,
+    external_document_id: str,
+    source_version_id: str,
+    previous_ids: list[str],
+    timeout: float,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        current = _callback_delivery_ids(
+            callback, tenant, source_system, external_document_id, source_version_id,
+        )
+        new_ids = [item for item in current if item not in previous_ids]
+        if new_ids:
+            return
+        time.sleep(.2)
+    raise LiveAssertionError("reprocess_callback_not_observed")
 
 
 def _env(name: str, *, required: bool = True, default: str = "") -> str:
@@ -309,7 +423,7 @@ class Artifacts:
         (self.directory / "requests.ndjson").write_text("".join(json.dumps(x, ensure_ascii=False, separators=(",", ":")) + "\n" for x in self.requests), encoding="utf-8")
         (self.directory / "callback-evidence.json").write_text(json.dumps({"contractVersion": CALLBACK_CONTRACT_VERSION, "events": self.callbacks}, ensure_ascii=False, indent=2), encoding="utf-8")
         outcome = summary.get("outcome", "passed" if summary.get("passed") else "unknown")
-        (self.directory / "acceptance.md").write_text(f"# FILE_SHARE local acceptance\n\nOutcome: {outcome}\n\nFILE_SHARE {FILE_SHARE_CONTRACT_VERSION}; Query {QUERY_CONTRACT_VERSION}; Callback {CALLBACK_CONTRACT_VERSION}.\n", encoding="utf-8")
+        (self.directory / "acceptance.md").write_text(f"# Document Feed local acceptance\n\nOutcome: {outcome}\n\nDocument Feed {DOCUMENT_FEED_CONTRACT_VERSION}; FILE_SHARE {FILE_SHARE_CONTRACT_VERSION}; Query {QUERY_CONTRACT_VERSION}; Callback {CALLBACK_CONTRACT_VERSION}.\n", encoding="utf-8")
 
 
 class _CallbackHTTPServer(ThreadingHTTPServer):
@@ -379,13 +493,27 @@ class CallbackReceiver:
             time.sleep(.2)
         raise LiveAssertionError("callback_retry_not_observed")
 
+    def assert_document_success(self, document: str, timeout: float) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self.lock:
+                events = [
+                    item for item in self.events
+                    if item["externalDocumentId"] == document
+                    and item["httpStatus"] == 204
+                ]
+            if events:
+                return
+            time.sleep(.2)
+        raise LiveAssertionError("document_callback_not_observed")
+
 
 class ExistingCallbackDelivery:
     """Observe the configured callback worker through non-sensitive DB fields."""
 
-    def __init__(self, db_path: str, tenant: str, system: str, document: str,
+    def __init__(self, tenant: str, system: str, document: str,
                  version: str, artifacts: Artifacts):
-        self.db_path = db_path
+        self.tenant, self.system, self.version = tenant, system, version
         self.scope = (tenant, system, document, version)
         self.artifacts = artifacts
 
@@ -396,51 +524,70 @@ class ExistingCallbackDelivery:
         return None
 
     def assert_success(self, timeout: float) -> None:
+        self._assert_scope_success(self.scope, timeout)
+
+    def assert_document_success(self, document: str, timeout: float) -> None:
+        self._assert_scope_success(
+            (self.tenant, self.system, document, self.version), timeout,
+        )
+
+    def _assert_scope_success(self, scope: tuple[str, str, str, str], timeout: float) -> None:
         deadline = time.monotonic() + timeout
         query = """SELECT delivery_id,attempts,state,last_http_status
                    FROM callback_delivery
                    WHERE tenant_id=? AND source_system=? AND external_document_id=?
                      AND source_version_id=? ORDER BY id DESC LIMIT 1"""
         while time.monotonic() < deadline:
-            with sqlite3.connect(Path(self.db_path).resolve().as_uri() + "?mode=ro", uri=True) as db:
-                row = db.execute(query, self.scope).fetchone()
-            if row and row[2] == "delivered":
+            row = _db_row(query, scope)
+            if row and row["state"] == "delivered":
                 self.artifacts.callbacks.append({
-                    "deliveryId": row[0], "attempts": row[1], "httpStatus": row[3],
+                    "deliveryId": row["delivery_id"],
+                    "attempts": row["attempts"],
+                    "httpStatus": row["last_http_status"],
                 })
                 return
-            if row and row[2] == "dead_letter":
+            if row and row["state"] == "dead_letter":
                 raise LiveAssertionError("configured_callback_delivery_failed")
             time.sleep(.2)
         raise LiveAssertionError("configured_callback_delivery_not_observed")
 
 
-def _document_scope(db_path: str, tenant: str, document: str, version: str) -> tuple[str | None, str | None]:
-    with sqlite3.connect(Path(db_path).resolve().as_uri() + "?mode=ro", uri=True) as db:
-        row = db.execute("SELECT ragflow_dataset_id,ragflow_document_id FROM ext_document_map WHERE tenant_id=? AND external_document_id=? AND source_version_id=?", (tenant, document, version)).fetchone()
-    return (row[0], row[1]) if row else (None, None)
+def _document_scope(tenant: str, document: str, version: str) -> tuple[str | None, str | None]:
+    row = _db_row(
+        "SELECT ragflow_dataset_id,ragflow_document_id FROM ext_document_map "
+        "WHERE tenant_id=? AND external_document_id=? AND source_version_id=?",
+        (tenant, document, version),
+    )
+    return (row["ragflow_dataset_id"], row["ragflow_document_id"]) if row else (None, None)
 
 
-def _document_equipment(db_path: str, tenant: str, document: str, version: str) -> str | None:
-    with sqlite3.connect(Path(db_path).resolve().as_uri() + "?mode=ro", uri=True) as db:
-        row = db.execute("SELECT equipment_id FROM ext_document_map WHERE tenant_id=? AND external_document_id=? AND source_version_id=?", (tenant, document, version)).fetchone()
-    return row[0] if row else None
+def _document_equipment(tenant: str, document: str, version: str) -> str | None:
+    row = _db_row(
+        "SELECT equipment_id FROM ext_document_map WHERE tenant_id=? "
+        "AND external_document_id=? AND source_version_id=?",
+        (tenant, document, version),
+    )
+    return str(row["equipment_id"]) if row and row["equipment_id"] else None
 
 
 def _assert_gateway_did_not_own_parser(
-    db_path: str, tenant: str, document: str, version: str,
+    tenant: str, document: str, version: str,
 ) -> None:
-    with sqlite3.connect(Path(db_path).resolve().as_uri() + "?mode=ro", uri=True) as db:
-        row = db.execute(
-            """SELECT parser_profile,parser_profile_version,parser_expected_json,
-                      parser_configured_json,parser_executed_json,parse_retry_count
-                 FROM ext_document_map
-                WHERE tenant_id=? AND external_document_id=? AND source_version_id=?""",
-            (tenant, document, version),
-        ).fetchone()
-    if not row or any(value is not None for value in row[:5]):
+    row = _db_row(
+        """SELECT parser_profile,parser_profile_version,parser_expected_json,
+                  parser_configured_json,parser_executed_json,parse_retry_count
+             FROM ext_document_map
+            WHERE tenant_id=? AND external_document_id=? AND source_version_id=?""",
+        (tenant, document, version),
+    )
+    parser_values = (
+        row["parser_profile"], row["parser_profile_version"],
+        row["parser_expected_json"], row["parser_configured_json"],
+        row["parser_executed_json"],
+    ) if row else ()
+    if not row or any(value is not None for value in parser_values):
         raise LiveAssertionError("gateway_parser_ownership_not_removed")
-    if int(row[5] or 0) != 0:
+    if int(row["parse_retry_count"] or 0) != 0:
         raise LiveAssertionError("normal_document_unexpected_parse_retry")
 
 
@@ -497,6 +644,39 @@ def _verify_native_upload(client: httpx.Client, ragflow: str, api_key: str, data
     chunks = chunks_data.get("chunks", chunks_data.get("data", [])) if isinstance(chunks_data, dict) else []
     if not isinstance(chunks, list) or not chunks:
         raise LiveAssertionError("ragflow_chunks_parse_evidence_missing")
+
+
+def _verify_inline_json_upload(
+    client: httpx.Client,
+    ragflow: str,
+    api_key: str,
+    dataset: str,
+    document: str,
+    marker: str,
+    artifacts: Artifacts,
+) -> None:
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
+    url = f"{ragflow}/api/v1/datasets/{quote(dataset, safe='')}/documents?id={quote(document, safe='')}"
+    response = client.get(url, headers=headers)
+    artifacts.record("inline_json_ragflow_document", "GET", url, response.status_code)
+    data = _ragflow_data(response)
+    docs = data.get("docs", data.get("data", [])) if isinstance(data, dict) else []
+    doc = next((item for item in docs if isinstance(item, dict) and item.get("id") == document), None)
+    if not isinstance(doc, dict) or doc.get("chunk_method") != "naive":
+        raise LiveAssertionError("inline_json_naive_parser_not_applied")
+    metadata = doc.get("meta_fields") if isinstance(doc.get("meta_fields"), dict) else {}
+    if "anything_added_later" in metadata:
+        raise LiveAssertionError("inline_json_unknown_field_promoted_to_metadata")
+    chunks_url = f"{ragflow}/api/v1/datasets/{quote(dataset, safe='')}/documents/{quote(document, safe='')}/chunks?page=1&page_size=100"
+    chunks_response = client.get(chunks_url, headers=headers)
+    artifacts.record("inline_json_chunks", "GET", chunks_url, chunks_response.status_code)
+    chunks_data = _ragflow_data(chunks_response)
+    chunks = chunks_data.get("chunks", chunks_data.get("data", [])) if isinstance(chunks_data, dict) else []
+    searchable = "\n".join(
+        str(item.get("content") or "") for item in chunks if isinstance(item, dict)
+    )
+    if marker not in searchable:
+        raise LiveAssertionError("inline_json_unknown_field_not_indexed")
 
 
 def _preflight_services(client: httpx.Client, *, gateway: str, ragflow: str,
@@ -618,8 +798,11 @@ def run_live(artifacts: Artifacts, *, target_mode: str = "local",
     version, original_path = _env("ENTERPRISE_E2E_SOURCE_VERSION_ID", required=False, default="v3-1"), _env("ENTERPRISE_E2E_FILE_RELATIVE_PATH", required=False, default="Doc1.pdf")
     document = resume_document or _env("ENTERPRISE_E2E_EXTERNAL_DOCUMENT_ID", required=False, default=f"LOCAL-E2E-{time.time_ns()}")
     if document.upper().startswith(("PROBE-", "TYRAG-E2E-")): raise LiveEnvironmentError("callback_fixture_id_not_allowed")
-    db_path = _env("ENTERPRISE_DB_PATH")
-    if not Path(db_path).is_file(): raise LiveEnvironmentError("gateway_database_unavailable")
+    try:
+        if _db_row("SELECT 1 AS ok") != {"ok": 1}:
+            raise LiveEnvironmentError("gateway_database_unavailable")
+    except Exception as exc:
+        raise LiveEnvironmentError("gateway_database_unavailable") from exc
     key, hmac_secret = _load_hmac_credential(tenant, system)
     jwt_secret, issuer, audience = _env("JWT_SHARED_SECRET"), _env("JWT_ISSUER"), _env("JWT_AUDIENCE")
     callback_secret = ""
@@ -633,7 +816,7 @@ def run_live(artifacts: Artifacts, *, target_mode: str = "local",
     try:
         sha, size = _sha256_file(staged); page_count = _pdf_page_count(staged); stat = staged.stat()
         equipment = (
-            _document_equipment(db_path, tenant, document, version)
+            _document_equipment(tenant, document, version)
             if resume_document
             else f"{_env('ENTERPRISE_E2E_EQUIPMENT_ID')[:96]}-e2e-{uuid.uuid4().hex[:12]}"
         )
@@ -658,7 +841,7 @@ def run_live(artifacts: Artifacts, *, target_mode: str = "local",
             default="Which facts in the registered document support its summary?",
         )
         callback = (
-            ExistingCallbackDelivery(db_path, tenant, system, document, version, artifacts)
+            ExistingCallbackDelivery(tenant, system, document, version, artifacts)
             if callback_mode == "existing"
             else CallbackReceiver(_env("ENTERPRISE_E2E_CALLBACK_URL"), callback_secret, document, artifacts)
         )
@@ -682,13 +865,156 @@ def run_live(artifacts: Artifacts, *, target_mode: str = "local",
                 status_url = build_diagnostic_status_url(tenant_id=tenant, source_system=system,
                     external_document_id=document, source_version_id=version)
                 _poll_status(client, gateway, key, hmac_secret, status_url, artifacts)
-            dataset, rag_document = _document_scope(db_path, tenant, document, version)
+            dataset, rag_document = _document_scope(tenant, document, version)
             if not dataset or not rag_document: raise LiveAssertionError("ragflow_mapping_missing")
             if not resume_document:
                 _assert_gateway_did_not_own_parser(
-                    db_path, tenant, document, version,
+                    tenant, document, version,
                 )
             _verify_native_upload(client, ragflow, api_key, dataset, rag_document, artifacts)
+            json_document = ""
+            json_marker = ""
+            if not resume_document:
+                json_document = f"LOCAL-JSON-{uuid.uuid4().hex}"
+                json_marker = f"json-marker-{uuid.uuid4().hex}"
+                json_feed = {
+                    "eventId": f"evt-{json_document}",
+                    "eventType": "upsert",
+                    "tenantId": tenant,
+                    "sourceSystem": system,
+                    "externalDocumentId": json_document,
+                    "sourceVersionId": version,
+                    "fileName": f"{json_document}.json",
+                    "mediaType": "application/json",
+                    "source": {
+                        "kind": "INLINE_JSON",
+                        "content": {
+                            "equipment_id": equipment,
+                            "equipment_name": "INLINE_JSON acceptance fixture",
+                            "anything_added_later": json_marker,
+                            "technical_profile": {"voltage_v": 380},
+                        },
+                    },
+                    "metadata": _metadata(
+                        tenant_id=tenant,
+                        source_system=system,
+                        external_document_id=json_document,
+                        source_version_id=version,
+                        equipment_id=equipment,
+                        fixed_asset_no="",
+                    ),
+                }
+                json_accepted = _post_feed(
+                    client, gateway, key, hmac_secret, json_feed, artifacts,
+                    "inline_json_feed",
+                )
+                if json_accepted.status_code != 202:
+                    raise LiveAssertionError("inline_json_feed_not_accepted")
+                validate_accept_receipt(
+                    _json(json_accepted),
+                    external_document_id=json_document,
+                    source_version_id=version,
+                )
+                time.sleep(1.05)
+                json_replay = _post_feed(
+                    client, gateway, key, hmac_secret, json_feed, artifacts,
+                    "inline_json_feed_replay",
+                )
+                if json_replay.status_code != 202 or _json(json_replay).get("deduplicated") is not True:
+                    raise LiveAssertionError("inline_json_idempotency_failed")
+                changed_json = json.loads(json.dumps(json_feed))
+                changed_json["eventId"] = f"evt-json-conflict-{uuid.uuid4().hex}"
+                changed_json["source"]["content"]["anything_added_later"] = "changed"
+                changed_response = _post_feed(
+                    client, gateway, key, hmac_secret, changed_json, artifacts,
+                    "inline_json_version_conflict",
+                )
+                if changed_response.status_code != 409:
+                    raise LiveAssertionError("inline_json_version_conflict_not_rejected")
+                sensitive = json.loads(json.dumps(json_feed))
+                sensitive_id = f"LOCAL-JSON-SENSITIVE-{uuid.uuid4().hex}"
+                sensitive["eventId"] = f"evt-{sensitive_id}"
+                sensitive["externalDocumentId"] = sensitive_id
+                sensitive["metadata"] = _metadata(
+                    tenant_id=tenant,
+                    source_system=system,
+                    external_document_id=sensitive_id,
+                    source_version_id=version,
+                    equipment_id=equipment,
+                    fixed_asset_no="",
+                )
+                sensitive["source"]["content"]["api_token"] = "must-be-rejected"
+                sensitive_response = _post_feed(
+                    client, gateway, key, hmac_secret, sensitive, artifacts,
+                    "inline_json_sensitive_field",
+                )
+                if sensitive_response.status_code != 422:
+                    raise LiveAssertionError("inline_json_sensitive_field_not_rejected")
+                equipment_conflict = json.loads(json.dumps(json_feed))
+                equipment_conflict_id = f"LOCAL-JSON-SCOPE-{uuid.uuid4().hex}"
+                equipment_conflict["eventId"] = f"evt-{equipment_conflict_id}"
+                equipment_conflict["externalDocumentId"] = equipment_conflict_id
+                equipment_conflict["metadata"] = _metadata(
+                    tenant_id=tenant,
+                    source_system=system,
+                    external_document_id=equipment_conflict_id,
+                    source_version_id=version,
+                    equipment_id=equipment,
+                    fixed_asset_no="",
+                )
+                equipment_conflict["source"]["content"]["equipment_id"] = "EQ-OTHER"
+                conflict_response = _post_feed(
+                    client, gateway, key, hmac_secret, equipment_conflict, artifacts,
+                    "inline_json_equipment_conflict",
+                )
+                if conflict_response.status_code != 422:
+                    raise LiveAssertionError("inline_json_equipment_conflict_not_rejected")
+                json_status_url = build_diagnostic_status_url(
+                    tenant_id=tenant,
+                    source_system=system,
+                    external_document_id=json_document,
+                    source_version_id=version,
+                )
+                _poll_status(
+                    client, gateway, key, hmac_secret, json_status_url, artifacts,
+                )
+                json_dataset, json_rag_document = _document_scope(
+                    tenant, json_document, version,
+                )
+                if not json_dataset or not json_rag_document:
+                    raise LiveAssertionError("inline_json_ragflow_mapping_missing")
+                _verify_inline_json_upload(
+                    client, ragflow, api_key, json_dataset, json_rag_document,
+                    json_marker, artifacts,
+                )
+                callback.assert_document_success(
+                    json_document,
+                    float(os.getenv("ENTERPRISE_E2E_CALLBACK_TIMEOUT", "45")),
+                )
+                json_previous_deliveries = _callback_delivery_ids(
+                    callback, tenant, system, json_document, version,
+                )
+                json_before_retry = _document_scope(tenant, json_document, version)
+                _inject_retryable_failure(tenant, system, json_document, version)
+                json_retry = _post_feed(
+                    client, gateway, key, hmac_secret, json_feed, artifacts,
+                    "inline_json_retryable_replay",
+                )
+                if json_retry.status_code != 202:
+                    raise LiveAssertionError("inline_json_retryable_replay_not_accepted")
+                if _json(json_retry).get("deduplicated") is not False:
+                    raise LiveAssertionError("inline_json_retryable_replay_was_deduplicated")
+                _poll_status(
+                    client, gateway, key, hmac_secret, json_status_url, artifacts,
+                )
+                json_after_retry = _document_scope(tenant, json_document, version)
+                if json_before_retry[1] != json_after_retry[1]:
+                    raise LiveAssertionError("inline_json_retry_changed_ragflow_document")
+                _assert_new_callback_delivery(
+                    callback, tenant, system, json_document, version,
+                    json_previous_deliveries,
+                    float(os.getenv("ENTERPRISE_E2E_CALLBACK_TIMEOUT", "45")),
+                )
             traversal_id = f"LOCAL-PATH-{uuid.uuid4().hex}"
             traversal = {
                 **feed,
@@ -723,7 +1049,7 @@ def run_live(artifacts: Artifacts, *, target_mode: str = "local",
             elif not 400 <= bad_path.status_code < 500:
                 raise LiveAssertionError("path_traversal_not_rejected")
             _, traversal_ragflow_document = _document_scope(
-                db_path, tenant, traversal_id, version
+                tenant, traversal_id, version
             )
             if traversal_ragflow_document:
                 raise LiveAssertionError("path_traversal_created_ragflow_document")
@@ -735,7 +1061,7 @@ def run_live(artifacts: Artifacts, *, target_mode: str = "local",
                 _poll_status(client, gateway, key, hmac_secret, build_diagnostic_status_url(tenant_id=tenant, source_system=system, external_document_id=mismatch_id, source_version_id=version), artifacts, expected_failure=True)
             elif not 400 <= bad_hash.status_code < 500: raise LiveAssertionError("sha_mismatch_not_rejected")
             _, mismatch_ragflow_document = _document_scope(
-                db_path, tenant, mismatch_id, version
+                tenant, mismatch_id, version
             )
             if mismatch_ragflow_document:
                 raise LiveAssertionError("sha_mismatch_created_ragflow_document")
@@ -758,6 +1084,29 @@ def run_live(artifacts: Artifacts, *, target_mode: str = "local",
             result = _json(query); assert_no_internal_grounding(result)
             citations = matching_ingested_citations(result.get("citations"), external_document_id=document, source_version_id=version)
             if not citations: raise LiveAssertionError("query_citation_scope_missing")
+            if json_document:
+                json_query = client.post(
+                    message_url,
+                    headers=headers,
+                    json={
+                        "clientMessageId": f"local-e2e-json-{uuid.uuid4().hex}",
+                        "question": f"Which document contains the exact value {json_marker}?",
+                    },
+                    timeout=float(os.getenv("ENTERPRISE_E2E_QUERY_TIMEOUT", "120")),
+                )
+                artifacts.record(
+                    "inline_json_authorized_query", "POST", message_url,
+                    json_query.status_code,
+                )
+                if json_query.status_code != 200:
+                    raise LiveAssertionError("inline_json_query_not_completed")
+                json_result = _json(json_query)
+                if not matching_ingested_citations(
+                    json_result.get("citations"),
+                    external_document_id=json_document,
+                    source_version_id=version,
+                ):
+                    raise LiveAssertionError("inline_json_query_citation_missing")
             sse = client.post(
                 message_url,
                 headers={**headers, "Accept": "text/event-stream"},
@@ -816,7 +1165,11 @@ def run_live(artifacts: Artifacts, *, target_mode: str = "local",
             )
             callback.assert_success(float(os.getenv("ENTERPRISE_E2E_CALLBACK_TIMEOUT", "45")))
             large_checked = _large_file_check(root, artifacts)
-        summary = {"fileShareFeed": not resume_document, "businessIdempotency": not resume_document,
+        summary = {"fileShareFeed": not resume_document, "inlineJsonFeed": not resume_document,
+                   "inlineJsonUnknownFieldSearch": not resume_document,
+                   "inlineJsonCallback": not resume_document,
+                   "inlineJsonRetryableReplay": not resume_document,
+                   "businessIdempotency": not resume_document,
                    "resumedExistingDocument": bool(resume_document), "nativeUpload": True, "chunksParse": True,
                    "qualityGate": True, "ragflowOwnedParserConfig": True,
                    "callbackRetry": True, "authorizedQueryCitationSource": True,
@@ -831,7 +1184,7 @@ def run_live(artifacts: Artifacts, *, target_mode: str = "local",
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Required FILE_SHARE/v2 HTTP E2E")
+    parser = argparse.ArgumentParser(description="Required Document Feed 3.2/v2 HTTP E2E")
     parser.add_argument("--report", type=Path)
     parser.add_argument("--artifact-dir", type=Path, default=ROOT / "artifacts" / "e2e" / "file-share-v3-v2")
     parser.add_argument("--target-mode", choices=("local", "docker"), default="local")

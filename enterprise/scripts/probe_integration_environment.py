@@ -78,25 +78,24 @@ def _file_share_config() -> tuple[dict[str, Path] | None, dict[str, str]]:
     return roots, _state(CONFIGURED, "root_registry")
 
 
-def _database_state() -> dict[str, str]:
-    state_host_dir = _value("ENTERPRISE_GATEWAY_STATE_HOST_DIR")
-    sync_path = _value("ENTERPRISE_SYNC_DB_PATH")
-    user_path = _value("ENTERPRISE_DB_PATH")
-    if not state_host_dir or not sync_path or not user_path:
-        return _state(MISSING, "shared_database_paths")
-    if sync_path == ":memory:" or user_path == ":memory:":
-        return _state(UNAVAILABLE, "database_must_be_durable")
+async def _database_state() -> dict[str, str]:
     try:
-        state_dir = Path(state_host_dir).resolve()
-        expected_path = (state_dir / "gateway.db").resolve()
-        paths = (Path(sync_path).resolve(), Path(user_path).resolve())
-    except (OSError, RuntimeError, ValueError):
-        return _state(UNAVAILABLE, "shared_database_path_invalid")
-    if not state_dir.is_dir() or not os.access(state_dir, os.W_OK):
-        return _state(UNAVAILABLE, "gateway_state_host_dir_unavailable")
-    if any(path != expected_path for path in paths):
-        return _state(UNAVAILABLE, "database_path_not_shared")
-    return _state(CONFIGURED, "shared_gateway_db")
+        from sqlalchemy import text
+
+        from enterprise.gateway.db.database import GatewayDatabase
+
+        # GatewayDatabase resolves ENTERPRISE_GATEWAY_DATABASE_URL or the
+        # ENTERPRISE_GATEWAY_DB_HOST/PORT/NAME/USER/PASSWORD component settings.
+        gateway = GatewayDatabase.from_env()
+        conn = await gateway.connect()
+        try:
+            await conn.execute(text("SELECT 1"))
+        finally:
+            await conn.close()
+            await gateway.dispose()
+    except Exception:
+        return _state(UNAVAILABLE, "gateway_postgresql_unavailable")
+    return _state(CONFIGURED, "gateway_postgresql")
 
 
 def _auth_state() -> dict[str, str]:
@@ -236,7 +235,7 @@ async def _probe_redis() -> dict[str, str]:
 async def _run() -> tuple[int, dict[str, object]]:
     file_roots, file_share = _file_share_config()
     del file_roots
-    database = _database_state()
+    database = await _database_state()
     auth = _auth_state()
 
     evidence: dict[str, dict[str, str]] = {
