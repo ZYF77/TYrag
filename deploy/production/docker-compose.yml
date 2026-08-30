@@ -104,6 +104,24 @@ services:
       - tyrag
     restart: unless-stopped
 
+  gateway-postgres:
+    image: ${ENTERPRISE_GATEWAY_POSTGRES_IMAGE:-postgres:17.11-alpine3.24}
+    env_file: *production-env-file
+    environment:
+      POSTGRES_DB: ${ENTERPRISE_GATEWAY_DB_NAME:-tyrag_gateway}
+      POSTGRES_USER: ${ENTERPRISE_GATEWAY_DB_USER:-tyrag_gateway}
+      POSTGRES_PASSWORD: ${ENTERPRISE_GATEWAY_DB_PASSWORD:?set ENTERPRISE_GATEWAY_DB_PASSWORD}
+    volumes:
+      - gateway_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    networks:
+      - tyrag
+    restart: unless-stopped
+
   ragflow-cpu:
     image: ${RAGFLOW_IMAGE:?set RAGFLOW_IMAGE}
     env_file: *production-env-file
@@ -191,8 +209,11 @@ services:
       ENTERPRISE_FILE_SHARE_ROOTS: '{"device-share":"/var/lib/tyrag/file-share"}'
       ENTERPRISE_FILE_SHARE_MAX_SIZE_MB: ${ENTERPRISE_FILE_SHARE_MAX_SIZE_MB:-512}
       ENTERPRISE_GATEWAY_STATE_HOST_DIR: /var/lib/tyrag/state
-      ENTERPRISE_SYNC_DB_PATH: /var/lib/tyrag/state/gateway.db
-      ENTERPRISE_DB_PATH: /var/lib/tyrag/state/gateway.db
+      ENTERPRISE_GATEWAY_DB_HOST: gateway-postgres
+      ENTERPRISE_GATEWAY_DB_PORT: "5432"
+      ENTERPRISE_GATEWAY_DB_NAME: ${ENTERPRISE_GATEWAY_DB_NAME:-tyrag_gateway}
+      ENTERPRISE_GATEWAY_DB_USER: ${ENTERPRISE_GATEWAY_DB_USER:-tyrag_gateway}
+      ENTERPRISE_GATEWAY_DB_PASSWORD: ${ENTERPRISE_GATEWAY_DB_PASSWORD:?set ENTERPRISE_GATEWAY_DB_PASSWORD}
       ENTERPRISE_REDIS_URL: ${ENTERPRISE_REDIS_CONTAINER_URL:?set ENTERPRISE_REDIS_CONTAINER_URL}
       ENTERPRISE_SERVICE_REPLAY_STORE: redis
       ENTERPRISE_REPLAY_KEY_PREFIX: ${ENTERPRISE_REPLAY_KEY_PREFIX:-tyrag:production:service-replay:}
@@ -221,6 +242,8 @@ services:
       ENTERPRISE_CALLBACK_POLL_SECONDS: ${ENTERPRISE_CALLBACK_POLL_SECONDS:-2.0}
       ENTERPRISE_AUDIT_LOG_DIR: ${ENTERPRISE_AUDIT_LOG_DIR:-/var/lib/tyrag/state/logs}
     depends_on:
+      gateway-postgres:
+        condition: service_healthy
       ragflow-cpu:
         condition: service_healthy
       redis:
@@ -265,6 +288,7 @@ volumes:
   mysql_data:
   minio_data:
   redis_data:
+  gateway_postgres_data:
   ragflow_logs:
 
 networks:

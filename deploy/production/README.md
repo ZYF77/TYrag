@@ -108,9 +108,19 @@ ingestion and is not a separate Asset Registry service in this bundle.
 
 ## Data and rollback
 
-The archive does not contain MySQL, Elasticsearch, MinIO, Redis, or Gateway
-state. Back up the Docker volumes before upgrades. Gateway state is currently
-SQLite and this bundle intentionally runs one Gateway instance only.
+The archive does not contain MySQL, Elasticsearch, MinIO, or Redis. Gateway
+state is stored in the dedicated `gateway-postgres` Compose service and its
+`gateway_postgres_data` volume; this bundle intentionally runs one Gateway
+instance only. Before an upgrade, back up that volume and, when migrating an
+existing pilot, keep a read-only backup of the old SQLite file until the
+manifest-verified cutover is complete.
+
+For a one-time SQLite-to-PostgreSQL cutover, stop the Gateway, start only
+`gateway-postgres`, and run
+`enterprise/scripts/migrate_gateway_sqlite_to_postgres.py` with the old SQLite
+file as its read-only source. The target must be empty. Recreate Gateway only
+after the per-table row counts and SHA-256 manifest are verified. The runtime
+image contains `asyncpg`; it does not use SQLite.
 
 Do not expose MySQL, Elasticsearch, MinIO, or Redis ports to the network. Put
 TLS and a reverse proxy in front of the Gateway before changing its bind

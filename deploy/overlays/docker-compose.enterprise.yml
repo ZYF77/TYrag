@@ -5,11 +5,28 @@
 #   docker compose -f ragflow/docker/docker-compose.yml \
 #     -f deploy/overlays/docker-compose.enterprise.yml \
 #     --profile cpu up -d
-# The host live runner must set ENTERPRISE_DB_PATH and
-# ENTERPRISE_SYNC_DB_PATH to ENTERPRISE_GATEWAY_STATE_HOST_DIR/gateway.db.
-# The bind mount below is the single SQLite state shared by host E2E and Gateway.
+# Host tests connect to the dedicated PostgreSQL service through port 55432.
 
 services:
+  gateway-postgres:
+    image: ${ENTERPRISE_GATEWAY_POSTGRES_IMAGE:-postgres:17.11-alpine3.24}
+    environment:
+      POSTGRES_DB: ${ENTERPRISE_GATEWAY_DB_NAME:-tyrag_gateway}
+      POSTGRES_USER: ${ENTERPRISE_GATEWAY_DB_USER:-tyrag_gateway}
+      POSTGRES_PASSWORD: ${ENTERPRISE_GATEWAY_DB_PASSWORD:?set ENTERPRISE_GATEWAY_DB_PASSWORD}
+    ports:
+      - "127.0.0.1:${ENTERPRISE_GATEWAY_POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - gateway_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks:
+      - ragflow
+    restart: unless-stopped
+
   enterprise-gateway:
     image: ${ENTERPRISE_GATEWAY_IMAGE:-tyrag/enterprise-gateway:v0.26.4}
     entrypoint: []
@@ -42,8 +59,11 @@ services:
       ENTERPRISE_QUERY_SOURCE_SYSTEM: ${ENTERPRISE_QUERY_SOURCE_SYSTEM:-EAM}
       ENTERPRISE_FILE_SHARE_ROOTS: '{"device-share":"/var/lib/tyrag/file-share"}'
       ENTERPRISE_GATEWAY_STATE_HOST_DIR: /var/lib/tyrag/state
-      ENTERPRISE_SYNC_DB_PATH: /var/lib/tyrag/state/gateway.db
-      ENTERPRISE_DB_PATH: /var/lib/tyrag/state/gateway.db
+      ENTERPRISE_GATEWAY_DB_HOST: gateway-postgres
+      ENTERPRISE_GATEWAY_DB_PORT: "5432"
+      ENTERPRISE_GATEWAY_DB_NAME: ${ENTERPRISE_GATEWAY_DB_NAME:-tyrag_gateway}
+      ENTERPRISE_GATEWAY_DB_USER: ${ENTERPRISE_GATEWAY_DB_USER:-tyrag_gateway}
+      ENTERPRISE_GATEWAY_DB_PASSWORD: ${ENTERPRISE_GATEWAY_DB_PASSWORD:?set ENTERPRISE_GATEWAY_DB_PASSWORD}
       ENTERPRISE_REDIS_URL: ${ENTERPRISE_REDIS_CONTAINER_URL:-redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379/0}
       ENTERPRISE_EAM_ASSET_RESOLVER_MODE: ${ENTERPRISE_EAM_ASSET_RESOLVER_MODE:-}
       ENTERPRISE_EAM_ASSET_RESOLVER_BASE_URL: ${ENTERPRISE_EAM_ASSET_RESOLVER_CONTAINER_BASE_URL:-${ENTERPRISE_EAM_ASSET_RESOLVER_BASE_URL:-}}
@@ -62,6 +82,8 @@ services:
       ENTERPRISE_CALLBACK_MAX_ATTEMPTS: ${ENTERPRISE_CALLBACK_MAX_ATTEMPTS:-8}
       ENTERPRISE_CALLBACK_POLL_SECONDS: ${ENTERPRISE_CALLBACK_POLL_SECONDS:-2.0}
     depends_on:
+      gateway-postgres:
+        condition: service_healthy
       ragflow-cpu:
         condition: service_started
     networks:
@@ -94,3 +116,6 @@ services:
     networks:
       - ragflow
     restart: "no"
+
+volumes:
+  gateway_postgres_data:
