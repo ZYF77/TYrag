@@ -131,6 +131,14 @@ export interface ConversationAttachmentResponse {
 
 export type MessageStatus = '已完成' | '无可靠依据' | '失败';
 
+export interface MessageAttachmentMeta {
+  attachmentId?: string | null;
+  fileName: string;
+  mediaType: string;
+  sizeBytes?: number | null;
+  sha256?: string | null;
+}
+
 export interface Citation {
   citationId: string;
   sourceType: 'document' | 'business_record' | 'timeseries';
@@ -151,6 +159,7 @@ export interface Message {
   content: string;
   status: MessageStatus;
   citations: Citation[];
+  attachments?: MessageAttachmentMeta[];
   createdAt: string;
 }
 
@@ -229,6 +238,7 @@ export interface HarnessUserMessage {
   content: string;
   createdAt: string;
   clientMessageId: string;
+  attachments?: MessageAttachmentMeta[];
 }
 
 export interface HarnessAssistantMessage {

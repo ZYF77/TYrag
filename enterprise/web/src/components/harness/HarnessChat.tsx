@@ -11,6 +11,9 @@ interface HarnessChatProps {
   onRetry: () => void;
   onCancel: () => void;
   onCitation: (citation: Citation) => void;
+  selectedFiles?: File[];
+  onFilesPicked?: (files: File[]) => void;
+  onRemoveFile?: (index: number) => void;
 }
 
 function statusLabel(status: string): string {
@@ -30,6 +33,9 @@ export function HarnessChat({
   onRetry,
   onCancel,
   onCitation,
+  selectedFiles,
+  onFilesPicked,
+  onRemoveFile,
 }: HarnessChatProps) {
   const [selected, setSelected] = useState<string | null>(null);
   return (
@@ -51,6 +57,13 @@ export function HarnessChat({
               return (
                 <div key={message.id} className="harness-bubble-user">
                   {message.content}
+                  {message.attachments && message.attachments.length > 0 && (
+                    <div className="harness-file-chips">
+                      {message.attachments.map((item, index) => (
+                        <span key={`${item.fileName}-${index}`} className="harness-file-chip">{item.fileName}</span>
+                      ))}
+                    </div>
+                  )}
                   <div className="console-route">clientMessageId: {message.clientMessageId}</div>
                 </div>
               );
@@ -99,6 +112,9 @@ export function HarnessChat({
           onCancel={onCancel}
           isStreaming={isStreaming}
           disabled={!conversation}
+          selectedFiles={selectedFiles}
+          onFilesPicked={onFilesPicked}
+          onRemoveFile={onRemoveFile}
         />
       </div>
     </section>

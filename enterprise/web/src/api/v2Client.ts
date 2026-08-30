@@ -23,15 +23,23 @@ import type {
   SuggestionPage,
 } from './v2Types';
 import type {
+  AdminConversationMessagesPage,
+  CallbackBinding,
   ConsoleUserPrincipal,
-  FileShareDocumentStatusPage,
+  ConversationMetadataOrderBy,
+  ConversationMetadataPage,
+  DocumentMetadataOrderBy,
+  DocumentMetadataPage,
+  EamProbeResult,
   GatewayHealth,
   GatewayHttpLogPage,
+  MetadataSortOrder,
+  MetadataSummary,
+  SystemIntegrations,
 } from './consoleTypes';
 
 const V1_BASE = '/enterprise/api/v1';
 const BASE = '/enterprise/api/v2';
-const V3_BASE = '/enterprise/api/v3';
 const TOKEN_STORAGE_KEY = 'enterprise.harness.jwt';
 
 export const HARNESS_DEFAULTS = {
@@ -154,6 +162,109 @@ export interface StreamHandle {
   promise: Promise<void>;
 }
 
+// Mirrors enterprise/gateway/query/attachment_context.py:
+// MESSAGE_MEDIA_TYPES + MAX_MESSAGE_FILES, with the documented 10MB per-file cap.
+export const MESSAGE_FILE_LIMITS = {
+  maxFiles: 5,
+  maxFileBytes: 10 * 1024 * 1024,
+  allowedMediaTypes: [
+    'image/jpeg',
+    'image/png',
+    'text/plain',
+    'application/pdf',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  ] as readonly string[],
+} as const;
+
+function invalidMessageFilesError(message: string): V2ApiError {
+  return new V2ApiError(0, {
+    code: 'MESSAGE_FILES_INVALID',
+    message,
+    requestId: 'message-files-invalid',
+    retryable: false,
+  });
+}
+
+export function validateMessageFiles(files: File[]): void {
+  if (files.length > MESSAGE_FILE_LIMITS.maxFiles) {
+    throw invalidMessageFilesError(`附件数量超出限制：最多 ${MESSAGE_FILE_LIMITS.maxFiles} 个文件。`);
+  }
+  for (const file of files) {
+    if (file.size === 0) {
+      throw invalidMessageFilesError(`附件 ${file.name} 内容为空，无法发送。`);
+    }
+    if (file.size > MESSAGE_FILE_LIMITS.maxFileBytes) {
+      throw invalidMessageFilesError(`附件 ${file.name} 超过单个文件 10MB 限制。`);
+    }
+    const mediaType = (file.type || '').split(';')[0].trim().toLowerCase();
+    if (!MESSAGE_FILE_LIMITS.allowedMediaTypes.includes(mediaType)) {
+      throw invalidMessageFilesError(`附件 ${file.name} 的文件类型不受支持，仅支持 JPEG/PNG/TXT/PDF/DOCX/XLSX。`);
+    }
+  }
+}
+
+function multipartFilename(name: string): string {
+  // Browsers send the raw UTF-8 name inside filename="…"; only strip characters
+  // that would break the header framing (quotes / CR / LF).
+  return (name || 'attachment').replace(/[\r\n"]/g, '_');
+}
+
+async function readFileBytes(file: File): Promise<Uint8Array> {
+  if (typeof file.arrayBuffer === 'function') {
+    return new Uint8Array(await file.arrayBuffer());
+  }
+  // jsdom's Blob predates Blob.arrayBuffer(); FileReader covers that environment.
+  const buffer = await new Promise<ArrayBuffer>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as ArrayBuffer);
+    reader.onerror = () => reject(reader.error ?? new Error('File content could not be read'));
+    reader.readAsArrayBuffer(file);
+  });
+  return new Uint8Array(buffer);
+}
+
+interface MultipartMessage {
+  body: Uint8Array;
+  contentType: string;
+}
+
+/**
+ * Serializes { metadata: JSON, files: [...] } into the exact multipart/form-data
+ * wire format a browser FormData would produce (same field names, same per-part
+ * Content-Type), so Gateway's `_parse_multipart_message` sees identical input.
+ * The bytes are sent as a Uint8Array body with an explicit boundary header:
+ * native FormData would also work in browsers, but jsdom's File/Blob cannot be
+ * streamed by undici under vitest (fetch(…, formData) hangs / body is lost).
+ */
+async function buildMessageMultipart(
+  body: CreateMessageRequest,
+  files: File[],
+): Promise<MultipartMessage> {
+  const boundary = `----harness-message-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+  const encoder = new TextEncoder();
+  const chunks: Uint8Array[] = [];
+  const pushText = (text: string) => chunks.push(encoder.encode(text));
+
+  pushText(`--${boundary}\r\nContent-Disposition: form-data; name="metadata"\r\n\r\n${JSON.stringify(body)}\r\n`);
+  for (const file of files) {
+    const mediaType = file.type || 'application/octet-stream';
+    pushText(`--${boundary}\r\nContent-Disposition: form-data; name="files"; filename="${multipartFilename(file.name)}"\r\nContent-Type: ${mediaType}\r\n\r\n`);
+    chunks.push(await readFileBytes(file));
+    pushText('\r\n');
+  }
+  pushText(`--${boundary}--\r\n`);
+
+  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return { body: bytes, contentType: `multipart/form-data; boundary=${boundary}` };
+}
+
 const pendingDelay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 function compatibleSignal(controller: AbortController): AbortSignal | undefined {
@@ -201,19 +312,33 @@ export function streamMessage(
   conversationId: string,
   body: CreateMessageRequest,
   onEvent: (event: SseEvent) => void,
+  files: File[] = [],
 ): StreamHandle {
   const controller = new AbortController();
   const signal = compatibleSignal(controller);
   const promise = (async () => {
     const url = `${BASE}/conversations/${encodeURIComponent(conversationId)}/messages`;
+    const headers: Record<string, string> = {
+      Accept: 'text/event-stream',
+      ...authHeaders(),
+    };
+    let payload: RequestInit['body'];
+    if (files.length > 0) {
+      // Rejected before any request is sent; errors surface through the
+      // stream promise and end up in the chat error banner.
+      validateMessageFiles(files);
+      const multipart = await buildMessageMultipart(body, files);
+      headers['Content-Type'] = multipart.contentType;
+      // TS 5.7+ 将 Uint8Array 泛型化后不再直接满足 BodyInit；运行时 fetch 接受二进制 body。
+      payload = multipart.body as unknown as RequestInit['body'];
+    } else {
+      headers['Content-Type'] = 'application/json';
+      payload = JSON.stringify(body);
+    }
     const init: RequestInit = {
       method: 'POST',
-      headers: {
-        Accept: 'text/event-stream',
-        'Content-Type': 'application/json',
-        ...authHeaders(),
-      },
-      body: JSON.stringify(body),
+      headers,
+      body: payload,
       ...(signal ? { signal } : {}),
     };
     let response: Response;
@@ -299,11 +424,76 @@ export const v2Api = {
     };
   },
 
-  listFileShareStatuses(): Promise<FileShareDocumentStatusPage> {
-    return request<FileShareDocumentStatusPage>(
-      '/documents/sync-status',
+  // ---- Admin system settings (v1) ----
+
+  getSystemIntegrations(): Promise<SystemIntegrations> {
+    return request<SystemIntegrations>('/admin/system/integrations', {}, V1_BASE);
+  },
+
+  probeEamCallback(binding: CallbackBinding): Promise<EamProbeResult> {
+    return request<EamProbeResult>('/admin/system/eam-probe', {
+      method: 'POST',
+      body: JSON.stringify({ binding }),
+    }, V1_BASE);
+  },
+
+  listAdminConversationMetadata(
+    params: {
+      limit?: number;
+      offset?: number;
+      status?: string | null;
+      orderBy?: ConversationMetadataOrderBy | null;
+      order?: MetadataSortOrder | null;
+    } = {},
+  ): Promise<ConversationMetadataPage> {
+    return request<ConversationMetadataPage>(
+      queryPath('/admin/system/metadata/conversations', {
+        limit: params.limit,
+        offset: params.offset,
+        status: params.status,
+        orderBy: params.orderBy,
+        order: params.order,
+      }),
       {},
-      V3_BASE,
+      V1_BASE,
+    );
+  },
+
+  listAdminDocumentMetadata(
+    params: {
+      limit?: number;
+      offset?: number;
+      sourceSystem?: string | null;
+      status?: string | null;
+      businessStatus?: string | null;
+      orderBy?: DocumentMetadataOrderBy | null;
+      order?: MetadataSortOrder | null;
+    } = {},
+  ): Promise<DocumentMetadataPage> {
+    return request<DocumentMetadataPage>(
+      queryPath('/admin/system/metadata/documents', {
+        limit: params.limit,
+        offset: params.offset,
+        sourceSystem: params.sourceSystem,
+        status: params.status,
+        businessStatus: params.businessStatus,
+        orderBy: params.orderBy,
+        order: params.order,
+      }),
+      {},
+      V1_BASE,
+    );
+  },
+
+  getMetadataSummary(): Promise<MetadataSummary> {
+    return request<MetadataSummary>('/admin/system/metadata/summary', {}, V1_BASE);
+  },
+
+  getAdminConversationMessages(conversationId: string): Promise<AdminConversationMessagesPage> {
+    return request<AdminConversationMessagesPage>(
+      `/admin/system/metadata/conversations/${encodeURIComponent(conversationId)}/messages`,
+      {},
+      V1_BASE,
     );
   },
 

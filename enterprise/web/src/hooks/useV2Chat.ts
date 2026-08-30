@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { toDisplayError, v2Api } from '../api/v2Client';
+import { toDisplayError, validateMessageFiles, v2Api } from '../api/v2Client';
 import type {
   Citation,
   DisplayError,
@@ -15,6 +15,7 @@ interface RetryRequest {
   replyId: string;
   clientMessageId: string;
   question: string;
+  files?: File[];
 }
 
 function newClientMessageId(): string {
@@ -70,6 +71,9 @@ function historyMessage(message: Message, index: number): HarnessMessage {
       content: message.content,
       createdAt: message.createdAt,
       clientMessageId,
+      ...(message.attachments && message.attachments.length > 0
+        ? { attachments: message.attachments }
+        : {}),
     };
     return user;
   }
@@ -199,6 +203,7 @@ export function useV2Chat(conversationId: string | null) {
         conversationId,
         { clientMessageId: request.clientMessageId, question: request.question },
         handleEvent,
+        request.files ?? [],
       );
       controllerRef.current = stream.controller;
       void stream.promise
@@ -247,8 +252,18 @@ export function useV2Chat(conversationId: string | null) {
   }, [conversationId]);
 
   const sendMessage = useCallback(
-    (question: string) => {
-      if (!conversationId || isStreaming) return;
+    (question: string, files: File[] = []): boolean => {
+      if (!conversationId || isStreaming) return false;
+      if (files.length > 0) {
+        // Synchronous pre-check: on failure nothing is sent and the caller
+        // keeps its staged files so the user can fix and resend directly.
+        try {
+          validateMessageFiles(files);
+        } catch (error) {
+          setError(toDisplayError(error));
+          return false;
+        }
+      }
       const clientMessageId = newClientMessageId();
       const replyId = `reply-${clientMessageId}`;
       const now = new Date().toISOString();
@@ -258,6 +273,15 @@ export function useV2Chat(conversationId: string | null) {
         content: question,
         createdAt: now,
         clientMessageId,
+        ...(files.length > 0
+          ? {
+              attachments: files.map((file) => ({
+                fileName: file.name,
+                mediaType: file.type || 'application/octet-stream',
+                sizeBytes: file.size,
+              })),
+            }
+          : {}),
       };
       const reply: HarnessAssistantMessage = {
         id: replyId,
@@ -269,7 +293,8 @@ export function useV2Chat(conversationId: string | null) {
         clientMessageId,
       };
       setMessages((previous) => [...previous, user, reply]);
-      startStream({ replyId, clientMessageId, question });
+      startStream({ replyId, clientMessageId, question, ...(files.length > 0 ? { files } : {}) });
+      return true;
     },
     [conversationId, isStreaming, startStream],
   );

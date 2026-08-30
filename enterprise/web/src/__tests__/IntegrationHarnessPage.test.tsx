@@ -5,6 +5,14 @@ import { describe, expect, it } from 'vitest';
 import { IntegrationHarnessPage } from '../pages/IntegrationHarnessPage';
 import { server } from '../test-setup';
 
+type User = ReturnType<typeof userEvent.setup>;
+
+async function createConversationWithoutDevice(user: User) {
+  const button = await screen.findByRole('button', { name: '+ 新建会话' });
+  await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
+  await user.click(button);
+}
+
 describe('IntegrationHarnessPage', () => {
   it('links to /console after JWT can be injected on this page', () => {
     render(<IntegrationHarnessPage />);
@@ -14,7 +22,7 @@ describe('IntegrationHarnessPage', () => {
     expect(screen.getByRole('link', { name: '打开联调 Console' }).getAttribute('href')).toBe('/console');
   });
 
-  it('keeps the harness reachable on mobile and uses the desktop three-column breakpoint', () => {
+  it('keeps the harness reachable on mobile and uses the desktop two-column breakpoint', () => {
     render(<IntegrationHarnessPage />);
 
     const page = screen.getByTestId('harness-page');
@@ -25,9 +33,11 @@ describe('IntegrationHarnessPage', () => {
     expect(screen.getByLabelText('功能菜单')).toBeTruthy();
     expect(screen.getByRole('button', { name: '问答会话' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'HTTP 日志' })).toBeTruthy();
-    expect(screen.getByLabelText('Asset Registry 设备选择')).toBeTruthy();
-    expect(screen.queryByLabelText('transient attachment 边界')).toBeNull();
-    expect(screen.queryByLabelText('运行')).toBeNull();
+    expect(screen.queryByRole('button', { name: '临时附件' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '文档' })).toBeNull();
+    expect(screen.getByLabelText('会话管理')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '+ 新建会话' })).toBeTruthy();
+    expect(screen.getByText('external contract v2.9.0')).toBeTruthy();
   });
 
   it('shows only the selected menu panel', async () => {
@@ -38,44 +48,52 @@ describe('IntegrationHarnessPage', () => {
     await user.click(screen.getByRole('button', { name: 'HTTP 日志' }));
     expect(screen.queryByTestId('harness-layout')).toBeNull();
     expect(screen.getByTestId('harness-runtime-log')).toBeTruthy();
-    await user.click(screen.getByRole('button', { name: '临时附件' }));
+    await user.click(screen.getByRole('button', { name: '问答会话' }));
     expect(screen.queryByTestId('harness-runtime-log')).toBeNull();
-    expect(screen.getByLabelText('transient attachment 边界')).toBeTruthy();
+    expect(screen.getByTestId('harness-layout')).toBeTruthy();
   });
 
-  it('guides local Asset Registry keys when creating a conversation', () => {
-    render(<IntegrationHarnessPage />);
-
-    expect(screen.getByText(/本地联调请使用/)).toBeTruthy();
-    expect(screen.getByPlaceholderText('equipmentId，例如 EQ-GD01250002')).toBeTruthy();
-    expect(screen.getByPlaceholderText('fixedAssetNo，例如 GD01250002')).toBeTruthy();
-    expect(screen.getByPlaceholderText('faultCode，例如 E-104')).toBeTruthy();
-  });
-
-  it('replays file event, document polling, and context switch scenarios', async () => {
+  it('creates a device-less conversation and offers optional device creation', async () => {
     const user = userEvent.setup();
     render(<IntegrationHarnessPage />);
 
-    await user.click(screen.getByRole('button', { name: '文档' }));
-    await user.click(screen.getByRole('button', { name: '提交文件事件' }));
-    await screen.findByText('未声明 ready（received）');
-    expect(screen.getByText('文档状态与质量诊断')).toBeTruthy();
+    await createConversationWithoutDevice(user);
+    expect((await screen.findAllByText('设备: 未绑定设备')).length).toBeGreaterThanOrEqual(1);
 
-    await user.click(screen.getByRole('button', { name: '问答会话' }));
-    await user.click(screen.getByRole('button', { name: '创建并选择' }));
-    await screen.findAllByText('Harness 会话');
-    expect(await screen.findByText('FA-2001')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: '指定设备创建（可选）' }));
+    const equipment = screen.getByLabelText('new equipmentId');
+    expect((equipment as HTMLInputElement).value).toBe('');
+    expect((screen.getByLabelText('new fixedAssetNo') as HTMLInputElement).value).toBe('');
+    expect(screen.getByText(/设备号可留空/)).toBeTruthy();
+    expect(screen.queryByLabelText('new faultCode')).toBeNull();
+
+    await user.type(equipment, 'EQ-1001');
+    await user.type(screen.getByLabelText('new fixedAssetNo'), 'FA-2001');
+    await user.click(screen.getByRole('button', { name: '创建会话' }));
+    expect(await screen.findByText('设备: EQ-1001 · FA-2001')).toBeTruthy();
+  });
+
+  it('rebinds the device through the session header inline form', async () => {
+    const user = userEvent.setup();
+    render(<IntegrationHarnessPage />);
+
+    await createConversationWithoutDevice(user);
+    await screen.findAllByText('设备: 未绑定设备');
+
+    await user.click(screen.getByRole('button', { name: '换绑' }));
     const equipment = screen.getByLabelText('equipmentId');
     await user.clear(equipment);
     await user.type(equipment, 'EQ-1002');
-    await user.click(screen.getByRole('button', { name: '切换 Asset context' }));
-    await waitFor(() => expect(screen.getByText(/contextVersion:/)).toBeTruthy());
+    await user.click(screen.getByRole('button', { name: '保存换绑' }));
+
+    await waitFor(() => expect(screen.getByTestId('harness-device-badge').textContent).toBe('设备: EQ-1002'));
+    expect(screen.queryByText(/canonical snapshot/i)).toBeNull();
   });
 
   it('renders independent business status and citation evidence from SSE', async () => {
     const user = userEvent.setup();
     render(<IntegrationHarnessPage />);
-    await user.click(screen.getByRole('button', { name: '创建并选择' }));
+    await createConversationWithoutDevice(user);
     const input = await screen.findByLabelText('问题输入');
     await user.type(input, 'how to inspect?');
     await user.click(screen.getByRole('button', { name: '发送' }));
@@ -93,7 +111,7 @@ describe('IntegrationHarnessPage', () => {
   it('shows no-reliable-evidence independently of citation count', async () => {
     const user = userEvent.setup();
     render(<IntegrationHarnessPage />);
-    await user.click(screen.getByRole('button', { name: '创建并选择' }));
+    await createConversationWithoutDevice(user);
     const input = await screen.findByLabelText('问题输入');
     await user.type(input, 'noevidence');
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
@@ -104,7 +122,7 @@ describe('IntegrationHarnessPage', () => {
   it('preserves failed status and citations when the conversation is replayed', async () => {
     const user = userEvent.setup();
     const first = render(<IntegrationHarnessPage />);
-    await user.click(screen.getByRole('button', { name: '创建并选择' }));
+    await createConversationWithoutDevice(user);
     const input = await screen.findByLabelText('问题输入');
     await user.type(input, 'sse-error replay status');
     await user.click(screen.getByRole('button', { name: '发送' }));
@@ -126,24 +144,45 @@ describe('IntegrationHarnessPage', () => {
   ])('renders the Gateway %s permission/dependency boundary', async (scenario, code, title) => {
     const user = userEvent.setup();
     render(<IntegrationHarnessPage />);
+    await user.click(screen.getByRole('button', { name: '指定设备创建（可选）' }));
     const equipment = screen.getByLabelText('new equipmentId');
     await user.clear(equipment);
     await user.type(equipment, `scenario-${scenario}`);
-    await user.click(screen.getByRole('button', { name: '创建并选择' }));
+    await user.click(screen.getByRole('button', { name: '创建会话' }));
     await screen.findByText(new RegExp(`\\[${code}\\]`));
     expect(screen.getByText(title)).toBeTruthy();
   });
 
-  it('shows Asset Registry unavailable without falling back to an unscoped conversation', async () => {
+  it('creates conversations without an Asset Registry fallback when the dependency is down', async () => {
     const user = userEvent.setup();
     render(<IntegrationHarnessPage />);
-    const equipment = screen.getByLabelText('new equipmentId');
-    await user.clear(equipment);
-    await user.type(equipment, 'asset-registry');
-    await user.click(screen.getByRole('button', { name: '创建并选择' }));
+    await user.click(screen.getByRole('button', { name: '指定设备创建（可选）' }));
+    await user.type(screen.getByLabelText('new equipmentId'), 'asset-registry');
+    await user.click(screen.getByRole('button', { name: '创建会话' }));
     await screen.findByText(/\[ASSET_REGISTRY_UNAVAILABLE\]/);
     expect(screen.getByText('依赖服务暂时不可用（503）')).toBeTruthy();
-    expect(screen.queryByText('Gateway 已返回的 Asset Registry snapshot')).toBeNull();
+    expect(screen.queryByLabelText('Asset Registry 设备选择')).toBeNull();
+  });
+
+  it('stages question files with the paperclip and streams them via multipart', async () => {
+    const user = userEvent.setup();
+    render(<IntegrationHarnessPage />);
+    await createConversationWithoutDevice(user);
+    const input = await screen.findByLabelText('问题输入');
+    const fileInput = screen.getByLabelText('选择附件');
+    expect(screen.getByRole('button', { name: '添加附件' })).toBeTruthy();
+
+    await user.upload(fileInput, new File(['hello'], 'note.txt', { type: 'text/plain' }));
+    expect(screen.getByText('note.txt')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: '移除附件 note.txt' }));
+    expect(screen.queryByText('note.txt')).toBeNull();
+
+    await user.upload(fileInput, new File(['hello'], 'note.txt', { type: 'text/plain' }));
+    await user.type(input, 'how to inspect?');
+    await user.click(screen.getByRole('button', { name: '发送' }));
+    await screen.findByText(/Harness answer/);
+    // staged chip is cleared after send; the user bubble echoes the file name
+    expect(screen.getAllByText('note.txt').length).toBeGreaterThanOrEqual(1);
   });
 
   it('shows gateway HTTP request and response logs in the runtime panel', async () => {
@@ -203,22 +242,5 @@ describe('IntegrationHarnessPage', () => {
     await user.click(screen.getByRole('button', { name: '下一页' }));
     expect(await screen.findByText('/runtime/10')).toBeTruthy();
     expect(screen.queryByText('/runtime/0')).toBeNull();
-  });
-
-  it('shows the transient attachment expiry returned by Gateway', async () => {
-    const user = userEvent.setup();
-    render(<IntegrationHarnessPage />);
-    await user.click(screen.getByRole('button', { name: '创建并选择' }));
-    await user.click(screen.getByRole('button', { name: '临时附件' }));
-    const input = await screen.findByLabelText('transient attachment file');
-    await waitFor(() => expect((input as HTMLInputElement).disabled).toBe(false));
-    const file = new File(['expired attachment'], 'expired-manual.pdf', { type: 'application/pdf' });
-    await user.upload(input, file);
-    const uploadButton = screen.getByRole('button', { name: '通过 Gateway 提交' });
-    await waitFor(() => expect((uploadButton as HTMLButtonElement).disabled).toBe(false));
-    await user.click(uploadButton);
-    const attachmentError = await screen.findByRole('alert');
-    expect(attachmentError.textContent).toContain('ATTACHMENT_EXPIRED');
-    expect(attachmentError.textContent).toContain('HTTP 410');
   });
 });

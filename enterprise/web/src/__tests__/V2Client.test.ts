@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { V2ApiError, v2Api } from '../api/v2Client';
+import { MESSAGE_FILE_LIMITS, V2ApiError, v2Api } from '../api/v2Client';
 
 const command = {
   eventId: 'test-event-v2',
@@ -169,6 +169,58 @@ describe('v2 API client', () => {
     );
     await stream.promise;
     expect(events.some((event) => event.event === 'answer.completed')).toBe(true);
+  });
+
+  it('sends question files as multipart metadata + files and persists attachment history', async () => {
+    const conversation = await v2Api.createConversation({ equipmentId: 'EQ-FILES' });
+    const events: Array<{ event: string; data: string }> = [];
+    const stream = v2Api.streamMessage(
+      conversation.conversationId,
+      { clientMessageId: 'client-files-v2', question: 'file question' },
+      (event) => events.push(event),
+      [new File(['file-content'], 'note.txt', { type: 'text/plain' })],
+    );
+    await stream.promise;
+    expect(events.some((event) => event.event === 'run.started')).toBe(true);
+    expect(events.some((event) => event.event === 'answer.completed')).toBe(true);
+    const answer = events
+      .filter((event) => event.event === 'answer.delta')
+      .map((event) => (JSON.parse(event.data) as { content?: string }).content ?? '')
+      .join('');
+    expect(answer).toBe('Harness answer: file question');
+
+    const history = await v2Api.listMessages(conversation.conversationId);
+    const user = history.items.find((item) => item.role === 'user');
+    expect(user?.attachments?.map((item) => item.fileName)).toEqual(['note.txt']);
+    expect(user?.attachments?.[0].mediaType).toBe('text/plain');
+  });
+
+  it('rejects invalid message files before any request is sent', async () => {
+    const conversation = await v2Api.createConversation({ equipmentId: 'EQ-FILELIMIT' });
+    const body = { clientMessageId: 'client-file-limit', question: 'q' } as const;
+    const onEvent = () => undefined;
+    const tooMany = Array.from(
+      { length: MESSAGE_FILE_LIMITS.maxFiles + 1 },
+      (_, index) => new File(['x'], `f${index}.txt`, { type: 'text/plain' }),
+    );
+    await expect(
+      v2Api.streamMessage(conversation.conversationId, body, onEvent, tooMany).promise,
+    ).rejects.toMatchObject({ status: 0, body: { code: 'MESSAGE_FILES_INVALID' } });
+
+    const tooBig = [new File([new ArrayBuffer(MESSAGE_FILE_LIMITS.maxFileBytes + 1)], 'big.pdf', { type: 'application/pdf' })];
+    await expect(
+      v2Api.streamMessage(conversation.conversationId, body, onEvent, tooBig).promise,
+    ).rejects.toMatchObject({ status: 0, body: { code: 'MESSAGE_FILES_INVALID' } });
+
+    const badType = [new File(['x'], 'evil.zip', { type: 'application/zip' })];
+    await expect(
+      v2Api.streamMessage(conversation.conversationId, body, onEvent, badType).promise,
+    ).rejects.toMatchObject({ status: 0, body: { code: 'MESSAGE_FILES_INVALID' } });
+
+    const empty = [new File([], 'empty.txt', { type: 'text/plain' })];
+    await expect(
+      v2Api.streamMessage(conversation.conversationId, body, onEvent, empty).promise,
+    ).rejects.toMatchObject({ status: 0, body: { code: 'MESSAGE_FILES_INVALID' } });
   });
 
   it.each([401, 403, 409, 422, 503])('retains HTTP %s for diagnostics', async (status) => {
