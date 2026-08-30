@@ -61,6 +61,8 @@ WP01 与 WP02 是唯一会动 ingestion 主链的包；WP03–WP06 不得偷偷�
 
 v0.26.4 没有运行时 upload 的单对象删除 API。WP06 仅保留一个登记为 `RF-PATCH-006` 的认证 `DELETE /api/v1/documents/upload/{file_id}`，用于当前轮附件清理；它不扩展成通用文件管理能力。`RF-PATCH-005` 只补 WebSearch provider 故障时继续内部知识及检索日志脱敏。
 
+chat completion 的显式业务终态由 RAGFlow 决定并随 `data.status`（`completed` / `no_reliable_evidence` / `failed`，登记为 `RF-PATCH-007`）输出；Gateway 只校验、映射中文文案并持久化，禁止按回答文本或 citations 推导/改判消息状态。
+
 ## 统一验收与回滚原则
 
 每包先跑本包 unit/contract，再由 WP07 跑真实本机 HTTP E2E；至少有一个未授权/越权/非法输入负例。任何 `200` JSON 业务错误均按失败处理，不当作文件字节或成功响应。回滚按包恢复 Gateway 调用与已登记的最小上游 patch，不删除历史数据、表、索引或对象；不能用“切回双轨”作为回滚，因为双轨不是目标实现。

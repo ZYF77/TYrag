@@ -70,9 +70,9 @@ flowchart TD
   GWPost --> SSE[SSE: answer.replaced / citation / answer.completed]
 ```
 
-**Gateway 职责**：认证、ACL、设备硬筛、`doc_ids`、附件观察、`internetEnabled`、EAM 契约映射、SQLite 历史与幂等、citation 投影、业务状态判定。
+**Gateway 职责**：认证、ACL、设备硬筛、`doc_ids`、附件观察、`internetEnabled`、EAM 契约映射、SQLite 历史与幂等、citation 投影、业务状态校验/映射/持久化。
 
-**RAGFlow 职责**：检索、prompt 组装、`effectiveKnowledge` 内部维护、（可选）Identifier/Numeric Fuse、Session/MinIO 持久化。
+**RAGFlow 职责**：检索、prompt 组装、`effectiveKnowledge` 内部维护、（可选）Identifier/Numeric Fuse、Session/MinIO 持久化、completion 显式业务终态（`data.status`，RF-PATCH-007）。
 
 Gateway **不在 Gateway 层跑 Final Guard**；Identifier/Numeric 保险丝仅在 RAGFlow `async_chat` 路径的 `decorate_answer` 之后执行。
 
@@ -92,13 +92,12 @@ Gateway **不在 Gateway 层跑 Final Guard**；Identifier/Numeric 保险丝仅�
 | **无检索拒答** | RAGFlow `async_chat` | `knowledges` 为空且配置了 `empty_response` | grounding 模式下不走模板文案，直接 `_grounding_abstain_event()`（标准拒答 + 空 reference） |
 | **空回答拒答** | RAGFlow `async_chat` | 流式结束但 `full_answer` 为空 | `grounding_enabled` 时 yield 标准拒答 |
 | **think_log 脱敏** | RAGFlow `rag_agent` | grounding 开 + Agentic 档位 | `set_think_log_sink(redact_content=True)`：进度日志只外送阶段标签（如 `[Hybrid search]`），不外送问题原文或知识正文 |
-| **拒答信号检测** | Gateway | 终态后处理 | `answer_signals_abstain()` 匹配「未找到可靠依据」「暂无专门…」「无法提供…相关信息」等 → `force_abstain_outcome` → `no_reliable_evidence` |
-| **终态拒答文案统一** | Gateway | `status == no_reliable_evidence` | 正文改写为 `未找到可靠依据，无法回答。`，citations 清空 |
+| **显式终态校验（fail-closed）** | Gateway | 终态后处理 | 缺失/非法 `data.status` 一律按上游契约不兼容处理：JSON 返回 HTTP 502 + `RAGFLOW_API_INCOMPATIBLE` 并持久化失败 run；SSE 清空已流出正文（`answer.replaced` 空内容）后发 `run.failed`。不做任何文本/正则兜底 |
+| **终态拒答文案统一** | Gateway | RAGFlow `status == no_reliable_evidence` | 将显式终态映射为中文文案 `未找到可靠依据，无法回答。`，citations 清空 |
 | **引用标记清洗** | Gateway | 每次 completed 路径 | `sanitize_citation_markers()` 修复/剔除畸形 `[ID:n]`，避免错误 refIndex |
 | **仅引用已 cite 的 chunk** | Gateway | completed | `select_cited_chunk_refs()`：只保留答案中 `[ID:n]` /  prose `ID:n` 对应 chunk；`no_reliable_evidence` 时 citations 恒为空 |
 | **越权 chunk 拦截** | Gateway | 联网检索返回 web chunk | 非 ACL 内文档且无合法 URL → `RAGFLOW_SCOPE_VIOLATION` 502 |
-| **资料清单救援** | Gateway |  inventory 问题 + fail-closed | `is_inventory_question` 且 scope 内有文档时，用目录类型生成「当前知识库中该设备已有以下资料：…」替代拒答 |
-| **inventory 拒答豁免** | Gateway | inventory + 已列出资料类型 | `force_abstain_outcome` 不因残留拒答短语把「有资料清单」判为 `no_reliable_evidence` |
+| **inventory 拒答 fail-closed（无资料清单救援）** | Gateway | inventory 问题 + RAGFlow `no_reliable_evidence` | 目录救援（`_catalog_inventory_rescue` 生成「当前知识库中该设备已有以下资料：…」）已整体删除；inventory 问题同样只按显式终态映射为标准拒答（`test_v2_inventory_question_fail_closed_without_catalog_rescue`） |
 | **未绑定设备提示** | Gateway | completed 且会话未绑设备 | `_with_equipment_hint` 追加设备号绑定提示 |
 | **answer.replaced** | Gateway SSE | 真流式且终态正文 ≠ 已流出正文 | 在 `citation` 事件前发送整段替换，供 EAM 覆盖气泡 |
 | **allowed_identifiers 传递** | Gateway → RAGFlow | 每次 v2 | 绑定 `equipmentId`/`fixedAssetNo` + 本轮 `question` 传给 Fuse（Fuse 开启时用于放行「身份」而非新事实） |
@@ -148,34 +147,33 @@ Gateway **不在 Gateway 层跑 Final Guard**；Identifier/Numeric 保险丝仅�
 
 传给 RAGFlow 后供 Fuse 使用；附件结构化观察通过 `attachment_observations` 单独传递。
 
-#### 业务状态（`_business_status` + `force_abstain_outcome`）
+#### 业务状态（RAGFlow 显式终态，fail-closed）
 
-1. 优先采用 RAGFlow 返回的 `data.status`（若存在）。
-2. 否则：有非空 answer → `completed`；空 → `no_reliable_evidence`。
-3. `force_abstain_outcome`：若答案匹配拒答信号正则 → 强制 `no_reliable_evidence`（`failed` 不覆盖）。
-4. **inventory 例外**：问题形如「有哪些资料/文档」且答案已列出资料类型或含 citation → 保持 `completed`。
+业务终态由 RAGFlow completion 显式给出（RF-PATCH-007：`data.status` ∈ `completed` / `no_reliable_evidence` / `failed`），Gateway 只校验、映射中文文案并持久化，**禁止按回答文本或 citations 推导/改判**：
+
+1. 合法 `data.status` → 直接采用，不做任何文本/正则二次判断；inventory 类问题无任何例外。
+2. 缺失或非法 `data.status` → 一律视为上游契约不兼容（fail-closed），**没有兜底推导**：JSON 返回 HTTP 502 + `RAGFLOW_API_INCOMPATIBLE` 并持久化失败 run；SSE 若已流出正文先发 `answer.replaced`（空内容）清空，再发 `run.failed`（`v2_router._business_status` / `formal_router._explicit_run_status`）。
 
 #### 终态后处理顺序（JSON 与 SSE 相同逻辑）
 
 1. `sanitize_citation_markers(answer)`
-2. `force_abstain_outcome` → `status`
-3. `_catalog_inventory_rescue`（可能把 status 改回 `completed`）
-4. 若 `completed`：`_external_citations` + `_with_equipment_hint`
-5. 若 `no_reliable_evidence`：`answer = 标准拒答`，`citations = []`
+2. 读取显式 `data.status`（`v2_router._business_status` / `formal_router._explicit_run_status`）；缺失/非法 → 契约错误（fail-closed，见上）。`force_abstain_outcome` 与 `_catalog_inventory_rescue` 已删除，不存在文本改判或救援分支
+3. 若 `completed`：`_external_citations` + `_with_equipment_hint`
+4. 若 `no_reliable_evidence`：`answer = 标准拒答`，`citations = []`
 
 #### SSE 与 `answer.replaced`
 
 - **真流式**：边收 RAGFlow SSE 边发 `reasoning.delta` / `answer.delta`。
-- 终态后处理若改变正文（引用清洗、拒答、资料清单、设备提示），且与已流出 `emitted_answer` 不同 → 发 `answer.replaced`（在 `citation` 之前）。
+- 终态后处理若改变正文（引用清洗、拒答映射、设备提示），且与已流出 `emitted_answer` 不同 → 发 `answer.replaced`（在 `citation` 之前）。
 - **回放**（`_streamDeltas`）：合并为单帧 `answer.delta`，不发 `answer.replaced`。
 
-常见「先流后拒答」成因：
+常见「先流后拒答/失败」成因：
 
 | 场景 | 机制 |
 |------|------|
 | 模型直接输出短拒答 | RAGFlow 流式即为「未找到可靠依据…」，Gateway 无 `answer.replaced` |
-| Gateway 后处理改判 | 流式较长正文含拒答短语 → `force_abstain_outcome` → `answer.replaced` |
-| Fuse FAIL（Fuse 开启时） | RAGFlow 终态一次性替换为标准拒答 → 可能触发 `answer.replaced` |
+| Gateway 契约错误（`data.status` 缺失/非法） | fail-closed：已流出正文先 `answer.replaced`（空内容）清空，随后 `run.failed`（`RAGFLOW_API_INCOMPATIBLE`）；Gateway 不再按正文短语改判 |
+| Fuse FAIL（Fuse 开启时） | RAGFlow 终态一次性替换为标准拒答并给出 `status=no_reliable_evidence` → 可能触发 `answer.replaced` |
 
 当前 Fuse 关闭时，第一类（模型自拒答）最常见。
 
@@ -273,4 +271,4 @@ Fuse 词法规则（`rag/grounding/guard.py`）：
 
 ---
 
-**摘要**：当前线上 v2 问询的幻觉防护以 **ACL/设备硬筛、无证据拒答、拒答信号检测、citation 硬约束、资料清单救援** 为主；**Identifier/Numeric Fuse 与候选 token 缓冲默认关闭**，真流式已启用。提升 `reasoningMode` 可增强检索与综合，**不能替代** Identifier Guard。无数字的语义幻觉、矛盾陈述、来源误归属仍属 P1/P2 范围。
+**摘要**：当前线上 v2 问询的幻觉防护以 **ACL/设备硬筛、无证据拒答、RAGFlow 显式终态（fail-closed 校验，无文本改判/无资料清单救援）、citation 硬约束** 为主；**Identifier/Numeric Fuse 与候选 token 缓冲默认关闭**，真流式已启用。提升 `reasoningMode` 可增强检索与综合，**不能替代** Identifier Guard。无数字的语义幻觉、矛盾陈述、来源误归属仍属 P1/P2 范围。

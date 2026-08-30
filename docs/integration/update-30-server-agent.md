@@ -117,7 +117,39 @@ Windows 上传的脚本先 `sed -i 's/\r$//'`。
 
 ---
 
-## 4. Gateway overlay（已测通的做法）
+## 4. Gateway PostgreSQL 切换（本工作包）
+
+本次 Gateway 状态库从现网 SQLite 切到 Compose 管理的独立 PostgreSQL。
+这是一次短停机操作；在 30 未连通前只准备，不执行下面命令。
+
+1. 在 30 上确认现网 Gateway 已停止前，先复制并校验 SQLite 备份（保留原文件，供回滚）。
+2. 先只启动数据库并等待 healthy：
+
+   ```bash
+   cd /home/zkadmin/tyrag-production
+   docker compose --env-file .env --env-file gateway-overrides.env \
+     -f docker-compose.yml up -d --no-deps --pull never gateway-postgres
+   docker compose -f docker-compose.yml ps gateway-postgres
+   ```
+
+3. 用新 Gateway 镜像执行一次性迁移。迁移工具只读 SQLite、拒绝非空 PG，且不会把正文或 secret 写入 manifest：
+
+   ```bash
+   docker compose --env-file .env --env-file gateway-overrides.env \
+     -f docker-compose.yml run --rm --no-deps \
+     -e ENTERPRISE_DB_PATH= -e ENTERPRISE_SYNC_DB_PATH= \
+     --entrypoint /ragflow/.venv/bin/python enterprise-gateway \
+     /ragflow/enterprise/scripts/migrate_gateway_sqlite_to_postgres.py \
+     --sqlite-path /var/lib/tyrag/state/gateway.db \
+     --manifest /var/lib/tyrag/state/gateway-postgres-migration.json
+   ```
+
+4. 核对迁移输出的每表行数和摘要；从 30 的 `.env` / env-file 中删除旧 `ENTERPRISE_DB_PATH`、`ENTERPRISE_SYNC_DB_PATH` 后，按下一节构建/覆盖 Gateway 镜像并 recreate。迁移失败时保留 SQLite 原文件，不启动新 Gateway。
+5. 回滚顺序：停止新 Gateway，恢复原 Gateway 镜像和 SQLite 配置，再按同一 bind/env 组合 recreate；不要删除 PG 卷或 SQLite 备份。
+
+`ENTERPRISE_GATEWAY_DB_NAME/USER/PASSWORD` 只放在 30 的权限受控 env/secret 中，禁止写进命令行、日志或仓库。PG 端口不发布到宿主机公网。
+
+## 5. Gateway overlay（已测通的做法）
 
 在开发机构包，不要把整个仓库 rsync 到 30。
 
@@ -171,7 +203,7 @@ docker compose --env-file .env --env-file gateway-overrides.env \
 
 ---
 
-## 5. enterprise-web
+## 6. enterprise-web
 
 开发机常无 Docker。把 `enterprise/web` 打到 30 再 build。
 
@@ -208,7 +240,7 @@ docker compose --env-file .env --env-file gateway-overrides.env \
 
 ---
 
-## 6. RAGFlow 8080 前端（优先不重建容器）
+## 7. RAGFlow 8080 前端（优先不重建容器）
 
 重建 `ragflow-cpu` 曾经把 8080 打回 `127.0.0.1`，并弄丢 `API_PROXY_SCHEME`。前端-only 改动：
 
@@ -234,7 +266,7 @@ docker compose --env-file .env --env-file core.env --env-file dev-ragflow.env \
 
 ---
 
-## 7. 部署后清单（缺一不可）
+## 8. 部署后清单（缺一不可）
 
 - [ ] 只重建了本次相关服务，`--no-deps --pull never`
 - [ ] `ss`：相关端口仍是 `0.0.0.0`
@@ -248,7 +280,7 @@ docker compose --env-file .env --env-file core.env --env-file dev-ragflow.env \
 
 ---
 
-## 8. 完成报告模板
+## 9. 完成报告模板
 
 - 修改的 30 侧对象（镜像 tag / 容器 / 是否 in-place dist）
 - 备份 tag

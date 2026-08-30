@@ -181,6 +181,10 @@ enterprise/ext_document_map.db*
 # Local pytest scratch artifacts (hyphen and underscore basetemp dirs)
 .pytest-tmp/
 .pytest_tmp/
+.pytest_tmp*/
+.pytest-tmp-*/
 .tmp-pytest/
+.tmp/
+enterprise/scripts/_*.py
 **/gateway-test.db
 
