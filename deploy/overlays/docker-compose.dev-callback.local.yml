@@ -1,0 +1,6 @@
+# Local-only override (untracked): force IPv4 host-gateway so the gateway
+# container can reach host-loopback callback receivers on Docker Desktop.
+services:
+  enterprise-gateway:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
