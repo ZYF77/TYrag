@@ -6,7 +6,6 @@ import type {
   ConsoleModuleStatus,
   ConsoleState,
   ConsoleUserPrincipal,
-  FileShareDocumentStatusPage,
   GatewayHealth,
 } from '../api/consoleTypes';
 import type {
@@ -18,10 +17,20 @@ import type {
   Message,
 } from '../api/v2Types';
 import { TransientAttachmentPanel } from '../components/harness/TransientAttachmentPanel';
+import { ConversationAdminPanel } from '../components/console/ConversationAdminPanel';
+import { ConversationMetadataPanel, DocumentMetadataPanel, IntegrationsPanel } from '../components/console/SystemSettingsPanels';
 import { WorkbenchShell, useWorkbenchTab } from '../components/layout/WorkbenchShell';
 import './enterprise-console.css';
 
-const CONSOLE_TABS = ['service', 'documents', 'sessions', 'attachment'] as const;
+const CONSOLE_TABS = [
+  'service',
+  'sessions',
+  'attachment',
+  'integrations',
+  'meta-conversations',
+  'conversation-admin',
+  'meta-documents',
+] as const;
 type ConsoleTab = (typeof CONSOLE_TABS)[number];
 
 const CONSOLE_NAV = [
@@ -30,12 +39,24 @@ const CONSOLE_NAV = [
     label: '诊断',
     items: [
       { id: 'service', label: '服务状态' },
-      { id: 'documents', label: '文档状态' },
       { id: 'sessions', label: '会话历史' },
       { id: 'attachment', label: '临时附件' },
     ],
   },
 ];
+
+const SYSTEM_NAV_GROUP = {
+  id: 'system',
+  label: '系统设置',
+  items: [
+    { id: 'integrations', label: '接口配置' },
+    { id: 'meta-conversations', label: '会话元数据' },
+    { id: 'conversation-admin', label: '会话管理' },
+    { id: 'meta-documents', label: '文件元数据' },
+  ],
+};
+
+const SYSTEM_TAB_IDS: readonly string[] = SYSTEM_NAV_GROUP.items.map((item) => item.id);
 
 function initialState<T>(): ConsoleState<T> {
   return { status: 'processing', data: null, error: null };
@@ -47,12 +68,6 @@ function errorStatus(error: DisplayError): ConsoleModuleStatus {
     return 'unavailable';
   }
   return 'failed';
-}
-
-function statusForDocumentPage(page: FileShareDocumentStatusPage): ConsoleModuleStatus {
-  if (page.items.some((item) => item.retrievable)) return 'retrievable';
-  if (page.items.some((item) => item.status === 'failed' || item.errorCode)) return 'failed';
-  return 'processing';
 }
 
 function statusText(status: ConsoleModuleStatus): string {
@@ -194,50 +209,6 @@ function ServicePanel({
       </div>
       {health.error && <ModuleError error={health.error} onRetry={onRefresh} />}
       {identity.error && <ModuleError error={identity.error} onRetry={onRefresh} />}
-    </ConsoleCard>
-  );
-}
-
-function DocumentPanel({
-  state,
-  onRefresh,
-}: {
-  state: ConsoleState<FileShareDocumentStatusPage>;
-  onRefresh: () => void;
-}) {
-  return (
-    <ConsoleCard
-      eyebrow="FILE_SHARE"
-      title="文档处理与可检索性"
-      description="读取 v3 FILE_SHARE 状态事实，不显示存储路径或引擎标识；retrievable 只来自 Gateway 返回值。"
-      status={state.status}
-      actions={<button type="button" onClick={onRefresh} className="console-icon-button" aria-label="刷新 FILE_SHARE 状态"><RefreshCw size={16} /></button>}
-      testId="console-document-card"
-    >
-      <p className="console-hint">浏览器不生成 HMAC。真实 Gateway 下若未由服务侧签名，模块会如实显示 <strong>unauthorized</strong>。</p>
-      {state.data?.items.length ? (
-        state.data.items.map((item) => (
-          <article key={`${item.externalDocumentId}-${item.sourceVersionId}`}>
-            <div className="console-row">
-              <div>
-                <p>{item.externalDocumentId}</p>
-                <p className="console-route">版本 {item.sourceVersionId} · {item.stage ?? 'stage 未提供'} · {item.status}</p>
-              </div>
-              <StatusBadge status={item.retrievable ? 'retrievable' : item.status === 'failed' ? 'failed' : 'processing'} />
-            </div>
-            <dl className="console-metrics">
-              <div><dt>parse</dt><dd>{item.parseCompleted ? 'complete' : 'processing'}</dd></div>
-              <div><dt>index</dt><dd>{item.indexCompleted ? 'complete' : 'processing'}</dd></div>
-              <div><dt>quality</dt><dd>{item.qualityStatus ?? 'unknown'}</dd></div>
-              <div><dt>updated</dt><dd>{formatTime(item.updatedAt)}</dd></div>
-            </dl>
-            {item.error && <p className="console-hint">{item.error.code} · {item.error.message}</p>}
-          </article>
-        ))
-      ) : (
-        <p className="console-empty">暂无 FILE_SHARE 状态。</p>
-      )}
-      {state.error && <ModuleError error={state.error} onRetry={onRefresh} />}
     </ConsoleCard>
   );
 }
@@ -430,7 +401,6 @@ export function EnterpriseConsolePage() {
   const [tab, setTab] = useWorkbenchTab<ConsoleTab>('service', CONSOLE_TABS);
   const [health, setHealth] = useState<ConsoleState<GatewayHealth>>(initialState);
   const [identity, setIdentity] = useState<ConsoleState<ConsoleUserPrincipal>>(initialState);
-  const [documents, setDocuments] = useState<ConsoleState<FileShareDocumentStatusPage>>(initialState);
   const [conversations, setConversations] = useState<ConsoleState<ConversationSummary[]>>(initialState);
   const [history, setHistory] = useState<ConsoleState<{ conversation: ConversationDetail; messages: Message[] }>>({ status: 'configured', data: null, error: null });
   const [citation, setCitation] = useState<ConsoleState<Citation>>({ status: 'configured', data: null, error: null });
@@ -441,6 +411,11 @@ export function EnterpriseConsolePage() {
   const [attachmentNotice, setAttachmentNotice] = useState<string | null>(null);
   const [tokenDraft, setTokenDraft] = useState('');
   const [tokenConfigured, setTokenConfigured] = useState(() => Boolean(getHarnessToken()));
+  const isAdmin = identity.data?.capabilities.includes('admin') ?? false;
+  const navGroups = useMemo(
+    () => (isAdmin ? [...CONSOLE_NAV, SYSTEM_NAV_GROUP] : CONSOLE_NAV),
+    [isAdmin],
+  );
 
   const loadHealth = useCallback(async () => {
     setHealth({ status: 'processing', data: null, error: null });
@@ -461,17 +436,6 @@ export function EnterpriseConsolePage() {
     } catch (error) {
       const displayError = toDisplayError(error);
       setIdentity({ status: errorStatus(displayError), data: null, error: displayError });
-    }
-  }, []);
-
-  const loadDocuments = useCallback(async () => {
-    setDocuments({ status: 'processing', data: null, error: null });
-    try {
-      const data = await v2Api.listFileShareStatuses();
-      setDocuments({ status: statusForDocumentPage(data), data, error: null });
-    } catch (error) {
-      const displayError = toDisplayError(error);
-      setDocuments({ status: errorStatus(displayError), data: null, error: displayError });
     }
   }, []);
 
@@ -511,9 +475,8 @@ export function EnterpriseConsolePage() {
   useEffect(() => {
     void loadHealth();
     void loadIdentity();
-    void loadDocuments();
     void loadConversations();
-  }, [loadConversations, loadDocuments, loadHealth, loadIdentity]);
+  }, [loadConversations, loadHealth, loadIdentity]);
 
   useEffect(() => {
     setCitation({ status: 'configured', data: null, error: null });
@@ -528,9 +491,8 @@ export function EnterpriseConsolePage() {
   const refreshAll = useCallback(() => {
     void loadHealth();
     void loadIdentity();
-    void loadDocuments();
     void loadConversations();
-  }, [loadConversations, loadDocuments, loadHealth, loadIdentity]);
+  }, [loadConversations, loadHealth, loadIdentity]);
 
   const saveToken = useCallback(() => {
     setHarnessToken(tokenDraft);
@@ -620,7 +582,7 @@ export function EnterpriseConsolePage() {
       shellClass="console-shell"
       brand="Console"
       subtitle="Gateway diagnostics"
-      groups={CONSOLE_NAV}
+      groups={navGroups}
       activeId={tab}
       onSelect={(id) => setTab(id as ConsoleTab)}
       actions={(
@@ -648,9 +610,6 @@ export function EnterpriseConsolePage() {
       {tab === 'service' && (
         <ServicePanel health={health} identity={identity} onRefresh={refreshAll} />
       )}
-      {tab === 'documents' && (
-        <DocumentPanel state={documents} onRefresh={loadDocuments} />
-      )}
       {tab === 'sessions' && (
         <ConversationPanel
           state={conversations}
@@ -675,6 +634,13 @@ export function EnterpriseConsolePage() {
           onIssueTicket={() => void issueTicket()}
           onDownload={() => void verifyDownload()}
         />
+      )}
+      {isAdmin && tab === 'integrations' && <IntegrationsPanel />}
+      {isAdmin && tab === 'meta-conversations' && <ConversationMetadataPanel />}
+      {isAdmin && tab === 'conversation-admin' && <ConversationAdminPanel />}
+      {isAdmin && tab === 'meta-documents' && <DocumentMetadataPanel />}
+      {!isAdmin && SYSTEM_TAB_IDS.includes(tab) && (
+        <p className="console-empty">需要 admin capability 才能查看系统设置。</p>
       )}
     </WorkbenchShell>
   );

@@ -11,6 +11,7 @@ import type {
   ConversationAttachmentResponse,
   DocumentOperation,
   Message,
+  MessageAttachmentMeta,
   Citation as V2Citation,
 } from '../v2Types';
 
@@ -561,7 +562,6 @@ export const handlers = [
 // They only expose the frozen v2 external response shape.
 
 const V2_BASE = '/enterprise/api/v2';
-const V3_BASE = '/enterprise/api/v3';
 const v2Documents = new Map<string, DocumentOperation>();
 const v2DocumentPolls = new Map<string, number>();
 const v2DocumentPayloadHashes = new Map<string, string>();
@@ -569,100 +569,6 @@ const v2Conversations = new Map<string, { detail: ConversationDetail; messages: 
 const v2Runs = new Map<string, { result: V2MessageRunResult; messages: Message[]; question: string; pending: boolean }>();
 const v2Attachments = new Map<string, { response: ConversationAttachmentResponse; content: Uint8Array }>();
 const v2AttachmentTickets = new Map<string, string>();
-
-const fileShareStatuses = [
-  {
-    externalDocumentId: 'FILE-SHARE-READY',
-    sourceVersionId: 'v3',
-    status: 'ready',
-    stage: 'complete',
-    pipelineStatus: 'DONE',
-    parseCompleted: true,
-    indexCompleted: true,
-    ingestState: 'INDEXED',
-    sourceState: 'AVAILABLE',
-    deduplicated: false,
-    businessStatus: 'active',
-    currentVersion: true,
-    eventStatus: 'processed',
-    updatedAt: new Date(Date.now() - 60_000).toISOString(),
-    retrievable: true,
-    readiness: {
-      currentVersion: true,
-      active: true,
-      syncReady: true,
-      parserReadback: true,
-      ragflowIdsPresent: true,
-      qualityPassed: true,
-      blockingReason: null,
-    },
-    qualityStatus: 'passed',
-    errorCode: null,
-    error: null,
-  },
-  {
-    externalDocumentId: 'FILE-SHARE-PARSING',
-    sourceVersionId: 'v2',
-    status: 'parsing',
-    stage: 'ocr_processing',
-    pipelineStatus: 'RUNNING',
-    parseCompleted: false,
-    indexCompleted: false,
-    ingestState: 'PARSING',
-    sourceState: 'AVAILABLE',
-    deduplicated: false,
-    businessStatus: 'active',
-    currentVersion: true,
-    eventStatus: 'accepted',
-    updatedAt: new Date(Date.now() - 120_000).toISOString(),
-    retrievable: false,
-    readiness: {
-      currentVersion: true,
-      active: true,
-      syncReady: false,
-      parserReadback: false,
-      ragflowIdsPresent: false,
-      qualityPassed: false,
-      blockingReason: 'PARSER_NOT_COMPLETE',
-    },
-    qualityStatus: 'unknown',
-    errorCode: null,
-    error: null,
-  },
-  {
-    externalDocumentId: 'FILE-SHARE-FAILED',
-    sourceVersionId: 'v1',
-    status: 'failed',
-    stage: 'validation',
-    pipelineStatus: 'FAILED',
-    parseCompleted: false,
-    indexCompleted: false,
-    ingestState: 'FAILED',
-    sourceState: 'UNAVAILABLE',
-    deduplicated: false,
-    businessStatus: 'active',
-    currentVersion: true,
-    eventStatus: 'failed',
-    updatedAt: new Date(Date.now() - 300_000).toISOString(),
-    retrievable: false,
-    readiness: {
-      currentVersion: true,
-      active: true,
-      syncReady: false,
-      parserReadback: false,
-      ragflowIdsPresent: false,
-      qualityPassed: false,
-      blockingReason: 'DOCUMENT_SOURCE_NOT_FOUND',
-    },
-    qualityStatus: 'rejected',
-    errorCode: 'DOCUMENT_SOURCE_NOT_FOUND',
-    error: {
-      code: 'DOCUMENT_SOURCE_NOT_FOUND',
-      message: 'Document source is unavailable',
-      retryable: true,
-    },
-  },
-];
 
 const canonicalJson = (value: unknown): string => {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
@@ -935,12 +841,39 @@ const v2Handlers = [
     const id = String(params.conversationId);
     const record = v2Conversations.get(id);
     if (!record) return v2Error('CONVERSATION_NOT_FOUND', 'Conversation not found', 404);
-    const body = (await request.json()) as { clientMessageId?: string; question?: string };
-    const question = body.question ?? '';
+    // Accept both the JSON branch and the multipart branch
+    // (metadata JSON string + files), mirroring Gateway _parse_multipart_message.
+    const contentType = (request.headers.get('content-type') ?? '').toLowerCase();
+    let clientMessageId = '';
+    let question = '';
+    let attachments: MessageAttachmentMeta[] = [];
+    if (contentType.includes('multipart/form-data')) {
+      const form = await request.formData();
+      const rawMeta = form.get('metadata');
+      const meta = typeof rawMeta === 'string' && rawMeta
+        ? (JSON.parse(rawMeta) as { clientMessageId?: string; question?: string })
+        : {};
+      clientMessageId = meta.clientMessageId ?? '';
+      question = (meta.question ?? '').trim();
+      attachments = form
+        .getAll('files')
+        .filter((item): item is File => typeof item !== 'string')
+        .map((file, index) => ({
+          attachmentId: `mock-attachment-${Date.now()}-${index}`,
+          fileName: file.name,
+          mediaType: file.type || 'application/octet-stream',
+          sizeBytes: file.size,
+          sha256: null,
+        }));
+    } else {
+      const body = (await request.json()) as { clientMessageId?: string; question?: string };
+      clientMessageId = body.clientMessageId ?? '';
+      question = body.question ?? '';
+    }
     const scenario = v2ScenarioError(question);
     if (scenario) return scenario;
-    if (!body.clientMessageId || !question) return v2Error('VALIDATION_ERROR', 'Request validation failed', 422);
-    const runKey = `${id}:${body.clientMessageId}`;
+    if (!clientMessageId || (!question && attachments.length === 0)) return v2Error('VALIDATION_ERROR', 'Request validation failed', 422);
+    const runKey = `${id}:${clientMessageId}`;
     const existing = v2Runs.get(runKey);
     if (existing) {
       if (existing.question !== question) {
@@ -956,11 +889,13 @@ const v2Handlers = [
     }
     const noEvidence = question.toLowerCase().includes('noevidence');
     const streamFailure = question.includes('sse-error');
-    const answer = noEvidence ? '未找到可靠依据，无法回答。' : `Harness answer: ${question}`;
+    const answer = noEvidence
+      ? '未找到可靠依据，无法回答。'
+      : `Harness answer: ${question || `（附件：${attachments.map((item) => item.fileName).join('、')}）`}`;
     const citations = noEvidence ? [] : [v2Citation];
     const result: V2MessageRunResult = {
       conversationId: id,
-      clientMessageId: body.clientMessageId,
+      clientMessageId,
       runId: `run-${Date.now()}`,
       messageId: `message-${Date.now()}`,
       answer,
@@ -968,14 +903,22 @@ const v2Handlers = [
       citations,
       replayed: false,
     };
-    const userMessage: Message = { messageId: `${result.messageId}-user`, role: 'user', content: question, status: '已完成', citations: [], createdAt: v2Now() };
+    const userMessage: Message = {
+      messageId: `${result.messageId}-user`,
+      role: 'user',
+      content: question || `（${attachments.length} 个附件）`,
+      status: '已完成',
+      citations: [],
+      createdAt: v2Now(),
+      ...(attachments.length > 0 ? { attachments } : {}),
+    };
     const assistantMessage: Message = { messageId: result.messageId, role: 'assistant', content: answer, status: result.status, citations, createdAt: v2Now() };
     const storedMessages = [...record.messages, userMessage, assistantMessage];
     record.messages = storedMessages;
     record.detail = { ...record.detail, lastMessageAt: v2Now(), title: question.slice(0, 40) || record.detail.title };
     const pending = question.toLowerCase().includes('pending');
     v2Runs.set(runKey, { result, messages: storedMessages, question, pending });
-    if (pending) return HttpResponse.json({ conversationId: id, clientMessageId: body.clientMessageId, runId: result.runId, status: '处理中', replayed: true }, { status: 202 });
+    if (pending) return HttpResponse.json({ conversationId: id, clientMessageId, runId: result.runId, status: '处理中', replayed: true }, { status: 202 });
     if ((request.headers.get('accept') ?? '').includes('text/event-stream')) return v2Stream(result, question.includes('sse-error'));
     return HttpResponse.json(result);
   }),
@@ -1061,11 +1004,6 @@ const v2Handlers = [
       },
     });
   }),
-
-  // GET /enterprise/api/v3/documents/sync-status - FILE_SHARE diagnostic fixture.
-  http.get(`${V3_BASE}/documents/sync-status`, () =>
-    HttpResponse.json({ items: fileShareStatuses }),
-  ),
 ];
 
 handlers.push(...v2Handlers);

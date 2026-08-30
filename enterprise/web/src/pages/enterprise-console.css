@@ -657,7 +657,7 @@ a.console-secondary-button {
 
 @media (min-width: 1280px) {
   .harness-layout {
-    grid-template-columns: 360px minmax(0, 1fr) 300px;
+    grid-template-columns: 300px minmax(0, 1fr);
   }
 }
 
@@ -673,8 +673,7 @@ a.console-secondary-button {
   font-size: 12px;
 }
 
-.diag-input,
-.diag-select {
+.diag-input {
   min-height: 44px;
   width: 100%;
   border: 1px solid rgba(24, 27, 33, 0.09);
@@ -687,12 +686,7 @@ a.console-secondary-button {
   transition: background-color var(--motion-quick) var(--ease-out), border-color var(--motion-quick) var(--ease-out), box-shadow var(--motion-quick) var(--ease-out);
 }
 
-.diag-select {
-  appearance: none;
-}
-
-.diag-input:focus,
-.diag-select:focus {
+.diag-input:focus {
   outline: 0;
   border-color: rgba(10, 132, 255, 0.34);
   background: #fff;
@@ -838,6 +832,195 @@ a.console-secondary-button {
 .harness-shell [role='alert'] {
   margin: 0;
   border-radius: var(--r-card);
+}
+
+/* ---- Session context bar (chat column header) ---- */
+
+.harness-context-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid rgba(24, 27, 33, 0.075);
+  border-radius: var(--r-card);
+  background: rgba(255, 255, 255, 0.92);
+  padding: 10px 14px;
+}
+
+.harness-context-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.harness-context-summary strong {
+  color: var(--text);
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.harness-device-badge {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  border-radius: 999px;
+  border: 1px solid rgba(10, 132, 255, 0.22);
+  background: rgba(10, 132, 255, 0.08);
+  color: var(--accent);
+  padding: 3px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.harness-context-form {
+  display: grid;
+  gap: 10px;
+  width: 100%;
+  border-top: 1px dashed rgba(24, 27, 33, 0.12);
+  padding-top: 10px;
+}
+
+.harness-device-create {
+  display: grid;
+  gap: 10px;
+  border-top: 1px dashed rgba(24, 27, 33, 0.1);
+  margin-top: 6px;
+  padding-top: 12px;
+}
+
+/* ---- Citation drawer (overlay, right side) ---- */
+
+.harness-drawer-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  justify-content: flex-end;
+  pointer-events: none;
+}
+
+.harness-drawer-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(16, 20, 28, 0.32);
+  pointer-events: auto;
+}
+
+.harness-drawer {
+  position: relative;
+  pointer-events: auto;
+  width: min(360px, 92vw);
+  height: 100%;
+  overflow-y: auto;
+  background: #fff;
+  box-shadow: -18px 0 40px rgba(16, 20, 28, 0.18);
+  padding: 14px;
+  animation: harness-drawer-in var(--motion-standard) var(--ease-out) both;
+}
+
+@keyframes harness-drawer-in {
+  from {
+    transform: translateX(28px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .harness-drawer {
+    animation: none;
+  }
+}
+
+/* ---- Question attachments (paperclip + file chips) ---- */
+
+.harness-clip-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  border: 1px solid rgba(24, 27, 33, 0.1);
+  background: #fff;
+  color: var(--text-2);
+  cursor: pointer;
+  transition: color var(--motion-quick) var(--ease-out), border-color var(--motion-quick) var(--ease-out), background-color var(--motion-quick) var(--ease-out);
+}
+
+.harness-clip-button:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: rgba(10, 132, 255, 0.3);
+  background: rgba(10, 132, 255, 0.05);
+}
+
+.harness-clip-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.harness-file-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.harness-file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  border-radius: 999px;
+  border: 1px solid rgba(24, 27, 33, 0.1);
+  background: #f4f5f7;
+  color: var(--text-2);
+  font-size: 12px;
+  padding: 3px 6px 3px 10px;
+}
+
+.harness-file-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.harness-file-chip-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 0;
+  background: rgba(24, 27, 33, 0.08);
+  color: var(--text-2);
+  cursor: pointer;
+  transition: background-color var(--motion-quick) var(--ease-out);
+}
+
+.harness-file-chip-remove:hover {
+  background: rgba(24, 27, 33, 0.16);
+}
+
+.harness-bubble-user .harness-file-chips {
+  margin-top: 8px;
+}
+
+.harness-bubble-user .harness-file-chip {
+  border-color: rgba(255, 255, 255, 0.34);
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
 }
 
 .runtime-card .console-card-body {
@@ -1715,12 +1898,434 @@ a.console-secondary-button {
   .console-card,
   .workbench .console-nav,
   .console-token-row,
-  .diag-input,
-  .diag-select {
+  .diag-input {
     border-color: rgba(0, 0, 0, 0.35);
   }
 
   .workbench-side {
     background: #f4f5f7;
+  }
+}
+
+/* ---- System settings (admin): tables, toolbars, probe cells ---- */
+
+.console-table-wrap {
+  overflow-x: auto;
+  margin: 8px 12px 12px;
+  border: 1px solid rgba(24, 27, 33, 0.06);
+  border-radius: 14px;
+  background: #fff;
+}
+
+.console-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.console-table th,
+.console-table td {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--hairline);
+  text-align: left;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.console-table th {
+  color: var(--text-3);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  background: var(--hover);
+}
+
+.console-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.console-table tbody tr:hover {
+  background: var(--hover);
+}
+
+.console-table-mono {
+  font-family: var(--mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+/* 表格行内动作按钮：紧凑尺寸，避免撑高行（配合 td 垂直居中） */
+.console-table .console-secondary-button {
+  min-height: 26px;
+  padding: 0 12px;
+  font-size: 12px;
+}
+
+/* 操作列：表头与单元格内容水平居中 */
+.console-table .console-col-center {
+  text-align: center;
+}
+
+.console-status--connected .console-status-dot {
+  background: var(--live);
+}
+
+.console-probe-cell {
+  display: grid;
+  gap: 6px;
+  justify-items: center;
+}
+
+.console-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(24, 27, 33, 0.06);
+  border-radius: 14px;
+  background: var(--hover);
+}
+
+.console-toolbar form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.console-toolbar label {
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.console-toolbar input {
+  min-height: 36px;
+  width: min(220px, 100%);
+  border: 1px solid rgba(24, 27, 33, 0.09);
+  border-radius: 10px;
+  background: #fff;
+  padding: 0 12px;
+  color: var(--text);
+  font-size: 12px;
+  transition:
+    border-color var(--motion-quick) var(--ease-out),
+    box-shadow var(--motion-quick) var(--ease-out);
+}
+
+.console-toolbar input:focus {
+  outline: 0;
+  border-color: rgba(10, 132, 255, 0.34);
+  box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.13);
+}
+
+.console-toolbar .console-secondary-button {
+  min-height: 36px;
+  padding: 0 14px;
+  font-size: 12px;
+}
+
+.console-pagination {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin: 0 12px 14px;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.console-pagination .console-secondary-button {
+  min-height: 34px;
+  padding: 0 14px;
+  font-size: 12px;
+}
+
+/* ---- Metadata toolbar: selects, filter chips, column menu ---- */
+
+.console-toolbar select {
+  min-height: 36px;
+  border: 1px solid rgba(24, 27, 33, 0.09);
+  border-radius: 10px;
+  background: #fff;
+  padding: 0 10px;
+  color: var(--text);
+  font-size: 12px;
+  transition:
+    border-color var(--motion-quick) var(--ease-out),
+    box-shadow var(--motion-quick) var(--ease-out);
+}
+
+.console-toolbar select:focus {
+  outline: 0;
+  border-color: rgba(10, 132, 255, 0.34);
+  box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.13);
+}
+
+.console-toolbar .console-toolbar-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.console-toolbar .console-toolbar-spacer {
+  flex: 1 1 24px;
+}
+
+.console-toolbar .console-icon-button {
+  min-height: 36px;
+  width: 36px;
+}
+
+.console-toolbar-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.console-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 28px;
+  border-radius: var(--r-pill);
+  background: rgba(10, 132, 255, 0.09);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 550;
+  padding: 0 4px 0 10px;
+}
+
+.console-filter-chip > button {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color var(--motion-quick) var(--ease-out);
+}
+
+.console-filter-chip > button:hover {
+  background: rgba(10, 132, 255, 0.16);
+}
+
+.console-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0 12px 8px;
+}
+
+.console-summary-chip {
+  border: 1px solid transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  transition:
+    background-color var(--motion-quick) var(--ease-out),
+    border-color var(--motion-quick) var(--ease-out),
+    color var(--motion-quick) var(--ease-out);
+}
+
+.console-summary-chip:hover {
+  border-color: rgba(10, 132, 255, 0.22);
+  color: var(--accent);
+}
+
+.console-summary-chip.is-active {
+  border-color: rgba(10, 132, 255, 0.3);
+  background: rgba(10, 132, 255, 0.1);
+  color: var(--accent);
+  font-weight: 620;
+}
+
+.console-th-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color var(--motion-quick) var(--ease-out);
+}
+
+.console-th-btn:hover {
+  color: var(--text);
+}
+
+.console-th-btn.is-active {
+  color: var(--accent);
+}
+
+.console-th-btn svg {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+}
+
+.console-col-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.console-col-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 30;
+  min-width: 200px;
+  max-height: 60vh;
+  overflow-y: auto;
+  border: 1px solid rgba(24, 27, 33, 0.08);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: var(--sh-panel);
+  padding: 10px 12px;
+}
+
+.console-col-menu-title {
+  margin: 0 0 6px;
+  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.console-col-menu-row {
+  display: flex;
+  min-height: 30px;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-body);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+/* 菜单在 .console-toolbar 内，必须显式还原 checkbox 尺寸，
+   否则会被 `.console-toolbar input` 的输入框样式拉成 36px 高。 */
+.console-col-menu-row input {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  accent-color: var(--accent);
+}
+
+.console-col-menu-row input:disabled {
+  cursor: not-allowed;
+}
+
+.console-col-menu-actions {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--hairline);
+}
+
+.console-col-menu-actions .console-secondary-button {
+  min-height: 30px;
+  padding: 0 12px;
+  font-size: 12px;
+}
+
+/* ---- Status pill tones for business codes ---- */
+
+.console-status--ok .console-status-dot {
+  background: var(--live);
+}
+
+.console-status--warn .console-status-dot {
+  background: var(--heat);
+}
+
+.console-status--muted .console-status-dot {
+  background: var(--text-4);
+}
+
+/* ---- Conversation admin chat ---- */
+
+.console-chat {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 8px 12px 14px;
+  padding: 14px;
+  border: 1px solid rgba(24, 27, 33, 0.06);
+  border-radius: 16px;
+  background: var(--hover);
+}
+
+.console-chat-bubble {
+  display: grid;
+  gap: 6px;
+  max-width: 72%;
+  padding: 10px 14px;
+  border-radius: 16px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.console-chat-bubble--user {
+  align-self: flex-start;
+  border: 1px solid rgba(24, 27, 33, 0.08);
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(16, 20, 28, 0.04);
+}
+
+.console-chat-bubble--assistant {
+  align-self: flex-end;
+  border: 1px solid rgba(10, 132, 255, 0.16);
+  background: rgba(10, 132, 255, 0.08);
+}
+
+.console-chat-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-3);
+  font-size: 10px;
+}
+
+.console-chat-content > :first-child {
+  margin-top: 0;
+}
+
+.console-chat-content > :last-child {
+  margin-bottom: 0;
+}
+
+.console-chat-text {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 620px) {
+  .console-chat-bubble {
+    max-width: 88%;
   }
 }

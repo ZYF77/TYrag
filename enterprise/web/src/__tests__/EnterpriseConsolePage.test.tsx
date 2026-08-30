@@ -33,33 +33,13 @@ describe('EnterpriseConsolePage', () => {
     expect(serviceCard.textContent).toContain('sessionStorage 生命周期');
     expect(serviceCard.textContent).not.toContain('console-test-token');
     await screen.findByText(/用户映射：active/);
-    await userEvent.setup().click(screen.getByRole('button', { name: '文档状态' }));
-    await screen.findByText('FILE-SHARE-READY');
-  });
-
-  it('isolates a FILE_SHARE outage while service and session cards remain', async () => {
-    sessionStorage.setItem('enterprise.harness.jwt', 'console-test-token');
-    server.use(
-      http.get('/enterprise/api/v3/documents/sync-status', () =>
-        errorResponse('FILE_STATUS_UNAVAILABLE', 'FILE_SHARE status unavailable'),
-      ),
-    );
-
-    const user = userEvent.setup();
-    render(<EnterpriseConsolePage />);
-
-    expect(screen.getByTestId('console-service-card')).toBeTruthy();
-    expect(screen.getByText('Gateway liveness')).toBeTruthy();
-    await user.click(screen.getByRole('button', { name: '文档状态' }));
-    await screen.findByText(/FILE_STATUS_UNAVAILABLE/);
-    await user.click(screen.getByRole('button', { name: '会话历史' }));
-    expect(screen.getByTestId('console-conversation-card')).toBeTruthy();
+    // 文档状态面板已移除（用途由系统设置 → 文件元数据覆盖），导航不再提供该入口。
+    expect(screen.queryByRole('button', { name: '文档状态' })).toBeNull();
   });
 
   it('shows unauthorized modules without exposing credentials', async () => {
     server.use(
       http.get('/enterprise/api/v1/auth/me', () => errorResponse('AUTH_TOKEN_MISSING', 'Authentication token is required')),
-      http.get('/enterprise/api/v3/documents/sync-status', () => errorResponse('AUTH_HMAC_REQUIRED', 'HMAC producer required')),
       http.get('/enterprise/api/v2/conversations', () => errorResponse('AUTH_TOKEN_INVALID', 'Authentication token is invalid')),
     );
 
@@ -68,10 +48,6 @@ describe('EnterpriseConsolePage', () => {
 
     await waitFor(() => {
       expect(screen.getByTestId('console-service-card').textContent).toContain('unauthorized');
-    });
-    await user.click(screen.getByRole('button', { name: '文档状态' }));
-    await waitFor(() => {
-      expect(screen.getByTestId('console-document-card').textContent).toContain('unauthorized');
     });
     await user.click(screen.getByRole('button', { name: '会话历史' }));
     await waitFor(() => {
