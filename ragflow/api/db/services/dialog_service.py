@@ -74,6 +74,15 @@ def _grounding_requested(version) -> bool:
     return type(version) is int and version == 1
 
 
+# Keep the existing ``prompt`` response field truthy so RAGFlow can expose its
+# prompt dialog, but never put the actual system prompt, question, or evidence
+# in it for enterprise grounding requests.
+_GROUNDING_PROMPT_SUMMARY = (
+    "Enterprise grounding is enabled. The full prompt and source content are hidden; "
+    "the thinking section contains sanitized execution stages."
+)
+
+
 def _grounding_markers(knowledge: str) -> tuple[str, str]:
     """Return collision-free per-request markers for one knowledge body."""
     knowledge = knowledge or ""
@@ -244,7 +253,7 @@ def _grounding_abstain_event(**extra) -> dict:
     payload = {
         "answer": STANDARD_ABSTAIN_ANSWER,
         "reference": empty_reference(),
-        "prompt": "",
+        "prompt": _GROUNDING_PROMPT_SUMMARY,
         "audio_binary": None,
         "final": True,
     }
@@ -579,7 +588,12 @@ async def async_chat_solo(dialog, messages, stream=True, session_id=None, ground
         if grounding_enabled:
             answer = last_state.full_text if last_state else ""
             fused, _result = _fuse_or_keep(
-                {"answer": answer, "reference": {}, "prompt": "", "created_at": time.time()},
+                {
+                    "answer": answer,
+                    "reference": {},
+                    "prompt": _GROUNDING_PROMPT_SUMMARY if grounding_enabled else "",
+                    "created_at": time.time(),
+                },
                 effective_knowledge="",
                 attachment_observations=attachment_observations,
                 allowed_identifiers=allowed_identifiers,
@@ -597,6 +611,7 @@ async def async_chat_solo(dialog, messages, stream=True, session_id=None, ground
             logging.debug("User: {}|Assistant: {}".format(user_content, answer))
         payload = {"answer": answer, "reference": {}, "audio_binary": tts(tts_mdl, answer), "prompt": "", "created_at": time.time()}
         if grounding_enabled:
+            payload["prompt"] = _GROUNDING_PROMPT_SUMMARY
             payload, _result = _fuse_or_keep(
                 payload,
                 effective_knowledge="",
@@ -1342,7 +1357,7 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
         payload = {
             "answer": think + answer,
             "reference": refs,
-            "prompt": "" if grounding_enabled else re.sub(r"\n", "  \n", prompt),
+            "prompt": _GROUNDING_PROMPT_SUMMARY if grounding_enabled else re.sub(r"\n", "  \n", prompt),
             "created_at": time.time(),
         }
         if grounding_enabled:
@@ -2001,6 +2016,17 @@ def _extract_visible_answer(text: str) -> str:
     return f"<think>{thought}</think>{answer}"
 
 
+def _append_public_think_trace(answer: str, stages: list[str]) -> str:
+    """Attach only already-sanitized stage messages to a final answer."""
+    visible = _extract_visible_answer(answer)
+    trace = "\n".join(stage.strip() for stage in stages if stage and stage.strip())
+    if not trace:
+        return visible
+    if visible.startswith("<think>"):
+        return f"<think>{trace}\n{visible[len('<think>'):]}"
+    return f"<think>{trace}</think>{visible}"
+
+
 async def _stream_with_think_delta(stream_iter, min_tokens: int = 16):
     state = _ThinkStreamState()
 
@@ -2428,7 +2454,12 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
         if answer.lower().find("invalid key") >= 0 or answer.lower().find("invalid api") >= 0:
             answer += " Please set LLM API-Key in 'User Setting -> Model providers -> API-Key'"
 
-        return {"answer": think + answer, "reference": refs, "prompt": "", "created_at": time.time()}
+        return {
+            "answer": think + answer,
+            "reference": refs,
+            "prompt": _GROUNDING_PROMPT_SUMMARY if grounding_enabled else "",
+            "created_at": time.time(),
+        }
 
     # The agentic-search graph composes the final cited answer itself, so we
     # stream its tokens straight to the client instead of relaying a tool
@@ -2444,15 +2475,35 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
     if stream:
         # Surface the agentic pipeline's bracket-tagged progress logs to the
         # client as <think> content, interleaved with the real token stream.
-        from rag.advanced_rag.think_log import install_think_log_handler, set_think_log_sink, reset_think_log_sink
+        from rag.advanced_rag.think_log import (
+            install_think_log_handler,
+            public_think_log_detail,
+            reset_think_log_sink,
+            set_think_log_sink,
+        )
 
         install_think_log_handler()
         event_queue: asyncio.Queue = asyncio.Queue()
         loop = asyncio.get_running_loop()
+        think_stages: list[str] = []
+        think_stages_seen: set[str] = set()
 
         def _log_sink(msg):
+            safe_stage = public_think_log_detail(msg)
+            if safe_stage:
+                safe_stage = safe_stage.strip()
+                if safe_stage not in think_stages_seen and len(think_stages) < 64:
+                    think_stages_seen.add(safe_stage)
+                    think_stages.append(safe_stage)
             try:
-                loop.call_soon_threadsafe(event_queue.put_nowait, ("log", msg))
+                current_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                current_loop = None
+            try:
+                if current_loop is loop:
+                    event_queue.put_nowait(("log", msg))
+                else:
+                    loop.call_soon_threadsafe(event_queue.put_nowait, ("log", msg))
             except RuntimeError:
                 pass
 
@@ -2514,7 +2565,7 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
 
         full_answer = last_state.full_text if last_state else ""
         if full_answer:
-            final = await decorate_answer(_extract_visible_answer(full_answer))
+            final = await decorate_answer(_append_public_think_trace(full_answer, think_stages))
             final["final"] = True
             final["audio_binary"] = None
             yield final

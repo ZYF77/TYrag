@@ -47,6 +47,24 @@ _think_log_redact: contextvars.ContextVar[bool] = contextvars.ContextVar("think_
 # Stage tags like "[Hybrid search]" stay; quoted query/knowledge body does not.
 _STAGE_TAG_RE = re.compile(r"^((?:<br>)?\s*\[[^\]]+\])")
 
+# Descriptions are deliberately static.  The log body can contain questions,
+# document text, tool arguments, or results, so none of that is copied into a
+# user-visible trace.
+_STAGE_DESCRIPTIONS = {
+    "[Agentic RAG]": "started agentic retrieval",
+    "[Formalizing the question]": "normalized the request",
+    "[Preliminary search]": "ran the initial authorized search",
+    "[Planner]": "planned the retrieval steps",
+    "[Orchestrator]": "coordinated the retrieval steps",
+    "[Agentic research]": "reviewed authorized evidence",
+    "[Hybrid search]": "ran vector and keyword retrieval",
+    "[BM25 search]": "ran keyword retrieval",
+    "[Web search]": "ran the enabled web search",
+    "[Composing the answer]": "composed the answer from evidence",
+    "[Tool loop]": "ran the next approved tool step",
+    "[Function tool]": "ran an approved function tool",
+}
+
 # Only bracket-tagged INFO lines from these logger namespaces are surfaced.
 _SCOPED_PREFIXES = ("rag.advanced_rag", "rag.llm.chat_model", "rag.llm.tool_decorator")
 
@@ -71,7 +89,7 @@ class ThinkLogHandler(logging.Handler):
         if not msg or not msg.lstrip().startswith("["):
             return
         if _think_log_redact.get():
-            msg = public_think_log(msg)
+            msg = public_think_log_detail(msg)
             if not msg:
                 return
         try:
@@ -90,6 +108,18 @@ def public_think_log(msg: str) -> str | None:
     if not match:
         return None
     return match.group(1)
+
+
+def public_think_log_detail(msg: str) -> str | None:
+    """Return a safe, human-readable stage description without log details."""
+    tag = public_think_log(msg)
+    if not tag:
+        return None
+    display_tag = tag.strip()
+    if display_tag.startswith("<br>"):
+        display_tag = display_tag[4:].strip()
+    description = _STAGE_DESCRIPTIONS.get(display_tag)
+    return f"{display_tag} {description}" if description else display_tag
 
 
 def install_think_log_handler() -> None:
