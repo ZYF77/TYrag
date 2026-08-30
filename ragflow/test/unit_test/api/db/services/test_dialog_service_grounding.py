@@ -43,6 +43,26 @@ def test_grounding_request_flag_rejects_non_int_one():
     assert dialog_service._grounding_requested(1) is True
 
 
+def test_completion_status_is_exact_match_only():
+    assert dialog_service._completion_status("设备 EQ-104 压力 2 MPa") == "completed"
+    assert dialog_service._completion_status(STANDARD_ABSTAIN_ANSWER) == "no_reliable_evidence"
+    assert dialog_service._completion_status("  " + STANDARD_ABSTAIN_ANSWER + "  ") == "no_reliable_evidence"
+    assert dialog_service._completion_status("") == "no_reliable_evidence"
+    assert dialog_service._completion_status("   ") == "no_reliable_evidence"
+    assert dialog_service._completion_status(None) == "no_reliable_evidence"
+    # Near-miss wording must NOT be judged as abstain: no fuzzy/regex matching.
+    assert dialog_service._completion_status("未找到可靠依据，无法回答") == "completed"
+    assert dialog_service._completion_status("抱歉，未找到可靠依据，无法回答。") == "completed"
+
+
+def test_grounding_abstain_event_carries_no_reliable_evidence_status():
+    event = dialog_service._grounding_abstain_event()
+
+    assert event["status"] == "no_reliable_evidence"
+    assert event["final"] is True
+    assert event["answer"] == STANDARD_ABSTAIN_ANSWER
+
+
 class _FakeModel:
     trace_context = {}
 
@@ -162,6 +182,7 @@ def test_grounding_stream_does_not_yield_candidate_tokens(monkeypatch):
     final = [event for event in events if event.get("final")]
     assert len(final) == 1
     assert "EQ-104" in final[0]["answer"]
+    assert final[0]["status"] == "completed"
     assert "<GROUNDING_START:" in model.systems[0]
     assert "<GROUNDING_END:" in model.systems[0]
 
@@ -232,6 +253,7 @@ def test_grounding_guard_fail_replaces_candidate_before_yield(monkeypatch):
     assert "candidate" not in answers
     assert events[-1]["answer"] == STANDARD_ABSTAIN_ANSWER
     assert events[-1]["reference"].get("chunks") == []
+    assert events[-1]["status"] == "no_reliable_evidence"
     assert all(not event.get("answer") for event in events if not event.get("final"))
     assert model.stream_calls == 1
     assert model.chat_calls == 0
@@ -279,6 +301,7 @@ def test_grounding_guard_short_retry_on_numeric_only_recovers(monkeypatch):
     assert model.chat_calls == 1
     assert "发票" in events[-1]["answer"]
     assert events[-1]["answer"] != STANDARD_ABSTAIN_ANSWER
+    assert events[-1]["status"] == "completed"
 
 
 def test_grounding_guard_short_retry_still_abstains_when_retry_ungrounded(monkeypatch):
@@ -301,6 +324,7 @@ def test_grounding_guard_short_retry_still_abstains_when_retry_ungrounded(monkey
     assert model.chat_calls == 2
     assert events[-1]["answer"] == STANDARD_ABSTAIN_ANSWER
     assert events[-1]["reference"].get("chunks") == []
+    assert events[-1]["status"] == "no_reliable_evidence"
 
 
 def test_grounding_kpa_mpa_passes_and_keeps_answer(monkeypatch):
@@ -337,6 +361,7 @@ def test_grounding_non_stream_and_empty_response_are_terminal_only(monkeypatch):
     assert events[0]["final"] is True
     assert events[0]["answer"] == STANDARD_ABSTAIN_ANSWER
     assert events[0]["reference"].get("chunks") == []
+    assert events[0]["status"] == "no_reliable_evidence"
     assert "grounding" not in events[0]
 
 
@@ -387,6 +412,7 @@ def test_grounding_prompt_fit_rejects_without_calling_model_when_one_block_canno
 
     assert model.systems == []
     assert events[-1]["answer"] == STANDARD_ABSTAIN_ANSWER
+    assert events[-1]["status"] == "no_reliable_evidence"
     assert "grounding" not in events[-1]
 
 
@@ -405,6 +431,7 @@ def test_grounding_does_not_change_unversioned_payload(monkeypatch):
     assert events
     assert all("grounding" not in event for event in events)
     assert len(events) == 1
+    assert events[-1]["status"] == "completed"
     assert len(model.systems) == 1
 
 
@@ -422,6 +449,9 @@ def test_unversioned_stream_still_yields_candidate_tokens(monkeypatch):
 
     assert any(event.get("answer") == "streamed candidate WO-99999" for event in events if not event.get("final"))
     assert all("grounding" not in event for event in events)
+    final = [event for event in events if event.get("final")]
+    assert len(final) == 1
+    assert final[0]["status"] == "completed"
 
 
 def test_grounding_solo_path_does_not_expose_effective_knowledge(monkeypatch):
@@ -454,6 +484,33 @@ def test_grounding_solo_path_does_not_expose_effective_knowledge(monkeypatch):
     assert "grounding" not in events[0]
     assert bundle_calls[0][2]["disable_langfuse"] is True
     assert len(bundle_calls) == 1
+
+
+def test_grounding_solo_stream_final_carries_status(monkeypatch):
+    monkeypatch.setattr(dialog_service, "_IDENTIFIER_NUMERIC_FUSE_ENABLED", True)
+    model = _FakeModel("设备运行正常")
+    _patch_chat(monkeypatch, model, knowledge=())
+    monkeypatch.setattr(
+        dialog_service,
+        "LLMBundle",
+        lambda tenant_id, config, **kwargs: model,
+    )
+    dialog = _dialog()
+    dialog.kb_ids = []
+
+    events = _collect(
+        dialog_service.async_chat(
+            dialog,
+            [{"role": "user", "content": "question body"}],
+            stream=True,
+            grounding_version=1,
+        )
+    )
+
+    final = [event for event in events if event.get("final")]
+    assert len(final) == 1
+    assert final[0]["answer"] == "设备运行正常"
+    assert final[0]["status"] == "completed"
 
 
 def test_grounding_request_does_not_log_sensitive_prompt_or_answer(monkeypatch, caplog):
@@ -596,6 +653,9 @@ def test_rag_agent_grounding_with_reasoning_uses_agentic_path(monkeypatch):
     assert rag_tools_kwargs[0]["web_search"] is None
     assert any("档位答案" in str(event.get("answer") or "") for event in events)
     assert any(not event.get("final") and event.get("answer") == "档位答案" for event in events)
+    final = [event for event in events if event.get("final")]
+    assert len(final) == 1
+    assert final[0]["status"] == "completed"
 
 
 @pytest.mark.parametrize("failure_stage", ["create", "retrieve"])

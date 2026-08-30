@@ -249,12 +249,33 @@ async def _generate_short_fuse_retry(
     return await chat_mdl.async_chat(system, history, retry_conf, images=image_files)
 
 
+# Explicit terminal business status for chat completions (/api/v1/chat/completions).
+# The Gateway consumes `data.status` instead of guessing from the answer body.
+_COMPLETION_STATUS_COMPLETED = "completed"
+_COMPLETION_STATUS_NO_RELIABLE_EVIDENCE = "no_reliable_evidence"
+_COMPLETION_STATUS_FAILED = "failed"
+
+
+def _completion_status(answer: str) -> str:
+    """Terminal business status for a completion's final answer.
+
+    Exact-match only: abstain when the final answer is blank or exactly the
+    standard abstain text. No fuzzy/regex wording matching — Gateway maps this
+    field to the user-facing business state and never re-judges by text.
+    """
+    text = str(answer or "").strip()
+    if not text or text == STANDARD_ABSTAIN_ANSWER:
+        return _COMPLETION_STATUS_NO_RELIABLE_EVIDENCE
+    return _COMPLETION_STATUS_COMPLETED
+
+
 def _grounding_abstain_event(**extra) -> dict:
     payload = {
         "answer": STANDARD_ABSTAIN_ANSWER,
         "reference": empty_reference(),
         "prompt": _GROUNDING_PROMPT_SUMMARY,
         "audio_binary": None,
+        "status": _COMPLETION_STATUS_NO_RELIABLE_EVIDENCE,
         "final": True,
     }
     payload.update(extra)
@@ -600,6 +621,7 @@ async def async_chat_solo(dialog, messages, stream=True, session_id=None, ground
             )
             fused["audio_binary"] = None
             fused["final"] = True
+            fused["status"] = _completion_status(fused.get("answer") or "")
             yield fused
     else:
         if model_config["model_type"] == "chat":
@@ -619,6 +641,7 @@ async def async_chat_solo(dialog, messages, stream=True, session_id=None, ground
                 allowed_identifiers=allowed_identifiers,
             )
             payload["audio_binary"] = tts(tts_mdl, payload.get("answer") or "")
+        payload["status"] = _completion_status(payload.get("answer") or "")
         yield payload
 
 
@@ -1189,6 +1212,7 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
             "reference": kbinfos,
             "prompt": "\n\n### Query:\n%s" % " ".join(questions),
             "audio_binary": tts(tts_mdl, empty_res),
+            "status": _completion_status(escaped_answer),
             "final": True,
         }
         return
@@ -1424,6 +1448,10 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
             final = await decorate_answer(_extract_visible_answer(thought + full_answer))
             final["final"] = True
             final["audio_binary"] = None
+            # Compute status from the decorated answer BEFORE blanking it:
+            # in non-grounding mode the text was already streamed via deltas
+            # and the final frame intentionally carries an empty answer body.
+            final["status"] = _completion_status(final.get("answer") or "")
             if not grounding_enabled:
                 final["answer"] = ""
             yield final
@@ -1440,6 +1468,7 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
             logging.debug("User: {}|Assistant: {}".format(user_content, answer))
         res = await decorate_answer(answer)
         res["audio_binary"] = tts(tts_mdl, res.get("answer") or "")
+        res["status"] = _completion_status(res.get("answer") or "")
         yield res
 
     return
@@ -2568,6 +2597,7 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
             final = await decorate_answer(_append_public_think_trace(full_answer, think_stages))
             final["final"] = True
             final["audio_binary"] = None
+            final["status"] = _completion_status(final.get("answer") or "")
             yield final
     else:
         answer = await chat_mdl.async_chat(rag_tools.sys_prompt(), messages, gen_conf)
@@ -2576,5 +2606,6 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
             logging.debug("User: {}|Assistant: {}".format(user_content, answer))
         res = await decorate_answer(answer)
         res["audio_binary"] = tts(tts_mdl, answer)
+        res["status"] = _completion_status(res.get("answer") or "")
         yield res
     return

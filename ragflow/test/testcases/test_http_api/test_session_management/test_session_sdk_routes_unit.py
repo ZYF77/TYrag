@@ -2266,6 +2266,9 @@ def _load_chat_api_module(monkeypatch):
     tenant_model_svc.resolve_model_config = lambda **_k: {}
     tenant_model_svc.get_api_key = lambda **_k: "fake-api-key"
     tenant_model_svc.split_model_name = lambda model_name: (model_name, "", "")
+    tenant_model_svc.get_composite_model_name_by_id = lambda **_k: "fake-composite-model"
+    tenant_model_svc.get_model_config_by_id = lambda **_k: {}
+    tenant_model_svc.resolve_model_id = lambda **_k: None
     monkeypatch.setitem(sys.modules, "api.db.joint_services.tenant_model_service", tenant_model_svc)
 
     chunk_feedback_mod = ModuleType("api.db.services.chunk_feedback_service")
@@ -2318,6 +2321,7 @@ def _load_chat_api_module(monkeypatch):
     )
     dialog_svc_mod.async_chat = lambda *_a, **_k: None
     dialog_svc_mod.gen_mindmap = lambda *_a, **_k: None
+    dialog_svc_mod.rag_agent = lambda *_a, **_k: None
     monkeypatch.setitem(sys.modules, "api.db.services.dialog_service", dialog_svc_mod)
 
     kb_svc_mod = ModuleType("api.db.services.knowledgebase_service")
@@ -2408,7 +2412,7 @@ def test_session_completion_user_id_not_spoofable(monkeypatch):
 
     captured_user_ids = []
 
-    async def _spy_create_session(_chat_id, _dialog, user_id):
+    async def _spy_create_session(_chat_id, _dialog, user_id, **_kwargs):
         """Record the user_id passed to _create_session_for_completion, then abort early."""
         captured_user_ids.append(user_id)
         raise RuntimeError("stop-sentinel")
@@ -2430,6 +2434,42 @@ def test_session_completion_user_id_not_spoofable(monkeypatch):
     _run(inspect.unwrap(module.session_completion)())
 
     assert captured_user_ids == [module.current_user.id]
+
+
+@pytest.mark.p2
+def test_session_completion_stream_error_frame_carries_failed_status(monkeypatch):
+    """The code:500 SSE error frame must carry data.status="failed" so the
+    Gateway can persist an explicit terminal failure instead of guessing."""
+    module = _load_chat_api_module(monkeypatch)
+
+    async def _failing_rag_agent(*_args, **_kwargs):
+        raise RuntimeError("model exploded")
+        yield  # noqa: unreachable - makes this an async generator
+
+    monkeypatch.setattr(module, "rag_agent", _failing_rag_agent)
+    monkeypatch.setattr(
+        module,
+        "get_request_json",
+        lambda: _AwaitableValue(
+            {
+                "messages": [{"role": "user", "content": "hello"}],
+                "chat_id": "chat-1",
+                "stream": True,
+            }
+        ),
+    )
+
+    resp = _run(inspect.unwrap(module.session_completion)())
+    assert isinstance(resp, _StubResponse)
+
+    chunks = _run(_collect_stream(resp.body))
+    frames = [json.loads(chunk[len("data:"):]) for chunk in chunks if chunk.startswith("data:")]
+    error_frames = [frame for frame in frames if frame.get("code") == 500]
+    assert len(error_frames) == 1
+    assert "**ERROR**: model exploded" in error_frames[0]["data"]["answer"]
+    assert error_frames[0]["data"]["status"] == "failed"
+    # The stream still terminates with the normal end marker afterwards.
+    assert frames[-1] == {"code": 0, "message": "", "data": True}
 
 
 @pytest.mark.p2

@@ -75,6 +75,18 @@ patches:
       - "ragflow/test/testcases/test_web_api/test_document_app/test_upload_info_unit.py"
       - "enterprise/tests/test_ragflow_chat_attachment_client.py"
     upgrade_notes: "Delete only a 32-hex upload id from the authenticated tenant downloads bucket; never accept bucket or owner from the request."
+  - id: RF-PATCH-007
+    reason: "chat completion final payloads carry an explicit business terminal status (completed / no_reliable_evidence / failed) so the Gateway maps instead of guessing from answer text"
+    upstream_files:
+      - ragflow/api/db/services/dialog_service.py
+      - ragflow/api/apps/restful_apis/chat_api.py
+    adr: "decisions/ADR-015-completion-explicit-terminal-status.md"
+    change_request: "patches/CHANGE-REQUEST-RF-PATCH-007-COMPLETION-STATUS.md"
+    introduced_in: "RF-PATCH-007-completion-status"
+    tests:
+      - "ragflow/test/unit_test/api/db/services/test_dialog_service_grounding.py"
+      - "ragflow/test/testcases/test_http_api/test_session_management/test_session_sdk_routes_unit.py::test_session_completion_stream_error_frame_carries_failed_status"
+    upgrade_notes: "Replay _completion_status plus the status keys on async_chat_solo/async_chat/rag_agent final payloads, _grounding_abstain_event, and the chat_api code:500 SSE error frame; keep the stream-final status computed before the non-grounding answer blanking. Rollback removes only the status keys and must be paired with disabling the Gateway's status read."
   - id: RF-PATCH-008
     reason: "grounding-safe prompt summary and deduplicated agentic stage trace remain visible in RAGFlow live and persisted sessions"
     upstream_files:
