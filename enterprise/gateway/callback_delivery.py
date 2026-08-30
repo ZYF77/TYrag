@@ -6,6 +6,12 @@ to server-configured device-system endpoints.
 
 from __future__ import annotations
 
+from sqlalchemy.ext.asyncio import AsyncConnection
+
+from enterprise.gateway.db import GatewayDatabase
+from enterprise.gateway.db.dialect import begin_transaction, exec_sql, fetchall, fetchone
+from enterprise.gateway.db.exceptions import PersistenceConflictError
+
 import asyncio
 import hashlib
 import json
@@ -15,10 +21,10 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import Any, Mapping
 from typing import Any, Literal
 from urllib.parse import urlparse
 
-import aiosqlite
 import httpx
 
 from enterprise.gateway.audit_log import write_feed_callback_audit
@@ -28,7 +34,7 @@ from enterprise.gateway.sync.models import ExtDocumentMap, utc_now
 logger = logging.getLogger(__name__)
 
 TerminalStatus = Literal["retrievable", "failed", "review_required"]
-DeliveryState = Literal["pending", "delivered", "dead_letter"]
+DeliveryState = Literal["pending", "processing", "delivered", "dead_letter"]
 
 CALLBACK_EVENT_TYPE = "document.terminal"
 CALLBACK_PAYLOAD_VERSION = "1"
@@ -43,39 +49,6 @@ def is_internal_callback_document(external_document_id: str | None) -> bool:
 
 # Freeze schedule: 1/5/30/120/600… then hold at 600s through attempt 8.
 RETRY_DELAY_SECONDS = (1, 5, 30, 120, 600, 600, 600, 600)
-
-CREATE_CALLBACK_DELIVERY = """
-CREATE TABLE IF NOT EXISTS callback_delivery (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    delivery_id TEXT NOT NULL UNIQUE,
-    originating_event_id TEXT NOT NULL,
-    tenant_id TEXT NOT NULL,
-    source_system TEXT NOT NULL,
-    external_document_id TEXT NOT NULL,
-    source_version_id TEXT NOT NULL,
-    terminal_status TEXT NOT NULL,
-    payload_json TEXT NOT NULL,
-    payload_hash TEXT NOT NULL,
-    endpoint_url TEXT NOT NULL,
-    attempts INTEGER NOT NULL DEFAULT 0,
-    max_attempts INTEGER NOT NULL DEFAULT 8,
-    next_attempt_at TEXT,
-    state TEXT NOT NULL DEFAULT 'pending',
-    last_http_status INTEGER,
-    last_error_code TEXT,
-    last_error_message TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    UNIQUE(
-        tenant_id, source_system, external_document_id,
-        source_version_id, terminal_status
-    )
-);
-
-CREATE INDEX IF NOT EXISTS idx_callback_delivery_pending
-    ON callback_delivery(state, next_attempt_at);
-"""
-
 
 @dataclass(frozen=True)
 class CallbackEndpoint:
@@ -93,6 +66,7 @@ class CallbackDelivery:
     source_system: str
     external_document_id: str
     source_version_id: str
+    processing_round: int
     terminal_status: str
     payload_json: str
     payload_hash: str
@@ -106,6 +80,8 @@ class CallbackDelivery:
     last_error_message: str | None
     created_at: str
     updated_at: str
+    locked_at: str | None = None
+    worker_id: str | None = None
 
 
 def _canonical_json(value: object) -> bytes:
@@ -233,12 +209,8 @@ def build_terminal_payload(
     }
 
 
-async def ensure_callback_delivery_schema(db: aiosqlite.Connection) -> None:
-    await db.executescript(CREATE_CALLBACK_DELIVERY)
-    await db.commit()
 
-
-def _row_to_delivery(row: aiosqlite.Row) -> CallbackDelivery:
+def _row_to_delivery(row: Mapping[str, Any]) -> CallbackDelivery:
     return CallbackDelivery(
         id=row["id"],
         delivery_id=row["delivery_id"],
@@ -247,6 +219,7 @@ def _row_to_delivery(row: aiosqlite.Row) -> CallbackDelivery:
         source_system=row["source_system"],
         external_document_id=row["external_document_id"],
         source_version_id=row["source_version_id"],
+        processing_round=int(row["processing_round"] or 1),
         terminal_status=row["terminal_status"],
         payload_json=row["payload_json"],
         payload_hash=row["payload_hash"],
@@ -255,6 +228,8 @@ def _row_to_delivery(row: aiosqlite.Row) -> CallbackDelivery:
         max_attempts=int(row["max_attempts"] or 8),
         next_attempt_at=row["next_attempt_at"],
         state=row["state"],
+        locked_at=row.get("locked_at"),
+        worker_id=row.get("worker_id"),
         last_http_status=row["last_http_status"],
         last_error_code=row["last_error_code"],
         last_error_message=row["last_error_message"],
@@ -264,32 +239,35 @@ def _row_to_delivery(row: aiosqlite.Row) -> CallbackDelivery:
 
 
 async def get_callback_delivery(
-    db: aiosqlite.Connection,
+    conn: AsyncConnection,
     *,
     tenant_id: str,
     source_system: str,
     external_document_id: str,
     source_version_id: str,
     terminal_status: str,
+    processing_round: int = 1,
 ) -> CallbackDelivery | None:
-    async with db.execute(
+    row = await fetchone(
+        conn,
         """SELECT * FROM callback_delivery
-           WHERE tenant_id=? AND source_system=? AND external_document_id=?
-             AND source_version_id=? AND terminal_status=?""",
+             WHERE tenant_id=? AND source_system=? AND external_document_id=?
+             AND source_version_id=? AND processing_round=?
+             AND terminal_status=?""",
         (
             tenant_id,
             source_system,
             external_document_id,
             source_version_id,
+            processing_round,
             terminal_status,
         ),
-    ) as cursor:
-        row = await cursor.fetchone()
+    )
     return _row_to_delivery(row) if row else None
 
 
 async def enqueue_terminal_callback(
-    db: aiosqlite.Connection,
+    conn: AsyncConnection,
     *,
     doc: ExtDocumentMap,
     terminal_status: TerminalStatus,
@@ -300,6 +278,7 @@ async def enqueue_terminal_callback(
     default_secret: str | None = None,
     max_attempts: int | None = None,
     enabled: bool | None = None,
+    processing_round: int | None = None,
 ) -> CallbackDelivery | None:
     """Idempotently enqueue one terminal callback. Never raises to callers."""
     from enterprise.gateway.config import config
@@ -352,6 +331,7 @@ async def enqueue_terminal_callback(
         attempts_limit = (
             max_attempts if max_attempts is not None else config.callback_max_attempts
         )
+        callback_round = int(processing_round or getattr(doc, "processing_round", 1) or 1)
         delivery_id = str(uuid.uuid4())
         payload = build_terminal_payload(
             delivery_id=delivery_id,
@@ -366,13 +346,18 @@ async def enqueue_terminal_callback(
         payload_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
         now = utc_now()
         try:
-            await db.execute(
+            result = await exec_sql(conn,
                 """INSERT INTO callback_delivery (
                     delivery_id, originating_event_id, tenant_id, source_system,
-                    external_document_id, source_version_id, terminal_status,
+                    external_document_id, source_version_id, processing_round,
+                    terminal_status,
                     payload_json, payload_hash, endpoint_url, attempts,
-                    max_attempts, next_attempt_at, state, created_at, updated_at
-                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'pending', ?, ?)""",
+                    max_attempts, next_attempt_at, state, locked_at, worker_id,
+                    created_at, updated_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'pending', NULL, NULL, ?, ?)
+                   ON CONFLICT(tenant_id, source_system, external_document_id,
+                               source_version_id, processing_round, terminal_status)
+                   DO NOTHING""",
                 (
                     delivery_id,
                     doc.event_id,
@@ -380,6 +365,7 @@ async def enqueue_terminal_callback(
                     doc.source_system,
                     doc.external_document_id,
                     doc.source_version_id,
+                    callback_round,
                     terminal_status,
                     payload_json,
                     payload_hash,
@@ -390,26 +376,26 @@ async def enqueue_terminal_callback(
                     now,
                 ),
             )
-            await db.commit()
         except Exception:
             # Unique constraint → already enqueued for this terminal status.
-            await db.rollback()
             existing = await get_callback_delivery(
-                db,
+                conn,
                 tenant_id=doc.tenant_id,
                 source_system=doc.source_system,
                 external_document_id=doc.external_document_id,
                 source_version_id=doc.source_version_id,
+                processing_round=callback_round,
                 terminal_status=terminal_status,
             )
             return existing
 
         return await get_callback_delivery(
-            db,
+            conn,
             tenant_id=doc.tenant_id,
             source_system=doc.source_system,
             external_document_id=doc.external_document_id,
             source_version_id=doc.source_version_id,
+            processing_round=callback_round,
             terminal_status=terminal_status,
         )
     except Exception:
@@ -420,51 +406,56 @@ async def enqueue_terminal_callback(
             getattr(doc, "external_document_id", None),
             terminal_status,
         )
-        try:
-            await db.rollback()
-        except Exception:
-            pass
         return None
 
 
 async def claim_pending_callback_deliveries(
-    db: aiosqlite.Connection,
+    conn: AsyncConnection,
     *,
+    worker_id: str,
     limit: int = 10,
 ) -> list[CallbackDelivery]:
     now = utc_now()
-    async with db.execute(
-        """SELECT * FROM callback_delivery
-           WHERE state='pending'
-             AND (next_attempt_at IS NULL OR next_attempt_at<=?)
-           ORDER BY next_attempt_at ASC, id ASC
-           LIMIT ?""",
-        (now, limit),
-    ) as cursor:
-        rows = await cursor.fetchall()
+    rows = await fetchall(
+        conn,
+        """WITH candidates AS (
+               SELECT id FROM callback_delivery
+               WHERE state='pending'
+                 AND (next_attempt_at IS NULL OR next_attempt_at<=?)
+               ORDER BY next_attempt_at ASC NULLS FIRST, id ASC
+               LIMIT ? FOR UPDATE SKIP LOCKED
+           )
+           UPDATE callback_delivery AS d
+              SET state='processing', locked_at=?, worker_id=?,
+                  attempts=attempts+1, updated_at=?
+             FROM candidates
+            WHERE d.id=candidates.id
+           RETURNING d.*""",
+        (now, limit, now, worker_id, now),
+    )
     return [_row_to_delivery(row) for row in rows]
 
 
 async def mark_callback_delivered(
-    db: aiosqlite.Connection,
+    conn: AsyncConnection,
     delivery: CallbackDelivery,
     *,
     http_status: int,
 ) -> None:
     now = utc_now()
-    await db.execute(
+    result = await exec_sql(conn,
         """UPDATE callback_delivery
-           SET state='delivered', attempts=?, last_http_status=?,
+           SET state='delivered', locked_at=NULL, worker_id=NULL,
+               attempts=?, last_http_status=?,
                last_error_code=NULL, last_error_message=NULL,
                next_attempt_at=NULL, updated_at=?
            WHERE delivery_id=?""",
-        (delivery.attempts + 1, http_status, now, delivery.delivery_id),
+        (delivery.attempts, http_status, now, delivery.delivery_id),
     )
-    await db.commit()
 
 
 async def mark_callback_retry(
-    db: aiosqlite.Connection,
+    conn: AsyncConnection,
     delivery: CallbackDelivery,
     *,
     http_status: int | None,
@@ -474,14 +465,15 @@ async def mark_callback_retry(
 ) -> None:
     now_dt = datetime.now(timezone.utc)
     next_at = (now_dt + timedelta(seconds=max(0.0, delay_seconds))).isoformat()
-    await db.execute(
+    result = await exec_sql(conn,
         """UPDATE callback_delivery
-           SET state='pending', attempts=?, next_attempt_at=?,
+           SET state='pending', locked_at=NULL, worker_id=NULL,
+               attempts=?, next_attempt_at=?,
                last_http_status=?, last_error_code=?, last_error_message=?,
                updated_at=?
            WHERE delivery_id=?""",
         (
-            delivery.attempts + 1,
+            delivery.attempts,
             next_at,
             http_status,
             error_code,
@@ -490,25 +482,25 @@ async def mark_callback_retry(
             delivery.delivery_id,
         ),
     )
-    await db.commit()
 
 
 async def mark_callback_dead_letter(
-    db: aiosqlite.Connection,
+    conn: AsyncConnection,
     delivery: CallbackDelivery,
     *,
     http_status: int | None,
     error_code: str,
     error_message: str,
 ) -> None:
-    await db.execute(
+    result = await exec_sql(conn,
         """UPDATE callback_delivery
-           SET state='dead_letter', attempts=?, last_http_status=?,
+           SET state='dead_letter', locked_at=NULL, worker_id=NULL,
+               attempts=?, last_http_status=?,
                last_error_code=?, last_error_message=?,
                next_attempt_at=NULL, updated_at=?
            WHERE delivery_id=?""",
         (
-            delivery.attempts + 1,
+            delivery.attempts,
             http_status,
             error_code,
             error_message[:500],
@@ -516,13 +508,12 @@ async def mark_callback_dead_letter(
             delivery.delivery_id,
         ),
     )
-    await db.commit()
 
 
 class CallbackDeliveryWorker:
     def __init__(
         self,
-        db: aiosqlite.Connection,
+        gateway: GatewayDatabase,
         *,
         endpoints: dict[str, CallbackEndpoint] | None = None,
         default_secret: str | None = None,
@@ -531,7 +522,7 @@ class CallbackDeliveryWorker:
     ) -> None:
         from enterprise.gateway.config import config
 
-        self.db = db
+        self.gateway = gateway
         self._endpoints = endpoints
         self._default_secret = (
             default_secret
@@ -541,6 +532,7 @@ class CallbackDeliveryWorker:
         self._client = http_client
         self._owns_client = http_client is None
         self._timeout_seconds = timeout_seconds
+        self.worker_id = str(uuid.uuid4())
 
     def _endpoint_for(self, delivery: CallbackDelivery) -> CallbackEndpoint | None:
         endpoints = self._endpoints
@@ -574,11 +566,15 @@ class CallbackDeliveryWorker:
             await self._client.aclose()
             self._client = None
 
+    async def _write(self, fn, /, *args, **kwargs):
+        async with self.gateway.transaction(write=True) as conn:
+            return await fn(conn, *args, **kwargs)
+
     async def deliver_one(self, delivery: CallbackDelivery) -> str:
         endpoint = self._endpoint_for(delivery)
         if endpoint is None or not endpoint.secret:
-            await mark_callback_dead_letter(
-                self.db,
+            await self._write(
+                mark_callback_dead_letter,
                 delivery,
                 http_status=None,
                 error_code="CALLBACK_ENDPOINT_UNCONFIGURED",
@@ -608,7 +604,7 @@ class CallbackDeliveryWorker:
         if endpoint.key_id:
             headers["X-TY-Key-Id"] = endpoint.key_id
 
-        attempt = delivery.attempts + 1
+        attempt = max(1, delivery.attempts)
         http_status: int | None = None
         response_text = ""
         outcome = "dead_letter"
@@ -630,8 +626,8 @@ class CallbackDeliveryWorker:
                 max_attempts=delivery.max_attempts,
             )
             if decision.status == "retry_wait":
-                await mark_callback_retry(
-                    self.db,
+                await self._write(
+                    mark_callback_retry,
                     delivery,
                     http_status=None,
                     error_code="CALLBACK_TRANSPORT_ERROR",
@@ -640,8 +636,8 @@ class CallbackDeliveryWorker:
                 )
                 outcome = "retry_wait"
             else:
-                await mark_callback_dead_letter(
-                    self.db,
+                await self._write(
+                    mark_callback_dead_letter,
                     delivery,
                     http_status=None,
                     error_code="CALLBACK_TRANSPORT_ERROR",
@@ -667,13 +663,13 @@ class CallbackDeliveryWorker:
             max_attempts=delivery.max_attempts,
         )
         if decision.status == "delivered":
-            await mark_callback_delivered(
-                self.db, delivery, http_status=http_status
+            await self._write(
+                mark_callback_delivered, delivery, http_status=http_status
             )
             outcome = "delivered"
         elif decision.status == "retry_wait":
-            await mark_callback_retry(
-                self.db,
+            await self._write(
+                mark_callback_retry,
                 delivery,
                 http_status=http_status,
                 error_code="CALLBACK_HTTP_RETRYABLE",
@@ -682,8 +678,8 @@ class CallbackDeliveryWorker:
             )
             outcome = "retry_wait"
         else:
-            await mark_callback_dead_letter(
-                self.db,
+            await self._write(
+                mark_callback_dead_letter,
                 delivery,
                 http_status=http_status,
                 error_code="CALLBACK_HTTP_PERMANENT",
@@ -707,7 +703,10 @@ class CallbackDeliveryWorker:
 
         if not config.callback_enabled:
             return 0
-        deliveries = await claim_pending_callback_deliveries(self.db, limit=limit)
+        async with self.gateway.transaction(write=True) as conn:
+            deliveries = await claim_pending_callback_deliveries(
+                conn, worker_id=self.worker_id, limit=limit,
+            )
         for delivery in deliveries:
             try:
                 outcome = await self.deliver_one(delivery)
@@ -717,7 +716,7 @@ class CallbackDeliveryWorker:
                     outcome,
                     delivery.delivery_id,
                     delivery.terminal_status,
-                    delivery.attempts + 1,
+                    delivery.attempts,
                 )
             except Exception:
                 logger.exception(
@@ -739,20 +738,22 @@ class CallbackDeliveryWorker:
 
 
 async def emit_terminal_callback_safe(
-    db: aiosqlite.Connection,
+    conn: AsyncConnection,
     doc: ExtDocumentMap,
     terminal_status: TerminalStatus,
     *,
     quality_status: str | None = None,
     retrievable: bool = False,
     error: dict[str, Any] | None = None,
+    processing_round: int | None = None,
 ) -> None:
     """Enqueue without affecting the ingestion state machine."""
     await enqueue_terminal_callback(
-        db,
+        conn,
         doc=doc,
         terminal_status=terminal_status,
         quality_status=quality_status,
         retrievable=retrievable,
         error=error,
+        processing_round=processing_round,
     )

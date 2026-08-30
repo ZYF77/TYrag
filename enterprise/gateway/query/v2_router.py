@@ -26,7 +26,6 @@ from enterprise.gateway.query.attachment_context import (
     MESSAGE_MEDIA_TYPES,
     MAX_MESSAGE_FILES,
     PendingAttachment,
-    any_understood,
     chat_is_vision_capable,
     cleanup_ragflow_files,
     completion_files,
@@ -48,9 +47,6 @@ from enterprise.gateway.query.answer_split import (
     split_assistant_output,
 )
 from enterprise.gateway.query.citation_select import (
-    catalog_inventory_answer,
-    force_abstain_outcome,
-    is_inventory_question,
     sanitize_citation_markers,
     select_cited_chunk_refs,
 )
@@ -103,6 +99,26 @@ EQUIPMENT_ID_HINT = (
 GLOBAL_QUESTION_PREFIX = (
     "当前未指定具体设备，请仅根据检索到的资料回答用户问题。\n用户问题："
 )
+# Sent to RAGFlow when a message carries attachments but no user question;
+# attachment bodies are parsed by RAGFlow itself from ``files[]``.
+DEFAULT_ATTACHMENT_QUESTION = "请说明你上传的附件内容。"
+
+
+
+async def _gw_read(gateway, fn, /, *args, **kwargs):
+    from enterprise.gateway.db import GatewayDatabase
+    if not isinstance(gateway, GatewayDatabase):
+        return await fn(gateway, *args, **kwargs)
+    async with gateway.transaction(write=False) as conn:
+        return await fn(conn, *args, **kwargs)
+
+
+async def _gw_write(gateway, fn, /, *args, **kwargs):
+    from enterprise.gateway.db import GatewayDatabase
+    if not isinstance(gateway, GatewayDatabase):
+        return await fn(gateway, *args, **kwargs)
+    async with gateway.transaction(write=True) as conn:
+        return await fn(conn, *args, **kwargs)
 
 
 async def get_db():
@@ -216,8 +232,8 @@ async def _project_citations(
                     }
                 )
             continue
-        ticket = await issue_citation_file_ticket(
-            db, citation=item, principal=principal
+        ticket = await _gw_write(
+            db, issue_citation_file_ticket, citation=item, principal=principal
         )
         projected.append(
             public_citation(
@@ -407,7 +423,11 @@ def _with_equipment_hint(conversation: dict, answer: str, status: str) -> str:
 
 def _allowed_identifiers(conversation: dict, question: str) -> list[str]:
     allowed: list[str] = []
-    for value in conversation.get("_turn_entity_ids") or []:
+    try:
+        turn_ids = conversation["_turn_entity_ids"]
+    except (KeyError, IndexError, TypeError):
+        turn_ids = None
+    for value in turn_ids or []:
         if value and value not in allowed:
             allowed.append(value)
     for key in ("equipment_id", "fixed_asset_no"):
@@ -487,25 +507,6 @@ def _conversation_value(conversation: dict, key: str) -> str:
     return ""
 
 
-def _catalog_inventory_rescue(
-    question: str,
-    raw_answer: str,
-    status: str,
-    docs_by_internal_id: dict,
-) -> str | None:
-    """If an inventory question fail-closed, list catalog types instead."""
-    del raw_answer
-    if status == "completed" or not is_inventory_question(question):
-        return None
-    if not docs_by_internal_id:
-        return None
-    labels: list[str] = []
-    for doc in docs_by_internal_id.values():
-        labels.append(str(getattr(doc, "file_name", "") or ""))
-        labels.append(str(getattr(doc, "document_type", "") or ""))
-    return catalog_inventory_answer(*labels) or None
-
-
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -578,9 +579,9 @@ def _conversation_detail(row: dict) -> dict:
 
 
 async def _owned_conversation(db, principal: UserPrincipal, conversation_id: str):
-    await v2_store.ensure_schema(db)
-    return await v2_store.get_conversation(
+    return await _gw_read(
         db,
+        v2_store.get_conversation,
         conversation_id=conversation_id,
         tenant_id=principal.tenant_id,
         business_user_id=principal.business_user_id,
@@ -593,10 +594,8 @@ async def create_conversation(
     db=Depends(get_db),
     principal: UserPrincipal = Depends(require_capability("list_sessions")),
 ):
-    await v2_store.ensure_schema(db)
     snapshot = _submitted_snapshot(req.equipmentId, req.fixedAssetNo)
-    row = await v2_store.create_conversation(
-        db,
+    row = await _gw_write(db, v2_store.create_conversation,
         conversation_id=str(uuid.uuid4()),
         tenant_id=principal.tenant_id,
         business_user_id=principal.business_user_id,
@@ -617,10 +616,8 @@ async def list_conversations(
     db=Depends(get_db),
     principal: UserPrincipal = Depends(require_capability("list_sessions")),
 ):
-    await v2_store.ensure_schema(db)
     try:
-        items, next_cursor, has_more = await v2_store.list_conversations(
-            db,
+        items, next_cursor, has_more = await _gw_read(db, v2_store.list_conversations,
             tenant_id=principal.tenant_id,
             business_user_id=principal.business_user_id,
             limit=limit,
@@ -680,8 +677,7 @@ async def patch_context(
             row.get("asset_id"),
             row["fault_code"],
         )
-        updated = await v2_store.update_context(
-            db,
+        updated = await _gw_write(db, v2_store.update_context,
             conversation_id=conversation_id,
             tenant_id=principal.tenant_id,
             business_user_id=principal.business_user_id,
@@ -714,8 +710,7 @@ async def archive_conversation(
         row = await _owned_conversation(db, principal, conversation_id)
         if not row:
             return _error(404, "CONVERSATION_NOT_FOUND", "Conversation not found")
-        row = await v2_store.archive_conversation(
-            db,
+        row = await _gw_write(db, v2_store.archive_conversation,
             conversation_id=conversation_id,
             tenant_id=principal.tenant_id,
             business_user_id=principal.business_user_id,
@@ -738,8 +733,7 @@ async def list_messages(
     if not row:
         return _error(404, "CONVERSATION_NOT_FOUND", "Conversation not found")
     try:
-        items, next_cursor, has_more = await v2_store.list_messages(
-            db,
+        items, next_cursor, has_more = await _gw_read(db, v2_store.list_messages,
             conversation_id=conversation_id,
             tenant_id=principal.tenant_id,
             business_user_id=principal.business_user_id,
@@ -817,8 +811,8 @@ async def _available_context_scope(
         return acl_scope, {}
     filtered: dict[str, ExtDocumentMap] = {}
     for internal_id, doc in resolver._docs.items():
-        readiness, _quality_status = await document_candidate_readiness_from_db(
-            db, doc
+        readiness, _quality_status = await _gw_read(
+            db, document_candidate_readiness_from_db, doc
         )
         if not readiness.retrievable:
             continue
@@ -882,8 +876,7 @@ async def _resolve_turn_scope(
 ) -> dict:
     _scope, available = await _available_context_scope(db, principal, conversation)
     explicit, unresolved = _explicit_equipment_ids(question, available)
-    recent_records = await v2_store.list_recent_entity_scopes(
-        db,
+    recent_records = await _gw_read(db, v2_store.list_recent_entity_scopes,
         conversation_id=conversation["conversation_id"],
         tenant_id=principal.tenant_id,
         business_user_id=principal.business_user_id,
@@ -959,8 +952,7 @@ async def _resolve_turn_scope(
             or conversation.get("fixed_asset_no") != fixed_asset_no
         )
         if changed:
-            updated = await v2_store.update_context(
-                db,
+            updated = await _gw_write(db, v2_store.update_context,
                 conversation_id=conversation["conversation_id"],
                 tenant_id=principal.tenant_id,
                 business_user_id=principal.business_user_id,
@@ -1093,21 +1085,16 @@ async def _ensure_ragflow_session(
         session_id = str(data.get("id") or "") if isinstance(data, dict) else ""
         if not session_id:
             raise RAGFlowAPIError("Session id missing after create", 502)
-        cursor = await db.execute(
-            """UPDATE ext_v2_conversation
-               SET ragflow_chat_id=?, ragflow_session_id=?
-               WHERE conversation_id=? AND tenant_id=? AND business_user_id=?
-                 AND ragflow_session_id IS NULL""",
-            (
-                chat_id,
-                session_id,
-                conversation["conversation_id"],
-                principal.tenant_id,
-                principal.business_user_id,
-            ),
+        rowcount = await _gw_write(
+            db,
+            v2_store.claim_ragflow_session,
+            conversation_id=conversation["conversation_id"],
+            tenant_id=principal.tenant_id,
+            business_user_id=principal.business_user_id,
+            ragflow_chat_id=chat_id,
+            ragflow_session_id=session_id,
         )
-        await db.commit()
-        if cursor.rowcount != 1:
+        if rowcount != 1:
             current = await _owned_conversation(
                 db, principal, conversation["conversation_id"]
             )
@@ -1144,17 +1131,23 @@ def _request_hash(
     return hashlib.sha256(raw).hexdigest()
 
 
-def _business_status(
-    completion: dict | None, answer: str, question: str = ""
-) -> str:
-    """Resolve business state without consulting citation presence."""
+def _business_status(completion: dict | None) -> str:
+    """Trust only the explicit terminal status in ``data.status``.
+
+    RF-PATCH-007: RAGFlow sends ``status`` in the JSON completion payload and
+    the SSE final frame with exactly one of the three terminal values. Missing
+    or invalid values are an upstream contract violation, never a reason to
+    re-derive the state from the answer text or citations.
+    """
     data = completion.get("data", {}) if isinstance(completion, dict) else {}
     explicit = data.get("status") if isinstance(data, dict) else None
-    if explicit in {"completed", "no_reliable_evidence", "failed"}:
-        status = explicit
-    else:
-        status = "completed" if answer.strip() else "no_reliable_evidence"
-    return force_abstain_outcome(answer, status, question)
+    if explicit not in {"completed", "no_reliable_evidence", "failed"}:
+        raise _FormalQueryError(
+            "RAGFLOW_API_INCOMPATIBLE",
+            502,
+            "RAGFlow completion status missing or invalid",
+        )
+    return explicit
 
 
 def _error_response_from_result(result: dict) -> JSONResponse:
@@ -1182,8 +1175,7 @@ async def _replay_or_pending(
     req: CreateMessageRequest,
     pending: list[PendingAttachment] | None = None,
 ) -> tuple[dict | None, JSONResponse | None]:
-    run = await v2_store.get_message_run(
-        db,
+    run = await _gw_read(db, v2_store.get_message_run,
         conversation_id=conversation["conversation_id"],
         tenant_id=principal.tenant_id,
         business_user_id=principal.business_user_id,
@@ -1198,8 +1190,7 @@ async def _replay_or_pending(
             "clientMessageId was already used with a different payload",
         )
     if run["status"] == "running":
-        run = await v2_store.mark_expired_run_interrupted(
-            db,
+        run = await _gw_write(db, v2_store.mark_expired_run_interrupted,
             conversation_id=conversation["conversation_id"],
             tenant_id=principal.tenant_id,
             business_user_id=principal.business_user_id,
@@ -1250,8 +1241,7 @@ async def _prepare_message_run(
     title = " ".join(question.split())[:80] or (
         pending[0].file_name if pending else "New conversation"
     )
-    run = await v2_store.reserve_message_run(
-        db,
+    run = await _gw_write(db, v2_store.reserve_message_run,
         conversation_id=conversation["conversation_id"],
         tenant_id=principal.tenant_id,
         business_user_id=principal.business_user_id,
@@ -1283,8 +1273,7 @@ async def _save_failed_run(
     status_code: int,
     message: str,
 ) -> JSONResponse:
-    await v2_store.add_message(
-        db,
+    await _gw_write(db, v2_store.add_message,
         message_id=assistant_message_id,
         conversation_id=conversation["conversation_id"],
         tenant_id=principal.tenant_id,
@@ -1295,8 +1284,7 @@ async def _save_failed_run(
         citations=[],
     )
     error_response = _error(status_code, code, message)
-    await v2_store.complete_message_run(
-        db,
+    await _gw_write(db, v2_store.complete_message_run,
         conversation_id=conversation["conversation_id"],
         tenant_id=principal.tenant_id,
         business_user_id=principal.business_user_id,
@@ -1319,22 +1307,18 @@ async def _retrieval_question(
     conversation: dict,
     question: str,
     pending: list[PendingAttachment],
-) -> tuple[str, JSONResponse | None, Any, list[AttachmentObservation]]:
+) -> tuple[str, Any, list[AttachmentObservation]]:
     if not pending:
-        return question, None, None, []
+        return question, None, []
     client = _query_client()
     chat_id = None
     scope, _docs = await _context_scope(db, principal, conversation)
     if not scope.is_empty:
         chat_id = await _ensure_chat(client, principal, scope)
     observations = await observe_attachments(pending, client, chat_id, db)
-    if not question.strip() and not any_understood(observations):
-        return question, _error(
-            422,
-            "VALIDATION_ERROR",
-            "Could not understand the attachment; add a text question",
-        ), client, observations
-    return enrich_question(question, observations), None, client, observations
+    if not question.strip():
+        question = DEFAULT_ATTACHMENT_QUESTION
+    return enrich_question(question, observations), client, observations
 
 
 async def _execute_json_run(
@@ -1352,15 +1336,9 @@ async def _execute_json_run(
     client = None
     try:
         try:
-            question, observe_error, client, observations = await _retrieval_question(
+            question, client, observations = await _retrieval_question(
                 db, principal, conversation, question, pending
             )
-            if observe_error:
-                return None, await _save_failed_run(
-                    db, principal, conversation, req, run, assistant_message_id,
-                    code="VALIDATION_ERROR", status_code=422,
-                    message="Could not understand the attachment; add a text question",
-                )
             scope, docs_by_internal_id = await _context_scope(db, principal, conversation)
             answer = NO_RELIABLE_EVIDENCE_ANSWER
             status = "no_reliable_evidence"
@@ -1417,34 +1395,30 @@ async def _execute_json_run(
                     )
                 answer = sanitize_citation_markers(split.answer)
                 reasoning = public_reasoning(split.reasoning)
-                status = _business_status(completion, answer, question)
-                rescued = _catalog_inventory_rescue(
-                    question, answer, status, docs_by_internal_id
+                status = _business_status(completion)
+                citations = _external_citations(
+                    chunks,
+                    docs_by_internal_id,
+                    assistant_message_id,
+                    answer=answer,
+                    status=status,
+                    internet_enabled=effective_internet,
+                    attachment_document_ids={
+                        str((item.ragflow_file or {}).get("id") or "")
+                        for item in pending
+                        if (item.ragflow_file or {}).get("id")
+                    },
                 )
-                if rescued:
-                    status = "completed"
-                    answer = rescued
-                    citations = []
+                if status == "completed":
+                    answer = _with_equipment_hint(conversation, answer, status)
                 else:
-                    citations = _external_citations(
-                        chunks,
-                        docs_by_internal_id,
-                        assistant_message_id,
-                        answer=answer,
-                        status=status,
-                        internet_enabled=effective_internet,
-                        attachment_document_ids={
-                            str((item.ragflow_file or {}).get("id") or "")
-                            for item in pending
-                            if (item.ragflow_file or {}).get("id")
-                        },
-                    )
-                    if status == "completed":
-                        answer = _with_equipment_hint(conversation, answer, status)
-                    else:
-                        answer = NO_RELIABLE_EVIDENCE_ANSWER
-            await v2_store.add_message(
-                db,
+                    # Defensive: a contract-violating upstream that reports
+                    # no_reliable_evidence/failed together with cited markers
+                    # must not persist the standard abstain text next to
+                    # dangling citations (mirrors the v1 router).
+                    citations = []
+                    answer = NO_RELIABLE_EVIDENCE_ANSWER
+            await _gw_write(db, v2_store.add_message,
                 message_id=assistant_message_id,
                 conversation_id=conversation["conversation_id"],
                 tenant_id=principal.tenant_id,
@@ -1472,8 +1446,7 @@ async def _execute_json_run(
                     for item in pending
                     if item.attachment_id
                 ]
-            await v2_store.complete_message_run(
-                db,
+            await _gw_write(db, v2_store.complete_message_run,
                 conversation_id=conversation["conversation_id"],
                 tenant_id=principal.tenant_id,
                 business_user_id=principal.business_user_id,
@@ -1493,7 +1466,8 @@ async def _execute_json_run(
                 else:
                     code = (
                         "RAGFLOW_API_INCOMPATIBLE"
-                        if exc.status_code and 400 <= exc.status_code < 500
+                        if exc.status_code
+                        and (400 <= exc.status_code < 500 or exc.status_code == 502)
                         else "RAGFLOW_UNAVAILABLE"
                     )
                     status_code = 503
@@ -1547,25 +1521,9 @@ async def _stream_run_events(
     live_streamed = False
     emitted_answer = ""
     try:
-        question, observe_error, client, observations = await _retrieval_question(
+        question, client, observations = await _retrieval_question(
             db, principal, conversation, question, pending
         )
-        if observe_error:
-            await _save_failed_run(
-                db, principal, conversation, req, run, assistant_message_id,
-                code="VALIDATION_ERROR", status_code=422,
-                message="Could not understand the attachment; add a text question",
-            )
-            yield _sse(
-                "run.failed",
-                {
-                    "conversationId": conversation_id,
-                    "runId": run["run_id"],
-                    "code": "VALIDATION_ERROR",
-                    "message": "Could not understand the attachment; add a text question",
-                },
-            )
-            return
         scope, docs_by_internal_id = await _context_scope(db, principal, conversation)
         if not scope.is_empty:
             client = client or _query_client()
@@ -1669,40 +1627,35 @@ async def _stream_run_events(
                 )
                 return
             accumulated = sanitize_citation_markers(accumulated)
-            status = force_abstain_outcome(
-                accumulated,
-                upstream_status
-                or ("completed" if accumulated.strip() else "no_reliable_evidence"),
-                question,
-            )
-            reasoning = public_reasoning(accumulated_reasoning)
-            rescued = _catalog_inventory_rescue(
-                question, accumulated, status, docs_by_internal_id
-            )
-            if rescued:
-                status = "completed"
-                answer = rescued
-                citations = []
-            else:
-                citations = _external_citations(
-                    chunks,
-                    docs_by_internal_id,
-                    assistant_message_id,
-                    answer=accumulated,
-                    status=status,
-                    internet_enabled=effective_internet,
-                    attachment_document_ids={
-                        str((item.ragflow_file or {}).get("id") or "")
-                        for item in pending
-                        if (item.ragflow_file or {}).get("id")
-                    },
+            if upstream_status not in {"completed", "no_reliable_evidence", "failed"}:
+                raise _FormalQueryError(
+                    "RAGFLOW_API_INCOMPATIBLE",
+                    502,
+                    "RAGFlow completion status missing or invalid",
                 )
-                if status == "completed":
-                    answer = _with_equipment_hint(conversation, accumulated, status)
-                else:
-                    answer = NO_RELIABLE_EVIDENCE_ANSWER
-        await v2_store.add_message(
-            db,
+            status = upstream_status
+            reasoning = public_reasoning(accumulated_reasoning)
+            citations = _external_citations(
+                chunks,
+                docs_by_internal_id,
+                assistant_message_id,
+                answer=accumulated,
+                status=status,
+                internet_enabled=effective_internet,
+                attachment_document_ids={
+                    str((item.ragflow_file or {}).get("id") or "")
+                    for item in pending
+                    if (item.ragflow_file or {}).get("id")
+                },
+            )
+            if status == "completed":
+                answer = _with_equipment_hint(conversation, accumulated, status)
+            else:
+                # Defensive: never stream/persist citations next to the
+                # replaced standard abstain answer (mirrors the v1 router).
+                citations = []
+                answer = NO_RELIABLE_EVIDENCE_ANSWER
+        await _gw_write(db, v2_store.add_message,
             message_id=assistant_message_id,
             conversation_id=conversation_id,
             tenant_id=principal.tenant_id,
@@ -1735,8 +1688,7 @@ async def _stream_run_events(
                 for item in pending
                 if item.attachment_id
             ]
-        await v2_store.complete_message_run(
-            db,
+        await _gw_write(db, v2_store.complete_message_run,
             conversation_id=conversation_id,
             tenant_id=principal.tenant_id,
             business_user_id=principal.business_user_id,
@@ -1800,7 +1752,8 @@ async def _stream_run_events(
             else:
                 code = (
                     "RAGFLOW_API_INCOMPATIBLE"
-                    if exc.status_code and 400 <= exc.status_code < 500
+                    if exc.status_code
+                    and (400 <= exc.status_code < 500 or exc.status_code == 502)
                     else "RAGFLOW_UNAVAILABLE"
                 )
                 message = "Query engine unavailable"
@@ -2038,8 +1991,7 @@ async def _persist_pending_attachments(
     metas = [_attachment_public_meta(item) for item in pending]
     user_message_id = run.get("user_message_id")
     if user_message_id and metas:
-        await v2_store.set_message_attachments(
-            db, message_id=user_message_id, attachments=metas
+        await _gw_write(db, v2_store.set_message_attachments, message_id=user_message_id, attachments=metas
         )
     return metas
 
@@ -2145,9 +2097,7 @@ async def get_citation(
         require_capability("view_citations", "list_sessions")
     ),
 ):
-    await v2_store.ensure_schema(db)
-    citation = await v2_store.get_citation(
-        db,
+    citation = await _gw_read(db, v2_store.get_citation,
         citation_id=citation_id,
         tenant_id=principal.tenant_id,
         business_user_id=principal.business_user_id,
@@ -2170,13 +2120,11 @@ async def download_citation_file(
     request: Request,
     db=Depends(get_db),
 ):
-    await v2_store.ensure_schema(db)
     try:
-        claimed = await claim_citation_file_ticket(db, citation_id, ticket)
+        claimed = await _gw_write(db, claim_citation_file_ticket, citation_id, ticket)
     except CitationFileError:
         return _error(404, "CITATION_FILE_NOT_FOUND", "Citation file not found")
-    citation = await v2_store.get_citation(
-        db,
+    citation = await _gw_read(db, v2_store.get_citation,
         citation_id=citation_id,
         tenant_id=claimed["tenant_id"],
         business_user_id=claimed["business_user_id"],
@@ -2210,9 +2158,7 @@ async def get_citation_source(
         require_capability("view_citations", "list_sessions")
     ),
 ):
-    await v2_store.ensure_schema(db)
-    citation = await v2_store.get_citation(
-        db,
+    citation = await _gw_read(db, v2_store.get_citation,
         citation_id=citation_id,
         tenant_id=principal.tenant_id,
         business_user_id=principal.business_user_id,

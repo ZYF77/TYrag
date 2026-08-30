@@ -2,92 +2,22 @@
 
 from __future__ import annotations
 
+from sqlalchemy.ext.asyncio import AsyncConnection
+
+from enterprise.gateway.db.dialect import begin_transaction, exec_sql, fetchall, fetchone
+from enterprise.gateway.db.exceptions import PersistenceConflictError
+
 import json
-import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from typing import Any, Mapping
 from typing import Any
 
-import aiosqlite
 
 from enterprise.gateway.quality.metrics import metrics
 
 EVALUATION_CONTRACT = "contracts/parse-quality-evaluation.md"
 EVALUATION_CONTRACT_VERSION = "1"
-
-CREATE_QUALITY_EVALUATION = """
-CREATE TABLE IF NOT EXISTS parse_quality_evaluation (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    tenant_id TEXT NOT NULL,
-    source_system TEXT NOT NULL,
-    external_document_id TEXT NOT NULL,
-    source_version_id TEXT NOT NULL,
-    ragflow_dataset_id TEXT,
-    ragflow_document_id TEXT,
-    evaluation_version TEXT NOT NULL DEFAULT '1',
-    evaluation_contract_version TEXT NOT NULL DEFAULT '1',
-    thresholds_version TEXT,
-    thresholds_digest TEXT,
-    parser_profile TEXT,
-    parser_version TEXT,
-    routing_policy_version TEXT,
-    routing_reasons TEXT NOT NULL DEFAULT '[]',
-    evaluation_state TEXT NOT NULL DEFAULT 'pending',
-    parse_quality_status TEXT,
-    quality_reasons TEXT NOT NULL DEFAULT '[]',
-    metrics_json TEXT NOT NULL DEFAULT '{}',
-    parse_repeatability_hash TEXT,
-    e2e_repeatability_hash TEXT,
-    artifact_hash TEXT,
-    enterprise_commit TEXT,
-    enterprise_worktree_dirty INTEGER NOT NULL DEFAULT 0,
-    ragflow_source_tag TEXT,
-    ragflow_source_commit TEXT,
-    attempt_count INTEGER NOT NULL DEFAULT 0,
-    last_error_code TEXT,
-    last_error_message TEXT,
-    started_at TEXT,
-    completed_at TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    UNIQUE(tenant_id, source_system, external_document_id,
-           source_version_id, evaluation_version)
-);
-
-CREATE INDEX IF NOT EXISTS idx_quality_eval_doc
-    ON parse_quality_evaluation(
-        tenant_id, source_system, external_document_id, source_version_id
-    );
-
-CREATE INDEX IF NOT EXISTS idx_quality_eval_state
-    ON parse_quality_evaluation(evaluation_state, parse_quality_status);
-"""
-
-CREATE_QUALITY_JOB = """
-CREATE TABLE IF NOT EXISTS quality_evaluation_job (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    evaluation_id INTEGER NOT NULL UNIQUE,
-    tenant_id TEXT NOT NULL,
-    source_system TEXT NOT NULL,
-    external_document_id TEXT NOT NULL,
-    source_version_id TEXT NOT NULL,
-    evaluation_version TEXT NOT NULL DEFAULT '1',
-    status TEXT NOT NULL DEFAULT 'pending',
-    attempts INTEGER NOT NULL DEFAULT 0,
-    max_attempts INTEGER NOT NULL DEFAULT 5,
-    next_retry_at TEXT,
-    locked_at TEXT,
-    worker_id TEXT,
-    last_error_code TEXT,
-    last_error_message TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_quality_job_pending
-    ON quality_evaluation_job(status, next_retry_at);
-"""
-
 
 @dataclass
 class QualityEvaluation:
@@ -201,7 +131,7 @@ def _json_loads(value: str | None, default: Any) -> Any:
         return default
 
 
-def _row_to_evaluation(row: aiosqlite.Row) -> QualityEvaluation:
+def _row_to_evaluation(row: Mapping[str, Any]) -> QualityEvaluation:
     return QualityEvaluation(
         id=row["id"],
         tenant_id=row["tenant_id"],
@@ -239,7 +169,7 @@ def _row_to_evaluation(row: aiosqlite.Row) -> QualityEvaluation:
     )
 
 
-def _row_to_job(row: aiosqlite.Row) -> QualityJob:
+def _row_to_job(row: Mapping[str, Any]) -> QualityJob:
     return QualityJob(
         id=row["id"],
         evaluation_id=row["evaluation_id"],
@@ -261,37 +191,33 @@ def _row_to_job(row: aiosqlite.Row) -> QualityJob:
     )
 
 
-def row_to_job(row: aiosqlite.Row) -> QualityJob:
+def row_to_job(row: Mapping[str, Any]) -> QualityJob:
     """Public row converter used by worker/reconciler code."""
     return _row_to_job(row)
 
 
-async def ensure_quality_schema(db: aiosqlite.Connection) -> None:
-    await db.executescript(CREATE_QUALITY_EVALUATION)
-    await db.executescript(CREATE_QUALITY_JOB)
-    await db.commit()
-
 
 async def get_evaluation_by_id(
-    db: aiosqlite.Connection, evaluation_id: int,
+    conn: AsyncConnection, evaluation_id: int,
 ) -> QualityEvaluation | None:
-    async with db.execute(
+    row = await fetchone(
+        conn,
         "SELECT * FROM parse_quality_evaluation WHERE id=?",
         (evaluation_id,),
-    ) as cursor:
-        row = await cursor.fetchone()
-        return _row_to_evaluation(row) if row else None
+    )
+    return _row_to_evaluation(row) if row else None
 
 
 async def get_evaluation(
-    db: aiosqlite.Connection,
+    conn: AsyncConnection,
     tenant_id: str,
     source_system: str,
     external_document_id: str,
     source_version_id: str,
     evaluation_version: str,
 ) -> QualityEvaluation | None:
-    async with db.execute(
+    row = await fetchone(
+        conn,
         """SELECT * FROM parse_quality_evaluation
            WHERE tenant_id=? AND source_system=? AND external_document_id=?
              AND source_version_id=? AND evaluation_version=?""",
@@ -299,13 +225,12 @@ async def get_evaluation(
             tenant_id, source_system, external_document_id,
             source_version_id, evaluation_version,
         ),
-    ) as cursor:
-        row = await cursor.fetchone()
-        return _row_to_evaluation(row) if row else None
+    )
+    return _row_to_evaluation(row) if row else None
 
 
 async def get_latest_evaluation(
-    db: aiosqlite.Connection,
+    conn: AsyncConnection,
     tenant_id: str,
     source_system: str,
     external_document_id: str,
@@ -316,19 +241,19 @@ async def get_latest_evaluation(
     if source_version_id:
         version_clause = "AND source_version_id=?"
         params.append(source_version_id)
-    async with db.execute(
+    row = await fetchone(
+        conn,
         f"""SELECT * FROM parse_quality_evaluation
             WHERE tenant_id=? AND source_system=? AND external_document_id=?
             {version_clause}
             ORDER BY id DESC LIMIT 1""",
         params,
-    ) as cursor:
-        row = await cursor.fetchone()
-        return _row_to_evaluation(row) if row else None
+    )
+    return _row_to_evaluation(row) if row else None
 
 
 async def list_evaluations(
-    db: aiosqlite.Connection,
+    conn: AsyncConnection,
     tenant_id: str | None = None,
     source_system: str | None = None,
     status: str | None = None,
@@ -356,7 +281,8 @@ async def list_evaluations(
         params.append(batch_id)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     params.extend([limit, offset])
-    async with db.execute(
+    rows = await fetchall(
+        conn,
         f"""SELECT e.* FROM parse_quality_evaluation e
             LEFT JOIN ext_document_map m
               ON m.tenant_id=e.tenant_id
@@ -366,13 +292,12 @@ async def list_evaluations(
             {where}
             ORDER BY e.id DESC LIMIT ? OFFSET ?""",
         params,
-    ) as cursor:
-        rows = await cursor.fetchall()
-        return [_row_to_evaluation(r) for r in rows]
+    )
+    return [_row_to_evaluation(r) for r in rows]
 
 
 async def get_or_create_evaluation(
-    db: aiosqlite.Connection,
+    conn: AsyncConnection,
     tenant_id: str,
     source_system: str,
     external_document_id: str,
@@ -385,14 +310,14 @@ async def get_or_create_evaluation(
 ) -> QualityEvaluation:
     routing = routing or {}
     existing = await get_evaluation(
-        db, tenant_id, source_system, external_document_id,
+        conn, tenant_id, source_system, external_document_id,
         source_version_id, evaluation_version,
     )
     if existing:
-        job = await get_job_by_evaluation_id(db, existing.id)
+        job = await get_job_by_evaluation_id(conn, existing.id)
         if job is None and existing.evaluation_state == "pending":
             now = utc_now()
-            await db.execute(
+            result = await exec_sql(conn,
                 """INSERT INTO quality_evaluation_job
                    (evaluation_id, tenant_id, source_system,
                     external_document_id, source_version_id,
@@ -405,12 +330,11 @@ async def get_or_create_evaluation(
                     evaluation_version, max_attempts, now, now,
                 ),
             )
-            await db.commit()
         return existing
 
     now = utc_now()
     try:
-        cursor = await db.execute(
+        cursor = result = await exec_sql(conn,
             """INSERT INTO parse_quality_evaluation
                (tenant_id, source_system, external_document_id,
                 source_version_id, ragflow_dataset_id, ragflow_document_id,
@@ -421,7 +345,8 @@ async def get_or_create_evaluation(
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', '{}', ?, ?)
                ON CONFLICT(tenant_id, source_system, external_document_id,
                            source_version_id, evaluation_version)
-               DO NOTHING""",
+               DO NOTHING
+               RETURNING id""",
             (
                 tenant_id, source_system, external_document_id,
                 source_version_id, ragflow_dataset_id, ragflow_document_id,
@@ -433,11 +358,11 @@ async def get_or_create_evaluation(
                 now, now,
             ),
         )
-        await db.commit()
-        if cursor.rowcount:
-            evaluation_id = cursor.lastrowid
+        evaluation_id = result.scalar_one_or_none()
+        if evaluation_id is not None:
+            evaluation_id = int(evaluation_id)
             metrics.inc("quality_evaluation_pending_total")
-            await db.execute(
+            result = await exec_sql(conn,
                 """INSERT INTO quality_evaluation_job
                    (evaluation_id, tenant_id, source_system,
                     external_document_id, source_version_id,
@@ -450,25 +375,24 @@ async def get_or_create_evaluation(
                     evaluation_version, max_attempts, now, now,
                 ),
             )
-            await db.commit()
-            return await get_evaluation_by_id(db, evaluation_id)
-    except sqlite3.IntegrityError:
-        await db.rollback()
+            return await get_evaluation_by_id(conn, evaluation_id)
+    except PersistenceConflictError:
+        pass
     return await get_evaluation(
-        db, tenant_id, source_system, external_document_id,
+        conn, tenant_id, source_system, external_document_id,
         source_version_id, evaluation_version,
     ) or existing
 
 
 async def next_evaluation_version(
-    db: aiosqlite.Connection,
+    conn: AsyncConnection,
     tenant_id: str,
     source_system: str,
     external_document_id: str,
     source_version_id: str,
 ) -> str:
     latest = await get_latest_evaluation(
-        db, tenant_id, source_system, external_document_id, source_version_id,
+        conn, tenant_id, source_system, external_document_id, source_version_id,
     )
     if latest is None:
         return "1"
@@ -478,20 +402,19 @@ async def next_evaluation_version(
         return "2"
 
 
-async def start_evaluation(db: aiosqlite.Connection, evaluation_id: int) -> None:
+async def start_evaluation(conn: AsyncConnection, evaluation_id: int) -> None:
     now = utc_now()
-    await db.execute(
+    result = await exec_sql(conn,
         """UPDATE parse_quality_evaluation
            SET evaluation_state='running', started_at=COALESCE(started_at, ?),
                updated_at=?
            WHERE id=?""",
         (now, now, evaluation_id),
     )
-    await db.commit()
 
 
 async def complete_evaluation(
-    db: aiosqlite.Connection,
+    conn: AsyncConnection,
     evaluation_id: int,
     *,
     parse_quality_status: str,
@@ -508,7 +431,7 @@ async def complete_evaluation(
     thresholds_digest: str | None,
 ) -> None:
     now = utc_now()
-    await db.execute(
+    result = await exec_sql(conn,
         """UPDATE parse_quality_evaluation
            SET evaluation_state='completed',
                parse_quality_status=?,
@@ -537,11 +460,10 @@ async def complete_evaluation(
             thresholds_version, thresholds_digest, now, now, evaluation_id,
         ),
     )
-    await db.commit()
 
 
 async def fail_evaluation(
-    db: aiosqlite.Connection,
+    conn: AsyncConnection,
     evaluation_id: int,
     error_code: str,
     error_message: str,
@@ -549,7 +471,7 @@ async def fail_evaluation(
     parse_quality_status: str | None = None,
 ) -> None:
     now = utc_now()
-    await db.execute(
+    result = await exec_sql(conn,
         """UPDATE parse_quality_evaluation
            SET evaluation_state='failed',
                parse_quality_status=?,
@@ -559,53 +481,47 @@ async def fail_evaluation(
            WHERE id=?""",
         (parse_quality_status, error_code, error_message, now, evaluation_id),
     )
-    await db.commit()
 
 
 async def claim_quality_job(
-    db: aiosqlite.Connection, worker_id: str, limit: int = 1,
+    conn: AsyncConnection, worker_id: str, limit: int = 1,
 ) -> list[QualityJob]:
     now = utc_now()
-    cursor = await db.execute(
-        """UPDATE quality_evaluation_job
-           SET status='running', locked_at=?, worker_id=?,
-               attempts=attempts+1, updated_at=?
-           WHERE id IN (
+    rows = await fetchall(
+        conn,
+        """WITH candidates AS (
                SELECT id FROM quality_evaluation_job
                WHERE status='pending'
                  AND (next_retry_at IS NULL OR next_retry_at <= ?)
-               ORDER BY id LIMIT ?
-           )""",
-        (now, worker_id, now, now, limit),
+               ORDER BY id
+               LIMIT ? FOR UPDATE SKIP LOCKED
+           )
+           UPDATE quality_evaluation_job AS q
+              SET status='running', locked_at=?, worker_id=?,
+                  attempts=attempts+1, updated_at=?
+             FROM candidates
+            WHERE q.id=candidates.id
+           RETURNING q.*""",
+        (now, limit, now, worker_id, now),
     )
-    await db.commit()
-    if cursor.rowcount == 0:
-        return []
-    async with db.execute(
-        """SELECT * FROM quality_evaluation_job
-           WHERE worker_id=? AND locked_at=? AND status='running'
-           ORDER BY id LIMIT ?""",
-        (worker_id, now, limit),
-    ) as cursor:
-        rows = await cursor.fetchall()
-        return [_row_to_job(r) for r in rows]
+    return [_row_to_job(r) for r in rows]
 
 
 async def get_job_by_evaluation_id(
-    db: aiosqlite.Connection, evaluation_id: int,
+    conn: AsyncConnection, evaluation_id: int,
 ) -> QualityJob | None:
-    async with db.execute(
+    row = await fetchone(
+        conn,
         "SELECT * FROM quality_evaluation_job WHERE evaluation_id=?",
         (evaluation_id,),
-    ) as cursor:
-        row = await cursor.fetchone()
-        return _row_to_job(row) if row else None
+    )
+    return _row_to_job(row) if row else None
 
 
 async def mark_quality_job_done(
-    db: aiosqlite.Connection, job: QualityJob,
+    conn: AsyncConnection, job: QualityJob,
 ) -> None:
-    await db.execute(
+    result = await exec_sql(conn,
         """UPDATE quality_evaluation_job
            SET status='done', locked_at=NULL, worker_id=NULL,
                next_retry_at=NULL, last_error_code=NULL,
@@ -613,12 +529,11 @@ async def mark_quality_job_done(
            WHERE id=?""",
         (utc_now(), job.id),
     )
-    await db.commit()
     job.status = "done"
 
 
 async def mark_quality_job_retry(
-    db: aiosqlite.Connection,
+    conn: AsyncConnection,
     job: QualityJob,
     error_code: str,
     error_message: str,
@@ -627,7 +542,7 @@ async def mark_quality_job_retry(
     next_retry_at = (
         datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
     ).isoformat()
-    await db.execute(
+    result = await exec_sql(conn,
         """UPDATE quality_evaluation_job
            SET status='pending', locked_at=NULL, worker_id=NULL,
                next_retry_at=?, last_error_code=?, last_error_message=?,
@@ -635,7 +550,6 @@ async def mark_quality_job_retry(
            WHERE id=?""",
         (next_retry_at, error_code, error_message, utc_now(), job.id),
     )
-    await db.commit()
     job.status = "pending"
     job.next_retry_at = next_retry_at
     job.last_error_code = error_code
@@ -643,20 +557,19 @@ async def mark_quality_job_retry(
 
 
 async def mark_quality_job_failed(
-    db: aiosqlite.Connection,
+    conn: AsyncConnection,
     job: QualityJob,
     error_code: str,
     error_message: str,
 ) -> None:
     status = "dead" if job.attempts >= job.max_attempts else "failed"
-    await db.execute(
+    result = await exec_sql(conn,
         """UPDATE quality_evaluation_job
            SET status=?, locked_at=NULL, worker_id=NULL,
                last_error_code=?, last_error_message=?, updated_at=?
            WHERE id=?""",
         (status, error_code, error_message, utc_now(), job.id),
     )
-    await db.commit()
     job.status = status
     job.last_error_code = error_code
     job.last_error_message = error_message

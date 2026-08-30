@@ -14,6 +14,7 @@ from enterprise.gateway.auth.service_auth import require_service_principal
 from enterprise.gateway.auth.user_principal import UserPrincipal
 from enterprise.gateway.acl.policy import evaluate_document_acl
 from enterprise.gateway.acl.schema import DocumentAclFacts
+from enterprise.gateway.db.ops import gw_read, gw_write
 from enterprise.gateway.quality import models as quality_models
 from enterprise.gateway.quality.gate import quality_dimensions, safe_metric_summary
 from enterprise.gateway.sync.models import get_mapping, get_versions_for_document
@@ -77,16 +78,21 @@ async def _authorized_document(
     request_id: str,
 ):
     if source_version_id:
-        doc = await get_mapping(
+        doc = await gw_read(
             db,
+            get_mapping,
             principal.tenant_id,
             source_system,
             external_document_id,
             source_version_id,
         )
     else:
-        versions = await get_versions_for_document(
-            db, principal.tenant_id, source_system, external_document_id,
+        versions = await gw_read(
+            db,
+            get_versions_for_document,
+            principal.tenant_id,
+            source_system,
+            external_document_id,
         )
         doc = max(
             versions,
@@ -144,8 +150,9 @@ async def list_quality_status(
         offset = max(int(request.query_params.get("offset", "0")), 0)
     except ValueError:
         limit, offset = 100, 0
-    items = await quality_models.list_evaluations(
+    items = await gw_read(
         db,
+        quality_models.list_evaluations,
         tenant_id=request.query_params.get("tenant_id"),
         source_system=request.query_params.get("source_system"),
         status=request.query_params.get("status"),
@@ -179,8 +186,9 @@ async def get_document_quality(
         return acl_error
     if doc is None:
         return _error(404, "DOCUMENT_NOT_FOUND", "Document not found", request_id)
-    evaluation = await quality_models.get_latest_evaluation(
+    evaluation = await gw_read(
         db,
+        quality_models.get_latest_evaluation,
         doc.tenant_id,
         doc.source_system,
         doc.external_document_id,
@@ -214,17 +222,22 @@ async def reevaluate_document_quality(
             request_id,
         )
     tenant_id = request.query_params.get("tenant_id", "default")
-    doc = await get_mapping(
-        db, tenant_id, source_system, external_document_id, source_version_id,
+    doc = await gw_read(
+        db, get_mapping, tenant_id, source_system, external_document_id, source_version_id,
     )
     if doc is None:
         return _error(404, "DOCUMENT_NOT_FOUND", "Document not found", request_id)
-    version = await quality_models.next_evaluation_version(
-        db, doc.tenant_id, doc.source_system,
-        doc.external_document_id, doc.source_version_id,
-    )
-    evaluation = await quality_models.get_or_create_evaluation(
+    version = await gw_read(
         db,
+        quality_models.next_evaluation_version,
+        doc.tenant_id,
+        doc.source_system,
+        doc.external_document_id,
+        doc.source_version_id,
+    )
+    evaluation = await gw_write(
+        db,
+        quality_models.get_or_create_evaluation,
         tenant_id=doc.tenant_id,
         source_system=doc.source_system,
         external_document_id=doc.external_document_id,

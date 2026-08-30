@@ -69,7 +69,6 @@ def _integration_env(tmp_path: Path) -> dict[str, str]:
     file_share_root.mkdir()
     state_host_dir = tmp_path / "gateway-state"
     state_host_dir.mkdir()
-    db_path = state_host_dir / "gateway.db"
     env = os.environ.copy()
     env.update(
         {
@@ -81,8 +80,10 @@ def _integration_env(tmp_path: Path) -> dict[str, str]:
                 {"device-share": str(file_share_root)}
             ),
             "ENTERPRISE_GATEWAY_STATE_HOST_DIR": str(state_host_dir),
-            "ENTERPRISE_DB_PATH": str(db_path),
-            "ENTERPRISE_SYNC_DB_PATH": str(db_path),
+            "ENTERPRISE_GATEWAY_DATABASE_URL": (
+                "postgresql+asyncpg://runner_test:runner_test@127.0.0.1:55432/runner_test"
+            ),
+            "ENTERPRISE_GATEWAY_DATABASE_SCHEMA": "runner_test",
             "ENTERPRISE_SYNC_HMAC_CREDENTIALS": "runner-test-hmac-config",
             "JWT_SHARED_SECRET": "runner-test-jwt-secret",
         }
@@ -107,8 +108,8 @@ def test_missing_integration_environment_returns_exit_three(tmp_path):
         "ENTERPRISE_FILE_SHARE_ROOT",
         "ENTERPRISE_FILE_SHARE_ROOT_ID",
         "ENTERPRISE_GATEWAY_STATE_HOST_DIR",
-        "ENTERPRISE_DB_PATH",
-        "ENTERPRISE_SYNC_DB_PATH",
+        "ENTERPRISE_GATEWAY_DATABASE_URL",
+        "ENTERPRISE_GATEWAY_DATABASE_SCHEMA",
         "ENTERPRISE_SYNC_HMAC_CREDENTIALS",
         "JWT_SHARED_SECRET",
     ):
@@ -293,10 +294,9 @@ def test_preflight_reports_only_states_and_has_no_s3_requirements():
     assert "ENTERPRISE_RAGFLOW_BASE_URL" in source
     assert "ENTERPRISE_REDIS_URL" in source
     assert "GATEWAY_URL" in source
-    assert "ENTERPRISE_DB_PATH" in source
-    assert "ENTERPRISE_SYNC_DB_PATH" in source
-    assert "ENTERPRISE_GATEWAY_STATE_HOST_DIR" in source
-    assert "database_path_not_shared" in source
+    assert "ENTERPRISE_GATEWAY_DATABASE_URL" in source
+    assert "ENTERPRISE_GATEWAY_DB_HOST" in source
+    assert "gateway_postgresql_unavailable" in source
     assert "S3_ENDPOINT" not in source
     assert "S3_ACCESS_KEY" not in source
     assert "S3_SECRET_KEY" not in source
@@ -350,9 +350,9 @@ def test_overlay_wires_gateway_file_share_and_official_ragflow_api():
 
 def test_unshared_gateway_db_returns_exit_three(tmp_path):
     env = _integration_env(tmp_path)
-    other_state_dir = tmp_path / "other-state"
-    other_state_dir.mkdir()
-    env["ENTERPRISE_DB_PATH"] = str(other_state_dir / "gateway.db")
+    env["ENTERPRISE_GATEWAY_DATABASE_URL"] = (
+        "postgresql+asyncpg://runner_test:runner_test@127.0.0.1:55433/runner_test"
+    )
     result, summary = _run_runner(tmp_path, "Integration", env)
     assert result.returncode == 3
     assert summary["requiredIntegrationEvidence"] is False
@@ -415,25 +415,24 @@ def test_live_runner_docker_target_allowlist():
         assert_http_target("http://example.com", target_mode="docker")
 
 
-def test_existing_callback_mode_reads_only_safe_delivery_fields(tmp_path):
-    import sqlite3
-
+def test_existing_callback_mode_reads_only_safe_delivery_fields(monkeypatch, tmp_path):
     from enterprise.scripts.run_file_share_v3_v2_e2e import (
         Artifacts,
         ExistingCallbackDelivery,
     )
 
-    db_path = tmp_path / "gateway.db"
-    with sqlite3.connect(db_path) as db:
-        db.execute("""CREATE TABLE callback_delivery (
-            id INTEGER PRIMARY KEY, delivery_id TEXT, attempts INTEGER, state TEXT,
-            last_http_status INTEGER, tenant_id TEXT, source_system TEXT,
-            external_document_id TEXT, source_version_id TEXT)""")
-        db.execute("""INSERT INTO callback_delivery VALUES
-            (1,'delivery-1',2,'delivered',204,'tenant-a','EAM','DOC-1','v1')""")
+    monkeypatch.setattr(
+        "enterprise.scripts.run_file_share_v3_v2_e2e._db_row",
+        lambda _query, _scope: {
+            "delivery_id": "delivery-1",
+            "attempts": 2,
+            "state": "delivered",
+            "last_http_status": 204,
+        },
+    )
     artifacts = Artifacts(tmp_path / "artifacts")
     ExistingCallbackDelivery(
-        str(db_path), "tenant-a", "EAM", "DOC-1", "v1", artifacts,
+        "tenant-a", "EAM", "DOC-1", "v1", artifacts,
     ).assert_success(1)
     assert artifacts.callbacks == [
         {"deliveryId": "delivery-1", "attempts": 2, "httpStatus": 204}

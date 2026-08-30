@@ -1,35 +1,19 @@
-"""ExtUserMap persistence.
+"""ExtUserMap persistence via GatewayDatabase."""
 
-Uses the same aiosqlite Repository pattern as WP-02A ext_document_map.
-SQLite is a local development default; production PostgreSQL migration
-is documented in docs/04-SSO-RBAC-ACL.md.
-"""
 from __future__ import annotations
 
+import asyncio
+
 import logging
-import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-import aiosqlite
+from sqlalchemy.ext.asyncio import AsyncConnection
+
+from enterprise.gateway.db import GatewayDatabase
+from enterprise.gateway.db.dialect import exec_sql, fetchone
 
 logger = logging.getLogger(__name__)
-
-CREATE_EXT_USER_MAP = """
-CREATE TABLE IF NOT EXISTS ext_user_map (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    tenant_id TEXT NOT NULL,
-    business_user_id TEXT,
-    business_subject TEXT NOT NULL,
-    ragflow_user_id TEXT,
-    status TEXT NOT NULL DEFAULT 'active',
-    mapping_strategy TEXT NOT NULL DEFAULT 'B',
-    created_at TEXT NOT NULL DEFAULT '',
-    updated_at TEXT NOT NULL DEFAULT '',
-    last_login_at TEXT,
-    UNIQUE(tenant_id, business_subject)
-);
-"""
 
 
 @dataclass
@@ -56,75 +40,90 @@ class ExtUserMap:
 
 
 class ExtUserMapRepo:
-    """Repository for ext_user_map with persistent connection."""
+    """Repository for ext_user_map backed by GatewayDatabase."""
 
-    def __init__(self, db_path: str | None = None):
-        self._db_path = db_path or os.environ.get(
-            "ENTERPRISE_DB_PATH",
-            os.path.join(os.path.dirname(__file__), "..", "..", "ext_document_map.db"),
-        )
-        self._db: aiosqlite.Connection | None = None
+    def __init__(
+        self,
+        gateway: GatewayDatabase | None = None,
+        *,
+        db_path: str | None = None,
+    ):
+        if gateway is not None and db_path is not None:
+            raise TypeError("pass gateway or db_path, not both")
+        self._gateway = gateway
+        self._db_path = db_path
+        self._init_lock = asyncio.Lock()
 
-    async def _get_db(self) -> aiosqlite.Connection:
-        if self._db is not None:
-            return self._db
-        path = self._db_path
-        if path == ":memory:":
-            path = "file::memory:?cache=shared"
-        self._db = await aiosqlite.connect(path)
-        self._db.row_factory = aiosqlite.Row
-        await self._db.execute("PRAGMA journal_mode=WAL")
-        await self._db.execute("PRAGMA foreign_keys=ON")
-        return self._db
+    async def _gateway_db(self) -> GatewayDatabase:
+        if self._gateway is not None:
+            return self._gateway
+        async with self._init_lock:
+            if self._gateway is not None:
+                return self._gateway
+            if self._db_path is not None:
+                from enterprise.gateway.db.testing import create_gateway
 
-    async def close(self) -> None:
-        if self._db is not None:
-            await self._db.close()
-            self._db = None
+                self._gateway = await create_gateway(self._db_path)
+                return self._gateway
+            from enterprise.gateway.app import get_gateway_db
 
-    async def ensure_table(self) -> None:
-        db = await self._get_db()
-        await db.executescript(CREATE_EXT_USER_MAP)
-        await db.commit()
+            self._gateway = await get_gateway_db()
+            return self._gateway
 
     async def insert_mapping(self, entry: ExtUserMap) -> ExtUserMap:
         now = datetime.now(timezone.utc).isoformat()
-        db = await self._get_db()
-        cursor = await db.execute(
-            """INSERT INTO ext_user_map
-               (tenant_id, business_user_id, business_subject, ragflow_user_id,
-                status, mapping_strategy, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(tenant_id, business_subject) DO UPDATE SET
-               updated_at=excluded.updated_at""",
-            (entry.tenant_id, entry.business_user_id, entry.business_subject,
-             entry.ragflow_user_id, entry.status, entry.mapping_strategy,
-             now, now),
-        )
-        await db.commit()
-        entry.id = cursor.lastrowid
-        return entry
+        gateway = await self._gateway_db()
+        async with gateway.transaction(write=True) as conn:
+            result = await exec_sql(
+                conn,
+                """INSERT INTO ext_user_map
+                   (tenant_id, business_user_id, business_subject, ragflow_user_id,
+                    status, mapping_strategy, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(tenant_id, business_subject) DO UPDATE SET
+                   updated_at=excluded.updated_at
+                   RETURNING id""",
+                (
+                    entry.tenant_id,
+                    entry.business_user_id,
+                    entry.business_subject,
+                    entry.ragflow_user_id,
+                    entry.status,
+                    entry.mapping_strategy,
+                    now,
+                    now,
+                ),
+            )
+            entry.id = int(result.scalar_one())
+            return entry
 
     async def get_mapping(
         self, tenant_id: str, business_subject: str
     ) -> dict | None:
-        db = await self._get_db()
-        cursor = await db.execute(
-            """SELECT * FROM ext_user_map
-               WHERE tenant_id=? AND business_subject=?""",
-            (tenant_id, business_subject),
-        )
-        row = await cursor.fetchone()
-        if row:
-            return dict(row)
-        return None
+        gateway = await self._gateway_db()
+        async with gateway.transaction() as conn:
+            row = await fetchone(
+                conn,
+                """SELECT * FROM ext_user_map
+                   WHERE tenant_id=? AND business_subject=?""",
+                (tenant_id, business_subject),
+            )
+            return dict(row) if row else None
 
     async def record_login(self, tenant_id: str, business_subject: str) -> None:
         now = datetime.now(timezone.utc).isoformat()
-        db = await self._get_db()
-        await db.execute(
-            """UPDATE ext_user_map SET last_login_at=?, updated_at=?
-               WHERE tenant_id=? AND business_subject=?""",
-            (now, now, tenant_id, business_subject),
-        )
-        await db.commit()
+        gateway = await self._gateway_db()
+        async with gateway.transaction(write=True) as conn:
+            await exec_sql(
+                conn,
+                """UPDATE ext_user_map SET last_login_at=?, updated_at=?
+                   WHERE tenant_id=? AND business_subject=?""",
+                (now, now, tenant_id, business_subject),
+            )
+
+    async def close(self) -> None:
+        """Compatibility no-op; GatewayDatabase lifecycle is app-managed."""
+
+    async def ensure_table(self) -> None:
+        """Ensure GatewayDatabase is initialized (compat with legacy callers)."""
+        await self._gateway_db()

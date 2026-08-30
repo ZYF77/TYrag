@@ -1,9 +1,10 @@
 """Read-only EAM asset resolver boundary used by the external v2 contract.
 
 The document map is deliberately not an asset registry. Production deployments
-may call the EAM-owned resolver over HTTP; the SQLite adapter is only an
-explicit test/development fixture. FILE_SHARE v3 ingestion does not require a
-resolver call and persists the identifiers supplied by EAM directly.
+may call the EAM-owned resolver over HTTP; the test adapter is only an explicit
+development fixture backed by the Gateway test database. FILE_SHARE v3
+ingestion does not require a resolver call and persists the identifiers supplied
+by EAM directly.
 """
 from __future__ import annotations
 
@@ -156,11 +157,11 @@ def _validate_resolved(
     return resolved
 
 
-class SQLiteAssetRegistryAdapter:
-    """Explicit offline fixture adapter backed by the gateway test DB."""
+class TestAssetRegistryAdapter:
+    """Explicit offline fixture adapter backed by the Gateway test DB."""
 
-    def __init__(self, db):
-        self.db = db
+    def __init__(self, conn):
+        self.conn = conn
 
     async def resolve(
         self,
@@ -170,20 +171,22 @@ class SQLiteAssetRegistryAdapter:
         fixed_asset_no: str | None = None,
         asset_id: str | None = None,
     ) -> ResolvedAsset | None:
+        from enterprise.gateway.db.dialect import fetchall
+
         tenant_id, equipment_id, fixed_asset_no, asset_id = _validate_lookup(
             tenant_id=tenant_id,
             equipment_id=equipment_id,
             fixed_asset_no=fixed_asset_no,
             asset_id=asset_id,
         )
-        async with self.db.execute(
+        tenant_rows = await fetchall(
+            self.conn,
             """SELECT tenant_id, equipment_id, fixed_asset_no, asset_id
                 FROM ext_asset_registry
                 WHERE tenant_id=?
                 ORDER BY equipment_id""",
             (tenant_id,),
-        ) as cursor:
-            tenant_rows = await cursor.fetchall()
+        )
 
         fields = (
             ("equipment_id", equipment_id),
@@ -232,7 +235,7 @@ class SQLiteAssetRegistryAdapter:
             equipment_id=equipment,
             fixed_asset_no=fixed,
             asset_id=canonical_asset,
-            registry_version="sqlite-fixture",
+            registry_version="test-fixture",
             resolved_at=utc_now(),
         )
 
@@ -362,28 +365,39 @@ def asset_registry_adapter(db) -> AssetRegistryAdapter:
             or EAM_ASSET_RESOLVER_DEFAULT_PATH,
             token=os.environ.get(EAM_ASSET_RESOLVER_TOKEN_ENV, "").strip() or None,
         )
-    if mode in {"sqlite", "test", "fixture"} or (
+    if mode in {"test", "fixture"} or (
         not mode and os.environ.get("ENTERPRISE_TEST_MODE") == "1"
     ):
-        return SQLiteAssetRegistryAdapter(db)
+        return TestAssetRegistryAdapter(db)
     return UnconfiguredAssetRegistryAdapter()
 
 
 async def resolve_asset(
-    db,
+    conn,
     *,
     tenant_id: str,
     equipment_id: str | None = None,
     fixed_asset_no: str | None = None,
     asset_id: str | None = None,
 ) -> ResolvedAsset:
+    from enterprise.gateway.db import GatewayDatabase
+
+    if isinstance(conn, GatewayDatabase):
+        async with conn.transaction(write=False) as opened:
+            return await resolve_asset(
+                opened,
+                tenant_id=tenant_id,
+                equipment_id=equipment_id,
+                fixed_asset_no=fixed_asset_no,
+                asset_id=asset_id,
+            )
     tenant_id, equipment_id, fixed_asset_no, asset_id = _validate_lookup(
         tenant_id=tenant_id,
         equipment_id=equipment_id,
         fixed_asset_no=fixed_asset_no,
         asset_id=asset_id,
     )
-    resolved = await asset_registry_adapter(db).resolve(
+    resolved = await asset_registry_adapter(conn).resolve(
         tenant_id=tenant_id,
         equipment_id=equipment_id,
         fixed_asset_no=fixed_asset_no,

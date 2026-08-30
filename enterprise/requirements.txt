@@ -1,5 +1,6 @@
 # Runtime dependencies for the enterprise gateway.
-# FastAPI, uvicorn, aiosqlite, jsonschema, pydantic, and httpx are provided by
-# the base image; this file records the WP-02 object-storage dependency.
+# FastAPI, uvicorn, asyncpg, jsonschema, pydantic, and httpx are provided by
+# the base image; this file records the PostgreSQL driver and object-storage dependency.
+asyncpg>=0.31.0,<0.32.0
 boto3>=1.34.0,<2.0.0
 python-multipart>=0.0.9,<1.0.0

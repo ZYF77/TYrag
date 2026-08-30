@@ -1,5 +1,4 @@
 """Query demo closed-loop tests with UserPrincipal and ACL ownership."""
-import aiosqlite
 import hashlib
 import os
 import subprocess
@@ -16,6 +15,9 @@ from httpx import ASGITransport, AsyncClient
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from enterprise.gateway.app import app  # noqa: E402
+from enterprise.gateway.db.dialect import exec_sql, fetchone, table_columns  # noqa: E402
+from enterprise.gateway.db.ops import gw_write  # noqa: E402
+from enterprise.gateway.db.testing import create_gateway  # noqa: E402
 from enterprise.gateway.models.ext_user_map import (  # noqa: E402
     ExtUserMap,
     ExtUserMapRepo,
@@ -26,7 +28,6 @@ from enterprise.gateway.query import router as query_router  # noqa: E402
 from enterprise.gateway.quality import models as quality_models  # noqa: E402
 from enterprise.gateway.sync.models import (  # noqa: E402
     ExtDocumentMap,
-    init_db,
     insert_mapping,
     update_mapping_status,
 )
@@ -78,13 +79,12 @@ async def isolated_demo_db(demo_env):
     import enterprise.gateway.app as app_module
     import enterprise.gateway.query.router as query_router
 
-    if app_module._db is not None:
-        await app_module._db.close()
-        app_module._db = None
+    if app_module._gateway_db is not None:
+        await app_module._gateway_db.dispose()
+        app_module._gateway_db = None
 
-    db = await init_db(demo_env)
-    repo = ExtUserMapRepo(db_path=demo_env)
-    await repo.ensure_table()
+    gateway = await create_gateway(demo_env)
+    repo = ExtUserMapRepo(gateway=gateway)
     await repo.insert_mapping(
         ExtUserMap(
             tenant_id="customer-a",
@@ -111,12 +111,19 @@ async def isolated_demo_db(demo_env):
     )
     await repo.close()
     query_router._query_stub = None
-    app_module.app.dependency_overrides[query_router.get_db] = lambda: db
+    app_module.app.dependency_overrides[app_module.get_gateway_db] = lambda: gateway
+    app_module.app.dependency_overrides[app_module.get_db] = lambda: gateway
+    app_module.app.dependency_overrides[query_router.get_db] = lambda: gateway
     try:
-        yield db
+        yield gateway
     finally:
+        app_module.app.dependency_overrides.pop(app_module.get_gateway_db, None)
+        app_module.app.dependency_overrides.pop(app_module.get_db, None)
         app_module.app.dependency_overrides.pop(query_router.get_db, None)
-        await db.close()
+        await gateway.dispose()
+        if app_module._gateway_db is not None:
+            await app_module._gateway_db.dispose()
+            app_module._gateway_db = None
 
 
 def _headers(token: str) -> dict:
@@ -144,13 +151,12 @@ async def _insert_ready_document(
         asset_id=asset_id,
         sync_status="ready",
     )
-    doc = await insert_mapping(db, doc)
-    await update_mapping_status(
-        db, doc, "ready", pipeline_status="DONE"
-    )
+    doc = await gw_write(db, insert_mapping, doc)
+    await gw_write(db, update_mapping_status, doc, "ready", pipeline_status="DONE")
     for user in allowed_users:
-        await acl_store.grant(
+        await gw_write(
             db,
+            acl_store.grant,
             tenant_id=tenant_id,
             external_document_id=doc_id,
             business_user_id=user,
@@ -189,8 +195,9 @@ class TestUploadAndStatus:
             assert without_acl.status_code == 403
             assert without_acl.json()["code"] == "ACL_DENIED"
 
-            await acl_store.grant(
+            await gw_write(
                 isolated_demo_db,
+                acl_store.grant,
                 tenant_id="customer-a",
                 external_document_id="DOC-DEMO-001",
                 business_user_id="biz-user-001",
@@ -219,8 +226,9 @@ class TestUploadAndStatus:
             }
             first = await c.post(url, content=b"%PDF-1.7", headers=headers)
             assert first.status_code == 200
-            await acl_store.grant(
+            await gw_write(
                 isolated_demo_db,
+                acl_store.grant,
                 tenant_id="customer-a",
                 external_document_id="DOC-DEMO-002",
                 business_user_id="biz-user-001",
@@ -362,17 +370,19 @@ class TestAsk:
             assert body["answer"] == "未找到可靠依据，无法回答。"
             assert body["citations"] == []
 
-            async with isolated_demo_db.execute(
-                """SELECT COUNT(*), COALESCE(MAX(source_version_id), ''),
-                          COALESCE(MAX(asset_id), ''),
-                          COALESCE(MAX(ragflow_session_id), '')
-                   FROM ext_conversation_map"""
-            ) as cursor:
-                row = await cursor.fetchone()
-            assert row[0] == 1
-            assert row[1] == "v1"
-            assert row[2] == "FA-DEMO-001"
-            assert row[3] == body["ragflowSessionId"]
+            async with isolated_demo_db.transaction(write=False) as conn:
+                row = await fetchone(
+                    conn,
+                    """SELECT COUNT(*) AS n,
+                              COALESCE(MAX(source_version_id), '') AS version_id,
+                              COALESCE(MAX(asset_id), '') AS asset_id,
+                              COALESCE(MAX(ragflow_session_id), '') AS session_id
+                       FROM ext_conversation_map""",
+                )
+            assert row["n"] == 1
+            assert row["version_id"] == "v1"
+            assert row["asset_id"] == "FA-DEMO-001"
+            assert row["session_id"] == body["ragflowSessionId"]
 
     @pytest.mark.asyncio
     async def test_ask_returns_no_reliable_evidence_when_answer_empty(
@@ -401,9 +411,11 @@ class TestAsk:
             assert len(body["citations"]) == 1
 
     @pytest.mark.asyncio
-    async def test_ask_returns_no_reliable_evidence_when_chunks_empty(
+    async def test_ask_returns_completed_when_chunks_empty(
         self, isolated_demo_db
     ):
+        """RF-PATCH-007: the stub reports an explicit terminal status from the
+        answer text only, so an empty chunk list no longer forces abstain."""
         await _insert_ready_document(
             isolated_demo_db, doc_id="DOC-EMPTY-CHUNKS"
         )
@@ -422,8 +434,7 @@ class TestAsk:
             )
             assert resp.status_code == 200
             body = resp.json()
-            assert body["code"] == "NO_RELIABLE_EVIDENCE"
-            assert body["status"] == "no_reliable_evidence"
+            assert body["status"] == "completed"
             assert body["citations"] == []
 
     @pytest.mark.asyncio
@@ -468,8 +479,9 @@ class TestAsk:
         await _insert_ready_document(
             isolated_demo_db, doc_id="DOC-QUALITY-REVIEW"
         )
-        evaluation = await quality_models.get_or_create_evaluation(
+        evaluation = await gw_write(
             isolated_demo_db,
+            quality_models.get_or_create_evaluation,
             tenant_id="customer-a",
             source_system="DEMO",
             external_document_id="DOC-QUALITY-REVIEW",
@@ -478,15 +490,16 @@ class TestAsk:
             ragflow_document_id="doc-1",
             routing={},
         )
-        await isolated_demo_db.execute(
-            """UPDATE parse_quality_evaluation
-               SET evaluation_state='completed',
-                   parse_quality_status='review_required',
-                   quality_reasons='["REVIEW"]'
-               WHERE id=?""",
-            (evaluation.id,),
-        )
-        await isolated_demo_db.commit()
+        async with isolated_demo_db.transaction(write=True) as conn:
+            await exec_sql(
+                conn,
+                """UPDATE parse_quality_evaluation
+                   SET evaluation_state='completed',
+                       parse_quality_status='review_required',
+                       quality_reasons='["REVIEW"]'
+                   WHERE id=?""",
+                (evaluation.id,),
+            )
         monkeypatch.setenv("ENTERPRISE_QUALITY_GATE_ENABLED", "true")
 
         token = _make_token()
@@ -540,12 +553,17 @@ class TestAsk:
             ragflow_document_id="doc-1",
             sync_status="parsing",
         )
-        doc = await insert_mapping(isolated_demo_db, doc)
-        await update_mapping_status(
-            isolated_demo_db, doc, "parsing", pipeline_status="RUNNING"
-        )
-        await acl_store.grant(
+        doc = await gw_write(isolated_demo_db, insert_mapping, doc)
+        await gw_write(
             isolated_demo_db,
+            update_mapping_status,
+            doc,
+            "parsing",
+            pipeline_status="RUNNING",
+        )
+        await gw_write(
+            isolated_demo_db,
+            acl_store.grant,
             tenant_id="customer-a",
             external_document_id="DOC-ASK-002",
             business_user_id="biz-user-001",
@@ -926,76 +944,40 @@ class TestHistoryEmptyMessageFilter:
 
 @pytest.mark.asyncio
 async def test_ensure_schema_preserves_old_content_and_citations_columns(
-    tmp_path,
 ):
-    db = await aiosqlite.connect(str(tmp_path / "migration.db"))
-    db.row_factory = aiosqlite.Row
-    await db.execute(
-        """CREATE TABLE ext_conversation_map (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            tenant_id TEXT NOT NULL,
-            business_conversation_id TEXT NOT NULL,
-            business_user_id TEXT NOT NULL,
-            ragflow_chat_id TEXT,
-            ragflow_session_id TEXT,
-            external_document_id TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'active',
-            created_at TEXT NOT NULL,
-            last_message_at TEXT
-        )"""
-    )
-    await db.execute(
-        """CREATE TABLE ext_conversation_message (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            conversation_id TEXT NOT NULL,
-            tenant_id TEXT NOT NULL,
-            business_user_id TEXT NOT NULL,
-            message_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'completed',
-            content TEXT,
-            citations_json TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )"""
-    )
-    await db.execute(
-        """INSERT INTO ext_conversation_map
-           (tenant_id, business_conversation_id, business_user_id,
-            ragflow_chat_id, ragflow_session_id, external_document_id,
-            status, created_at, last_message_at)
-           VALUES ('t', 'c', 'u', 'chat', 'session', 'doc',
-                   'active', 'now', 'now')"""
-    )
-    await db.execute(
-        """INSERT INTO ext_conversation_message
-           (conversation_id, tenant_id, business_user_id, message_id,
-            role, status, content, citations_json, created_at, updated_at)
-           VALUES ('c', 't', 'u', 'm', 'assistant', 'completed',
-                   '正文', '[]', 'now', 'now')"""
-    )
-    await db.commit()
+    gateway = await create_gateway(":memory:")
+    conn = await gateway.connect()
+    try:
+        await conn.begin()
+        await exec_sql(
+            conn,
+            """INSERT INTO ext_conversation_message
+               (conversation_id, tenant_id, business_user_id, message_id,
+                role, status, content, citations_json, created_at, updated_at)
+               VALUES ('c', 't', 'u', 'm', 'assistant', 'completed',
+                       '正文', '[]', 'now', 'now')""",
+        )
+        await conn.commit()
 
-    await conversation_store.ensure_schema(db)
-    await conversation_store.ensure_schema(db)
+        await conversation_store.ensure_schema(conn)
+        await conversation_store.ensure_schema(conn)
 
-    async with db.execute(
-        "PRAGMA table_info(ext_conversation_message)"
-    ) as cursor:
-        columns = {row["name"] for row in await cursor.fetchall()}
-    assert "content" in columns
-    assert "citations_json" in columns
-    assert "ragflow_message_id" in columns
+        columns = await table_columns(conn, "ext_conversation_message")
+        assert "content" in columns
+        assert "citations_json" in columns
+        assert "ragflow_message_id" in columns
 
-    async with db.execute(
-        """SELECT content, citations_json
-           FROM ext_conversation_message
-           WHERE message_id='m'"""
-    ) as cursor:
-        row = await cursor.fetchone()
-    assert row["content"] == "正文"
-    assert row["citations_json"] == "[]"
-    await db.close()
+        row = await fetchone(
+            conn,
+            """SELECT content, citations_json
+               FROM ext_conversation_message
+               WHERE message_id='m'""",
+        )
+        assert row["content"] == "正文"
+        assert row["citations_json"] == "[]"
+    finally:
+        await conn.close()
+        await gateway.dispose()
 
 
 @pytest.mark.usefixtures("isolated_demo_db")
@@ -1021,12 +1003,13 @@ class TestCitationSnapshot:
             assert created.status_code == 200
             conversation_id = created.json()["conversationId"]
 
-            await isolated_demo_db.execute(
-                """UPDATE ext_document_map
-                   SET asset_id='FA-CHANGED'
-                   WHERE external_document_id='DOC-SNAP-001'"""
-            )
-            await isolated_demo_db.commit()
+            async with isolated_demo_db.transaction(write=True) as conn:
+                await exec_sql(
+                    conn,
+                    """UPDATE ext_document_map
+                       SET asset_id='FA-CHANGED'
+                       WHERE external_document_id='DOC-SNAP-001'""",
+                )
 
             history = await c.get(
                 f"/enterprise/api/v1/demo/conversations/{conversation_id}",
@@ -1180,12 +1163,13 @@ class TestOwnership:
             assert history_a.status_code == 200
             assert history_a.json()["ragflowSessionId"] == session_a
 
-            async with isolated_demo_db.execute(
-                "SELECT COUNT(*) AS n FROM ext_conversation_map "
-                "WHERE business_conversation_id=?",
-                (conversation_id,),
-            ) as cursor:
-                row = await cursor.fetchone()
+            async with isolated_demo_db.transaction(write=False) as conn:
+                row = await fetchone(
+                    conn,
+                    "SELECT COUNT(*) AS n FROM ext_conversation_map "
+                    "WHERE business_conversation_id=?",
+                    (conversation_id,),
+                )
             assert row["n"] == 1
 
     @pytest.mark.asyncio
@@ -1205,12 +1189,13 @@ class TestOwnership:
             assert created.status_code == 200
             conversation_id = created.json()["conversationId"]
 
-            await isolated_demo_db.execute(
-                "DELETE FROM demo_document_acl "
-                "WHERE tenant_id='customer-a' "
-                "AND external_document_id='DOC-OWN-005'"
-            )
-            await isolated_demo_db.commit()
+            async with isolated_demo_db.transaction(write=True) as conn:
+                await exec_sql(
+                    conn,
+                    "DELETE FROM demo_document_acl "
+                    "WHERE tenant_id='customer-a' "
+                    "AND external_document_id='DOC-OWN-005'",
+                )
 
             history = await c.get(
                 f"/enterprise/api/v1/demo/conversations/{conversation_id}",

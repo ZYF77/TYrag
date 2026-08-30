@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from enterprise.gateway.db.dialect import exec_sql, fetchall, fetchone
+from enterprise.gateway.db.ops import gw_read, gw_write
+
 import hashlib
 import json
 import uuid
@@ -93,8 +96,7 @@ def _client(runtime) -> AsyncClient:
 
 
 async def _seed_doc(db) -> None:
-    await insert_mapping(
-        db,
+    await gw_write(db, insert_mapping,
         ExtDocumentMap(
             tenant_id="customer-a",
             source_system="DEMO",
@@ -270,14 +272,10 @@ async def test_multipart_png_only_enriches_and_deletes_ragflow_file(runtime):
     assert user["attachments"][0]["fileName"] == "photo.png"
     assert "content" not in user["attachments"][0]
     assert "downloadUrl" not in user["attachments"][0]
-    async with runtime.db.execute("SELECT COUNT(*) AS n FROM ext_document_map") as cursor:
-        row = await cursor.fetchone()
+    row = await gw_read(runtime.db, fetchone, "SELECT COUNT(*) AS n FROM ext_document_map")
     assert row["n"] == 1
     assert runtime.stub.deleted_files
-    async with runtime.db.execute(
-        "SELECT file_id, deleted_at FROM ext_ragflow_temp_file"
-    ) as cursor:
-        temps = await cursor.fetchall()
+    temps = await gw_read(runtime.db, fetchall, "SELECT file_id, deleted_at FROM ext_ragflow_temp_file")
     assert temps
     assert all(row["deleted_at"] for row in temps)
 
@@ -307,10 +305,7 @@ async def test_ragflow_delete_failure_keeps_orphan_for_ttl_cleanup(
         )
 
     assert response.status_code == 200
-    async with runtime.db.execute(
-        "SELECT deleted_at FROM ext_ragflow_temp_file"
-    ) as cursor:
-        rows = await cursor.fetchall()
+    rows = await gw_read(runtime.db, fetchall, "SELECT deleted_at FROM ext_ragflow_temp_file")
     assert rows
     assert all(row["deleted_at"] is None for row in rows)
 
@@ -353,6 +348,90 @@ async def test_multipart_txt_history_keeps_filename(runtime):
     files = body.get("files") or []
     assert files
     assert files[0]["mime_type"] == "text/plain"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "file_tuple",
+    [
+        ("note.txt", b"HMI fault code E07", "text/plain"),
+        ("drawing.pdf", b"%PDF-1.4 fake", "application/pdf"),
+    ],
+)
+async def test_empty_question_with_text_attachment_uses_default_question(
+    runtime, file_tuple
+):
+    """TXT/PDF bodies are parsed by RAGFlow from files[]; Gateway no longer
+    extracts text observations, so an empty question gets the default ask."""
+    await _seed_doc(runtime.db)
+    async with _client(runtime) as client:
+        created = await client.post(f"{BASE}/conversations", json={"equipmentId": "EQ-ATT"})
+        response = await client.post(
+            f"{BASE}/conversations/{created.json()['conversationId']}/messages",
+            data={
+                "metadata": json.dumps(
+                    {"clientMessageId": f"default-q-{file_tuple[0]}"}
+                )
+            },
+            files={"files": file_tuple},
+        )
+    assert response.status_code == 200, response.text
+    body = runtime.stub._last_completion_body
+    assert body is not None
+    assert body["question"] == "请说明你上传的附件内容。"
+    assert body.get("attachment_observations") == []
+    files = body.get("files") or []
+    assert files
+    assert files[0]["mime_type"] == file_tuple[2]
+    assert files[0]["name"].endswith(Path(file_tuple[0]).suffix)
+
+
+@pytest.mark.asyncio
+async def test_upload_failure_returns_503_ragflow_unavailable(runtime, monkeypatch):
+    await _seed_doc(runtime.db)
+
+    async def fail_upload(*_args, **_kwargs):
+        raise RuntimeError("connection reset during upload")
+
+    monkeypatch.setattr(runtime.stub, "upload_chat_file", fail_upload)
+    async with _client(runtime) as client:
+        created = await client.post(
+            f"{BASE}/conversations", json={"equipmentId": "EQ-ATT"}
+        )
+        response = await client.post(
+            f"{BASE}/conversations/{created.json()['conversationId']}/messages",
+            data={"metadata": json.dumps({"clientMessageId": "upload-fail"})},
+            files={"files": ("photo.png", MIN_PNG, "image/png")},
+        )
+    assert response.status_code == 503
+    assert response.json()["code"] == "RAGFLOW_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_upload_invalid_response_fails_closed(runtime, monkeypatch):
+    """A non-descriptor upload response must fail the run, never be swallowed.
+
+    RAGFlowAPIError(..., 502) signals an upstream API contract violation, so it
+    maps to RAGFLOW_API_INCOMPATIBLE with HTTP 503 in the router; the 502
+    status stays on the exception for diagnostics.
+    """
+    await _seed_doc(runtime.db)
+
+    async def bad_upload(*_args, **_kwargs):
+        return {"unexpected": "payload-without-id"}
+
+    monkeypatch.setattr(runtime.stub, "upload_chat_file", bad_upload)
+    async with _client(runtime) as client:
+        created = await client.post(
+            f"{BASE}/conversations", json={"equipmentId": "EQ-ATT"}
+        )
+        response = await client.post(
+            f"{BASE}/conversations/{created.json()['conversationId']}/messages",
+            data={"metadata": json.dumps({"clientMessageId": "upload-invalid"})},
+            files={"files": ("photo.png", MIN_PNG, "image/png")},
+        )
+    assert response.status_code == 503
+    assert response.json()["code"] == "RAGFLOW_API_INCOMPATIBLE"
 
 
 RFC2047_TXT = "=?utf-8?B?5paw5paH5Lu2Mi50eHQ=?="
@@ -457,8 +536,7 @@ async def test_multipart_txt_works_without_object_storage(isolated_gateway_db, m
     assert "downloadUrl" not in atts[0]
     user = next(item for item in history.json()["items"] if item["role"] == "user")
     assert user["attachments"][0]["fileName"] == "note.txt"
-    async with db.execute("SELECT COUNT(*) AS n FROM ext_transient_attachment") as cursor:
-        row = await cursor.fetchone()
+    row = await gw_read(db, fetchone, "SELECT COUNT(*) AS n FROM ext_transient_attachment")
     assert row["n"] == 0
 
 
@@ -576,10 +654,7 @@ async def test_replay_does_not_create_second_attachment(runtime):
     assert first.json()["attachments"] == second.json()["attachments"]
     assert runtime.stub.uploaded_files.count("photo.png") == 1
     assert runtime.stub.understand_calls == 1
-    async with runtime.db.execute(
-        "SELECT COUNT(*) AS n FROM ext_transient_attachment"
-    ) as cursor:
-        row = await cursor.fetchone()
+    row = await gw_read(runtime.db, fetchone, "SELECT COUNT(*) AS n FROM ext_transient_attachment")
     assert row["n"] == 0
     user = next(item for item in history.json()["items"] if item["role"] == "user")
     assert len(user["attachments"]) == 1
@@ -821,7 +896,9 @@ async def test_image_observation_without_abstain_is_completed(runtime):
 
 @pytest.mark.asyncio
 async def test_repair_question_without_kb_still_abstains(runtime):
-    runtime.stub.forced_answer = f"附件只是观察。{ABSTAIN_PHRASE}"
+    # RF-PATCH-007: upstream abstains via explicit status (exact abstain text);
+    # Gateway no longer re-judges mixed wording on its own.
+    runtime.stub.forced_answer = formal_router.NO_RELIABLE_EVIDENCE_ANSWER
     await _seed_doc(runtime.db)
     async with _client(runtime) as client:
         created = await client.post(f"{BASE}/conversations", json={"equipmentId": "EQ-ATT"})

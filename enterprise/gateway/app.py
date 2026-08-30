@@ -9,15 +9,17 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-import aiosqlite
 import jsonschema
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from enterprise.gateway.db import GatewayDatabase
+from enterprise.gateway.db.dialect import fetchone
+from enterprise.gateway.db.testing import create_gateway
 from enterprise.gateway.sync.models import (
-    ExtDocumentMap, OutboxEvent, init_db, insert_mapping, get_mapping,
+    ExtDocumentMap, OutboxEvent, insert_mapping, get_mapping,
     get_mapping_by_event_id, list_mappings,
     enqueue_outbox, get_outbox_by_event_id, row_to_mapping,
     update_mapping_status,
@@ -64,7 +66,7 @@ _SCHEMA_PATH = Path(__file__).resolve().parents[2] / "contracts" / "metadata-sch
 with open(_SCHEMA_PATH) as f:
     METADATA_SCHEMA = json.load(f)
 
-_db: aiosqlite.Connection | None = None
+_gateway_db: GatewayDatabase | None = None
 _background_tasks: list[asyncio.Task] = []
 
 
@@ -82,28 +84,56 @@ def _ragflow_client() -> RAGFlowDocumentClient:
     return RAGFlowDocumentClient(api_key=require_ragflow_api_key())
 
 
-def _sync_service(db: aiosqlite.Connection) -> SyncService:
+def _sync_service(gateway: GatewayDatabase) -> SyncService:
     return SyncService(
-        db,
+        gateway,
         _source_adapter(),
         _ragflow_client(),
         FileShareSourceAdapter(),
     )
 
 
-async def get_db() -> aiosqlite.Connection:
-    global _db
-    if _db is None:
-        db_path = os.environ.get(
-            "ENTERPRISE_SYNC_DB_PATH", "enterprise/ext_document_map.db")
-        _db = await init_db(db_path)
-    return _db
+async def get_gateway_db() -> GatewayDatabase:
+    global _gateway_db
+    from enterprise.gateway.db.database import (
+        resolve_database_url,
+        resolve_test_database_url,
+        schema_for_key,
+    )
+
+    if _test_mode():
+        # Existing test callers use temporary path strings as isolation keys;
+        # they now select a PostgreSQL schema and never open a SQLite file.
+        key = (
+            os.environ.get("ENTERPRISE_SYNC_DB_PATH")
+            or os.environ.get("ENTERPRISE_DB_PATH")
+            or "gateway-app"
+        )
+        desired = resolve_test_database_url()
+        schema = schema_for_key(key, test=True)
+    else:
+        desired = resolve_database_url()
+        schema = schema_for_key()
+    if _gateway_db is not None and (
+        getattr(_gateway_db, "db_path", None) != desired
+        or getattr(_gateway_db, "schema", None) != schema
+    ):
+        await _gateway_db.dispose()
+        _gateway_db = None
+    if _gateway_db is None:
+        _gateway_db = await create_gateway(desired, schema=schema)
+    return _gateway_db
+
+
+async def get_db() -> GatewayDatabase:
+    """Backward-compatible alias for router modules still named get_db."""
+    return await get_gateway_db()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _db
-    _db = await get_db()
+    global _gateway_db
+    _gateway_db = await get_gateway_db()
     configure_gateway_file_logging()
     if not _test_mode():
         require_ragflow_api_key()
@@ -116,7 +146,7 @@ async def lifespan(app: FastAPI):
     set_citation_image_fetcher(_fetch_citation_image)
     started_tasks: list[asyncio.Task] = []
     if config.worker_enabled and not _test_mode():
-        service = _sync_service(_db)
+        service = _sync_service(_gateway_db)
         worker_task = asyncio.create_task(
             OutboxWorker(service).run_forever(config.outbox_poll_seconds)
         )
@@ -125,14 +155,14 @@ async def lifespan(app: FastAPI):
         )
         attachment_cleanup_task = asyncio.create_task(
             TransientAttachmentCleanupWorker(
-                TransientAttachmentService(_db)
+                TransientAttachmentService(_gateway_db)
             ).run_forever(attachment_cleanup_interval_seconds())
         )
         started_tasks.extend([worker_task, reconciler_task, attachment_cleanup_task])
         _background_tasks.extend(started_tasks)
     if config.quality_worker_enabled and not _test_mode():
         quality_service = QualityEvaluationService(
-            _db,
+            _gateway_db,
             _ragflow_client(),
             max_attempts=config.quality_max_attempts,
         )
@@ -151,7 +181,7 @@ async def lifespan(app: FastAPI):
         _background_tasks.extend([quality_worker_task, quality_reconciler_task])
     if config.callback_enabled and not _test_mode():
         callback_worker_task = asyncio.create_task(
-            CallbackDeliveryWorker(_db).run_forever(config.callback_poll_seconds)
+            CallbackDeliveryWorker(_gateway_db).run_forever(config.callback_poll_seconds)
         )
         started_tasks.append(callback_worker_task)
         _background_tasks.append(callback_worker_task)
@@ -168,9 +198,9 @@ async def lifespan(app: FastAPI):
         for task in started_tasks:
             if task in _background_tasks:
                 _background_tasks.remove(task)
-        if _db:
-            await _db.close()
-            _db = None
+        if _gateway_db:
+            await _gateway_db.dispose()
+            _gateway_db = None
 
 
 app = FastAPI(title="Enterprise RAGFlow Gateway", version="1.0.0", lifespan=lifespan)
@@ -302,6 +332,7 @@ ERROR_CODES = {
     "DOCUMENT_SOURCE_NOT_FOUND": (422, True),
     "DOCUMENT_NOT_FOUND": (404, False),
     "DOCUMENT_SYNC_FAILED": (502, True),
+    "DOCUMENT_PARSE_FAILED": (422, True),
     "DOCUMENT_REVIEW_REQUIRED": (409, False),
     "DOCUMENT_QUALITY_FAILED": (409, False),
     "DOCUMENT_QUALITY_PENDING": (409, False),
@@ -330,6 +361,7 @@ ERROR_CODES = {
     "VALIDATION_ERROR": (422, False),
     "INTERNAL_ERROR": (500, False),
     "REQUEST_FAILED": (404, False),
+    "PROBE_TARGET_NOT_FOUND": (404, False),
 }
 
 SAFE_ERROR_MESSAGES = {
@@ -379,6 +411,7 @@ SAFE_ERROR_MESSAGES = {
     "INTERNAL_ERROR": "服务开小差了，请稍后重试。",
     "REQUEST_FAILED": "请求无法完成。",
     "RUN_INTERRUPTED": "回答未完成，请稍后重试。",
+    "PROBE_TARGET_NOT_FOUND": "未找到该回调配置。",
 }
 
 
@@ -473,7 +506,7 @@ def sync_error_response(exc: DocumentSyncError, request_id: str) -> JSONResponse
 async def upsert_document(
     req: DocumentUpsertRequest,
     request: Request,
-    db: aiosqlite.Connection = Depends(get_db),
+    gateway: GatewayDatabase = Depends(get_gateway_db),
     principal: ServicePrincipal = Depends(require_service_principal),
 ):
     request_id = str(uuid.uuid4())
@@ -486,86 +519,87 @@ async def upsert_document(
         return error_response(err, request_id)
 
     tenant_id = req.metadata.get("tenant_id", "default")
-    existing_outbox = await get_outbox_by_event_id(db, req.eventId)
-    existing_mapping = await get_mapping_by_event_id(db, req.eventId)
-    if not existing_mapping:
-        existing_mapping = await get_mapping(
-            db, tenant_id, req.sourceSystem,
-            req.externalDocumentId, req.sourceVersionId,
-        )
-    if existing_outbox and existing_mapping:
-        return accepted_response(
-            make_status_response(
-                existing_mapping, deduplicated=True, request_id=request_id,
+    async with gateway.transaction(write=True) as conn:
+        existing_outbox = await get_outbox_by_event_id(conn, req.eventId)
+        existing_mapping = await get_mapping_by_event_id(conn, req.eventId)
+        if not existing_mapping:
+            existing_mapping = await get_mapping(
+                conn, tenant_id, req.sourceSystem,
+                req.externalDocumentId, req.sourceVersionId,
             )
+        if existing_outbox and existing_mapping:
+            return accepted_response(
+                make_status_response(
+                    existing_mapping, deduplicated=True, request_id=request_id,
+                )
+            )
+
+        payload = req.model_dump(mode="json")
+        event = OutboxEvent(
+            event_id=req.eventId,
+            event_type=req.eventType,
+            tenant_id=tenant_id,
+            source_system=req.sourceSystem,
+            external_document_id=req.externalDocumentId,
+            source_version_id=req.sourceVersionId,
+            batch_id=req.batchId,
+            payload=json.dumps(payload),
+            max_attempts=config.outbox_max_attempts,
+        )
+        await enqueue_outbox(conn, event)
+
+        doc = ExtDocumentMap(
+            tenant_id=tenant_id,
+            source_system=req.sourceSystem,
+            external_document_id=req.externalDocumentId,
+            source_version_id=req.sourceVersionId,
+            event_id=req.eventId,
+            event_type=req.eventType,
+            event_status="received",
+            sha256=req.sha256,
+            file_name=req.fileName,
+            media_type=req.mediaType,
+            document_type=req.metadata.get("document_type"),
+            source_page_count=req.metadata.get("page_count"),
+            asset_id=(
+                req.metadata.get("asset_id")
+                or req.metadata.get("fixed_asset_no")
+                or req.metadata.get("equipment_id")
+            ),
+            equipment_id=req.metadata.get("equipment_id"),
+            fixed_asset_no=req.metadata.get("fixed_asset_no"),
+            department_id=req.metadata.get("department_id"),
+            security_level=req.metadata.get("security_level"),
+            allow_group_ids=json.dumps(
+                req.metadata.get("allow_group_ids") or [],
+                ensure_ascii=False,
+            ),
+            deny_group_ids=json.dumps(
+                req.metadata.get("deny_group_ids") or [],
+                ensure_ascii=False,
+            ),
+            bucket=req.source.bucket,
+            object_key=req.source.objectKey,
+            batch_id=req.batchId,
+            sync_status="received",
         )
 
-    payload = req.model_dump(mode="json")
-    event = OutboxEvent(
-        event_id=req.eventId,
-        event_type=req.eventType,
-        tenant_id=tenant_id,
-        source_system=req.sourceSystem,
-        external_document_id=req.externalDocumentId,
-        source_version_id=req.sourceVersionId,
-        batch_id=req.batchId,
-        payload=json.dumps(payload),
-        max_attempts=config.outbox_max_attempts,
-    )
-    await enqueue_outbox(db, event)
+        try:
+            doc = await insert_mapping(conn, doc)
+        except Exception:
+            logger.exception("Failed to insert mapping")
+            return error_response("INTERNAL_ERROR", request_id)
 
-    doc = ExtDocumentMap(
-        tenant_id=tenant_id,
-        source_system=req.sourceSystem,
-        external_document_id=req.externalDocumentId,
-        source_version_id=req.sourceVersionId,
-        event_id=req.eventId,
-        event_type=req.eventType,
-        event_status="received",
-        sha256=req.sha256,
-        file_name=req.fileName,
-        media_type=req.mediaType,
-        document_type=req.metadata.get("document_type"),
-        source_page_count=req.metadata.get("page_count"),
-        asset_id=(
-            req.metadata.get("asset_id")
-            or req.metadata.get("fixed_asset_no")
-            or req.metadata.get("equipment_id")
-        ),
-        equipment_id=req.metadata.get("equipment_id"),
-        fixed_asset_no=req.metadata.get("fixed_asset_no"),
-        department_id=req.metadata.get("department_id"),
-        security_level=req.metadata.get("security_level"),
-        allow_group_ids=json.dumps(
-            req.metadata.get("allow_group_ids") or [],
-            ensure_ascii=False,
-        ),
-        deny_group_ids=json.dumps(
-            req.metadata.get("deny_group_ids") or [],
-            ensure_ascii=False,
-        ),
-        bucket=req.source.bucket,
-        object_key=req.source.objectKey,
-        batch_id=req.batchId,
-        sync_status="received",
-    )
+        if doc.event_id != req.eventId:
+            return accepted_response(
+                make_status_response(doc, deduplicated=True, request_id=request_id)
+            )
 
-    try:
-        doc = await insert_mapping(db, doc)
-    except Exception:
-        logger.exception("Failed to insert mapping")
-        return error_response("INTERNAL_ERROR", request_id)
-
-    if doc.event_id != req.eventId:
-        return accepted_response(
-            make_status_response(doc, deduplicated=True, request_id=request_id)
-        )
-
-    if _test_mode():
-        await update_mapping_status(
-            db, doc, "registered", event_status="completed",
-        )
-        doc.sync_status = "registered"
+        if _test_mode():
+            await update_mapping_status(
+                conn, doc, "registered", event_status="completed",
+            )
+            doc.sync_status = "registered"
 
     return accepted_response(make_status_response(doc, request_id=request_id))
 
@@ -574,7 +608,7 @@ async def upsert_document(
 async def get_document_status(
     external_document_id: str,
     request: Request,
-    db: aiosqlite.Connection = Depends(get_db),
+    gateway: GatewayDatabase = Depends(get_gateway_db),
     principal: ServicePrincipal = Depends(require_service_principal),
 ):
     request_id = str(uuid.uuid4())
@@ -583,22 +617,22 @@ async def get_document_status(
     source_system = request.query_params.get("source_system")
     refresh = request.query_params.get("refresh", "").lower() in ("1", "true", "yes")
 
-    if source_system:
-        query = (
-            """SELECT * FROM ext_document_map
-               WHERE external_document_id=? AND tenant_id=? AND source_system=?
-               ORDER BY updated_at DESC LIMIT 1"""
-        )
-        params = (external_document_id, tenant_id, source_system)
-    else:
-        query = (
-            """SELECT * FROM ext_document_map
-               WHERE external_document_id=? AND tenant_id=?
-               ORDER BY updated_at DESC LIMIT 1"""
-        )
-        params = (external_document_id, tenant_id)
-    async with db.execute(query, params) as cursor:
-        row = await cursor.fetchone()
+    async with gateway.transaction() as conn:
+        if source_system:
+            query = (
+                """SELECT * FROM ext_document_map
+                   WHERE external_document_id=? AND tenant_id=? AND source_system=?
+                   ORDER BY updated_at DESC LIMIT 1"""
+            )
+            params = (external_document_id, tenant_id, source_system)
+        else:
+            query = (
+                """SELECT * FROM ext_document_map
+                   WHERE external_document_id=? AND tenant_id=?
+                   ORDER BY updated_at DESC LIMIT 1"""
+            )
+            params = (external_document_id, tenant_id)
+        row = await fetchone(conn, query, params)
         if not row:
             return JSONResponse(
                 status_code=404,
@@ -608,13 +642,11 @@ async def get_document_status(
                     requestId=request_id,
                 ).model_dump()
             )
+        doc = row_to_mapping(row)
 
-    doc = row_to_mapping(row)
-
-    # Optional refresh from RAGFlow
     if refresh and doc.ragflow_dataset_id and doc.ragflow_document_id:
         try:
-            doc = await _sync_service(db).refresh_status(doc)
+            doc = await _sync_service(gateway).refresh_status(doc)
         except DocumentSyncError:
             logger.warning("RAGFlow status refresh failed for %s", doc.ragflow_document_id)
 
@@ -624,7 +656,7 @@ async def get_document_status(
 @app.get("/enterprise/api/v1/documents/sync-status")
 async def list_sync_status(
     request: Request,
-    db: aiosqlite.Connection = Depends(get_db),
+    gateway: GatewayDatabase = Depends(get_gateway_db),
     principal: ServicePrincipal = Depends(require_service_principal),
 ):
     tenant_id = request.query_params.get("tenant_id")
@@ -636,15 +668,16 @@ async def list_sync_status(
         offset = max(int(request.query_params.get("offset", "0")), 0)
     except ValueError:
         limit, offset = 100, 0
-    docs = await list_mappings(
-        db,
-        tenant_id=tenant_id,
-        source_system=source_system,
-        status=status,
-        batch_id=batch_id,
-        limit=limit,
-        offset=offset,
-    )
+    async with gateway.transaction() as conn:
+        docs = await list_mappings(
+            conn,
+            tenant_id=tenant_id,
+            source_system=source_system,
+            status=status,
+            batch_id=batch_id,
+            limit=limit,
+            offset=offset,
+        )
     return [
         {
             "externalDocumentId": doc.external_document_id,
@@ -659,9 +692,11 @@ async def list_sync_status(
                         doc.last_error_code or "INTERNAL_ERROR"
                     ),
                     requestId=str(uuid.uuid4()),
-                    retryable=ERROR_CODES.get(
-                        doc.last_error_code or "INTERNAL_ERROR", (500, False)
-                    )[1],
+                    retryable=(
+                        bool(doc.last_error_retryable)
+                        if doc.last_error_code
+                        else False
+                    ),
                 ).model_dump()
                 if doc.last_error_code
                 else None
@@ -679,7 +714,7 @@ async def list_sync_status(
 async def disable_document(
     external_document_id: str,
     request: Request,
-    db: aiosqlite.Connection = Depends(get_db),
+    gateway: GatewayDatabase = Depends(get_gateway_db),
     principal: ServicePrincipal = Depends(require_service_principal),
 ):
     request_id = str(uuid.uuid4())
@@ -688,7 +723,7 @@ async def disable_document(
     if not source_system:
         return error_response("VALIDATION_ERROR", request_id)
     try:
-        versions = await _sync_service(db).disable_document(
+        versions = await _sync_service(gateway).disable_document(
             tenant_id, source_system, external_document_id,
         )
     except DocumentSyncError as e:
@@ -705,7 +740,7 @@ async def disable_document(
 async def restore_document(
     external_document_id: str,
     request: Request,
-    db: aiosqlite.Connection = Depends(get_db),
+    gateway: GatewayDatabase = Depends(get_gateway_db),
     principal: ServicePrincipal = Depends(require_service_principal),
 ):
     request_id = str(uuid.uuid4())
@@ -714,7 +749,7 @@ async def restore_document(
     if not source_system:
         return error_response("VALIDATION_ERROR", request_id)
     try:
-        doc = await _sync_service(db).restore_document(
+        doc = await _sync_service(gateway).restore_document(
             tenant_id, source_system, external_document_id,
         )
     except DocumentSyncError as e:
@@ -726,7 +761,7 @@ async def restore_document(
 async def delete_document(
     external_document_id: str,
     request: Request,
-    db: aiosqlite.Connection = Depends(get_db),
+    gateway: GatewayDatabase = Depends(get_gateway_db),
     principal: ServicePrincipal = Depends(require_service_principal),
 ):
     request_id = str(uuid.uuid4())
@@ -735,7 +770,7 @@ async def delete_document(
     if not source_system:
         return error_response("VALIDATION_ERROR", request_id)
     try:
-        versions = await _sync_service(db).delete_document(
+        versions = await _sync_service(gateway).delete_document(
             tenant_id, source_system, external_document_id,
         )
     except DocumentSyncError as e:
@@ -811,6 +846,10 @@ app.include_router(transient_attachment_router)
 # WP-03 Phase 2 quality status APIs
 from enterprise.gateway.quality.router import router as quality_router
 app.include_router(quality_router)
+
+# Internal system-admin settings APIs; not part of the external OpenAPI.
+from enterprise.gateway.admin_router import router as system_admin_router
+app.include_router(system_admin_router)
 
 
 @app.api_route(

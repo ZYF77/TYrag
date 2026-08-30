@@ -13,13 +13,12 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-import aiosqlite
-
 from enterprise.gateway.quality.gate import (
     quality_dimensions,
     required_quality_dimensions,
 )
 from enterprise.gateway.quality.metrics import metrics
+from enterprise.gateway.db import GatewayDatabase
 from enterprise.gateway.quality.models import (
     QualityJob,
     claim_quality_job,
@@ -34,7 +33,11 @@ from enterprise.gateway.quality.models import (
     start_evaluation,
     utc_now,
 )
-from enterprise.gateway.sync.models import get_mapping, list_mappings
+from enterprise.gateway.sync.models import (
+    get_mapping,
+    list_mappings,
+    update_mapping_status,
+)
 from enterprise.gateway.sync.ragflow_document_client import RAGFlowAPIError
 from enterprise.gateway.sync.sync_service import promote_quality_passed_version
 from enterprise.scripts.wp03.metrics import (
@@ -226,17 +229,21 @@ class QualityRetryableError(Exception):
 class QualityEvaluationService:
     def __init__(
         self,
-        db: aiosqlite.Connection,
+        gateway: GatewayDatabase,
         ragflow_client,
         thresholds_path: str | Path | None = None,
         max_attempts: int = 5,
     ) -> None:
-        self.db = db
+        self.gateway = gateway
         self.ragflow_client = ragflow_client
         self.thresholds_path = thresholds_path or (
             ROOT / "enterprise" / "scripts" / "wp03" / "thresholds.json"
         )
         self.max_attempts = max_attempts
+
+    async def _db_call(self, fn, /, *args, write: bool = True, **kwargs):
+        async with self.gateway.transaction(write=write) as conn:
+            return await fn(conn, *args, **kwargs)
 
     async def ensure_quality_evaluation(self, doc) -> Any | None:
         """Create an idempotent pending evaluation for a ready document."""
@@ -247,68 +254,65 @@ class QualityEvaluationService:
             or not doc.ragflow_document_id
         ):
             return None
-        return await get_or_create_evaluation(
-            self.db,
+        return await self._db_call(
+            get_or_create_evaluation,
             tenant_id=doc.tenant_id,
             source_system=doc.source_system,
             external_document_id=doc.external_document_id,
             source_version_id=doc.source_version_id,
             ragflow_dataset_id=doc.ragflow_dataset_id,
             ragflow_document_id=doc.ragflow_document_id,
-            evaluation_version="1",
+            evaluation_version=str(max(1, getattr(doc, "processing_round", 1))),
             max_attempts=self.max_attempts,
         )
 
     async def run_job(self, job: QualityJob) -> None:
         started = time.monotonic()
-        evaluation = await get_evaluation_by_id(self.db, job.evaluation_id)
+        evaluation = await self._db_call(get_evaluation_by_id, job.evaluation_id)
         if evaluation is None:
-            await mark_quality_job_failed(
-                self.db, job, "QUALITY_EVALUATION_NOT_FOUND", "Evaluation row missing"
+            await self._db_call(mark_quality_job_failed, job, "QUALITY_EVALUATION_NOT_FOUND", "Evaluation row missing"
             )
             return
-        doc = await get_mapping(
-            self.db,
+        doc = await self._db_call(get_mapping,
             job.tenant_id,
             job.source_system,
             job.external_document_id,
             job.source_version_id,
         )
         if doc is None:
-            await fail_evaluation(
-                self.db, evaluation.id, "DOCUMENT_NOT_FOUND", "Document mapping missing"
+            await self._db_call(fail_evaluation, evaluation.id, "DOCUMENT_NOT_FOUND", "Document mapping missing"
             )
-            await mark_quality_job_failed(
-                self.db, job, "DOCUMENT_NOT_FOUND", "Document mapping missing"
+            await self._db_call(mark_quality_job_failed, job, "DOCUMENT_NOT_FOUND", "Document mapping missing"
             )
             return
         if (
             doc.sync_status not in ("ready", "failed")
             or doc.business_status in ("disabled", "deleted", "superseded")
         ):
-            await fail_evaluation(
-                self.db,
+            await self._db_call(fail_evaluation,
                 evaluation.id,
                 "DOCUMENT_NOT_READY_FOR_QUALITY",
                 f"sync_status={doc.sync_status} business_status={doc.business_status}",
             )
-            await mark_quality_job_failed(
-                self.db,
+            await self._db_call(mark_quality_job_failed,
                 job,
                 "DOCUMENT_NOT_READY_FOR_QUALITY",
                 "Document is not ready and active",
             )
             return
 
-        await start_evaluation(self.db, evaluation.id)
+        try:
+            evaluation_round = max(1, int(evaluation.evaluation_version))
+        except (TypeError, ValueError):
+            evaluation_round = 1
+        await self._db_call(start_evaluation, evaluation.id)
         metrics.inc("quality_evaluation_running_total")
         try:
             result = await self._evaluate(doc, evaluation)
             await self._complete(doc, evaluation, result)
             if result["parse_quality_status"] == "passed":
                 try:
-                    await promote_quality_passed_version(
-                        self.db,
+                    await self._db_call(promote_quality_passed_version,
                         self.ragflow_client,
                         doc,
                         result["parse_quality_status"],
@@ -344,8 +348,10 @@ class QualityEvaluationService:
                 job.attempts,
                 time.monotonic() - started,
             )
-            await mark_quality_job_done(self.db, job)
-            await self._emit_terminal_callback(doc, result)
+            await self._db_call(mark_quality_job_done, job)
+            await self._emit_terminal_callback(
+                doc, result, processing_round=evaluation_round,
+            )
         except QualityRetryableError as exc:
             metrics.inc("quality_evaluation_retry_total")
             logger.warning(
@@ -359,18 +365,28 @@ class QualityEvaluationService:
                 job.attempts,
                 exc.code,
             )
-            await fail_evaluation(
-                self.db, evaluation.id, exc.code, exc.message,
+            await self._db_call(fail_evaluation, evaluation.id, exc.code, exc.message,
             )
             if job.attempts < job.max_attempts:
-                await mark_quality_job_retry(self.db, job, exc.code, exc.message)
+                await self._db_call(mark_quality_job_retry, job, exc.code, exc.message)
             else:
                 metrics.inc("quality_evaluation_failed_total")
-                await mark_quality_job_failed(self.db, job, exc.code, exc.message)
+                await self._db_call(mark_quality_job_failed, job, exc.code, exc.message)
+                await self._db_call(
+                    update_mapping_status,
+                    doc,
+                    "failed",
+                    event_status="failed",
+                    error_code=exc.code,
+                    error_message=exc.message,
+                    last_error_retryable=True,
+                )
                 await self._emit_terminal_failed(
                     doc,
                     code=exc.code,
                     message=exc.message,
+                    processing_round=evaluation_round,
+                    retryable=True,
                 )
         except Exception:
             logger.exception(
@@ -378,17 +394,16 @@ class QualityEvaluationService:
                 evaluation.id,
                 job.id,
             )
-            await fail_evaluation(
-                self.db, evaluation.id, "INTERNAL_ERROR", "Quality evaluation failed"
+            await self._db_call(fail_evaluation, evaluation.id, "INTERNAL_ERROR", "Quality evaluation failed"
             )
             metrics.inc("quality_evaluation_failed_total")
-            await mark_quality_job_failed(
-                self.db, job, "INTERNAL_ERROR", "Quality evaluation failed"
+            await self._db_call(mark_quality_job_failed, job, "INTERNAL_ERROR", "Quality evaluation failed"
             )
             await self._emit_terminal_failed(
                 doc,
                 code="INTERNAL_ERROR",
                 message="Quality evaluation failed",
+                processing_round=evaluation_round,
             )
 
     async def _evaluate(self, doc, evaluation) -> dict[str, Any]:
@@ -563,8 +578,7 @@ class QualityEvaluationService:
         parse_hash = parse_repeatability_hash([result])
         e2e_hash = e2e_repeatability_hash([result])
         artifact_hash = self._artifact_hash(evaluation.id, result)
-        await complete_evaluation(
-            self.db,
+        await self._db_call(complete_evaluation,
             evaluation.id,
             parse_quality_status=result["parse_quality_status"],
             quality_reasons=result["quality_reasons"],
@@ -620,32 +634,36 @@ class QualityEvaluationService:
             error["reasonCodes"] = codes
         return error
 
-    async def _emit_terminal_callback(self, doc, result: dict[str, Any]) -> None:
+    async def _emit_terminal_callback(
+        self,
+        doc,
+        result: dict[str, Any],
+        *,
+        processing_round: int | None = None,
+    ) -> None:
         from enterprise.gateway.callback_delivery import emit_terminal_callback_safe
         from enterprise.gateway.sync.readiness import document_candidate_readiness_from_db
 
         quality_status = str(result.get("parse_quality_status") or "")
-        fresh = await get_mapping(
-            self.db,
+        fresh = await self._db_call(get_mapping,
             doc.tenant_id,
             doc.source_system,
             doc.external_document_id,
             doc.source_version_id,
         ) or doc
         if quality_status == "passed":
-            readiness, _ = await document_candidate_readiness_from_db(self.db, fresh)
+            readiness, _ = await self._db_call(document_candidate_readiness_from_db, fresh)
             if readiness.retrievable:
-                await emit_terminal_callback_safe(
-                    self.db,
+                await self._db_call(emit_terminal_callback_safe,
                     fresh,
                     "retrievable",
                     quality_status="passed",
                     retrievable=True,
+                    processing_round=processing_round,
                 )
             else:
                 # Quality passed but version was not promoted; notify EAM.
-                await emit_terminal_callback_safe(
-                    self.db,
+                await self._db_call(emit_terminal_callback_safe,
                     fresh,
                     "review_required",
                     quality_status="passed",
@@ -653,6 +671,7 @@ class QualityEvaluationService:
                     error=self._review_required_error(
                         reason_codes=["VERSION_NOT_RETRIEVABLE"],
                     ),
+                    processing_round=processing_round,
                 )
             return
         if quality_status == "review_required":
@@ -662,13 +681,13 @@ class QualityEvaluationService:
                 if isinstance(raw_reasons, list)
                 else []
             )
-            await emit_terminal_callback_safe(
-                self.db,
+            await self._db_call(emit_terminal_callback_safe,
                 fresh,
                 "review_required",
                 quality_status="review_required",
                 retrievable=False,
                 error=self._review_required_error(reason_codes=reason_codes),
+                processing_round=processing_round,
             )
             return
         if quality_status == "failed":
@@ -676,6 +695,7 @@ class QualityEvaluationService:
                 fresh,
                 code="DOCUMENT_QUALITY_FAILED",
                 message="文档质检未通过。",
+                processing_round=processing_round,
             )
 
     async def _emit_terminal_failed(
@@ -684,16 +704,18 @@ class QualityEvaluationService:
         *,
         code: str,
         message: str,
+        processing_round: int | None = None,
+        retryable: bool = False,
     ) -> None:
         from enterprise.gateway.callback_delivery import emit_terminal_callback_safe
 
-        await emit_terminal_callback_safe(
-            self.db,
+        await self._db_call(emit_terminal_callback_safe,
             doc,
             "failed",
             quality_status="failed",
             retrievable=False,
-            error={"code": code, "message": message, "retryable": False},
+            error={"code": code, "message": message, "retryable": retryable},
+            processing_round=processing_round,
         )
 
 
@@ -705,7 +727,8 @@ class QualityEvaluationWorker:
         self.worker_id = worker_id or f"quality-{uuid.uuid4().hex[:8]}"
 
     async def run_once(self, limit: int = 1) -> int:
-        jobs = await claim_quality_job(self.service.db, self.worker_id, limit)
+        async with self.service.gateway.transaction(write=True) as conn:
+            jobs = await claim_quality_job(conn, self.worker_id, limit)
         for job in jobs:
             await self.service.run_job(job)
         return len(jobs)
@@ -730,8 +753,7 @@ class QualityReconciler:
 
     async def run_once(self, limit: int = 100) -> int:
         created = 0
-        docs = await list_mappings(
-            self.service.db,
+        docs = await self.service._db_call(list_mappings,
             status="ready",
             limit=limit,
             ascending=True,
@@ -751,22 +773,25 @@ class QualityReconciler:
             datetime.now(timezone.utc)
             - timedelta(seconds=self.running_timeout_seconds)
         ).isoformat()
-        async with self.service.db.execute(
-            """SELECT * FROM quality_evaluation_job
-               WHERE status='running' AND locked_at IS NOT NULL AND locked_at < ?""",
-            (threshold,),
-        ) as cursor:
-            rows = await cursor.fetchall()
+        from enterprise.gateway.db.dialect import fetchall
+
+        async with self.service.gateway.transaction(write=False) as conn:
+            rows = await fetchall(
+                conn,
+                """SELECT * FROM quality_evaluation_job
+                   WHERE status='running' AND locked_at IS NOT NULL AND locked_at < ?""",
+                (threshold,),
+            )
         for row in rows:
             job = row_to_job(row)
-            await fail_evaluation(
-                self.service.db,
+            await self.service._db_call(
+                fail_evaluation,
                 job.evaluation_id,
                 "QUALITY_RUNNING_TIMEOUT",
                 "Quality evaluation exceeded running timeout",
             )
-            await mark_quality_job_failed(
-                self.service.db,
+            await self.service._db_call(
+                mark_quality_job_failed,
                 job,
                 "QUALITY_RUNNING_TIMEOUT",
                 "Quality evaluation exceeded running timeout",

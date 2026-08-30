@@ -34,23 +34,27 @@ class OutboxWorker:
         self.worker_id = worker_id or f"worker-{uuid.uuid4().hex[:8]}"
 
     async def run_once(self, limit: int = 1) -> int:
-        events = await claim_outbox(self.service.db, self.worker_id, limit)
+        async with self.service.gateway.transaction(write=True) as conn:
+            events = await claim_outbox(conn, self.worker_id, limit)
         for event in events:
             try:
                 await self.service.process_event(event)
-                await mark_outbox_done(self.service.db, event)
+                async with self.service.gateway.transaction(write=True) as conn:
+                    await mark_outbox_done(conn, event)
             except DocumentSyncError as e:
-                if e.retryable and event.attempts < event.max_attempts:
-                    await mark_outbox_retry(
-                        self.service.db, event, e.code, str(e),
-                    )
-                else:
-                    await mark_outbox_failed(
-                        self.service.db, event, e.code, str(e),
-                    )
+                async with self.service.gateway.transaction(write=True) as conn:
+                    if e.retryable and event.attempts < event.max_attempts:
+                        await mark_outbox_retry(
+                            conn, event, e.code, str(e),
+                        )
+                    else:
+                        await mark_outbox_failed(
+                            conn, event, e.code, str(e),
+                        )
+                if not (e.retryable and event.attempts < event.max_attempts):
                     try:
                         await self.service.finalize_outbox_exhausted(
-                            event, e.code, str(e),
+                            event, e.code, str(e), e.retryable,
                         )
                     except Exception:
                         logger.exception(
@@ -59,10 +63,11 @@ class OutboxWorker:
                         )
             except Exception:
                 logger.exception("Outbox processing failed event_id=%s", event.event_id)
-                await mark_outbox_failed(
-                    self.service.db, event, "INTERNAL_ERROR",
-                    "服务开小差了，请稍后重试。",
-                )
+                async with self.service.gateway.transaction(write=True) as conn:
+                    await mark_outbox_failed(
+                        conn, event, "INTERNAL_ERROR",
+                        "服务开小差了，请稍后重试。",
+                    )
                 try:
                     await self.service.finalize_outbox_exhausted(
                         event, "INTERNAL_ERROR", "服务开小差了，请稍后重试。",
@@ -88,18 +93,19 @@ class StatusReconciler:
         self.service = service
 
     async def run_once(self, limit: int = 100) -> int:
-        mappings = await list_mappings(
-            self.service.db,
-            statuses=list(IN_PROGRESS_STATUSES),
-            limit=limit,
-            ascending=True,
-        )
-        ready_rows = await list_mappings(
-            self.service.db,
-            statuses=["ready"],
-            limit=limit,
-            ascending=True,
-        )
+        async with self.service.gateway.transaction(write=False) as conn:
+            mappings = await list_mappings(
+                conn,
+                statuses=list(IN_PROGRESS_STATUSES),
+                limit=limit,
+                ascending=True,
+            )
+            ready_rows = await list_mappings(
+                conn,
+                statuses=["ready"],
+                limit=limit,
+                ascending=True,
+            )
         to_refresh = list(mappings)
         seen = {doc.id for doc in to_refresh if doc.id is not None}
         for doc in ready_rows:

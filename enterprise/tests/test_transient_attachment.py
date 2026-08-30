@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import asyncio
 import json
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -19,8 +20,10 @@ from enterprise.gateway import app as app_module
 from enterprise.gateway.auth.middleware import require_user_principal
 from enterprise.gateway.auth.user_principal import UserPrincipal
 from enterprise.gateway.config import config
+from enterprise.gateway.db.dialect import exec_sql, fetchall, fetchone
+from enterprise.gateway.db.ops import gw_read, gw_write
+from enterprise.gateway.db.testing import create_gateway
 from enterprise.gateway.query import v2_store
-from enterprise.gateway.sync.models import init_db
 from enterprise.gateway.sync.source_adapter import S3SourceAdapter, SourceFile
 from enterprise.gateway.sync.transient_attachment import (
     TransientAttachmentError,
@@ -88,9 +91,9 @@ def _principal(
 
 
 async def _conversation(db, principal: UserPrincipal, conversation_id: str = "conversation-a"):
-    await v2_store.ensure_schema(db)
-    return await v2_store.create_conversation(
+    return await gw_write(
         db,
+        v2_store.create_conversation,
         conversation_id=conversation_id,
         tenant_id=principal.tenant_id,
         business_user_id=principal.business_user_id,
@@ -247,7 +250,8 @@ async def test_explicit_disable_returns_stable_unavailable_before_dependencies(
 @pytest.mark.asyncio
 async def test_attachment_post_is_reachable_by_default(storage_env, monkeypatch):
     assert config.transient_attachments_enabled is True
-    db = await init_db(":memory:")
+    gateway = await create_gateway(":memory:")
+    db = gateway
     storage = MemoryObjectStorage()
     owner = _principal()
     await _conversation(db, owner)
@@ -280,7 +284,7 @@ async def test_attachment_post_is_reachable_by_default(storage_env, monkeypatch)
     assert response.status_code == 201, response.text
     assert response.json()["indexPolicy"] == "never"
     assert response.json()["maxDownloads"] == 1
-    await db.close()
+    await gateway.dispose()
 
 
 @pytest.mark.asyncio
@@ -340,7 +344,8 @@ def test_formal_attachment_routes_are_visible_in_openapi():
 async def test_create_rejects_missing_and_archived_conversation_with_error_envelope(
     storage_env,
 ):
-    db = await init_db(":memory:")
+    gateway = await create_gateway(":memory:")
+    db = gateway
     storage = MemoryObjectStorage()
     owner = _principal()
     application = FastAPI()
@@ -355,8 +360,9 @@ async def test_create_rejects_missing_and_archived_conversation_with_error_envel
         "content": base64.b64encode(b"envelope-bytes").decode("ascii"),
     }
     await _conversation(db, owner)
-    await v2_store.archive_conversation(
+    await gw_write(
         db,
+        v2_store.archive_conversation,
         conversation_id="conversation-a",
         tenant_id=owner.tenant_id,
         business_user_id=owner.business_user_id,
@@ -383,7 +389,7 @@ async def test_create_rejects_missing_and_archived_conversation_with_error_envel
     assert archived.status_code == 409
     assert archived.json()["code"] == "CONVERSATION_ARCHIVED"
     assert archived.json()["retryable"] is False
-    await db.close()
+    await gateway.dispose()
 
 
 @pytest.mark.asyncio
@@ -500,7 +506,8 @@ def test_attachment_encoded_and_decoded_limits_are_both_enforced(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_attachment_validation_rejects_mime_extension_and_size(storage_env):
-    db = await init_db(":memory:")
+    gateway = await create_gateway(":memory:")
+    db = gateway
     storage = MemoryObjectStorage()
     service = TransientAttachmentService(db, storage)
 
@@ -543,12 +550,13 @@ async def test_attachment_validation_rejects_mime_extension_and_size(storage_env
     finally:
         os.environ["ENTERPRISE_ATTACHMENT_MAX_SIZE_BYTES"] = previous
     assert size_error.value.code == "ATTACHMENT_TOO_LARGE"
-    await db.close()
+    await gateway.dispose()
 
 
 @pytest.mark.asyncio
 async def test_upload_failure_is_retryable_and_scheduled_for_cleanup(storage_env):
-    db = await init_db(":memory:")
+    gateway = await create_gateway(":memory:")
+    db = gateway
     storage = MemoryObjectStorage()
     owner = _principal()
     await _conversation(db, owner)
@@ -568,29 +576,31 @@ async def test_upload_failure_is_retryable_and_scheduled_for_cleanup(storage_env
     assert unavailable.value.code == "ATTACHMENT_STORAGE_UNAVAILABLE"
     assert unavailable.value.status_code == 503
     assert unavailable.value.retryable is True
-    conversation = await v2_store.get_conversation(
+    conversation = await gw_read(
         db,
+        v2_store.get_conversation,
         conversation_id="conversation-a",
         tenant_id=owner.tenant_id,
         business_user_id=owner.business_user_id,
     )
     assert conversation["status"] == "active"
 
-    async with db.execute(
-        "SELECT status, next_retry_at FROM ext_transient_attachment"
-    ) as cursor:
-        pending = await cursor.fetchone()
+    async with db.transaction(write=False) as conn:
+        pending = await fetchone(
+            conn, "SELECT status, next_retry_at FROM ext_transient_attachment"
+        )
     assert pending["status"] == "delete_retry"
     assert pending["next_retry_at"]
 
     cleaned = await service.cleanup_expired()
     assert cleaned["deleted"] == 1
-    await db.close()
+    await gateway.dispose()
 
 
 @pytest.mark.asyncio
 async def test_storage_integrity_failure_is_stable_and_ticket_can_retry(storage_env):
-    db = await init_db(":memory:")
+    gateway = await create_gateway(":memory:")
+    db = gateway
     storage = MemoryObjectStorage()
     owner = _principal()
     await _conversation(db, owner)
@@ -625,12 +635,13 @@ async def test_storage_integrity_failure_is_stable_and_ticket_can_retry(storage_
         principal=owner,
     )
     assert downloaded.content == b"integrity-bytes"
-    await db.close()
+    await gateway.dispose()
 
 
 @pytest.mark.asyncio
 async def test_ticket_is_tenant_bound_and_repeated_download_is_denied(storage_env):
-    db = await init_db(":memory:")
+    gateway = await create_gateway(":memory:")
+    db = gateway
     storage = MemoryObjectStorage()
     service = TransientAttachmentService(db, storage)
     owner = _principal()
@@ -692,18 +703,20 @@ async def test_ticket_is_tenant_bound_and_repeated_download_is_denied(storage_en
         )
     assert repeated.value.code == "ATTACHMENT_DOWNLOAD_LIMIT"
 
-    async with db.execute(
-        "SELECT action, outcome, metadata_json FROM ext_transient_attachment_audit"
-    ) as cursor:
-        audit_rows = await cursor.fetchall()
+    async with db.transaction(write=False) as conn:
+        audit_rows = await fetchall(
+            conn,
+            "SELECT action, outcome, metadata_json FROM ext_transient_attachment_audit",
+        )
     assert any(row["action"] == "download" and row["outcome"] == "accepted" for row in audit_rows)
     assert all("attachment-bytes" not in row["metadata_json"] for row in audit_rows)
-    await db.close()
+    await gateway.dispose()
 
 
 @pytest.mark.asyncio
 async def test_archived_conversation_keeps_ticket_issue_denied(storage_env):
-    db = await init_db(":memory:")
+    gateway = await create_gateway(":memory:")
+    db = gateway
     storage = MemoryObjectStorage()
     owner = _principal()
     await _conversation(db, owner)
@@ -716,8 +729,9 @@ async def test_archived_conversation_keeps_ticket_issue_denied(storage_env):
         media_type="application/pdf",
         content=b"archived-bytes",
     )
-    await v2_store.archive_conversation(
+    await gw_write(
         db,
+        v2_store.archive_conversation,
         conversation_id="conversation-a",
         tenant_id=owner.tenant_id,
         business_user_id=owner.business_user_id,
@@ -731,14 +745,15 @@ async def test_archived_conversation_keeps_ticket_issue_denied(storage_env):
         )
     assert archived.value.code == "CONVERSATION_ARCHIVED"
     assert archived.value.status_code == 409
-    await db.close()
+    await gateway.dispose()
 
 
 @pytest.mark.asyncio
 async def test_conversation_operational_error_returns_503_without_issuing_ticket(
     storage_env,
 ):
-    db = await init_db(":memory:")
+    gateway = await create_gateway(":memory:")
+    db = gateway
     storage = MemoryObjectStorage()
     owner = _principal()
     await _conversation(db, owner)
@@ -751,12 +766,12 @@ async def test_conversation_operational_error_returns_503_without_issuing_ticket
         media_type="application/pdf",
         content=b"unavailable-bytes",
     )
-    async with db.execute(
-        "SELECT COUNT(*) AS count FROM ext_transient_attachment_ticket"
-    ) as cursor:
-        before = (await cursor.fetchone())["count"]
-    await db.execute("DROP TABLE ext_v2_conversation")
-    await db.commit()
+    async with db.transaction(write=False) as conn:
+        before = (await fetchone(
+            conn, "SELECT COUNT(*) AS count FROM ext_transient_attachment_ticket"
+        ))["count"]
+    async with db.transaction(write=True) as conn:
+        await exec_sql(conn, "DROP TABLE ext_v2_conversation")
 
     with pytest.raises(TransientAttachmentError) as unavailable:
         await service.issue_download_ticket(
@@ -767,19 +782,20 @@ async def test_conversation_operational_error_returns_503_without_issuing_ticket
     assert unavailable.value.code == "CONVERSATION_UNAVAILABLE"
     assert unavailable.value.status_code == 503
     assert unavailable.value.retryable is True
-    async with db.execute(
-        "SELECT COUNT(*) AS count FROM ext_transient_attachment_ticket"
-    ) as cursor:
-        after = (await cursor.fetchone())["count"]
+    async with db.transaction(write=False) as conn:
+        after = (await fetchone(
+            conn, "SELECT COUNT(*) AS count FROM ext_transient_attachment_ticket"
+        ))["count"]
     assert after == before
-    await db.close()
+    await gateway.dispose()
 
 
 @pytest.mark.asyncio
 async def test_unavailable_conversation_status_returns_503_without_issuing_ticket(
     storage_env,
 ):
-    db = await init_db(":memory:")
+    gateway = await create_gateway(":memory:")
+    db = gateway
     storage = MemoryObjectStorage()
     owner = _principal()
     await _conversation(db, owner)
@@ -792,12 +808,13 @@ async def test_unavailable_conversation_status_returns_503_without_issuing_ticke
         media_type="application/pdf",
         content=b"status-bytes",
     )
-    await db.execute(
-        "UPDATE ext_v2_conversation SET status='unavailable' "
-        "WHERE conversation_id=? AND tenant_id=? AND business_user_id=?",
-        ("conversation-a", owner.tenant_id, owner.business_user_id),
-    )
-    await db.commit()
+    async with db.transaction(write=True) as conn:
+        await exec_sql(
+            conn,
+            "UPDATE ext_v2_conversation SET status='unavailable' "
+            "WHERE conversation_id=? AND tenant_id=? AND business_user_id=?",
+            ("conversation-a", owner.tenant_id, owner.business_user_id),
+        )
 
     with pytest.raises(TransientAttachmentError) as unavailable:
         await service.issue_download_ticket(
@@ -807,12 +824,13 @@ async def test_unavailable_conversation_status_returns_503_without_issuing_ticke
         )
     assert unavailable.value.code == "CONVERSATION_UNAVAILABLE"
     assert unavailable.value.status_code == 503
-    await db.close()
+    await gateway.dispose()
 
 
 @pytest.mark.asyncio
 async def test_expired_ticket_and_fetch_retry(storage_env):
-    db = await init_db(":memory:")
+    gateway = await create_gateway(":memory:")
+    db = gateway
     storage = MemoryObjectStorage()
     clock = [datetime(2026, 8, 10, tzinfo=timezone.utc)]
     service = TransientAttachmentService(db, storage, now_fn=lambda: clock[0])
@@ -845,12 +863,13 @@ async def test_expired_ticket_and_fetch_retry(storage_env):
             token=expired_ticket.token,
         )
     assert expired.value.code == "ATTACHMENT_EXPIRED"
-    await db.close()
+    await gateway.dispose()
 
 
 @pytest.mark.asyncio
 async def test_expired_cleanup_retries_delete_and_records_metadata(storage_env, monkeypatch):
-    db = await init_db(":memory:")
+    gateway = await create_gateway(":memory:")
+    db = gateway
     storage = MemoryObjectStorage()
     monkeypatch.setenv("ENTERPRISE_ATTACHMENT_TTL_SECONDS", "1")
     clock = [datetime(2026, 8, 10, tzinfo=timezone.utc)]
@@ -868,35 +887,39 @@ async def test_expired_cleanup_retries_delete_and_records_metadata(storage_env, 
     storage.delete_failures = 3
     first = await service.cleanup_expired()
     assert first["failed"] == 1
-    async with db.execute(
-        "SELECT status, delete_attempts FROM ext_transient_attachment WHERE attachment_id=?",
-        (record.attachment_id,),
-    ) as cursor:
-        pending = await cursor.fetchone()
+    async with db.transaction(write=False) as conn:
+        pending = await fetchone(
+            conn,
+            "SELECT status, delete_attempts FROM ext_transient_attachment WHERE attachment_id=?",
+            (record.attachment_id,),
+        )
     assert pending["status"] == "delete_retry"
     assert pending["delete_attempts"] >= 3
 
-    await db.execute(
-        "UPDATE ext_transient_attachment SET next_retry_at=NULL WHERE attachment_id=?",
-        (record.attachment_id,),
-    )
-    await db.commit()
+    async with db.transaction(write=True) as conn:
+        await exec_sql(
+            conn,
+            "UPDATE ext_transient_attachment SET next_retry_at=NULL WHERE attachment_id=?",
+            (record.attachment_id,),
+        )
     second = await service.cleanup_expired()
     assert second["deleted"] == 1
     assert storage.objects == {}
-    async with db.execute(
-        "SELECT action, outcome FROM ext_transient_attachment_audit WHERE attachment_id=?",
-        (record.attachment_id,),
-    ) as cursor:
-        actions = await cursor.fetchall()
+    async with db.transaction(write=False) as conn:
+        actions = await fetchall(
+            conn,
+            "SELECT action, outcome FROM ext_transient_attachment_audit WHERE attachment_id=?",
+            (record.attachment_id,),
+        )
     assert any(row["action"] == "cleanup" and row["outcome"] == "failed" for row in actions)
     assert any(row["action"] == "cleanup" and row["outcome"] == "accepted" for row in actions)
-    await db.close()
+    await gateway.dispose()
 
 
 @pytest.mark.asyncio
 async def test_cleanup_recovers_already_expired_rows(storage_env, monkeypatch):
-    db = await init_db(":memory:")
+    gateway = await create_gateway(":memory:")
+    db = gateway
     storage = MemoryObjectStorage()
     monkeypatch.setenv("ENTERPRISE_ATTACHMENT_TTL_SECONDS", "1")
     clock = [datetime(2026, 8, 10, tzinfo=timezone.utc)]
@@ -911,22 +934,24 @@ async def test_cleanup_recovers_already_expired_rows(storage_env, monkeypatch):
         content=b"expired-row-bytes",
     )
     clock[0] += timedelta(seconds=2)
-    await db.execute(
-        "UPDATE ext_transient_attachment SET status='expired' WHERE attachment_id=?",
-        (record.attachment_id,),
-    )
-    await db.commit()
+    async with db.transaction(write=True) as conn:
+        await exec_sql(
+            conn,
+            "UPDATE ext_transient_attachment SET status='expired' WHERE attachment_id=?",
+            (record.attachment_id,),
+        )
 
     result = await service.cleanup_expired()
 
     assert result["deleted"] == 1
     assert storage.objects == {}
-    await db.close()
+    await gateway.dispose()
 
 
 @pytest.mark.asyncio
 async def test_gateway_contract_validates_permissions_and_hides_storage_url(storage_env):
-    db = await init_db(":memory:")
+    gateway = await create_gateway(":memory:")
+    db = gateway
     storage = MemoryObjectStorage()
     owner = _principal()
     other = _principal("tenant-b", "user-b")
@@ -961,17 +986,15 @@ async def test_gateway_contract_validates_permissions_and_hides_storage_url(stor
             key for key in storage.objects if key[0] == "attachment-test-bucket"
         )
         assert object_key[1].startswith("transient-attachments/")
-        async with db.execute("SELECT COUNT(*) AS count FROM ext_document_map") as cursor:
-            assert (await cursor.fetchone())["count"] == 0
-        async with db.execute("SELECT COUNT(*) AS count FROM sync_outbox") as cursor:
-            assert (await cursor.fetchone())["count"] == 0
-
-        async with db.execute(
-            "SELECT created_at, expires_at FROM ext_transient_attachment "
-            "WHERE attachment_id=?",
-            (body["attachmentId"],),
-        ) as cursor:
-            timestamps = await cursor.fetchone()
+        async with db.transaction(write=False) as conn:
+            assert (await fetchone(conn, "SELECT COUNT(*) AS count FROM ext_document_map"))["count"] == 0
+            assert (await fetchone(conn, "SELECT COUNT(*) AS count FROM sync_outbox"))["count"] == 0
+            timestamps = await fetchone(
+                conn,
+                "SELECT created_at, expires_at FROM ext_transient_attachment "
+                "WHERE attachment_id=?",
+                (body["attachmentId"],),
+            )
         assert (
             datetime.fromisoformat(timestamps["expires_at"])
             - datetime.fromisoformat(timestamps["created_at"])
@@ -1027,14 +1050,24 @@ async def test_gateway_contract_validates_permissions_and_hides_storage_url(stor
         assert cross_tenant.status_code == 404
         assert cross_tenant.json()["code"] == "CONVERSATION_NOT_FOUND"
 
-    await db.close()
+    await gateway.dispose()
 
 
 @pytest.mark.asyncio
 async def test_explicit_disable_keeps_cleanup_worker_running(tmp_path, monkeypatch):
     monkeypatch.setenv("ENTERPRISE_TEST_MODE", "0")
     monkeypatch.setenv("RAGFLOW_API_KEY", "test-key")
-    monkeypatch.setenv("ENTERPRISE_SYNC_DB_PATH", str(tmp_path / "lifespan.db"))
+    monkeypatch.delenv("ENTERPRISE_SYNC_DB_PATH", raising=False)
+    monkeypatch.delenv("ENTERPRISE_DB_PATH", raising=False)
+    monkeypatch.setenv(
+        "ENTERPRISE_GATEWAY_DATABASE_URL",
+        "postgresql+asyncpg://tyrag_gateway_test:tyrag_gateway_test@127.0.0.1:55432/tyrag_gateway_test",
+    )
+    monkeypatch.setenv(
+        "ENTERPRISE_GATEWAY_DATABASE_SCHEMA",
+        f"gw_lifespan_{uuid.uuid4().hex[:16]}",
+    )
+    monkeypatch.setenv("ENTERPRISE_AUDIT_LOG_DIR", str(tmp_path / "logs"))
     monkeypatch.setattr(app_module.config, "worker_enabled", True)
     monkeypatch.setattr(app_module.config, "quality_worker_enabled", False)
     monkeypatch.setattr(app_module.config, "transient_attachments_enabled", False)
@@ -1070,7 +1103,8 @@ async def test_explicit_disable_keeps_cleanup_worker_running(tmp_path, monkeypat
 
 @pytest.mark.asyncio
 async def test_cleanup_retries_ragflow_file_delete(storage_env):
-    db = await init_db(":memory:")
+    gateway = await create_gateway(":memory:")
+    db = gateway
     storage = MemoryObjectStorage()
     service = TransientAttachmentService(
         db, storage, now_fn=lambda: datetime(2026, 8, 10, tzinfo=timezone.utc)
@@ -1091,18 +1125,20 @@ async def test_cleanup_retries_ragflow_file_delete(storage_env):
         deleted.append(file_id)
         raise RuntimeError("ragflow down")
 
-    await db.execute(
-        "UPDATE ext_transient_attachment SET expires_at=? WHERE attachment_id=?",
-        ("2020-01-01T00:00:00+00:00", record.attachment_id),
-    )
-    await db.commit()
+    async with db.transaction(write=True) as conn:
+        await exec_sql(
+            conn,
+            "UPDATE ext_transient_attachment SET expires_at=? WHERE attachment_id=?",
+            ("2020-01-01T00:00:00+00:00", record.attachment_id),
+        )
     await service.cleanup_expired(delete_ragflow_file=boom)
     assert deleted == ["rf-orphan"]
-    async with db.execute(
-        "SELECT ragflow_file_deleted_at FROM ext_transient_attachment WHERE attachment_id=?",
-        (record.attachment_id,),
-    ) as cursor:
-        row = await cursor.fetchone()
+    async with db.transaction(write=False) as conn:
+        row = await fetchone(
+            conn,
+            "SELECT ragflow_file_deleted_at FROM ext_transient_attachment WHERE attachment_id=?",
+            (record.attachment_id,),
+        )
     assert row["ragflow_file_deleted_at"] is None
 
     async def ok(file_id: str) -> None:
@@ -1110,36 +1146,40 @@ async def test_cleanup_retries_ragflow_file_delete(storage_env):
 
     await service.cleanup_expired(delete_ragflow_file=ok)
     assert deleted[-1] == "rf-orphan"
-    async with db.execute(
-        "SELECT ragflow_file_deleted_at FROM ext_transient_attachment WHERE attachment_id=?",
-        (record.attachment_id,),
-    ) as cursor:
-        row = await cursor.fetchone()
+    async with db.transaction(write=False) as conn:
+        row = await fetchone(
+            conn,
+            "SELECT ragflow_file_deleted_at FROM ext_transient_attachment WHERE attachment_id=?",
+            (record.attachment_id,),
+        )
     assert row["ragflow_file_deleted_at"]
-    await db.close()
+    await gateway.dispose()
 
 
 @pytest.mark.asyncio
 async def test_cleanup_only_deletes_ttl_expired_ragflow_temp_files(monkeypatch):
-    db = await init_db(":memory:")
+    gateway = await create_gateway(":memory:")
+    db = gateway
     storage = MemoryObjectStorage()
     monkeypatch.setenv("ENTERPRISE_ATTACHMENT_TTL_SECONDS", "60")
     now = datetime(2026, 8, 10, tzinfo=timezone.utc)
     service = TransientAttachmentService(
         db, storage, now_fn=lambda: now
     )
-    await remember_ragflow_temp_file(db, "rf-new")
-    await remember_ragflow_temp_file(db, "rf-expired")
-    await remember_ragflow_temp_file(db, "rf-failed")
-    await db.executemany(
-        "UPDATE ext_ragflow_temp_file SET created_at=? WHERE file_id=?",
-        (
+    async with db.transaction(write=True) as conn:
+        await remember_ragflow_temp_file(conn, "rf-new")
+        await remember_ragflow_temp_file(conn, "rf-expired")
+        await remember_ragflow_temp_file(conn, "rf-failed")
+        for created_at, file_id in (
             (now.isoformat(), "rf-new"),
             ((now - timedelta(seconds=61)).isoformat(), "rf-expired"),
             ((now - timedelta(seconds=61)).isoformat(), "rf-failed"),
-        ),
-    )
-    await db.commit()
+        ):
+            await exec_sql(
+                conn,
+                "UPDATE ext_ragflow_temp_file SET created_at=? WHERE file_id=?",
+                (created_at, file_id),
+            )
     deleted: list[str] = []
 
     async def delete(file_id: str) -> None:
@@ -1151,11 +1191,15 @@ async def test_cleanup_only_deletes_ttl_expired_ragflow_temp_files(monkeypatch):
     assert deleted == ["rf-expired", "rf-failed"]
     assert result["ragflowTempDeleted"] == 1
     assert result["ragflowTempFailed"] == 1
-    async with db.execute(
-        "SELECT file_id, deleted_at FROM ext_ragflow_temp_file ORDER BY file_id",
-    ) as cursor:
-        rows = {row["file_id"]: row["deleted_at"] for row in await cursor.fetchall()}
+    async with db.transaction(write=False) as conn:
+        rows = {
+            row["file_id"]: row["deleted_at"]
+            for row in await fetchall(
+                conn,
+                "SELECT file_id, deleted_at FROM ext_ragflow_temp_file ORDER BY file_id",
+            )
+        }
     assert rows["rf-new"] is None
     assert rows["rf-expired"]
     assert rows["rf-failed"] is None
-    await db.close()
+    await gateway.dispose()

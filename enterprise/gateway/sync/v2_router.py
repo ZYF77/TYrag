@@ -5,14 +5,13 @@ import asyncio
 import hashlib
 import json
 import os
-import sqlite3
 import uuid
 from base64 import urlsafe_b64decode, urlsafe_b64encode
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 from weakref import WeakKeyDictionary
 
-import aiosqlite
 import jsonschema
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
@@ -27,6 +26,9 @@ from enterprise.gateway.asset_registry import (
     AssetRegistryUnavailable,
     resolve_asset,
 )
+from enterprise.gateway.db import GatewayDatabase
+from enterprise.gateway.db.dialect import exec_sql, fetchall, fetchone
+from enterprise.gateway.db.exceptions import PersistenceConflictError
 from enterprise.gateway.sync.models import (
     DocumentEventReceipt,
     ExtDocumentMap,
@@ -75,14 +77,24 @@ class DocumentUpsertRequest(_StrictModel):
     batchId: str | None = Field(default=None, max_length=128)
 
 
-async def get_db() -> aiosqlite.Connection:
+async def get_db() -> GatewayDatabase:
     """Reuse the app dependency while keeping this router independently testable."""
     from enterprise.gateway import app as app_module
 
     dependency = app_module.app.dependency_overrides.get(
-        app_module.get_db, app_module.get_db
+        app_module.get_gateway_db, app_module.get_gateway_db
     )
     return await dependency()
+
+
+async def _gw_read(gateway: GatewayDatabase, fn, /, *args, **kwargs):
+    async with gateway.transaction(write=False) as conn:
+        return await fn(conn, *args, **kwargs)
+
+
+async def _gw_write(gateway: GatewayDatabase, fn, /, *args, **kwargs):
+    async with gateway.transaction(write=True) as conn:
+        return await fn(conn, *args, **kwargs)
 
 
 async def require_v2_service_principal(
@@ -107,10 +119,10 @@ async def require_v2_service_principal(
     )
 
 
-def _sync_service(db: aiosqlite.Connection):
+def _sync_service(gateway: GatewayDatabase):
     from enterprise.gateway import app as app_module
 
-    return app_module._sync_service(db)
+    return app_module._sync_service(gateway)
 
 
 async def _document_write_lock(
@@ -119,9 +131,8 @@ async def _document_write_lock(
     external_document_id: str,
     source_version_id: str,
 ) -> asyncio.Lock:
-    # One aiosqlite connection has one transaction state.  Serialize all
-    # gateway writes in this process so unrelated document keys cannot
-    # interleave two BEGIN/COMMIT sequences on that shared connection.
+    # PostgreSQL provides the cross-process serialization; this lock only
+    # avoids duplicate work within one event loop for the same document key.
     del tenant_id, source_system, external_document_id, source_version_id
     loop = asyncio.get_running_loop()
     lock = _document_write_locks.get(loop)
@@ -132,7 +143,7 @@ async def _document_write_lock(
 
 
 async def _persist_mapping_and_outbox(
-    db: aiosqlite.Connection,
+    gateway: GatewayDatabase,
     mapping: ExtDocumentMap,
     event: OutboxEvent,
 ) -> tuple[ExtDocumentMap | None, bool]:
@@ -143,22 +154,17 @@ async def _persist_mapping_and_outbox(
         mapping.source_version_id,
     )
     async with lock:
-        try:
-            await db.execute("BEGIN IMMEDIATE")
+        async with gateway.transaction(write=True) as conn:
             doc, inserted = await insert_mapping(
-                db, mapping, commit=False, return_inserted=True,
+                conn, mapping, return_inserted=True,
             )
             if doc is None:
-                await db.rollback()
                 return None, False
             if inserted or doc.event_id == event.event_id:
-                if not await get_outbox_by_event_id(db, event.event_id):
-                    await enqueue_outbox(db, event, commit=False)
-            await db.commit()
+                if not await get_outbox_by_event_id(conn, event.event_id):
+                    await enqueue_outbox(conn, event)
             return doc, inserted
-        except Exception:
-            await db.rollback()
-            raise
+
 
 
 def _error(status_code: int, code: str, request_id: str) -> JSONResponse:
@@ -296,7 +302,7 @@ def _receipt_matches(
 
 
 async def _record_receipt(
-    db: aiosqlite.Connection,
+    gateway: GatewayDatabase,
     *,
     event_id: str,
     payload_hash: str,
@@ -310,8 +316,9 @@ async def _record_receipt(
         tenant_id, source_system, external_document_id, source_version_id
     )
     async with lock:
-        return await insert_document_event_receipt(
-            db,
+        async with gateway.transaction(write=True) as conn:
+            return await insert_document_event_receipt(
+                conn,
             DocumentEventReceipt(
                 event_id=event_id,
                 payload_hash=payload_hash,
@@ -349,7 +356,7 @@ def _metadata_scope(req: DocumentUpsertRequest) -> str | None:
 
 
 async def _seed_test_registry_fixture(
-    db: aiosqlite.Connection, req: DocumentUpsertRequest, tenant_id: str
+    gateway: GatewayDatabase, req: DocumentUpsertRequest, tenant_id: str
 ) -> None:
     """Populate only the explicit offline registry fixture used by tests."""
     if os.environ.get("ENTERPRISE_TEST_MODE") != "1":
@@ -368,7 +375,8 @@ async def _seed_test_registry_fixture(
         req.sourceVersionId,
     )
     async with lock:
-        await db.execute(
+        async with gateway.transaction(write=True) as conn:
+            await exec_sql(conn,
             """INSERT INTO ext_asset_registry
                (tenant_id, equipment_id, fixed_asset_no, asset_id)
                VALUES (?, ?, ?, ?)
@@ -376,37 +384,37 @@ async def _seed_test_registry_fixture(
                  fixed_asset_no=excluded.fixed_asset_no,
                  asset_id=excluded.asset_id""",
             (tenant_id, equipment_id or fixed_asset_no or asset_id, fixed_asset_no, asset_id),
-        )
-        await db.commit()
+            )
 
 
 async def _mapping_for_scope(
-    db: aiosqlite.Connection,
+    gateway: GatewayDatabase,
     tenant_id: str,
     source_system: str,
     external_document_id: str,
     source_version_id: str | None,
 ) -> ExtDocumentMap | None:
-    if source_version_id:
-        return await get_mapping(
-            db, tenant_id, source_system, external_document_id, source_version_id
+    async with gateway.transaction(write=False) as conn:
+        if source_version_id:
+            return await get_mapping(
+                conn, tenant_id, source_system, external_document_id, source_version_id
+            )
+        row = await fetchone(
+            conn,
+            """SELECT * FROM ext_document_map
+               WHERE tenant_id=? AND source_system=? AND external_document_id=?
+               ORDER BY current_version DESC, updated_at DESC LIMIT 1""",
+            (tenant_id, source_system, external_document_id),
         )
-    async with db.execute(
-        """SELECT * FROM ext_document_map
-           WHERE tenant_id=? AND source_system=? AND external_document_id=?
-           ORDER BY current_version DESC, updated_at DESC LIMIT 1""",
-        (tenant_id, source_system, external_document_id),
-    ) as cursor:
-        row = await cursor.fetchone()
-    if not row:
-        return None
-    from enterprise.gateway.sync.models import row_to_mapping
+        if not row:
+            return None
+        from enterprise.gateway.sync.models import row_to_mapping
 
-    return row_to_mapping(row)
+        return row_to_mapping(row)
 
 
 async def _replay_receipt(
-    db: aiosqlite.Connection,
+    gateway: GatewayDatabase,
     receipt: DocumentEventReceipt,
     payload_hash: str,
     request_id: str,
@@ -422,8 +430,9 @@ async def _replay_receipt(
         return _error(409, "EVENT_ID_CONFLICT", request_id)
     if receipt.outcome_code == "DOCUMENT_VERSION_CONFLICT":
         return _error(409, "DOCUMENT_VERSION_CONFLICT", request_id)
-    doc = await get_mapping(
-        db,
+    doc = await _gw_read(
+        gateway,
+        get_mapping,
         receipt.tenant_id,
         receipt.source_system,
         receipt.external_document_id,
@@ -444,7 +453,7 @@ async def _replay_receipt(
 @router.post("")
 async def upsert_document(
     req: DocumentUpsertRequest,
-    db: aiosqlite.Connection = Depends(get_db),
+    gateway: GatewayDatabase = Depends(get_db),
     principal: ServicePrincipal = Depends(require_v2_service_principal),
 ):
     request_id = str(uuid.uuid4())
@@ -456,7 +465,7 @@ async def upsert_document(
 
     normalized = _normalized_ingestion_payload(req)
     payload_hash = _canonical_hash(normalized)
-    receipt = await get_document_event_receipt(db, req.eventId)
+    receipt = await _gw_read(gateway, get_document_event_receipt, req.eventId)
     if receipt:
         if not _receipt_matches(
             receipt,
@@ -467,10 +476,10 @@ async def upsert_document(
             req.sourceVersionId,
         ):
             return _error(409, "EVENT_ID_CONFLICT", request_id)
-        return await _replay_receipt(db, receipt, payload_hash, request_id)
+        return await _replay_receipt(gateway, receipt, payload_hash, request_id)
 
-    legacy_mapping = await get_mapping_by_event_id(db, req.eventId)
-    legacy_outbox = await get_outbox_by_event_id(db, req.eventId)
+    legacy_mapping = await _gw_read(gateway, get_mapping_by_event_id, req.eventId)
+    legacy_outbox = await _gw_read(gateway, get_outbox_by_event_id, req.eventId)
     if legacy_mapping or legacy_outbox:
         if not legacy_mapping or not legacy_outbox:
             return _error(409, "EVENT_ID_CONFLICT", request_id)
@@ -496,7 +505,7 @@ async def upsert_document(
         if legacy_hash != payload_hash:
             return _error(409, "EVENT_ID_CONFLICT", request_id)
         await _record_receipt(
-            db,
+            gateway,
             event_id=req.eventId,
             payload_hash=payload_hash,
             tenant_id=tenant_id,
@@ -509,8 +518,9 @@ async def upsert_document(
             _status_payload(legacy_mapping, deduplicated=True)
         )
 
-    existing = await get_mapping(
-        db,
+    existing = await _gw_read(
+        gateway,
+        get_mapping,
         tenant_id,
         req.sourceSystem,
         req.externalDocumentId,
@@ -521,7 +531,7 @@ async def upsert_document(
             outcome = "DOCUMENT_VERSION_CONFLICT"
         elif req.eventType == "reindex":
             try:
-                existing = await _sync_service(db).reindex_document(
+                existing = await _sync_service(gateway).reindex_document(
                     tenant_id,
                     req.sourceSystem,
                     req.externalDocumentId,
@@ -533,7 +543,7 @@ async def upsert_document(
         else:
             outcome = "deduplicated"
         stored = await _record_receipt(
-            db,
+            gateway,
             event_id=req.eventId,
             payload_hash=payload_hash,
             tenant_id=tenant_id,
@@ -564,10 +574,11 @@ async def upsert_document(
     if req.eventType == "reindex":
         return _error(404, "DOCUMENT_NOT_FOUND", request_id)
 
-    await _seed_test_registry_fixture(db, req, tenant_id)
+    await _seed_test_registry_fixture(gateway, req, tenant_id)
     try:
-        canonical_asset = await resolve_asset(
-            db,
+        async with gateway.transaction(write=False) as conn:
+            canonical_asset = await resolve_asset(
+                conn,
             tenant_id=tenant_id,
             equipment_id=req.metadata.get("equipment_id"),
             fixed_asset_no=req.metadata.get("fixed_asset_no"),
@@ -614,7 +625,7 @@ async def upsert_document(
     )
     try:
         doc, _inserted = await _persist_mapping_and_outbox(
-            db,
+            gateway,
             mapping,
             OutboxEvent(
                 event_id=req.eventId,
@@ -629,7 +640,7 @@ async def upsert_document(
         )
         if doc is None:
             return _error(409, "EVENT_ID_CONFLICT", request_id)
-    except sqlite3.IntegrityError:
+    except PersistenceConflictError:
         return _error(409, "EVENT_ID_CONFLICT", request_id)
     doc_identity = (
         doc.tenant_id,
@@ -651,7 +662,7 @@ async def upsert_document(
             else "DOCUMENT_VERSION_CONFLICT"
         )
         await _record_receipt(
-            db,
+            gateway,
             event_id=req.eventId,
             payload_hash=payload_hash,
             tenant_id=tenant_id,
@@ -665,7 +676,7 @@ async def upsert_document(
         return _accepted(_status_payload(doc, deduplicated=True))
 
     await _record_receipt(
-        db,
+        gateway,
         event_id=req.eventId,
         payload_hash=payload_hash,
         tenant_id=tenant_id,
@@ -683,7 +694,7 @@ async def list_document_status(
     source_system: str = Query(alias="sourceSystem", min_length=1, max_length=64),
     limit: int = Query(default=20, ge=1, le=100),
     cursor: str | None = None,
-    db: aiosqlite.Connection = Depends(get_db),
+    gateway: GatewayDatabase = Depends(get_db),
     principal: ServicePrincipal = Depends(require_v2_service_principal),
 ):
     request_id = str(uuid.uuid4())
@@ -699,13 +710,14 @@ async def list_document_status(
         clauses.append("(updated_at < ? OR (updated_at = ? AND id < ?))")
         params.extend([cursor_updated_at, cursor_updated_at, cursor_id])
     params.append(limit + 1)
-    async with db.execute(
-        f"""SELECT * FROM ext_document_map
-            WHERE {' AND '.join(clauses)}
-            ORDER BY updated_at DESC, id DESC LIMIT ?""",
-        params,
-    ) as result:
-        rows = await result.fetchall()
+    async with gateway.transaction(write=False) as conn:
+        rows = await fetchall(
+            conn,
+            f"""SELECT * FROM ext_document_map
+                WHERE {' AND '.join(clauses)}
+                ORDER BY updated_at DESC, id DESC LIMIT ?""",
+            params,
+        )
     has_more = len(rows) > limit
     page_rows = rows[:limit]
     from enterprise.gateway.sync.models import row_to_mapping
@@ -727,20 +739,20 @@ async def get_document_status(
         default=None, alias="sourceVersionId", min_length=1, max_length=64
     ),
     refresh: bool = False,
-    db: aiosqlite.Connection = Depends(get_db),
+    gateway: GatewayDatabase = Depends(get_db),
     principal: ServicePrincipal = Depends(require_v2_service_principal),
 ):
     request_id = str(uuid.uuid4())
     if not _scope_allowed(principal, tenant_id, source_system):
         return _error(403, "ACL_DENIED", request_id)
     doc = await _mapping_for_scope(
-        db, tenant_id, source_system, external_document_id, source_version_id
+        gateway, tenant_id, source_system, external_document_id, source_version_id
     )
     if not doc:
         return _error(404, "DOCUMENT_NOT_FOUND", request_id)
     if refresh and doc.ragflow_dataset_id and doc.ragflow_document_id:
         try:
-            doc = await _sync_service(db).refresh_status(doc)
+            doc = await _sync_service(gateway).refresh_status(doc)
         except DocumentSyncError as exc:
             return _sync_error(exc, request_id)
     return _status_payload(doc)
@@ -751,14 +763,14 @@ async def disable_document(
     external_document_id: str,
     tenant_id: str = Query(alias="tenantId", min_length=1, max_length=64),
     source_system: str = Query(alias="sourceSystem", min_length=1, max_length=64),
-    db: aiosqlite.Connection = Depends(get_db),
+    gateway: GatewayDatabase = Depends(get_db),
     principal: ServicePrincipal = Depends(require_v2_service_principal),
 ):
     request_id = str(uuid.uuid4())
     if not _scope_allowed(principal, tenant_id, source_system):
         return _error(403, "ACL_DENIED", request_id)
     try:
-        await _sync_service(db).disable_document(
+        await _sync_service(gateway).disable_document(
             tenant_id, source_system, external_document_id
         )
     except DocumentSyncError as exc:
@@ -776,14 +788,14 @@ async def restore_document(
     external_document_id: str,
     tenant_id: str = Query(alias="tenantId", min_length=1, max_length=64),
     source_system: str = Query(alias="sourceSystem", min_length=1, max_length=64),
-    db: aiosqlite.Connection = Depends(get_db),
+    gateway: GatewayDatabase = Depends(get_db),
     principal: ServicePrincipal = Depends(require_v2_service_principal),
 ):
     request_id = str(uuid.uuid4())
     if not _scope_allowed(principal, tenant_id, source_system):
         return _error(403, "ACL_DENIED", request_id)
     try:
-        await _sync_service(db).restore_document(
+        await _sync_service(gateway).restore_document(
             tenant_id, source_system, external_document_id
         )
     except DocumentSyncError as exc:
@@ -798,14 +810,14 @@ async def delete_document(
     external_document_id: str,
     tenant_id: str = Query(alias="tenantId", min_length=1, max_length=64),
     source_system: str = Query(alias="sourceSystem", min_length=1, max_length=64),
-    db: aiosqlite.Connection = Depends(get_db),
+    gateway: GatewayDatabase = Depends(get_db),
     principal: ServicePrincipal = Depends(require_v2_service_principal),
 ):
     request_id = str(uuid.uuid4())
     if not _scope_allowed(principal, tenant_id, source_system):
         return _error(403, "ACL_DENIED", request_id)
     try:
-        await _sync_service(db).delete_document(
+        await _sync_service(gateway).delete_document(
             tenant_id, source_system, external_document_id
         )
     except DocumentSyncError as exc:

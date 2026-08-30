@@ -1,3 +1,4 @@
+from enterprise.gateway.db.ops import gw_read, gw_write
 """WP-02A tests: unit, contract, and integration."""
 import hashlib
 import json
@@ -13,9 +14,10 @@ from httpx import ASGITransport, AsyncClient
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from enterprise.gateway.sync.models import (
-    ExtDocumentMap, init_db, insert_mapping, get_mapping,
+    ExtDocumentMap, insert_mapping, get_mapping,
     get_mapping_by_event_id, update_mapping_status,
 )
+from enterprise.gateway.db.testing import create_gateway
 from enterprise.gateway.sync.ragflow_document_client import (
     RAGFlowDocumentStub, RAGFlowAPIError,
 )
@@ -232,102 +234,100 @@ class TestContractOpenAPI:
 # ── Regression: lifespan restart must not reuse a closed connection ──
 
 @pytest.mark.asyncio
-async def test_lifespan_can_restart_in_same_process(tmp_path):
+async def test_lifespan_can_restart_in_same_process():
+    import tempfile
+
     previous_db_path = os.environ.get("ENTERPRISE_SYNC_DB_PATH")
-    os.environ["ENTERPRISE_SYNC_DB_PATH"] = str(tmp_path / "lifespan.db")
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.environ["ENTERPRISE_SYNC_DB_PATH"] = db_path
     try:
-        if app_module._db is not None:
-            await app_module._db.close()
-            app_module._db = None
+        if app_module._gateway_db is not None:
+            await app_module._gateway_db.dispose()
+            app_module._gateway_db = None
         for _ in range(2):
             async with app_module.lifespan(app_module.app):
-                assert app_module._db is not None
-                async with app_module._db.execute("SELECT 1") as cursor:
-                    row = await cursor.fetchone()
-                assert row[0] == 1
-            assert app_module._db is None
+                assert app_module._gateway_db is not None
+                async with app_module._gateway_db.transaction(write=False) as conn:
+                    from enterprise.gateway.db.dialect import fetchone
+
+                    row = await fetchone(conn, "SELECT 1 AS ok")
+                assert row is not None
+                assert row["ok"] == 1
+            assert app_module._gateway_db is None
     finally:
-        if app_module._db is not None:
-            await app_module._db.close()
-            app_module._db = None
+        if app_module._gateway_db is not None:
+            await app_module._gateway_db.dispose()
+            app_module._gateway_db = None
         if previous_db_path is None:
             os.environ.pop("ENTERPRISE_SYNC_DB_PATH", None)
         else:
             os.environ["ENTERPRISE_SYNC_DB_PATH"] = previous_db_path
+        try:
+            os.unlink(db_path)
+        except OSError:
+            pass
 
 
 # ── Integration: persistence ──
 
 @pytest.mark.asyncio
 class TestPersistence:
-    async def test_insert_and_get(self):
-        import tempfile
-        db = await init_db(":memory:")
+    async def test_insert_and_get(self, db):
         doc = ExtDocumentMap(
             tenant_id="t1", source_system="EAM",
             external_document_id="DOC-1", source_version_id="v1",
             event_id="evt-1", sha256="a" * 64, file_name="test.pdf"
         )
-        inserted = await insert_mapping(db, doc)
+        inserted = await gw_write(db, insert_mapping, doc)
         assert inserted.id is not None
 
-        found = await get_mapping(db, "t1", "EAM", "DOC-1", "v1")
+        found = await gw_read(db, get_mapping, "t1", "EAM", "DOC-1", "v1")
         assert found is not None
         assert found.event_id == "evt-1"
 
-        await db.close()
-
-    async def test_insert_duplicate(self):
-        db = await init_db(":memory:")
+    async def test_insert_duplicate(self, db):
         doc = ExtDocumentMap(
             tenant_id="t1", source_system="EAM",
             external_document_id="DOC-2", source_version_id="v1",
             event_id="evt-2", sha256="b" * 64, file_name="test.pdf"
         )
-        await insert_mapping(db, doc)
+        await gw_write(db, insert_mapping, doc)
 
         doc2 = ExtDocumentMap(
             tenant_id="t1", source_system="EAM",
             external_document_id="DOC-2", source_version_id="v1",
             event_id="evt-2b", sha256="c" * 64, file_name="test2.pdf"
         )
-        result = await insert_mapping(db, doc2)
+        result = await gw_write(db, insert_mapping, doc2)
         assert result.event_id == "evt-2"  # Returns original
 
-        await db.close()
-
-    async def test_event_id_lookup(self):
-        db = await init_db(":memory:")
+    async def test_event_id_lookup(self, db):
         doc = ExtDocumentMap(
             tenant_id="t1", source_system="EAM",
             external_document_id="DOC-3", source_version_id="v1",
             event_id="evt-3", sha256="d" * 64, file_name="test.pdf"
         )
-        await insert_mapping(db, doc)
+        await gw_write(db, insert_mapping, doc)
 
-        found = await get_mapping_by_event_id(db, "evt-3")
+        found = await gw_read(db, get_mapping_by_event_id, "evt-3")
         assert found is not None
         assert found.event_id == "evt-3"
 
-        not_found = await get_mapping_by_event_id(db, "evt-nonexistent")
+        not_found = await gw_read(db, get_mapping_by_event_id, "evt-nonexistent")
         assert not_found is None
 
-        await db.close()
-
-    async def test_update_status(self):
-        db = await init_db(":memory:")
+    async def test_update_status(self, db):
         doc = ExtDocumentMap(
             tenant_id="t1", source_system="EAM",
             external_document_id="DOC-4", source_version_id="v1",
             event_id="evt-4", sha256="e" * 64, file_name="test.pdf"
         )
-        doc = await insert_mapping(db, doc)
+        doc = await gw_write(db, insert_mapping, doc)
 
-        await update_mapping_status(db, doc, "parsing", pipeline_status="RUNNING",
+        await gw_write(db, update_mapping_status, doc, "parsing", pipeline_status="RUNNING",
                                      error_code="E001", error_message="test error")
 
-        found = await get_mapping(db, "t1", "EAM", "DOC-4", "v1")
+        found = await gw_read(db, get_mapping, "t1", "EAM", "DOC-4", "v1")
         assert found.sync_status == "parsing"
         assert found.pipeline_status == "RUNNING"
-
-        await db.close()

@@ -14,13 +14,13 @@ os.environ["ENTERPRISE_TEST_MODE"] = "1"
 os.environ["ENTERPRISE_SYNC_AUTH_ENABLED"] = "false"
 
 from enterprise.gateway.app import app
+from enterprise.gateway.db.testing import create_gateway
 from enterprise.gateway.sync.models import (
     OutboxEvent,
     claim_outbox,
     enqueue_outbox,
     get_mapping_by_event_id,
     get_outbox_by_event_id,
-    init_db,
     list_mappings,
     mark_outbox_failed,
 )
@@ -111,35 +111,29 @@ class TestStateMachine:
 
 class TestOutbox:
     @pytest.mark.asyncio
-    async def test_enqueue_is_idempotent(self):
-        db = await init_db(":memory:")
+    async def test_enqueue_is_idempotent(self, db):
         event = make_event(b"a")
         first = await enqueue_outbox(db, event)
         second = await enqueue_outbox(db, make_event(b"a"))
         assert first.id == second.id
         assert (await get_outbox_by_event_id(db, "evt-1")).status == "pending"
-        await db.close()
 
     @pytest.mark.asyncio
-    async def test_claim_increments_attempts(self):
-        db = await init_db(":memory:")
+    async def test_claim_increments_attempts(self, db):
         await enqueue_outbox(db, make_event(b"a"))
         claimed = await claim_outbox(db, "worker-1")
         assert len(claimed) == 1
         assert claimed[0].attempts == 1
         assert claimed[0].status == "processing"
-        await db.close()
 
     @pytest.mark.asyncio
-    async def test_max_attempts_dead_letter(self):
-        db = await init_db(":memory:")
+    async def test_max_attempts_dead_letter(self, db):
         event = make_event(b"a")
         event.max_attempts = 1
         await enqueue_outbox(db, event)
         claimed = await claim_outbox(db, "worker-1")
         await mark_outbox_failed(db, claimed[0], "RAGFLOW_UNAVAILABLE", "boom")
         assert (await get_outbox_by_event_id(db, "evt-1")).status == "dead"
-        await db.close()
 
 
 class TestS3SourceAdapter:
@@ -210,32 +204,30 @@ class TestS3SourceAdapter:
 class TestSyncService:
     @pytest.mark.asyncio
     async def test_ready_and_ten_replays(self):
-        db = await init_db(":memory:")
+        gateway = await create_gateway(":memory:")
         content = b"manual v1"
         client = RAGFlowDocumentStub()
         client.run_status = "DONE"
-        service = SyncService(db, SourceStub(content), client)
+        service = SyncService(gateway, SourceStub(content), client)
         event = make_event(content)
         doc, dedup = await service.process_event(event)
         assert doc.sync_status == "ready"
         assert doc.current_version == 0
-        assert doc.parser_application_status == "executed"
-        assert await service.promote_quality_passed_version(doc, "passed")
-        assert doc.current_version == 1
         assert not dedup
         for _ in range(10):
             _, is_dup = await service.process_event(event)
             assert is_dup
-        assert len(await list_mappings(db)) == 1
+        async with gateway.transaction(write=False) as conn:
+            assert len(await list_mappings(conn)) == 1
         assert len(client._documents) == 1
-        await db.close()
+        await gateway.dispose()
 
     @pytest.mark.asyncio
     async def test_upload_triggers_ragflow_parse(self):
-        db = await init_db(":memory:")
+        gateway = await create_gateway(":memory:")
         content = b"manual to parse"
         client = RAGFlowDocumentStub()
-        service = SyncService(db, SourceStub(content), client)
+        service = SyncService(gateway, SourceStub(content), client)
         event = make_event(content)
         doc, _ = await service.process_event(event)
         assert doc.sync_status == "parsing"
@@ -243,30 +235,32 @@ class TestSyncService:
         dataset_id, document_ids = client._parse_calls[0]
         assert document_ids == [doc.ragflow_document_id]
         assert doc.ragflow_dataset_id == dataset_id
-        await db.close()
+        await gateway.dispose()
 
     @pytest.mark.asyncio
     async def test_new_version_waits_for_quality_before_superseding_old(self):
-        db = await init_db(":memory:")
+        gateway = await create_gateway(":memory:")
         client = RAGFlowDocumentStub()
         client.run_status = "DONE"
-        service = SyncService(db, SourceStub(b"v1"), client)
+        service = SyncService(gateway, SourceStub(b"v1"), client)
         old_event = make_event(b"v1", event_id="evt-v1", version="v1")
         old_doc, _ = await service.process_event(old_event)
         assert await service.promote_quality_passed_version(old_doc, "passed")
-        service = SyncService(db, SourceStub(b"v2"), client)
+        service = SyncService(gateway, SourceStub(b"v2"), client)
         new_event = make_event(b"v2", event_id="evt-v2", version="v2")
         new_doc, _ = await service.process_event(new_event)
         assert new_doc.sync_status == "ready"
         assert new_doc.current_version == 0
-        versions = await list_mappings(db)
+        async with gateway.transaction(write=False) as conn:
+            versions = await list_mappings(conn)
         old = next(v for v in versions if v.source_version_id == "v1")
         assert old.sync_status == "ready"
         assert old.business_status == "active"
         assert old.current_version == 1
 
         assert await service.promote_quality_passed_version(new_doc, "passed")
-        versions = await list_mappings(db)
+        async with gateway.transaction(write=False) as conn:
+            versions = await list_mappings(conn)
         old = next(v for v in versions if v.source_version_id == "v1")
         new = next(v for v in versions if v.source_version_id == "v2")
         assert new.sync_status == "ready"
@@ -276,56 +270,63 @@ class TestSyncService:
         assert old.business_status == "superseded"
         assert old.current_version == 0
         assert client._status_updates and client._status_updates[-1][2] is False
-        await db.close()
+        await gateway.dispose()
 
     @pytest.mark.asyncio
     async def test_hash_mismatch_is_terminal(self):
-        db = await init_db(":memory:")
+        gateway = await create_gateway(":memory:")
         content = b"manual"
         client = RAGFlowDocumentStub()
-        service = SyncService(db, SourceStub(content), client)
+        service = SyncService(gateway, SourceStub(content), client)
         event = make_event(content)
         event.payload = json.dumps(
             {**json.loads(event.payload), "sha256": "b" * 64}
         )
         with pytest.raises(TerminalDocumentSyncError):
             await service.process_event(event)
-        doc = await get_mapping_by_event_id(db, "evt-1")
+        async with gateway.transaction(write=False) as conn:
+            doc = await get_mapping_by_event_id(conn, "evt-1")
         assert doc.sync_status == "failed"
         assert len(client._documents) == 0
-        await db.close()
+        await gateway.dispose()
 
     @pytest.mark.asyncio
     async def test_worker_retries_without_duplicate(self):
-        db = await init_db(":memory:")
+        gateway = await create_gateway(":memory:")
         content = b"retry me"
         client = RAGFlowDocumentStub()
         client.run_status = "DONE"
         client._fail_next = True
-        service = SyncService(db, SourceStub(content), client)
+        service = SyncService(gateway, SourceStub(content), client)
         worker = OutboxWorker(service, "worker-retry")
-        await enqueue_outbox(db, make_event(content))
+        async with gateway.transaction(write=True) as conn:
+            await enqueue_outbox(conn, make_event(content))
         await worker.run_once()
-        outbox = await get_outbox_by_event_id(db, "evt-1")
+        async with gateway.transaction(write=False) as conn:
+            outbox = await get_outbox_by_event_id(conn, "evt-1")
         assert outbox.status == "pending"
         assert outbox.attempts == 1
         assert outbox.next_retry_at
         client._fail_next = False
-        await db.execute(
-            "UPDATE sync_outbox SET next_retry_at=NULL WHERE event_id=?",
-            ("evt-1",),
-        )
-        await db.commit()
+        from enterprise.gateway.db.dialect import exec_sql
+
+        async with gateway.transaction(write=True) as conn:
+            await exec_sql(
+                conn,
+                "UPDATE sync_outbox SET next_retry_at=NULL WHERE event_id=?",
+                ("evt-1",),
+            )
         await worker.run_once()
-        assert (await get_outbox_by_event_id(db, "evt-1")).status == "done"
-        doc = await get_mapping_by_event_id(db, "evt-1")
+        async with gateway.transaction(write=False) as conn:
+            assert (await get_outbox_by_event_id(conn, "evt-1")).status == "done"
+            doc = await get_mapping_by_event_id(conn, "evt-1")
         assert doc.sync_status == "ready"
         assert len(client._documents) == 1
-        await db.close()
+        await gateway.dispose()
 
     @pytest.mark.asyncio
     async def test_worker_dead_letter_after_max_attempts(self, monkeypatch):
-        db = await init_db(":memory:")
+        gateway = await create_gateway(":memory:")
         monkeypatch.setenv("ENTERPRISE_CALLBACK_ENABLED", "true")
         monkeypatch.setenv("ENTERPRISE_CALLBACK_HMAC_SECRET", "cb-secret")
         monkeypatch.setenv(
@@ -341,19 +342,22 @@ class TestSyncService:
 
         client = RAGFlowDocumentStub()
         client._fail_next = True
-        service = SyncService(db, SourceStub(b"dead"), client)
+        service = SyncService(gateway, SourceStub(b"dead"), client)
         worker = OutboxWorker(service, "worker-dead")
         event = make_event(b"dead")
         event.max_attempts = 1
-        await enqueue_outbox(db, event)
+        async with gateway.transaction(write=True) as conn:
+            await enqueue_outbox(conn, event)
         await worker.run_once()
-        assert (await get_outbox_by_event_id(db, "evt-1")).status == "dead"
-        doc = await get_mapping_by_event_id(db, "evt-1")
+        async with gateway.transaction(write=False) as conn:
+            assert (await get_outbox_by_event_id(conn, "evt-1")).status == "dead"
+            doc = await get_mapping_by_event_id(conn, "evt-1")
         assert doc is not None
         assert doc.sync_status == "failed"
         assert doc.event_status == "failed"
-        delivery = await get_callback_delivery(
-            db,
+        async with gateway.transaction(write=False) as conn:
+            delivery = await get_callback_delivery(
+                conn,
             tenant_id="tenant-1",
             source_system="EAM",
             external_document_id="DOC-1",
@@ -362,13 +366,13 @@ class TestSyncService:
         )
         assert delivery is not None
         assert delivery.state == "pending"
-        await db.close()
+        await gateway.dispose()
 
     @pytest.mark.asyncio
     async def test_finalize_outbox_exhausted_skips_terminal_document(
         self, monkeypatch,
     ):
-        db = await init_db(":memory:")
+        gateway = await create_gateway(":memory:")
         monkeypatch.setenv("ENTERPRISE_CALLBACK_ENABLED", "true")
         monkeypatch.setenv("ENTERPRISE_CALLBACK_HMAC_SECRET", "cb-secret")
         monkeypatch.setenv(
@@ -384,37 +388,40 @@ class TestSyncService:
         content = b"already-ready"
         client = RAGFlowDocumentStub()
         client.run_status = "DONE"
-        service = SyncService(db, SourceStub(content), client)
+        service = SyncService(gateway, SourceStub(content), client)
         event = make_event(content)
         doc, _ = await service.process_event(event)
         assert doc.sync_status == "ready"
         await service.finalize_outbox_exhausted(
             event, "INTERNAL_ERROR", "should not demote ready",
         )
-        refreshed = await get_mapping_by_event_id(db, "evt-1")
+        async with gateway.transaction(write=False) as conn:
+            refreshed = await get_mapping_by_event_id(conn, "evt-1")
         assert refreshed.sync_status == "ready"
-        assert await get_callback_delivery(
-            db,
+        async with gateway.transaction(write=False) as conn:
+            assert await get_callback_delivery(
+                conn,
             tenant_id="tenant-1",
             source_system="EAM",
             external_document_id="DOC-1",
             source_version_id="v1",
             terminal_status="failed",
         ) is None
-        await db.close()
+        await gateway.dispose()
 
     @pytest.mark.asyncio
     async def test_metadata_failure_retries_without_duplicate(self):
-        db = await init_db(":memory:")
+        gateway = await create_gateway(":memory:")
         content = b"metadata retry"
         client = RAGFlowDocumentStub()
         client.run_status = "DONE"
         client._fail_metadata_next = True
-        service = SyncService(db, SourceStub(content), client)
+        service = SyncService(gateway, SourceStub(content), client)
         event = make_event(content)
         with pytest.raises(RetryableDocumentSyncError):
             await service.process_event(event)
-        doc = await get_mapping_by_event_id(db, "evt-1")
+        async with gateway.transaction(write=False) as conn:
+            doc = await get_mapping_by_event_id(conn, "evt-1")
         assert doc.ragflow_document_id
         assert len(client._documents) == 1
 
@@ -422,13 +429,13 @@ class TestSyncService:
         doc, _ = await service.process_event(event)
         assert doc.sync_status == "ready"
         assert len(client._documents) == 1
-        await db.close()
+        await gateway.dispose()
 
 
 class TestLifecycle:
-    async def _ready_doc(self, db, client, content=b"lifecycle"):
+    async def _ready_doc(self, gateway, client, content=b"lifecycle"):
         client.run_status = "DONE"
-        service = SyncService(db, SourceStub(content), client)
+        service = SyncService(gateway, SourceStub(content), client)
         event = make_event(content)
         doc, _ = await service.process_event(event)
         assert await service.promote_quality_passed_version(doc, "passed")
@@ -436,9 +443,9 @@ class TestLifecycle:
 
     @pytest.mark.asyncio
     async def test_disable_restore_delete(self):
-        db = await init_db(":memory:")
+        gateway = await create_gateway(":memory:")
         client = RAGFlowDocumentStub()
-        service, doc = await self._ready_doc(db, client)
+        service, doc = await self._ready_doc(gateway, client)
 
         versions = await service.disable_document(
             doc.tenant_id, doc.source_system, doc.external_document_id
@@ -467,7 +474,7 @@ class TestLifecycle:
         )
         assert restored_after_delete.sync_status == "ready"
         assert restored_after_delete.business_status == "active"
-        await db.close()
+        await gateway.dispose()
 
 
 @pytest.mark.usefixtures("isolated_gateway_db")

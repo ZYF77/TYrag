@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from enterprise.gateway.db.dialect import fetchone
+from enterprise.gateway.db.ops import gw_read, gw_write
+
 import hashlib
 import json
 from pathlib import Path
@@ -172,7 +175,7 @@ async def test_v3_file_share_worker_uploads_same_verified_handle(
         FileShareSourceAdapter(),
     )
     assert await OutboxWorker(service).run_once() == 1
-    doc = await get_mapping(db, "tenant-a", "DEMO", "DOC-FS", "v1")
+    doc = await gw_read(db, get_mapping, "tenant-a", "DEMO", "DOC-FS", "v1")
     assert doc is not None
     assert doc.source_kind == "FILE_SHARE"
     assert doc.ragflow_document_id
@@ -204,10 +207,13 @@ async def test_v3_file_share_worker_uploads_same_verified_handle(
     parse_count = len(ragflow._parse_calls)
     await service.reindex_document("tenant-a", "DEMO", "DOC-FS", "v1")
     assert len(ragflow._parse_calls) == parse_count + 1
-    async with db.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='ext_source_ticket'"
-    ) as cursor:
-        assert await cursor.fetchone() is None
+    row = await gw_read(
+        db,
+        fetchone,
+        "SELECT table_name AS name FROM information_schema.tables "
+        "WHERE table_schema=current_schema() AND table_name='ext_source_ticket'",
+    )
+    assert row is None
 
 
 @pytest.mark.asyncio
@@ -303,7 +309,7 @@ async def test_file_share_hash_mismatch_fails_before_upload(
     ragflow = RAGFlowDocumentStub()
     service = SyncService(db, NeverReadSource(), ragflow, FileShareSourceAdapter())
     assert await OutboxWorker(service).run_once() == 1
-    doc = await get_mapping(db, "tenant-a", "DEMO", "DOC-HASH", "v1")
+    doc = await gw_read(db, get_mapping, "tenant-a", "DEMO", "DOC-HASH", "v1")
     assert doc.sync_status == "failed"
     assert doc.last_error_code == "DOCUMENT_HASH_MISMATCH"
     assert ragflow._documents == {}

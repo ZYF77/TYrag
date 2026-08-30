@@ -1,9 +1,11 @@
+from enterprise.gateway.db.ops import gw_read
 import pytest
 from types import SimpleNamespace
 
 from enterprise.gateway.app import make_status_response
 from enterprise.gateway.quality.routing import route_document
-from enterprise.gateway.sync.models import get_mapping, init_db
+from enterprise.gateway.sync.models import get_mapping
+from enterprise.gateway.db.testing import create_gateway
 from enterprise.gateway.sync.ragflow_document_client import (
     RAGFlowAPIError,
     RAGFlowDocumentStub,
@@ -46,7 +48,8 @@ def test_client_profile_override_is_ignored_by_server_routing():
 
 @pytest.mark.asyncio
 async def test_sync_writes_enterprise_metadata_without_parser_override():
-    db = await init_db(":memory:")
+    gateway = await create_gateway(":memory:")
+    db = gateway
     client = RAGFlowDocumentStub()
     client.run_status = "DONE"
     service = SyncService(db, SourceStub(b"manual"), client)
@@ -65,22 +68,23 @@ async def test_sync_writes_enterprise_metadata_without_parser_override():
     # must not force a profile through the upload path.
     assert ragflow_doc["chunk_method"] == "naive"
     assert ragflow_doc["parser_config"] == {}
-    await db.close()
+    await db.dispose()
 
 
 @pytest.mark.asyncio
 async def test_reindex_does_not_require_legacy_parser_evidence():
-    db = await init_db(":memory:")
+    gateway = await create_gateway(":memory:")
+    db = gateway
     client = RAGFlowDocumentStub()
     client.run_status = "DONE"
     service = SyncService(db, SourceStub(b"manual"), client)
 
     doc, _ = await service.process_event(make_event(b"manual"))
     await service.reindex_document("tenant-1", "EAM", "DOC-1", "v1")
-    current = await get_mapping(db, "tenant-1", "EAM", "DOC-1", "v1")
+    current = await gw_read(db, get_mapping, "tenant-1", "EAM", "DOC-1", "v1")
     assert current.sync_status in {"ready", "queued", "parsing", "registered"}
     assert len(client._parse_calls) >= 2
-    await db.close()
+    await db.dispose()
 
 
 def test_status_response_reports_ragflow_owned_parser_application():
@@ -161,7 +165,8 @@ class BatchStatusErrorStub(RAGFlowDocumentStub):
 
 @pytest.mark.asyncio
 async def test_done_with_empty_chunks_retries_parse_once():
-    db = await init_db(":memory:")
+    gateway = await create_gateway(":memory:")
+    db = gateway
     client = EmptyChunksStub()
     client.run_status = "DONE"
     service = SyncService(db, SourceStub(b"manual"), client)
@@ -172,12 +177,13 @@ async def test_done_with_empty_chunks_retries_parse_once():
     assert doc.parse_retry_count == 1
     assert doc.pipeline_status == "RUNNING"
     assert len(client._parse_calls) == 2
-    await db.close()
+    await db.dispose()
 
 
 @pytest.mark.asyncio
 async def test_parser_config_mismatch_no_longer_blocks_ready():
-    db = await init_db(":memory:")
+    gateway = await create_gateway(":memory:")
+    db = gateway
     client = RAGFlowDocumentStub()
     client.run_status = "DONE"
     service = SyncService(db, SourceStub(b"manual"), client)
@@ -190,12 +196,13 @@ async def test_parser_config_mismatch_no_longer_blocks_ready():
     }
     refreshed = await service.refresh_status(doc)
     assert refreshed.sync_status == "ready"
-    await db.close()
+    await db.dispose()
 
 
 @pytest.mark.asyncio
 async def test_source_digest_is_verified_before_ragflow_registration():
-    db = await init_db(":memory:")
+    gateway = await create_gateway(":memory:")
+    db = gateway
     content = b"manual"
     client = RAGFlowDocumentStub()
     service = SyncService(db, IncorrectDigestSource(content), client)
@@ -204,17 +211,18 @@ async def test_source_digest_is_verified_before_ragflow_registration():
         await service.process_event(make_event(content))
 
     assert error.value.code == "DOCUMENT_HASH_MISMATCH"
-    doc = await get_mapping(db, "tenant-1", "EAM", "DOC-1", "v1")
+    doc = await gw_read(db, get_mapping, "tenant-1", "EAM", "DOC-1", "v1")
     assert doc.sync_status == "failed"
     assert doc.business_status == "review_required"
     assert doc.current_version == 0
     assert client._documents == {}
-    await db.close()
+    await db.dispose()
 
 
 @pytest.mark.asyncio
 async def test_parse_failure_retries_once_then_can_fail():
-    db = await init_db(":memory:")
+    gateway = await create_gateway(":memory:")
+    db = gateway
     client = RAGFlowDocumentStub()
     client.run_status = "FAIL"
     service = SyncService(db, SourceStub(b"manual"), client)
@@ -233,12 +241,13 @@ async def test_parse_failure_retries_once_then_can_fail():
     assert refreshed.business_status == "review_required"
     assert refreshed.current_version == 0
     assert await service.promote_quality_passed_version(refreshed, "passed") is False
-    await db.close()
+    await db.dispose()
 
 
 @pytest.mark.asyncio
 async def test_missing_terminal_readback_is_retryable_and_not_ready():
-    db = await init_db(":memory:")
+    gateway = await create_gateway(":memory:")
+    db = gateway
     client = MissingPostParseReadbackStub()
     service = SyncService(db, SourceStub(b"manual"), client)
 
@@ -246,15 +255,16 @@ async def test_missing_terminal_readback_is_retryable_and_not_ready():
         await service.process_event(make_event(b"manual"))
 
     assert error.value.code == "RAGFLOW_UNAVAILABLE"
-    doc = await get_mapping(db, "tenant-1", "EAM", "DOC-1", "v1")
+    doc = await gw_read(db, get_mapping, "tenant-1", "EAM", "DOC-1", "v1")
     assert doc.sync_status == "retry_wait"
     assert doc.current_version == 0
-    await db.close()
+    await db.dispose()
 
 
 @pytest.mark.asyncio
 async def test_status_refresh_failure_maps_to_stable_error():
-    db = await init_db(":memory:")
+    gateway = await create_gateway(":memory:")
+    db = gateway
     client = RefreshFailureStub()
     client.run_status = "RUNNING"
     service = SyncService(db, SourceStub(b"manual"), client)
@@ -265,12 +275,13 @@ async def test_status_refresh_failure_maps_to_stable_error():
         await service.refresh_status(doc)
 
     assert error.value.code == "RAGFLOW_UNAVAILABLE"
-    await db.close()
+    await db.dispose()
 
 
 @pytest.mark.asyncio
 async def test_lifecycle_does_not_commit_when_ragflow_reports_document_error():
-    db = await init_db(":memory:")
+    gateway = await create_gateway(":memory:")
+    db = gateway
     client = BatchStatusErrorStub()
     client.run_status = "DONE"
     service = SyncService(db, SourceStub(b"manual"), client)
@@ -280,16 +291,17 @@ async def test_lifecycle_does_not_commit_when_ragflow_reports_document_error():
         await service.disable_document("tenant-1", "EAM", "DOC-1")
 
     assert error.value.code == "RAGFLOW_API_INCOMPATIBLE"
-    current = await get_mapping(db, "tenant-1", "EAM", "DOC-1", "v1")
+    current = await gw_read(db, get_mapping, "tenant-1", "EAM", "DOC-1", "v1")
     assert current.sync_status == "ready"
     assert current.business_status == "active"
     assert doc.current_version == 0
-    await db.close()
+    await db.dispose()
 
 
 @pytest.mark.asyncio
 async def test_only_quality_passed_latest_version_is_promoted():
-    db = await init_db(":memory:")
+    gateway = await create_gateway(":memory:")
+    db = gateway
     client = RAGFlowDocumentStub()
     client.run_status = "DONE"
 
@@ -306,13 +318,13 @@ async def test_only_quality_passed_latest_version_is_promoted():
     second, _ = await second_service.process_event(
         make_event(b"v2", event_id="evt-v2", version="v2"),
     )
-    first = await get_mapping(db, "tenant-1", "EAM", "DOC-1", "v1")
+    first = await gw_read(db, get_mapping, "tenant-1", "EAM", "DOC-1", "v1")
     assert first.current_version == 1
     assert second.current_version == 0
 
     assert await second_service.promote_quality_passed_version(second, "passed") is True
-    first = await get_mapping(db, "tenant-1", "EAM", "DOC-1", "v1")
-    second = await get_mapping(db, "tenant-1", "EAM", "DOC-1", "v2")
+    first = await gw_read(db, get_mapping, "tenant-1", "EAM", "DOC-1", "v1")
+    second = await gw_read(db, get_mapping, "tenant-1", "EAM", "DOC-1", "v2")
     assert first.current_version == 0
     assert first.business_status == "superseded"
     assert second.current_version == 1
@@ -320,4 +332,4 @@ async def test_only_quality_passed_latest_version_is_promoted():
     stale_attempt = await first_service.promote_quality_passed_version(first, "passed")
     assert stale_attempt is False
     assert client._status_updates[-1][2] is False
-    await db.close()
+    await db.dispose()

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from enterprise.gateway.db.dialect import exec_sql, fetchall, fetchone
+from enterprise.gateway.db.ops import gw_read, gw_write
+
 import hashlib
 import json
 import uuid
@@ -65,8 +68,7 @@ def _client(runtime) -> AsyncClient:
 
 
 async def _seed_doc(db) -> None:
-    await insert_mapping(
-        db,
+    await gw_write(db, insert_mapping,
         ExtDocumentMap(
             tenant_id="customer-a",
             source_system="DEMO",
@@ -120,12 +122,9 @@ async def test_stateless_history_keeps_raw_turns_without_summary(runtime):
     assert detail.status_code == 200
     assert detail.json()["contextCompacted"] is False
     assert detail.json()["conversationId"] == conversation_id
-    async with runtime.db.execute(
-        "SELECT context_summary, ragflow_session_id, compressed_turn_watermark "
+    row = await gw_read(runtime.db, fetchone, "SELECT context_summary, ragflow_session_id, compressed_turn_watermark "
         "FROM ext_v2_conversation WHERE conversation_id=?",
-        (conversation_id,),
-    ) as cursor:
-        row = await cursor.fetchone()
+        (conversation_id,),)
     assert row["context_summary"] is None
     assert row["ragflow_session_id"]
     assert int(row["compressed_turn_watermark"]) == 0
@@ -209,11 +208,8 @@ async def test_compress_failure_does_not_break_completed_answer(
             assert last.status_code == 200
 
     assert last.json()["status"] in {"已完成", "无可靠依据"}
-    async with runtime.db.execute(
-        "SELECT context_summary FROM ext_v2_conversation WHERE conversation_id=?",
-        (conversation_id,),
-    ) as cursor:
-        row = await cursor.fetchone()
+    row = await gw_read(runtime.db, fetchone, "SELECT context_summary FROM ext_v2_conversation WHERE conversation_id=?",
+        (conversation_id,),)
     assert not row["context_summary"]
 
 
@@ -238,12 +234,9 @@ async def test_compress_disabled_skips_summary(runtime, monkeypatch):
         detail = await client.get(f"{BASE}/conversations/{conversation_id}")
 
     assert detail.json()["contextCompacted"] is False
-    async with runtime.db.execute(
-        "SELECT context_summary, ragflow_session_id FROM ext_v2_conversation "
+    row = await gw_read(runtime.db, fetchone, "SELECT context_summary, ragflow_session_id FROM ext_v2_conversation "
         "WHERE conversation_id=?",
-        (conversation_id,),
-    ) as cursor:
-        row = await cursor.fetchone()
+        (conversation_id,),)
     assert row["context_summary"] is None
     assert row["ragflow_session_id"]
 

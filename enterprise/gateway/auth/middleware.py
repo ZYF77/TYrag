@@ -142,5 +142,5 @@ def _get_validator() -> JWTValidator:
 
 
 def _get_repo() -> ExtUserMapRepo:
-    """Create an ExtUserMapRepo (reads ENTERPRISE_DB_PATH from env at init)."""
+    """Create an ExtUserMapRepo backed by the app's PostgreSQL Gateway DB."""
     return ExtUserMapRepo()

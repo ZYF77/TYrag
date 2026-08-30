@@ -42,7 +42,6 @@ async def maybe_compress_conversation(
         return conversation
     conversation_id = conversation["conversation_id"]
     try:
-        await v2_store.ensure_schema(db)
         threshold = max(2, int(config.context_compress_turns))
         keep_recent = max(0, int(config.context_compress_keep_recent))
         max_chars = max(200, int(config.context_summary_max_chars))

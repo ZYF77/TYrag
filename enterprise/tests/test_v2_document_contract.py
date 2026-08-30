@@ -1,3 +1,4 @@
+from enterprise.gateway.db.ops import gw_read, gw_write
 """P0 v2 external document contract tests, isolated from RAGFlow core."""
 import asyncio
 import hashlib
@@ -175,14 +176,11 @@ async def test_concurrent_same_business_key_creates_one_outbox_event(
         False,
         True,
     ]
-    async with db.execute(
-        "SELECT COUNT(*) AS count FROM ext_document_map"
-    ) as cursor:
-        assert (await cursor.fetchone())["count"] == 1
-    async with db.execute(
-        "SELECT COUNT(*) AS count FROM sync_outbox"
-    ) as cursor:
-        assert (await cursor.fetchone())["count"] == 1
+    from enterprise.gateway.db.dialect import fetchone
+
+    async with db.transaction(write=False) as conn:
+        assert (await fetchone(conn, "SELECT COUNT(*) AS count FROM ext_document_map"))["count"] == 1
+        assert (await fetchone(conn, "SELECT COUNT(*) AS count FROM sync_outbox"))["count"] == 1
 
 
 @pytest.mark.asyncio
@@ -205,14 +203,11 @@ async def test_concurrent_different_business_keys_share_one_sqlite_transaction(
         )
 
     assert [response.status_code for response in responses] == [202, 202]
-    async with db.execute(
-        "SELECT COUNT(*) AS count FROM ext_document_map"
-    ) as cursor:
-        assert (await cursor.fetchone())["count"] == 2
-    async with db.execute(
-        "SELECT COUNT(*) AS count FROM sync_outbox"
-    ) as cursor:
-        assert (await cursor.fetchone())["count"] == 2
+    from enterprise.gateway.db.dialect import fetchone
+
+    async with db.transaction(write=False) as conn:
+        assert (await fetchone(conn, "SELECT COUNT(*) AS count FROM ext_document_map"))["count"] == 2
+        assert (await fetchone(conn, "SELECT COUNT(*) AS count FROM sync_outbox"))["count"] == 2
 
 
 @pytest.mark.asyncio
@@ -287,7 +282,7 @@ async def test_credential_binding_restricts_tenant_source_pair(
     assert accepted.status_code == 202
     assert denied.status_code == 403
     assert denied.json()["code"] == "ACL_DENIED"
-    assert await get_mapping(db, "tenant-a", "EAM", "DOC-V2-001", "v1")
+    assert await gw_read(db, get_mapping, "tenant-a", "EAM", "DOC-V2-001", "v1")
 
 
 @pytest.mark.asyncio
@@ -358,7 +353,7 @@ async def test_canonical_equipment_aliases_are_persisted(v2_app, isolated_gatewa
         response = await client.post("/enterprise/api/v2/documents", json=_payload())
 
     assert response.status_code == 202
-    doc = await get_mapping(db, "tenant-a", "EAM", "DOC-V2-001", "v1")
+    doc = await gw_read(db, get_mapping, "tenant-a", "EAM", "DOC-V2-001", "v1")
     assert doc is not None
     assert doc.asset_id == "FA-001"
     assert doc.equipment_id == "EQ-001"
@@ -374,8 +369,7 @@ async def test_lifecycle_routes_keep_scope_and_external_responses(
     monkeypatch.setattr(
         v2_router,
         "_sync_service",
-        lambda connection: SyncService(
-            connection, SourceStub(b"test pdf content"), client_stub,
+        lambda connection: SyncService(connection, SourceStub(b"test pdf content"), client_stub,
         ),
     )
     query = {"tenantId": "tenant-a", "sourceSystem": "EAM"}
@@ -434,18 +428,17 @@ async def test_reindex_has_independent_idempotent_command(
         transport=ASGITransport(app=v2_app), base_url="http://test"
     ) as client:
         await client.post("/enterprise/api/v2/documents", json=_payload())
-        doc = await get_mapping(db, "tenant-a", "EAM", "DOC-V2-001", "v1")
+        doc = await gw_read(db, get_mapping, "tenant-a", "EAM", "DOC-V2-001", "v1")
         assert doc is not None
         doc.ragflow_dataset_id = "internal-dataset"
         doc.ragflow_document_id = "internal-document"
-        await update_mapping_status(
-            db,
+        await gw_write(db, update_mapping_status,
             doc,
             "ready",
             pipeline_status="DONE",
             event_status="completed",
         )
-        await update_parser_application(db, doc, status="executed")
+        await gw_write(db, update_parser_application, doc, status="executed")
         command = _payload(event_id="evt-reindex-1")
         command["eventType"] = "reindex"
         first = await client.post(

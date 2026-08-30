@@ -15,6 +15,10 @@ from enterprise.gateway.sync.ragflow_document_client import (
 
 logger = logging.getLogger(__name__)
 
+# Mirrors ragflow.dialog_service STANDARD_ABSTAIN_ANSWER / RF-PATCH-007:
+# the stub reports the same explicit terminal status the patched upstream sends.
+_STANDARD_ABSTAIN_ANSWER = "未找到可靠依据，无法回答。"
+
 
 def _chunk_stream_text(text: str, size: int = 8) -> list[str]:
     """Split a stub answer into multiple SSE pieces so Gateway can live-stream."""
@@ -648,6 +652,7 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         self._stream_delay = 0.0
         self._stream_fail_after = 0
         self._omit_stream_id = False
+        self._omit_status = False
         self._chunks_by_id: dict[str, dict] = {}
         self.uploaded_files: list[str] = []
         self.deleted_files: list[str] = []
@@ -814,6 +819,26 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         self._last_understand_file = dict(file)
         return dict(self.understand_result)
 
+    def _terminal_status(self, answer: str | None) -> str | None:
+        """Explicit ``data.status`` mirroring RF-PATCH-007 in dialog_service.
+
+        Exact-match only: abstain when the final answer is blank or exactly the
+        standard abstain text. ``_omit_status`` drops the field entirely so
+        Gateway contract tests can exercise the missing-status path.
+        """
+        if self._omit_status:
+            return None
+        text = str(answer or "").strip()
+        if not text or text == _STANDARD_ABSTAIN_ANSWER:
+            return "no_reliable_evidence"
+        return "completed"
+
+    def _apply_terminal_status(self, data: dict, answer: str | None) -> dict:
+        status = self._terminal_status(answer)
+        if status is not None:
+            data["status"] = status
+        return data
+
     async def chat_completion(
         self,
         chat_id: str | None,
@@ -868,11 +893,14 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
             self._append_no_evidence_turn(
                 session_id, question, turn_id
             )
-            data = {
-                "answer": "",
-                "id": turn_id,
-                "reference": {"chunks": []},
-            }
+            data = self._apply_terminal_status(
+                {
+                    "answer": "",
+                    "id": turn_id,
+                    "reference": {"chunks": []},
+                },
+                "",
+            )
             if session_id:
                 data["session_id"] = session_id
             return {
@@ -884,11 +912,14 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
             self._append_no_evidence_turn(
                 session_id, question, turn_id, chunks=[base_chunk]
             )
-            data = {
-                "answer": "",
-                "id": turn_id,
-                "reference": {"chunks": [base_chunk]},
-            }
+            data = self._apply_terminal_status(
+                {
+                    "answer": "",
+                    "id": turn_id,
+                    "reference": {"chunks": [base_chunk]},
+                },
+                "",
+            )
             if session_id:
                 data["session_id"] = session_id
             return {
@@ -900,11 +931,14 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
             self._append_no_evidence_turn(
                 session_id, question, turn_id
             )
-            data = {
-                "answer": "stub answer",
-                "id": turn_id,
-                "reference": {"chunks": []},
-            }
+            data = self._apply_terminal_status(
+                {
+                    "answer": "stub answer",
+                    "id": turn_id,
+                    "reference": {"chunks": []},
+                },
+                "stub answer",
+            )
             if session_id:
                 data["session_id"] = session_id
             return {
@@ -951,11 +985,14 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
                 }
             )
             session["reference"].append({"chunks": chunks})
-        data = {
-            "answer": answer,
-            "id": turn_id,
-            "reference": {"chunks": chunks},
-        }
+        data = self._apply_terminal_status(
+            {
+                "answer": answer,
+                "id": turn_id,
+                "reference": {"chunks": chunks},
+            },
+            answer,
+        )
         if session_id:
             data["session_id"] = session_id
         return {
@@ -1006,6 +1043,11 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
             session = data.get("session_id") if isinstance(data, dict) else None
             reference = data.get("reference", {}) if isinstance(data, dict) else {}
             answer = data.get("answer", "") if isinstance(data, dict) else ""
+            status = (
+                data.get("status")
+                if isinstance(data, dict) and isinstance(data.get("status"), str)
+                else None
+            )
             for piece in _chunk_stream_text(str(answer or "")):
                 await asyncio.sleep(self._stream_delay)
                 yield {
@@ -1017,16 +1059,19 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
                         "session_id": session,
                     },
                 }
+            final_data: dict[str, Any] = {
+                "answer": "",
+                "id": stream_id,
+                "session_id": session,
+                "reference": reference,
+                "final": True,
+            }
+            if status is not None:
+                final_data["status"] = status
             yield {
                 "code": 0,
                 "message": "",
-                "data": {
-                    "answer": "",
-                    "id": stream_id,
-                    "session_id": session,
-                    "reference": reference,
-                    "final": True,
-                },
+                "data": final_data,
             }
             yield {"code": 0, "message": "", "data": True}
             return

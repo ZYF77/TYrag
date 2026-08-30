@@ -1,25 +1,21 @@
-"""v3 FILE_SHARE document ingestion.
-
-v2 remains the S3 contract.  v3 deliberately accepts only a read-only file
-share coordinate; the sync worker verifies and uploads that file to RAGFlow.
-"""
+"""v3 FILE_SHARE and INLINE_JSON document ingestion."""
 
 from __future__ import annotations
 
 import json
 import inspect
-import sqlite3
 import uuid
-from typing import Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import quote
 
-import aiosqlite
 import jsonschema
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from enterprise.gateway.auth.service_principal import ServicePrincipal
+from enterprise.gateway.db import GatewayDatabase, PersistenceConflictError
+from enterprise.gateway.db.dialect import fetchall
 from enterprise.gateway.sync.document_catalog import validate_document_classification
 from enterprise.gateway.sync.models import (
     DocumentEventReceipt,
@@ -37,11 +33,22 @@ from enterprise.gateway.sync.readiness import (
     document_candidate_readiness,
     document_candidate_readiness_from_db,
 )
-from enterprise.gateway.sync.sync_service import DocumentSyncError
+from enterprise.gateway.sync.sync_service import (
+    DocumentSyncError,
+    inline_json_bytes_and_sha256,
+)
 from enterprise.gateway.sync import v2_router as v2
 
 
 router = APIRouter(prefix="/enterprise/api/v3/documents", tags=["documents-v3"])
+MAX_DOCUMENT_FEED_BODY_BYTES = 2 * 1024 * 1024
+MAX_INLINE_JSON_DEPTH = 20
+_FORBIDDEN_INLINE_KEYS = {
+    "password", "passwd", "pwd", "token", "apitoken", "accesstoken",
+    "refreshtoken",
+    "secret", "apikey", "authorization", "cookie", "privatekey",
+    "clientsecret", "base64", "filecontent", "binary", "attachmentcontent",
+}
 
 
 class _StrictModel(BaseModel):
@@ -56,6 +63,11 @@ class FileShareSource(_StrictModel):
     etag: str | None = Field(default=None, max_length=256)
 
 
+class InlineJsonSource(_StrictModel):
+    kind: Literal["INLINE_JSON"]
+    content: dict[str, Any]
+
+
 class DocumentUpsertRequest(_StrictModel):
     eventId: str = Field(min_length=1, max_length=128)
     eventType: Literal["upsert", "reindex"]
@@ -63,19 +75,73 @@ class DocumentUpsertRequest(_StrictModel):
     sourceSystem: str = Field(min_length=1, max_length=64)
     externalDocumentId: str = Field(min_length=1, max_length=128)
     sourceVersionId: str = Field(min_length=1, max_length=64)
-    sha256: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    sha256: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
     fileName: str = Field(min_length=1, max_length=255)
-    mediaType: Literal["application/pdf"]
-    source: FileShareSource
+    mediaType: Literal["application/pdf", "application/json"]
+    source: Annotated[FileShareSource | InlineJsonSource, Field(discriminator="kind")]
     metadata: dict
     batchId: str | None = Field(default=None, max_length=128)
 
+    @model_validator(mode="after")
+    def validate_source_contract(self):
+        if isinstance(self.source, FileShareSource):
+            if self.sha256 is None or self.mediaType != "application/pdf":
+                raise ValueError("FILE_SHARE requires sha256 and application/pdf")
+        elif (
+            self.sha256 is not None
+            or self.mediaType != "application/json"
+            or not self.fileName.lower().endswith(".json")
+        ):
+            raise ValueError(
+                "INLINE_JSON forbids sha256 and requires application/json with .json fileName"
+            )
+        return self
 
-async def get_db() -> aiosqlite.Connection:
+
+class InlineJsonContentError(ValueError):
+    pass
+
+
+def _normalized_key(value: str) -> str:
+    return value.replace("_", "").replace("-", "").lower()
+
+
+def _validate_inline_content(content: dict[str, Any]) -> list[Any]:
+    equipment_values: list[Any] = []
+    pending: list[tuple[Any, int]] = [(content, 1)]
+    while pending:
+        value, depth = pending.pop()
+        if depth > MAX_INLINE_JSON_DEPTH:
+            raise InlineJsonContentError("INLINE_JSON exceeds maximum nesting depth")
+        if isinstance(value, dict):
+            for key, child in value.items():
+                normalized = _normalized_key(key)
+                if normalized in _FORBIDDEN_INLINE_KEYS:
+                    raise InlineJsonContentError("INLINE_JSON contains a forbidden field")
+                if normalized == "equipmentid":
+                    equipment_values.append(child)
+                if isinstance(child, (dict, list)):
+                    pending.append((child, depth + 1))
+        elif isinstance(value, list):
+            pending.extend(
+                (child, depth + 1)
+                for child in value
+                if isinstance(child, (dict, list))
+            )
+    return equipment_values
+
+
+
+async def _gw_read(gateway: GatewayDatabase, fn, /, *args, **kwargs):
+    async with gateway.transaction(write=False) as conn:
+        return await fn(conn, *args, **kwargs)
+
+
+async def get_db() -> GatewayDatabase:
     from enterprise.gateway import app as app_module
 
     dependency = app_module.app.dependency_overrides.get(
-        app_module.get_db, app_module.get_db
+        app_module.get_gateway_db, app_module.get_gateway_db
     )
     value = dependency()
     return await value if inspect.iscoroutine(value) else value
@@ -87,8 +153,15 @@ async def require_v3_service_principal(
     return principal
 
 
-def _error(status_code: int, code: str, request_id: str) -> JSONResponse:
+def _error(
+    status_code: int,
+    code: str,
+    request_id: str,
+    *,
+    retryable: bool | None = None,
+) -> JSONResponse:
     from enterprise.gateway.app import safe_error_message
+    from enterprise.gateway.app import ERROR_CODES
 
     return JSONResponse(
         status_code=status_code,
@@ -96,7 +169,11 @@ def _error(status_code: int, code: str, request_id: str) -> JSONResponse:
             "code": code,
             "message": safe_error_message(code),
             "requestId": request_id,
-            "retryable": code in {"DOCUMENT_SOURCE_NOT_FOUND"},
+            "retryable": (
+                ERROR_CODES.get(code, (status_code, False))[1]
+                if retryable is None
+                else retryable
+            ),
         },
     )
 
@@ -110,13 +187,6 @@ _STATUS_ERROR_MESSAGES = {
     "RAGFLOW_UNAVAILABLE": "文档处理服务暂时不可用，请稍后重试。",
     "INTERNAL_ERROR": "服务开小差了，请稍后重试。",
 }
-_STATUS_ERROR_RETRYABLE = {
-    "DOCUMENT_SOURCE_NOT_FOUND",
-    "RAGFLOW_UNAVAILABLE",
-    "DOCUMENT_SYNC_FAILED",
-}
-
-
 def _status_url(
     tenant_id: str,
     source_system: str,
@@ -142,10 +212,13 @@ def _status_error(doc: ExtDocumentMap) -> dict | None:
     if not code:
         return None
     safe_code = code if code in _STATUS_ERROR_MESSAGES else "DOCUMENT_SYNC_FAILED"
+    retryable = bool(doc.last_error_retryable)
+    if safe_code != code:
+        retryable = True
     return {
         "code": safe_code,
         "message": _STATUS_ERROR_MESSAGES[safe_code],
-        "retryable": safe_code in _STATUS_ERROR_RETRYABLE,
+        "retryable": retryable,
     }
 
 
@@ -221,13 +294,14 @@ def _status_payload(
 
 
 async def _status_payload_for_db(
-    db: aiosqlite.Connection,
+    gateway: GatewayDatabase,
     doc: ExtDocumentMap,
     *,
     deduplicated: bool = False,
     operation_id: str | None = None,
 ) -> dict:
-    readiness, quality_status = await document_candidate_readiness_from_db(db, doc)
+    async with gateway.transaction(write=False) as conn:
+        readiness, quality_status = await document_candidate_readiness_from_db(conn, doc)
     return _status_payload(
         doc,
         deduplicated=deduplicated,
@@ -273,7 +347,14 @@ def _normalized_request(req: DocumentUpsertRequest) -> tuple[dict, dict]:
     payload["metadata"] = metadata
     payload.pop("eventId", None)
     payload.pop("batchId", None)
-    payload["sha256"] = payload["sha256"].lower()
+    if isinstance(req.source, InlineJsonSource):
+        equipment_values = _validate_inline_content(req.source.content)
+        if any(value != metadata["equipment_id"] for value in equipment_values):
+            raise ValueError("INLINE_JSON equipment_id conflicts with metadata")
+        _, digest = inline_json_bytes_and_sha256(req.source.content)
+        payload["sha256"] = digest
+    else:
+        payload["sha256"] = str(payload["sha256"]).lower()
     return payload, metadata
 
 
@@ -282,7 +363,7 @@ def _scope_allowed(principal: ServicePrincipal, tenant_id: str, source_system: s
 
 
 async def _record_receipt(
-    db: aiosqlite.Connection,
+    gateway: GatewayDatabase,
     *,
     event_id: str,
     payload_hash: str,
@@ -293,7 +374,7 @@ async def _record_receipt(
     outcome_code: str,
 ) -> DocumentEventReceipt:
     return await v2._record_receipt(
-        db,
+        gateway,
         event_id=event_id,
         payload_hash=payload_hash,
         tenant_id=tenant_id,
@@ -304,10 +385,10 @@ async def _record_receipt(
     )
 
 
-def _sync_service(db: aiosqlite.Connection):
+def _sync_service(gateway: GatewayDatabase):
     from enterprise.gateway import app as app_module
 
-    return app_module._sync_service(db)
+    return app_module._sync_service(gateway)
 
 
 def _file_name_is_safe(file_name: str) -> bool:
@@ -318,6 +399,16 @@ def _source_version_matches(
     doc: ExtDocumentMap, req: DocumentUpsertRequest, metadata: dict
 ) -> bool:
     source = req.source
+    if isinstance(source, InlineJsonSource):
+        _, digest = inline_json_bytes_and_sha256(source.content)
+        return (
+            doc.source_kind == "INLINE_JSON"
+            and doc.sha256.lower() == digest
+            and doc.equipment_id == metadata.get("equipment_id")
+            and doc.document_type == metadata.get("document_type")
+            and doc.document_subtype == metadata.get("document_subtype")
+            and doc.source_document_type == metadata.get("source_document_type")
+        )
     return (
         doc.source_kind == "FILE_SHARE"
         and doc.sha256.lower() == req.sha256.lower()
@@ -334,36 +425,40 @@ def _source_version_matches(
 @router.post("")
 async def upsert_document(
     req: DocumentUpsertRequest,
-    db: aiosqlite.Connection = Depends(get_db),
+    request: Request,
+    gateway: GatewayDatabase = Depends(get_db),
     principal: ServicePrincipal = Depends(require_v3_service_principal),
 ):
     request_id = str(uuid.uuid4())
+    if len(await request.body()) > MAX_DOCUMENT_FEED_BODY_BYTES:
+        return _error(422, "VALIDATION_ERROR", request_id)
     if not _file_name_is_safe(req.fileName):
         return _error(422, "VALIDATION_ERROR", request_id)
     if not _scope_allowed(principal, req.tenantId, req.sourceSystem):
         return _error(403, "ACL_DENIED", request_id)
     try:
         normalized, metadata = _normalized_request(req)
+    except InlineJsonContentError:
+        return _error(422, "VALIDATION_ERROR", request_id)
     except ValueError:
         return _error(422, "DOCUMENT_METADATA_INVALID", request_id)
 
     payload_hash = v2._canonical_hash(normalized)
-    receipt = await get_document_event_receipt(db, req.eventId)
+    receipt = await _gw_read(gateway, get_document_event_receipt, req.eventId)
     if receipt:
         if not v2._receipt_matches(
             receipt, payload_hash, req.tenantId, req.sourceSystem,
             req.externalDocumentId, req.sourceVersionId,
         ):
             return _error(409, "EVENT_ID_CONFLICT", request_id)
-        return await _replay_receipt(db, receipt, payload_hash, request_id)
+        return await _replay_receipt(gateway, receipt, payload_hash, request_id)
 
-    legacy_mapping = await get_mapping_by_event_id(db, req.eventId)
-    legacy_outbox = await get_outbox_by_event_id(db, req.eventId)
+    legacy_mapping = await _gw_read(gateway, get_mapping_by_event_id, req.eventId)
+    legacy_outbox = await _gw_read(gateway, get_outbox_by_event_id, req.eventId)
     if legacy_mapping or legacy_outbox:
         return _error(409, "EVENT_ID_CONFLICT", request_id)
 
-    existing = await get_mapping(
-        db, req.tenantId, req.sourceSystem,
+    existing = await _gw_read(gateway, get_mapping, req.tenantId, req.sourceSystem,
         req.externalDocumentId, req.sourceVersionId,
     )
     if existing:
@@ -371,7 +466,7 @@ async def upsert_document(
             outcome = "DOCUMENT_VERSION_CONFLICT"
         elif req.eventType == "reindex":
             try:
-                existing = await _sync_service(db).reindex_document(
+                existing = await _sync_service(gateway).reindex_document(
                     req.tenantId, req.sourceSystem,
                     req.externalDocumentId, req.sourceVersionId,
                 )
@@ -379,12 +474,12 @@ async def upsert_document(
                 return _sync_error(exc, request_id)
             outcome = "reindex_accepted"
         else:
-            existing, requeued = await _sync_service(db).ensure_present_or_requeue(
+            existing, requeued = await _sync_service(gateway).ensure_present_or_requeue(
                 existing,
             )
             outcome = "accepted" if requeued else "deduplicated"
         await _record_receipt(
-            db,
+            gateway,
             event_id=req.eventId,
             payload_hash=payload_hash,
             tenant_id=req.tenantId,
@@ -407,6 +502,8 @@ async def upsert_document(
     if req.eventType == "reindex":
         return _error(404, "DOCUMENT_NOT_FOUND", request_id)
 
+    source_kind = req.source.kind
+    internal_sha256 = normalized["sha256"]
     mapping = ExtDocumentMap(
         tenant_id=req.tenantId,
         source_system=req.sourceSystem,
@@ -415,16 +512,24 @@ async def upsert_document(
         event_id=req.eventId,
         event_type=req.eventType,
         event_status="received",
-        sha256=req.sha256.lower(),
+        sha256=internal_sha256,
         file_name=req.fileName,
         media_type=req.mediaType,
         document_type=metadata["document_type"],
         source_page_count=metadata.get("page_count"),
-        source_kind="FILE_SHARE",
-        storage_root_id=req.source.storageRootId,
-        relative_path=req.source.relativePath,
-        source_size=req.source.size,
-        source_etag=req.source.etag,
+        source_kind=source_kind,
+        storage_root_id=(
+            req.source.storageRootId if isinstance(req.source, FileShareSource) else None
+        ),
+        relative_path=(
+            req.source.relativePath if isinstance(req.source, FileShareSource) else None
+        ),
+        source_size=(
+            req.source.size
+            if isinstance(req.source, FileShareSource)
+            else len(inline_json_bytes_and_sha256(req.source.content)[0])
+        ),
+        source_etag=req.source.etag if isinstance(req.source, FileShareSource) else None,
         asset_id=metadata.get("asset_id"),
         equipment_id=metadata["equipment_id"],
         fixed_asset_no=metadata.get("fixed_asset_no"),
@@ -441,7 +546,7 @@ async def upsert_document(
     )
     try:
         doc, _inserted = await v2._persist_mapping_and_outbox(
-            db,
+            gateway,
             mapping,
             OutboxEvent(
                 event_id=req.eventId,
@@ -454,15 +559,15 @@ async def upsert_document(
                 payload=json.dumps(normalized, ensure_ascii=False, sort_keys=True),
             ),
         )
-    except sqlite3.IntegrityError:
+    except PersistenceConflictError:
         return _error(409, "EVENT_ID_CONFLICT", request_id)
     if doc is None:
         return _error(409, "EVENT_ID_CONFLICT", request_id)
     if doc.event_id != req.eventId:
-        if doc.sha256.lower() != req.sha256.lower():
+        if doc.sha256.lower() != internal_sha256:
             return _error(409, "DOCUMENT_VERSION_CONFLICT", request_id)
         await _record_receipt(
-            db,
+            gateway,
             event_id=req.eventId,
             payload_hash=payload_hash,
             tenant_id=req.tenantId,
@@ -477,7 +582,7 @@ async def upsert_document(
         )
 
     await _record_receipt(
-        db,
+        gateway,
         event_id=req.eventId,
         payload_hash=payload_hash,
         tenant_id=req.tenantId,
@@ -493,7 +598,7 @@ async def upsert_document(
 
 
 async def _replay_receipt(
-    db: aiosqlite.Connection,
+    gateway: GatewayDatabase,
     receipt: DocumentEventReceipt,
     payload_hash: str,
     request_id: str,
@@ -505,15 +610,14 @@ async def _replay_receipt(
         return _error(409, "EVENT_ID_CONFLICT", request_id)
     if receipt.outcome_code == "DOCUMENT_VERSION_CONFLICT":
         return _error(409, "DOCUMENT_VERSION_CONFLICT", request_id)
-    doc = await get_mapping(
-        db, receipt.tenant_id, receipt.source_system,
+    doc = await _gw_read(gateway, get_mapping, receipt.tenant_id, receipt.source_system,
         receipt.external_document_id, receipt.source_version_id,
     )
     if not doc:
         return _error(404, "DOCUMENT_NOT_FOUND", request_id)
     requeued = False
     if receipt.outcome_code != "reindex_accepted":
-        doc, requeued = await _sync_service(db).ensure_present_or_requeue(doc)
+        doc, requeued = await _sync_service(gateway).ensure_present_or_requeue(doc)
     return JSONResponse(
         status_code=202,
         content=_accept_payload(
@@ -530,9 +634,16 @@ def _sync_error(exc: DocumentSyncError, request_id: str) -> JSONResponse:
         "DOCUMENT_NOT_READY": 409,
         "DOCUMENT_SOURCE_NOT_FOUND": 422,
         "DOCUMENT_HASH_MISMATCH": 422,
+        "DOCUMENT_PARSE_FAILED": 422,
+        "DOCUMENT_SYNC_FAILED": 502,
         "RAGFLOW_UNAVAILABLE": 503,
     }
-    return _error(statuses.get(exc.code, 500), exc.code, request_id)
+    return _error(
+        statuses.get(exc.code, 500),
+        exc.code,
+        request_id,
+        retryable=exc.retryable,
+    )
 
 
 @router.get("/sync-status")
@@ -540,24 +651,26 @@ async def list_document_status(
     tenant_id: str = Query(alias="tenantId", min_length=1, max_length=64),
     source_system: str = Query(alias="sourceSystem", min_length=1, max_length=64),
     limit: int = Query(default=20, ge=1, le=100),
-    db: aiosqlite.Connection = Depends(get_db),
+    gateway: GatewayDatabase = Depends(get_db),
     principal: ServicePrincipal = Depends(require_v3_service_principal),
 ):
     request_id = str(uuid.uuid4())
     if not _scope_allowed(principal, tenant_id, source_system):
         return _error(403, "ACL_DENIED", request_id)
-    async with db.execute(
-        """SELECT * FROM ext_document_map
-           WHERE tenant_id=? AND source_system=? AND source_kind='FILE_SHARE'
-           ORDER BY updated_at DESC, id DESC LIMIT ?""",
-        (tenant_id, source_system, limit),
-    ) as cursor:
-        rows = await cursor.fetchall()
+    async with gateway.transaction(write=False) as conn:
+        rows = await fetchall(
+            conn,
+            """SELECT * FROM ext_document_map
+               WHERE tenant_id=? AND source_system=?
+                 AND source_kind IN ('FILE_SHARE', 'INLINE_JSON')
+               ORDER BY updated_at DESC, id DESC LIMIT ?""",
+            (tenant_id, source_system, limit),
+        )
     from enterprise.gateway.sync.models import row_to_mapping
 
     items = []
     for row in rows:
-        items.append(await _status_payload_for_db(db, row_to_mapping(row)))
+        items.append(await _status_payload_for_db(gateway, row_to_mapping(row)))
     return {"items": items}
 
 
@@ -567,15 +680,15 @@ async def get_document_status(
     tenant_id: str = Query(alias="tenantId", min_length=1, max_length=64),
     source_system: str = Query(alias="sourceSystem", min_length=1, max_length=64),
     source_version_id: str | None = Query(default=None, alias="sourceVersionId"),
-    db: aiosqlite.Connection = Depends(get_db),
+    gateway: GatewayDatabase = Depends(get_db),
     principal: ServicePrincipal = Depends(require_v3_service_principal),
 ):
     request_id = str(uuid.uuid4())
     if not _scope_allowed(principal, tenant_id, source_system):
         return _error(403, "ACL_DENIED", request_id)
     doc = await v2._mapping_for_scope(
-        db, tenant_id, source_system, external_document_id, source_version_id,
+        gateway, tenant_id, source_system, external_document_id, source_version_id,
     )
-    if not doc or doc.source_kind != "FILE_SHARE":
+    if not doc or doc.source_kind not in {"FILE_SHARE", "INLINE_JSON"}:
         return _error(404, "DOCUMENT_NOT_FOUND", request_id)
-    return await _status_payload_for_db(db, doc)
+    return await _status_payload_for_db(gateway, doc)

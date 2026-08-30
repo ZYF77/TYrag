@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from enterprise.gateway.db.dialect import exec_sql
+
+from enterprise.gateway.db.ops import gw_read, gw_write
+
 import httpx
 import pytest
 
@@ -23,13 +27,11 @@ async def _insert_registry_row(
     fixed_asset_no: str | None,
     asset_id: str | None = None,
 ) -> None:
-    await db.execute(
-        """INSERT INTO ext_asset_registry
+    await gw_write(db, exec_sql, """INSERT INTO ext_asset_registry
            (tenant_id, equipment_id, fixed_asset_no, asset_id)
            VALUES (?, ?, ?, ?)""",
         (tenant_id, equipment_id, fixed_asset_no, asset_id or fixed_asset_no),
     )
-    await db.commit()
 
 
 @pytest.mark.asyncio
@@ -120,22 +122,22 @@ async def test_equipment_with_multiple_fixed_assets_is_ambiguous(
     isolated_gateway_db,
 ):
     db, _ = isolated_gateway_db
-    await db.execute("DROP TABLE ext_asset_registry")
-    await db.execute(
-        """CREATE TABLE ext_asset_registry (
+    await gw_write(db, exec_sql, "DROP TABLE ext_asset_registry")
+    await gw_write(db, exec_sql, """CREATE TABLE ext_asset_registry (
                tenant_id TEXT NOT NULL,
                equipment_id TEXT NOT NULL,
                fixed_asset_no TEXT,
                asset_id TEXT
-           )"""
-    )
-    await db.executemany(
-        """INSERT INTO ext_asset_registry
-           (tenant_id, equipment_id, fixed_asset_no, asset_id)
-           VALUES ('tenant-a', 'EQ-A', ?, ?)""",
-        [("FA-1", "ASSET-1"), ("FA-2", "ASSET-2")],
-    )
-    await db.commit()
+           )""")
+    for fixed_asset_no, asset_id in [("FA-1", "ASSET-1"), ("FA-2", "ASSET-2")]:
+        await gw_write(
+            db,
+            exec_sql,
+            """INSERT INTO ext_asset_registry
+               (tenant_id, equipment_id, fixed_asset_no, asset_id)
+               VALUES ('tenant-a', 'EQ-A', ?, ?)""",
+            (fixed_asset_no, asset_id),
+        )
 
     with pytest.raises(AssetRegistryAmbiguous):
         await resolve_asset(db, tenant_id="tenant-a", equipment_id="EQ-A")
@@ -171,11 +173,8 @@ async def test_not_found_missing_and_mapping_drift_are_rejected(
     with pytest.raises(AssetRegistryInvalid):
         await resolve_asset(db, tenant_id="tenant-a")
 
-    await db.execute(
-        """UPDATE ext_asset_registry SET fixed_asset_no='FA-NEW'
-           WHERE tenant_id='tenant-a' AND equipment_id='EQ-DRIFT'"""
-    )
-    await db.commit()
+    await gw_write(db, exec_sql, """UPDATE ext_asset_registry SET fixed_asset_no='FA-NEW'
+           WHERE tenant_id='tenant-a' AND equipment_id='EQ-DRIFT'""")
     with pytest.raises(AssetRegistryConflict):
         await resolve_asset(
             db,

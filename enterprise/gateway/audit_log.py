@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+logger = logging.getLogger(__name__)
+
 _LOCK = threading.Lock()
 _HTTP_LOCK = threading.Lock()
 _MAX_BYTES = 10 * 1024 * 1024
@@ -82,13 +84,9 @@ def audit_log_dir() -> Path:
     override = (os.environ.get("ENTERPRISE_AUDIT_LOG_DIR") or "").strip()
     if override:
         return Path(override)
-    db_path = (
-        os.environ.get("ENTERPRISE_SYNC_DB_PATH")
-        or os.environ.get("ENTERPRISE_DB_PATH")
-        or ""
-    ).strip()
-    if db_path:
-        return Path(db_path).resolve().parent / "logs"
+    state_dir = (os.environ.get("ENTERPRISE_GATEWAY_STATE_HOST_DIR") or "").strip()
+    if state_dir:
+        return Path(state_dir).resolve() / "logs"
     return Path("/var/lib/tyrag/state/logs")
 
 

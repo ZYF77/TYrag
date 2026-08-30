@@ -7,7 +7,6 @@ import time
 import uuid
 from pathlib import Path
 
-import aiosqlite
 import jwt
 import pytest
 import pytest_asyncio
@@ -18,6 +17,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from enterprise.gateway.app import app  # noqa: E402
 from enterprise.gateway.auth.user_principal import UserPrincipal  # noqa: E402
+from enterprise.gateway.db.dialect import begin_transaction, exec_sql, fetchall, fetchone, table_columns  # noqa: E402
+from enterprise.gateway.db.ops import gw_read, gw_write  # noqa: E402
+from enterprise.gateway.db.testing import create_gateway  # noqa: E402
 from enterprise.gateway.models.ext_user_map import (  # noqa: E402
     ExtUserMap,
     ExtUserMapRepo,
@@ -28,7 +30,6 @@ from enterprise.gateway.quality import models as quality_models  # noqa: E402
 from enterprise.gateway.sync.models import (  # noqa: E402
     ExtDocumentMap,
     get_mapping,
-    init_db,
     insert_mapping,
     update_mapping_status,
 )
@@ -78,8 +79,8 @@ def _principal() -> UserPrincipal:
 
 
 async def _get_doc(db, doc_id: str):
-    return await get_mapping(
-        db, "customer-a", "DEMO", doc_id, "v1"
+    return await gw_read(
+        db, get_mapping, "customer-a", "DEMO", doc_id, "v1"
     )
 
 
@@ -104,19 +105,19 @@ async def isolated_db(demo_env):
     import enterprise.gateway.app as app_module
     from enterprise.gateway.query import formal_router
 
-    if app_module._db is not None:
-        await app_module._db.close()
-        app_module._db = None
+    if app_module._gateway_db is not None:
+        await app_module._gateway_db.dispose()
+        app_module._gateway_db = None
 
-    db = await init_db(demo_env)
-    await db.execute(
-        """INSERT INTO ext_asset_registry
-           (tenant_id, equipment_id, fixed_asset_no, asset_id)
-           VALUES ('customer-a', 'EQ-1', 'FA-1', 'ASSET-1')"""
-    )
-    await db.commit()
-    repo = ExtUserMapRepo(db_path=demo_env)
-    await repo.ensure_table()
+    gateway = await create_gateway(demo_env)
+    async with gateway.transaction(write=True) as conn:
+        await exec_sql(
+            conn,
+            """INSERT INTO ext_asset_registry
+               (tenant_id, equipment_id, fixed_asset_no, asset_id)
+               VALUES ('customer-a', 'EQ-1', 'FA-1', 'ASSET-1')""",
+        )
+    repo = ExtUserMapRepo(gateway=gateway)
     for tenant, subject, business_user in (
         ("customer-a", "biz-user-001", "biz-user-001"),
         ("customer-b", "biz-user-002", "biz-user-002"),
@@ -133,12 +134,19 @@ async def isolated_db(demo_env):
     await repo.close()
     query_router._query_stub = None
     formal_router._query_stub = None
-    app_module.app.dependency_overrides[formal_router.get_db] = lambda: db
+    app_module.app.dependency_overrides[app_module.get_gateway_db] = lambda: gateway
+    app_module.app.dependency_overrides[app_module.get_db] = lambda: gateway
+    app_module.app.dependency_overrides[formal_router.get_db] = lambda: gateway
     try:
-        yield db
+        yield gateway
     finally:
+        app_module.app.dependency_overrides.pop(app_module.get_gateway_db, None)
+        app_module.app.dependency_overrides.pop(app_module.get_db, None)
         app_module.app.dependency_overrides.pop(formal_router.get_db, None)
-        await db.close()
+        await gateway.dispose()
+        if app_module._gateway_db is not None:
+            await app_module._gateway_db.dispose()
+            app_module._gateway_db = None
 
 
 async def _insert_document(
@@ -179,13 +187,14 @@ async def _insert_document(
         deny_group_ids=json.dumps(list(deny_groups)),
         sync_status=sync_status,
     )
-    doc = await insert_mapping(db, doc)
-    await update_mapping_status(
-        db, doc, sync_status, pipeline_status="DONE"
+    doc = await gw_write(db, insert_mapping, doc)
+    await gw_write(
+        db, update_mapping_status, doc, sync_status, pipeline_status="DONE"
     )
     if quality:
-        evaluation = await quality_models.get_or_create_evaluation(
+        evaluation = await gw_write(
             db,
+            quality_models.get_or_create_evaluation,
             tenant_id=tenant_id,
             source_system=source_system,
             external_document_id=doc_id,
@@ -194,8 +203,9 @@ async def _insert_document(
             ragflow_document_id=ragflow_doc_id,
             routing={},
         )
-        await quality_models.complete_evaluation(
+        await gw_write(
             db,
+            quality_models.complete_evaluation,
             evaluation.id,
             parse_quality_status=quality,
             quality_reasons=[],
@@ -334,6 +344,7 @@ class TestAsk:
                         "answer": "<think>规划过程</think>故障码 E-104 时先检查液压油位。 [ID:0]",
                         "id": "ragflow-message",
                         "session_id": "ragflow-session",
+                        "status": "completed",
                         "reference": {
                             "chunks": [
                                 {
@@ -416,6 +427,15 @@ class TestAsk:
     async def test_unauthorized_document_is_not_retrievable(self, isolated_db):
         await _insert_document(isolated_db, doc_id="DOC-A", ragflow_doc_id="doc-a")
         token_b = _make_token(user="biz-user-003", groups=("other",))
+        # RF-PATCH-007: the Gateway only trusts data.status. The document ACL
+        # policy is intentionally tenant-open at this stage, so emulate the
+        # upstream finding no authorized evidence for this user instead of
+        # relying on the removed empty-chunk derivation.
+        from enterprise.gateway.query import formal_router
+
+        stub = formal_router.RAGFlowQueryStub()
+        stub._no_evidence = True
+        formal_router._query_stub = stub
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test"
         ) as c:
@@ -448,6 +468,39 @@ class TestAsk:
             )
         assert resp.status_code == 403
         assert resp.json()["code"] == "ACL_DENIED"
+
+    @pytest.mark.asyncio
+    async def test_missing_status_json_returns_502_contract_error(
+        self, isolated_db
+    ):
+        from enterprise.gateway.query import formal_router
+
+        await _insert_document(isolated_db, doc_id="DOC-NO-STATUS-JSON")
+        stub = formal_router.RAGFlowQueryStub()
+        stub._omit_status = True
+        formal_router._query_stub = stub
+        token = _make_token()
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as c:
+            conversation_id = (
+                await _create_conversation(c, token)
+            ).json()["conversationId"]
+            resp = await c.post(
+                f"/enterprise/api/v1/conversations/{conversation_id}/messages:stream",
+                headers=_headers(token),
+                json={"question": "hello"},
+            )
+            history = await c.get(
+                f"/enterprise/api/v1/conversations/{conversation_id}",
+                headers=_headers(token),
+            )
+        assert resp.status_code == 502
+        assert resp.json()["code"] == "RAGFLOW_API_INCOMPATIBLE"
+        assistant = next(
+            m for m in history.json()["messages"] if m["role"] == "assistant"
+        )
+        assert assistant["status"] == "failed"
 
 
 def _parse_sse(text: str) -> list[tuple[str, dict]]:
@@ -556,8 +609,9 @@ class TestSse:
         formal_router._query_stub = stub
         conversation_id = str(uuid.uuid4())
         await conversation_store.ensure_schema(isolated_db)
-        await conversation_store.create_conversation(
+        await gw_write(
             isolated_db,
+            conversation_store.create_conversation,
             tenant_id="customer-a",
             business_user_id="biz-user-001",
             conversation_id=conversation_id,
@@ -567,8 +621,9 @@ class TestSse:
             ("ds-1",), ("doc-1",), policy_version="1"
         )
         docs = {"doc-1": await _get_doc(isolated_db, "DOC-CANCEL")}
-        conversation = await conversation_store.get_conversation(
+        conversation = await gw_read(
             isolated_db,
+            conversation_store.get_conversation,
             conversation_id=conversation_id,
             tenant_id="customer-a",
             business_user_id="biz-user-001",
@@ -589,8 +644,9 @@ class TestSse:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        messages = await conversation_store.list_messages(
+        messages = await gw_read(
             isolated_db,
+            conversation_store.list_messages,
             conversation_id=conversation_id,
             tenant_id="customer-a",
             business_user_id="biz-user-001",
@@ -671,11 +727,14 @@ class TestCitation:
                 json={"question": "hello"},
             )
             citation_id = ask.json()["citations"][0]["citationId"]
-            await update_mapping_status(
+            # TEST_TENANT_OPEN ignores group mismatch; revoke via document status
+            # which citation ACL re-checks on every read.
+            await gw_write(
                 isolated_db,
+                update_mapping_status,
                 doc,
                 "ready",
-                allow_group_ids='["other"]',
+                business_status="disabled",
             )
             denied = await c.get(
                 f"/enterprise/api/v1/citations/{citation_id}",
@@ -874,8 +933,7 @@ class TestRunOutcome:
 
         completion = {"code": 0, "data": {"status": "completed"}}
         assert (
-            formal_router._resolve_run_outcome(completion, "answer", [])
-            == "completed"
+            formal_router._resolve_run_outcome(completion) == "completed"
         )
 
     def test_explicit_no_evidence_outcome_wins(self):
@@ -885,39 +943,48 @@ class TestRunOutcome:
             "code": 0,
             "data": {"status": "no_reliable_evidence"},
         }
-        assert formal_router._resolve_run_outcome(
-            completion, "answer", [{"id": "c1"}]
-        ) == "no_reliable_evidence"
+        assert (
+            formal_router._resolve_run_outcome(completion)
+            == "no_reliable_evidence"
+        )
 
-    def test_abstain_phrase_overrides_explicit_completed(self):
+    def test_explicit_failed_status_is_a_valid_outcome(self):
         from enterprise.gateway.query import formal_router
-        from enterprise.gateway.query.citation_select import ABSTAIN_PHRASE
+
+        completion = {"code": 0, "data": {"status": "failed"}}
+        assert formal_router._resolve_run_outcome(completion) == "failed"
+
+    def test_completed_status_is_not_rejudged_by_abstain_phrase(self):
+        from enterprise.gateway.query import formal_router
 
         completion = {"code": 0, "data": {"status": "completed"}}
-        assert (
-            formal_router._resolve_run_outcome(
-                completion,
-                f"暂无维修记录。{ABSTAIN_PHRASE} [ID:0]",
-                [{"id": "c1"}],
-            )
-            == "no_reliable_evidence"
-        )
+        # The answer body no longer participates in state resolution at all.
+        assert formal_router._resolve_run_outcome(completion) == "completed"
 
-    def test_run_outcome_uses_answer_and_retrieval_evidence(self):
+    def test_missing_status_is_an_upstream_contract_error(self):
         from enterprise.gateway.query import formal_router
 
-        assert (
-            formal_router._resolve_run_outcome(None, "answer", [{"id": "c1"}])
-            == "completed"
-        )
-        assert (
-            formal_router._resolve_run_outcome(None, "answer", [])
-            == "no_reliable_evidence"
-        )
-        assert (
-            formal_router._resolve_run_outcome(None, "", [{"id": "c1"}])
-            == "no_reliable_evidence"
-        )
+        with pytest.raises(formal_router._FormalQueryError) as exc_info:
+            formal_router._resolve_run_outcome({"code": 0, "data": {}})
+        assert exc_info.value.code == "RAGFLOW_API_INCOMPATIBLE"
+        assert exc_info.value.status_code == 502
+
+    def test_invalid_status_is_an_upstream_contract_error(self):
+        from enterprise.gateway.query import formal_router
+
+        completion = {"code": 0, "data": {"status": "abstain"}}
+        with pytest.raises(formal_router._FormalQueryError) as exc_info:
+            formal_router._resolve_run_outcome(completion)
+        assert exc_info.value.code == "RAGFLOW_API_INCOMPATIBLE"
+        assert exc_info.value.status_code == 502
+
+    def test_missing_data_payload_is_an_upstream_contract_error(self):
+        from enterprise.gateway.query import formal_router
+
+        with pytest.raises(formal_router._FormalQueryError) as exc_info:
+            formal_router._resolve_run_outcome(None)
+        assert exc_info.value.code == "RAGFLOW_API_INCOMPATIBLE"
+        assert exc_info.value.status_code == 502
 
 
 class TestTransportFailure:
@@ -1016,7 +1083,7 @@ class TestTransportFailure:
 @pytest.mark.usefixtures("isolated_db")
 class TestSseOutcomeConsistency:
     @pytest.mark.asyncio
-    async def test_empty_chunks_with_answer_is_no_reliable_evidence(
+    async def test_empty_chunks_do_not_downgrade_explicit_completed(
         self, isolated_db
     ):
         from enterprise.gateway.query import formal_router
@@ -1047,7 +1114,8 @@ class TestSseOutcomeConsistency:
         completed = next(
             data for event, data in events if event == "answer.completed"
         )
-        assert completed["status"] == "no_reliable_evidence"
+        # Chunks are evidence data only; they never change the business state.
+        assert completed["status"] == "completed"
         assert completed["citations"] == []
         assert "run.failed" not in [event for event, _ in events]
         assistant = next(
@@ -1055,8 +1123,46 @@ class TestSseOutcomeConsistency:
             for m in history.json()["messages"]
             if m["role"] == "assistant"
         )
-        assert assistant["status"] == "no_reliable_evidence"
+        assert assistant["status"] == "completed"
         assert assistant["citations"] == []
+
+    @pytest.mark.asyncio
+    async def test_missing_status_fails_stream_with_contract_error(
+        self, isolated_db
+    ):
+        from enterprise.gateway.query import formal_router
+
+        await _insert_document(isolated_db, doc_id="DOC-NO-STATUS")
+        stub = formal_router.RAGFlowQueryStub()
+        stub._omit_status = True
+        formal_router._query_stub = stub
+        token = _make_token()
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as c:
+            conversation_id = (
+                await _create_conversation(c, token)
+            ).json()["conversationId"]
+            resp = await c.post(
+                f"/enterprise/api/v1/conversations/{conversation_id}/messages:stream"
+                "?stream=true",
+                headers=_headers(token),
+                json={"question": "hello"},
+            )
+            history = await c.get(
+                f"/enterprise/api/v1/conversations/{conversation_id}",
+                headers=_headers(token),
+            )
+        events = _parse_sse(resp.text)
+        failed = next(data for event, data in events if event == "run.failed")
+        assert failed["code"] == "RAGFLOW_API_INCOMPATIBLE"
+        assert "answer.completed" not in [event for event, _ in events]
+        assistant = next(
+            m
+            for m in history.json()["messages"]
+            if m["role"] == "assistant"
+        )
+        assert assistant["status"] == "failed"
 
     @pytest.mark.asyncio
     async def test_stream_failure_persists_failed_for_history(
@@ -1119,13 +1225,14 @@ class TestSseOutcomeConsistency:
                 json={"question": "hello"},
             )
         assert resp.status_code == 200
-        async with isolated_db.execute(
-            """SELECT ragflow_message_id
-               FROM ext_conversation_message
-               WHERE conversation_id=?""",
-            (conversation_id,),
-        ) as cursor:
-            rows = await cursor.fetchall()
+        async with isolated_db.transaction(write=False) as conn:
+            rows = await fetchall(
+                conn,
+                """SELECT ragflow_message_id
+                   FROM ext_conversation_message
+                   WHERE conversation_id=?""",
+                (conversation_id,),
+            )
         assert rows
         assert all(row["ragflow_message_id"] is None for row in rows)
 
@@ -1178,54 +1285,43 @@ class TestScopeCompleteness:
 class TestSchemaMigration:
     @pytest.mark.asyncio
     async def test_ensure_schema_adds_legacy_message_columns(
-        self, tmp_path
+        self,
     ):
-        db = await aiosqlite.connect(str(tmp_path / "legacy.db"))
-        db.row_factory = aiosqlite.Row
-        await db.execute(
-            """CREATE TABLE ext_conversation_message (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                conversation_id TEXT NOT NULL,
-                tenant_id TEXT NOT NULL,
-                business_user_id TEXT NOT NULL,
-                message_id TEXT NOT NULL,
-                role TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'completed',
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )"""
-        )
-        await db.execute(
-            """INSERT INTO ext_conversation_message
-               (conversation_id, tenant_id, business_user_id, message_id,
-                role, status, created_at, updated_at)
-               VALUES ('c', 't', 'u', 'm', 'assistant', 'completed',
-                       'now', 'now')"""
-        )
-        await db.commit()
+        gateway = await create_gateway(":memory:")
+        conn = await gateway.connect()
+        try:
+            await conn.begin()
+            await exec_sql(
+                conn,
+                """INSERT INTO ext_conversation_message
+                   (conversation_id, tenant_id, business_user_id, message_id,
+                    role, status, created_at, updated_at)
+                   VALUES ('c', 't', 'u', 'm', 'assistant', 'completed',
+                           'now', 'now')""",
+            )
+            await conn.commit()
 
-        await conversation_store.ensure_schema(db)
-        await conversation_store.ensure_schema(db)
+            await conversation_store.ensure_schema(conn)
+            await conversation_store.ensure_schema(conn)
 
-        async with db.execute(
-            "PRAGMA table_info(ext_conversation_message)"
-        ) as cursor:
-            columns = {row["name"] for row in await cursor.fetchall()}
-        assert {"content", "citations_json", "ragflow_message_id"} <= columns
-        async with db.execute(
-            """SELECT message_id, role, status, content,
-                      citations_json, ragflow_message_id
-               FROM ext_conversation_message
-               WHERE message_id='m'"""
-        ) as cursor:
-            row = await cursor.fetchone()
-        assert row is not None
-        assert row["role"] == "assistant"
-        assert row["status"] == "completed"
-        assert row["content"] is None
-        assert row["citations_json"] is None
-        assert row["ragflow_message_id"] is None
-        await db.close()
+            columns = await table_columns(conn, "ext_conversation_message")
+            assert {"content", "citations_json", "ragflow_message_id"} <= columns
+            row = await fetchone(
+                conn,
+                """SELECT message_id, role, status, content,
+                          citations_json, ragflow_message_id
+                   FROM ext_conversation_message
+                   WHERE message_id='m'""",
+            )
+            assert row is not None
+            assert row["role"] == "assistant"
+            assert row["status"] == "completed"
+            assert row["content"] is None
+            assert row["citations_json"] is None
+            assert row["ragflow_message_id"] is None
+        finally:
+            await conn.close()
+            await gateway.dispose()
 
 
 @pytest.mark.usefixtures("isolated_db")
@@ -1251,17 +1347,18 @@ class TestW2AssetIdentity:
 
         assert equipment_only.status_code == 201
         assert fixed_only.status_code == 201
-        async with isolated_db.execute(
-            """SELECT equipment_id, fixed_asset_no
-               FROM ext_conversation
-               WHERE conversation_id IN (?, ?)
-               ORDER BY conversation_id""",
-            (
-                equipment_only.json()["conversationId"],
-                fixed_only.json()["conversationId"],
-            ),
-        ) as cursor:
-            rows = await cursor.fetchall()
+        async with isolated_db.transaction(write=False) as conn:
+            rows = await fetchall(
+                conn,
+                """SELECT equipment_id, fixed_asset_no
+                   FROM ext_conversation
+                   WHERE conversation_id IN (?, ?)
+                   ORDER BY conversation_id""",
+                (
+                    equipment_only.json()["conversationId"],
+                    fixed_only.json()["conversationId"],
+                ),
+            )
         assert {(row["equipment_id"], row["fixed_asset_no"]) for row in rows} == {
             ("EQ-1", "FA-1")
         }
@@ -1270,17 +1367,19 @@ class TestW2AssetIdentity:
     async def test_conflicting_and_cross_tenant_fixed_identifiers_are_denied(
         self, isolated_db
     ):
-        await isolated_db.execute(
-            """INSERT INTO ext_asset_registry
-               (tenant_id, equipment_id, fixed_asset_no, asset_id)
-               VALUES ('customer-a', 'EQ-2', 'FA-2', 'ASSET-2')"""
-        )
-        await isolated_db.execute(
-            """INSERT INTO ext_asset_registry
-               (tenant_id, equipment_id, fixed_asset_no, asset_id)
-               VALUES ('customer-b', 'EQ-B', 'FA-1', 'ASSET-B')"""
-        )
-        await isolated_db.commit()
+        async with isolated_db.transaction(write=True) as conn:
+            await exec_sql(
+                conn,
+                """INSERT INTO ext_asset_registry
+                   (tenant_id, equipment_id, fixed_asset_no, asset_id)
+                   VALUES ('customer-a', 'EQ-2', 'FA-2', 'ASSET-2')""",
+            )
+            await exec_sql(
+                conn,
+                """INSERT INTO ext_asset_registry
+                   (tenant_id, equipment_id, fixed_asset_no, asset_id)
+                   VALUES ('customer-b', 'EQ-B', 'FA-1', 'ASSET-B')""",
+            )
         token = _make_token()
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test"
@@ -1317,12 +1416,13 @@ class TestW2AssetIdentity:
                 headers=_headers(token),
                 json={"question": "first"},
             )
-            await isolated_db.execute(
-                """UPDATE ext_asset_registry
-                   SET fixed_asset_no='FA-DRIFT', asset_id='ASSET-DRIFT'
-                   WHERE tenant_id='customer-a' AND equipment_id='EQ-1'"""
-            )
-            await isolated_db.commit()
+            async with isolated_db.transaction(write=True) as conn:
+                await exec_sql(
+                    conn,
+                    """UPDATE ext_asset_registry
+                       SET fixed_asset_no='FA-DRIFT', asset_id='ASSET-DRIFT'
+                       WHERE tenant_id='customer-a' AND equipment_id='EQ-1'""",
+                )
             second = await client.post(
                 f"/enterprise/api/v1/conversations/{conversation_id}/messages:stream",
                 headers=_headers(token),
@@ -1344,13 +1444,14 @@ class TestW2AssetIdentity:
         ) as client:
             conversation = await _create_conversation(client, token)
             conversation_id = conversation.json()["conversationId"]
-            await isolated_db.execute(
-                """UPDATE ext_conversation
-                   SET fixed_asset_no=NULL
-                   WHERE conversation_id=?""",
-                (conversation_id,),
-            )
-            await isolated_db.commit()
+            async with isolated_db.transaction(write=True) as conn:
+                await exec_sql(
+                    conn,
+                    """UPDATE ext_conversation
+                       SET fixed_asset_no=NULL
+                       WHERE conversation_id=?""",
+                    (conversation_id,),
+                )
 
             response = await client.post(
                 f"/enterprise/api/v1/conversations/{conversation_id}/messages:stream",
@@ -1359,12 +1460,13 @@ class TestW2AssetIdentity:
             )
 
         assert response.status_code == 200
-        async with isolated_db.execute(
-            """SELECT equipment_id, fixed_asset_no
-               FROM ext_conversation WHERE conversation_id=?""",
-            (conversation_id,),
-        ) as cursor:
-            row = await cursor.fetchone()
+        async with isolated_db.transaction(write=False) as conn:
+            row = await fetchone(
+                conn,
+                """SELECT equipment_id, fixed_asset_no
+                   FROM ext_conversation WHERE conversation_id=?""",
+                (conversation_id,),
+            )
         assert (row["equipment_id"], row["fixed_asset_no"]) == (
             "EQ-1",
             "FA-1",
@@ -1400,12 +1502,13 @@ class TestW2AssetIdentity:
             equipment_id="EQ-ALIAS",
             fixed_asset_no="FA-ALIAS",
         )
-        await isolated_db.execute(
-            """UPDATE ext_document_map
-               SET equipment_id='FA-1', fixed_asset_no='FA-1'
-               WHERE external_document_id='DOC-W2-ALIAS'"""
-        )
-        await isolated_db.commit()
+        async with isolated_db.transaction(write=True) as conn:
+            await exec_sql(
+                conn,
+                """UPDATE ext_document_map
+                   SET equipment_id='FA-1', fixed_asset_no='FA-1'
+                   WHERE external_document_id='DOC-W2-ALIAS'""",
+            )
         token = _make_token()
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test"

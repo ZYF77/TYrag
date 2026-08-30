@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from enterprise.gateway.db.ops import gw_read, gw_write
+
 import hashlib
 import json
 
@@ -177,9 +179,8 @@ async def test_callback_worker_writes_audit_log(isolated_gateway_db, monkeypatch
         file_name="manual.pdf",
         source_kind="FILE_SHARE",
     )
-    doc = await insert_mapping(db, doc)
-    await enqueue_terminal_callback(
-        db,
+    doc = await gw_write(db, insert_mapping, doc)
+    await gw_write(db, enqueue_terminal_callback,
         doc=doc,
         terminal_status="retrievable",
         quality_status="passed",

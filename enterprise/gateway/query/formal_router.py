@@ -21,6 +21,7 @@ from enterprise.gateway.acl.context import AclContext
 from enterprise.gateway.acl.policy import evaluate_document_acl
 from enterprise.gateway.acl.schema import AclScope, DocumentAclFacts
 from enterprise.gateway.acl.scope import ScopeResolver, compile_scope
+from enterprise.gateway.db.ops import gw_read, gw_write
 from enterprise.gateway.asset_registry import (
     AssetRegistryConflict,
     AssetRegistryError,
@@ -41,7 +42,6 @@ from enterprise.gateway.query.answer_split import (
     split_assistant_output,
 )
 from enterprise.gateway.query.citation_select import (
-    force_abstain_outcome,
     select_cited_chunks,
 )
 from enterprise.gateway.query.enterprise_prompt import (
@@ -85,7 +85,7 @@ _conversation_locks: dict[str, asyncio.Lock] = {}
 
 
 async def get_db():
-    """Reuse the app-level SQLite connection without importing app eagerly."""
+    """Reuse the app-level PostgreSQL connection without importing app eagerly."""
     from enterprise.gateway import app as app_module
 
     dep = app_module.app.dependency_overrides.get(
@@ -199,8 +199,9 @@ async def _resolve_formal_asset(
 ) -> ResolvedAsset:
     """Resolve a formal conversation identity through the Asset Registry."""
     try:
-        resolved = await resolve_asset(
+        resolved = await gw_read(
             db,
+            resolve_asset,
             tenant_id=principal.tenant_id,
             equipment_id=equipment_id,
             fixed_asset_no=fixed_asset_no,
@@ -395,21 +396,30 @@ def _chunk_to_citation(
     }
 
 
-def _resolve_run_outcome(
-    completion: dict | None,
-    answer: str,
-    raw_chunks: list[dict],
-) -> str:
-    """Resolve message business status from the run result, not citations."""
-    if completion is not None:
-        data = completion.get("data", {}) if isinstance(completion, dict) else {}
-        if isinstance(data, dict):
-            explicit = data.get("status")
-            if explicit in ("completed", "no_reliable_evidence"):
-                return force_abstain_outcome(answer, explicit)
-    if not answer.strip() or not raw_chunks:
-        return "no_reliable_evidence"
-    return force_abstain_outcome(answer, "completed")
+_COMPLETION_STATUSES = ("completed", "no_reliable_evidence", "failed")
+
+
+def _explicit_run_status(explicit: object) -> str:
+    """Validate the explicit terminal status sent by RAGFlow (RF-PATCH-007).
+
+    Missing or invalid values are an upstream contract violation, never a
+    reason to re-derive the state from the answer text or citations.
+    """
+    if explicit not in _COMPLETION_STATUSES:
+        raise _FormalQueryError(
+            "RAGFLOW_API_INCOMPATIBLE",
+            502,
+            "RAGFlow completion status missing or invalid",
+        )
+    return str(explicit)
+
+
+def _resolve_run_outcome(completion: dict | None) -> str:
+    """Resolve message business status from the explicit completion status."""
+    data = completion.get("data", {}) if isinstance(completion, dict) else {}
+    return _explicit_run_status(
+        data.get("status") if isinstance(data, dict) else None
+    )
 
 
 class FormalScopeResolver(ScopeResolver):
@@ -438,14 +448,6 @@ class FormalScopeResolver(ScopeResolver):
             if self.source_system is not None
             else _query_source_system()
         )
-        docs = await list_all_mappings(
-            self.db,
-            tenant_id=context.principal.tenant_id,
-            source_system=source_system,
-            statuses=["ready"],
-        )
-        allowed_docs: list[ExtDocumentMap] = []
-        dataset_ids: set[str] = set()
         quality_required = (
             os.environ.get("ENTERPRISE_QUERY_QUALITY_REQUIRED", "true").lower()
             in ("1", "true", "yes", "on")
@@ -454,53 +456,70 @@ class FormalScopeResolver(ScopeResolver):
             quality_required = (
                 os.environ.get("ENTERPRISE_QUERY_QUALITY_REQUIRED", "false").lower()
                 in ("1", "true", "yes", "on")
-        )
-        for doc in docs:
-            if not doc.ragflow_dataset_id or not doc.ragflow_document_id:
-                continue
-            if self.identity is not None and (
-                doc.equipment_id != self.identity.equipment_id
-                or doc.fixed_asset_no != self.identity.fixed_asset_no
-            ):
-                # Asset Registry identity is authoritative.  A document with
-                # missing or mismatched metadata cannot become an alias.
-                continue
-            if doc.source_kind == "FILE_SHARE" and not doc.current_version:
-                # A new external version may be parsed while the previously
-                # promoted version continues serving retrieval traffic.
-                continue
-            if doc.business_status != "active":
-                continue
-            if quality_required:
-                evaluation = await get_latest_evaluation(
-                    self.db,
-                    doc.tenant_id,
-                    doc.source_system,
-                    doc.external_document_id,
-                    doc.source_version_id,
-                )
-                quality_allowed, _ = enforce_quality_gate(evaluation)
-                if not quality_allowed:
-                    continue
-            facts = DocumentAclFacts(
-                tenant_id=doc.tenant_id,
-                department_id=doc.department_id,
-                security_level=doc.security_level,
-                business_status=doc.business_status,
-                allow_group_ids=_json_list(doc.allow_group_ids),
-                deny_group_ids=_json_list(doc.deny_group_ids),
             )
-            decision = evaluate_document_acl(context.principal, facts)
-            if not decision.allowed:
-                continue
-            self._docs[doc.ragflow_document_id] = doc
-            allowed_docs.append(doc)
-            dataset_ids.add(doc.ragflow_dataset_id)
-        return AclScope.materialized(
-            tuple(dataset_ids),
-            tuple(doc.ragflow_document_id for doc in allowed_docs),
-            policy_version=context.policy_version,
-        )
+
+        async def _resolve_with(conn) -> AclScope:
+            docs = await list_all_mappings(
+                conn,
+                tenant_id=context.principal.tenant_id,
+                source_system=source_system,
+                statuses=["ready"],
+            )
+            allowed_docs: list[ExtDocumentMap] = []
+            dataset_ids: set[str] = set()
+            for doc in docs:
+                if not doc.ragflow_dataset_id or not doc.ragflow_document_id:
+                    continue
+                if self.identity is not None and (
+                    doc.equipment_id != self.identity.equipment_id
+                    or doc.fixed_asset_no != self.identity.fixed_asset_no
+                ):
+                    # Asset Registry identity is authoritative.  A document with
+                    # missing or mismatched metadata cannot become an alias.
+                    continue
+                if doc.source_kind == "FILE_SHARE" and not doc.current_version:
+                    # A new external version may be parsed while the previously
+                    # promoted version continues serving retrieval traffic.
+                    continue
+                if doc.business_status != "active":
+                    continue
+                if quality_required:
+                    evaluation = await get_latest_evaluation(
+                        conn,
+                        doc.tenant_id,
+                        doc.source_system,
+                        doc.external_document_id,
+                        doc.source_version_id,
+                    )
+                    quality_allowed, _ = enforce_quality_gate(evaluation)
+                    if not quality_allowed:
+                        continue
+                facts = DocumentAclFacts(
+                    tenant_id=doc.tenant_id,
+                    department_id=doc.department_id,
+                    security_level=doc.security_level,
+                    business_status=doc.business_status,
+                    allow_group_ids=_json_list(doc.allow_group_ids),
+                    deny_group_ids=_json_list(doc.deny_group_ids),
+                )
+                decision = evaluate_document_acl(context.principal, facts)
+                if not decision.allowed:
+                    continue
+                self._docs[doc.ragflow_document_id] = doc
+                allowed_docs.append(doc)
+                dataset_ids.add(doc.ragflow_dataset_id)
+            return AclScope.materialized(
+                tuple(dataset_ids),
+                tuple(doc.ragflow_document_id for doc in allowed_docs),
+                policy_version=context.policy_version,
+            )
+
+        from enterprise.gateway.db import GatewayDatabase
+
+        if isinstance(self.db, GatewayDatabase):
+            async with self.db.transaction(write=False) as conn:
+                return await _resolve_with(conn)
+        return await _resolve_with(self.db)
 
 
 async def _conversation_lock(conversation_id: str) -> asyncio.Lock:
@@ -518,8 +537,9 @@ async def _load_conversation(
     request_id: str,
 ):
     await conversation_store.ensure_schema(db)
-    conversation = await conversation_store.get_conversation(
+    conversation = await gw_read(
         db,
+        conversation_store.get_conversation,
         conversation_id=conversation_id,
         tenant_id=principal.tenant_id,
         business_user_id=principal.business_user_id,
@@ -592,19 +612,23 @@ async def _ensure_formal_context(
         )
 
     if stored_equipment is None or stored_fixed is None:
-        await db.execute(
-            """UPDATE ext_conversation
-               SET equipment_id=?, fixed_asset_no=?
-               WHERE conversation_id=? AND tenant_id=? AND business_user_id=?""",
-            (
-                resolved.equipment_id,
-                resolved.fixed_asset_no,
-                conversation["conversation_id"],
-                principal.tenant_id,
-                principal.business_user_id,
-            ),
-        )
-        await db.commit()
+        from enterprise.gateway.db import GatewayDatabase
+
+        async def _write_identity(conn):
+            await conversation_store.update_conversation_identity(
+                conn,
+                conversation_id=conversation["conversation_id"],
+                tenant_id=principal.tenant_id,
+                business_user_id=principal.business_user_id,
+                equipment_id=resolved.equipment_id,
+                fixed_asset_no=resolved.fixed_asset_no,
+            )
+
+        if isinstance(db, GatewayDatabase):
+            async with db.transaction(write=True) as conn:
+                await _write_identity(conn)
+        else:
+            await _write_identity(db)
         conversation = {
             **conversation,
             "equipment_id": resolved.equipment_id,
@@ -705,8 +729,9 @@ async def _persist_pair(
     user_message_id: str,
     assistant_message_id: str,
 ) -> None:
-    await conversation_store.add_message(
+    await gw_write(
         db,
+        conversation_store.add_message,
         conversation_id=conversation_id,
         tenant_id=tenant_id,
         business_user_id=business_user_id,
@@ -717,8 +742,9 @@ async def _persist_pair(
         citations=[],
         ragflow_message_id=ragflow_message_id,
     )
-    await conversation_store.add_message(
+    await gw_write(
         db,
+        conversation_store.add_message,
         conversation_id=conversation_id,
         tenant_id=tenant_id,
         business_user_id=business_user_id,
@@ -743,8 +769,9 @@ async def _persist_assistant(
     citations: list[dict],
     ragflow_message_id: str | None,
 ) -> None:
-    await conversation_store.add_message(
+    await gw_write(
         db,
+        conversation_store.add_message,
         conversation_id=conversation_id,
         tenant_id=tenant_id,
         business_user_id=business_user_id,
@@ -768,8 +795,9 @@ async def _run_ask(
 ) -> AskJsonResponse:
     user_message_id = str(uuid.uuid4())
     assistant_message_id = str(uuid.uuid4())
-    await conversation_store.add_message(
+    await gw_write(
         db,
+        conversation_store.add_message,
         conversation_id=conversation["conversation_id"],
         tenant_id=principal.tenant_id,
         business_user_id=principal.business_user_id,
@@ -792,7 +820,8 @@ async def _run_ask(
         if isinstance(e, RAGFlowAPIError):
             code = (
                 "RAGFLOW_API_INCOMPATIBLE"
-                if e.status_code and 400 <= e.status_code < 500
+                if e.status_code
+                and (400 <= e.status_code < 500 or e.status_code == 502)
                 else "RAGFLOW_UNAVAILABLE"
             )
             status_code = (
@@ -803,8 +832,9 @@ async def _run_ask(
             code = e.code
             status_code = e.status_code
             message = e.message
-        await conversation_store.add_message(
+        await gw_write(
             db,
+            conversation_store.add_message,
             conversation_id=conversation["conversation_id"],
             tenant_id=principal.tenant_id,
             business_user_id=principal.business_user_id,
@@ -836,7 +866,7 @@ async def _run_ask(
         )
         answer = split.answer
         reasoning = public_reasoning(split.reasoning)
-        status = _resolve_run_outcome(completion, answer, chunks)
+        status = _resolve_run_outcome(completion)
         citations = _build_citations(
             select_cited_chunks(answer, chunks, status),
             docs_by_ragflow,
@@ -852,16 +882,18 @@ async def _run_ask(
             data.get("id") if isinstance(data, dict) else None
         )
         if chat_id:
-            await conversation_store.update_conversation_mapping(
+            await gw_write(
                 db,
+                conversation_store.update_conversation_mapping,
                 conversation_id=conversation["conversation_id"],
                 tenant_id=principal.tenant_id,
                 business_user_id=principal.business_user_id,
                 ragflow_chat_id=chat_id,
                 ragflow_session_id=ragflow_session_id,
             )
-        await conversation_store.add_message(
+        await gw_write(
             db,
+            conversation_store.add_message,
             conversation_id=conversation["conversation_id"],
             tenant_id=principal.tenant_id,
             business_user_id=principal.business_user_id,
@@ -873,8 +905,9 @@ async def _run_ask(
             ragflow_message_id=ragflow_message_id,
         )
     except _FormalQueryError as e:
-        await conversation_store.add_message(
+        await gw_write(
             db,
+            conversation_store.add_message,
             conversation_id=conversation["conversation_id"],
             tenant_id=principal.tenant_id,
             business_user_id=principal.business_user_id,
@@ -914,8 +947,9 @@ async def _stream_ask_events(
             "requestId": request_id,
         },
     )
-    await conversation_store.add_message(
+    await gw_write(
         db,
+        conversation_store.add_message,
         conversation_id=conversation_id,
         tenant_id=principal.tenant_id,
         business_user_id=principal.business_user_id,
@@ -928,6 +962,7 @@ async def _stream_ask_events(
     accumulated = ""
     accumulated_reasoning = ""
     chunks: list[dict] = []
+    upstream_status: str | None = None
     ragflow_message_id: str | None = None
     ragflow_session_id = conversation.get("ragflow_session_id")
     status = "failed"
@@ -953,6 +988,9 @@ async def _stream_ask_events(
                 ragflow_session_id = data["session_id"]
             if data.get("id"):
                 ragflow_message_id = data["id"]
+            explicit_status = data.get("status")
+            if explicit_status in _COMPLETION_STATUSES:
+                upstream_status = explicit_status
             reference = data.get("reference") or {}
             raw_chunks = (
                 reference.get("chunks", [])
@@ -986,7 +1024,7 @@ async def _stream_ask_events(
                             "content": chunk,
                         },
                     )
-        status = _resolve_run_outcome(None, accumulated, chunks)
+        status = _explicit_run_status(upstream_status)
         citations = _build_citations(
             select_cited_chunks(accumulated, chunks, status),
             docs_by_ragflow,
@@ -998,8 +1036,9 @@ async def _stream_ask_events(
         else:
             answer = accumulated
         if chat_id:
-            await conversation_store.update_conversation_mapping(
+            await gw_write(
                 db,
+                conversation_store.update_conversation_mapping,
                 conversation_id=conversation_id,
                 tenant_id=principal.tenant_id,
                 business_user_id=principal.business_user_id,
@@ -1065,7 +1104,8 @@ async def _stream_ask_events(
     except RAGFlowAPIError as e:
         code = (
             "RAGFLOW_API_INCOMPATIBLE"
-            if e.status_code and 400 <= e.status_code < 500
+            if e.status_code
+            and (400 <= e.status_code < 500 or e.status_code == 502)
             else "RAGFLOW_UNAVAILABLE"
         )
         logger.warning(
@@ -1119,8 +1159,9 @@ async def create_conversation(
     except _FormalQueryError as error:
         return _error(error.status_code, error.code, error.message, request_id)
     conversation_id = str(uuid.uuid4())
-    conversation = await conversation_store.create_conversation(
+    conversation = await gw_write(
         db,
+        conversation_store.create_conversation,
         tenant_id=principal.tenant_id,
         business_user_id=principal.business_user_id,
         conversation_id=conversation_id,
@@ -1282,8 +1323,9 @@ async def get_conversation(
     )
     if error:
         return error
-    messages = await conversation_store.list_messages(
+    messages = await gw_read(
         db,
+        conversation_store.list_messages,
         conversation_id=conversation_id,
         tenant_id=principal.tenant_id,
         business_user_id=principal.business_user_id,
@@ -1317,8 +1359,9 @@ async def get_citation(
 ):
     request_id = str(uuid.uuid4())
     await conversation_store.ensure_schema(db)
-    citation = await conversation_store.get_citation(
+    citation = await gw_read(
         db,
+        conversation_store.get_citation,
         citation_id=citation_id,
         tenant_id=principal.tenant_id,
         business_user_id=principal.business_user_id,
@@ -1397,8 +1440,9 @@ async def get_citation_source(
 ):
     """Stream only the exact ACL-authorized FILE_SHARE source version."""
     await conversation_store.ensure_schema(db)
-    citation = await conversation_store.get_citation(
+    citation = await gw_read(
         db,
+        conversation_store.get_citation,
         citation_id=citation_id,
         tenant_id=principal.tenant_id,
         business_user_id=principal.business_user_id,
@@ -1424,8 +1468,9 @@ async def _citation_document_for_principal(
     source_system = _query_source_system()
     doc = None
     if external_document_id and source_system:
-        versions = await get_versions_for_document(
+        versions = await gw_read(
             db,
+            get_versions_for_document,
             principal.tenant_id,
             source_system,
             external_document_id,
@@ -1446,8 +1491,9 @@ async def _citation_document_for_principal(
                 doc = candidate
                 break
     if doc is None:
-        docs = await list_all_mappings(
+        docs = await gw_read(
             db,
+            list_all_mappings,
             tenant_id=principal.tenant_id,
             source_system=source_system,
         )

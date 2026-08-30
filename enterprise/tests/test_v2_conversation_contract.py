@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from enterprise.gateway.db.dialect import exec_sql, fetchall, fetchone
+from enterprise.gateway.db.ops import gw_read, gw_write
+
 import hashlib
 import json
 import uuid
@@ -124,7 +127,7 @@ async def _insert_document(
         current_version=1,
     )
     payload.update(extra)
-    return await insert_mapping(db, ExtDocumentMap(**payload))
+    return await gw_write(db, insert_mapping, ExtDocumentMap(**payload))
 
 
 def _stub_doc_ids(runtime) -> set[str]:
@@ -342,12 +345,9 @@ async def test_explicit_compare_and_unknown_equipment_use_turn_scope(runtime):
     assert compare_ids == {"doc-1", "doc-2"}
     assert detail.json()["equipmentId"] == "EQ-B"
     assert unknown.json()["status"] == "无可靠依据"
-    async with runtime.db.execute(
-        """SELECT entity_scope_json, allowed_doc_ids_json
+    snapshot = await gw_read(runtime.db, fetchone, """SELECT entity_scope_json, allowed_doc_ids_json
              FROM ext_v2_message_run
-            WHERE client_message_id='unknown'"""
-    ) as cursor:
-        snapshot = await cursor.fetchone()
+            WHERE client_message_id='unknown'""")
     assert json.loads(snapshot["entity_scope_json"]) == []
     assert json.loads(snapshot["allowed_doc_ids_json"]) == []
 
@@ -439,17 +439,15 @@ async def test_role_acl_is_open_within_tenant_during_test_stage(runtime):
 
 @pytest.mark.asyncio
 async def test_pending_duplicate_returns_same_run_without_second_user_message(runtime):
-    await runtime.db.execute(
-        "INSERT INTO ext_asset_registry (tenant_id, equipment_id, fixed_asset_no, asset_id) VALUES ('customer-a', 'EQ-PENDING', 'FA-PENDING', 'FA-PENDING')"
-    )
-    await runtime.db.commit()
+    await gw_write(runtime.db, exec_sql, "INSERT INTO ext_asset_registry (tenant_id, equipment_id, fixed_asset_no, asset_id) VALUES ('customer-a', 'EQ-PENDING', 'FA-PENDING', 'FA-PENDING')")
     async with _client(runtime) as client:
         conversation = await _create_conversation(client, equipmentId="EQ-PENDING")
         req = v2_router.CreateMessageRequest(
             clientMessageId="pending-1", question="pending"
         )
-        run = await v2_store.reserve_message_run(
+        run = await gw_write(
             runtime.db,
+            v2_store.reserve_message_run,
             conversation_id=conversation["conversationId"],
             tenant_id="customer-a",
             business_user_id="biz-user-001",
@@ -477,17 +475,15 @@ async def test_pending_duplicate_returns_same_run_without_second_user_message(ru
 
 @pytest.mark.asyncio
 async def test_expired_duplicate_is_stable_run_interrupted(runtime):
-    await runtime.db.execute(
-        "INSERT INTO ext_asset_registry (tenant_id, equipment_id, fixed_asset_no, asset_id) VALUES ('customer-a', 'EQ-EXPIRED', 'FA-EXPIRED', 'FA-EXPIRED')"
-    )
-    await runtime.db.commit()
+    await gw_write(runtime.db, exec_sql, "INSERT INTO ext_asset_registry (tenant_id, equipment_id, fixed_asset_no, asset_id) VALUES ('customer-a', 'EQ-EXPIRED', 'FA-EXPIRED', 'FA-EXPIRED')")
     async with _client(runtime) as client:
         conversation = await _create_conversation(client, equipmentId="EQ-EXPIRED")
         req = v2_router.CreateMessageRequest(
             clientMessageId="expired-1", question="expired"
         )
-        await v2_store.reserve_message_run(
+        await gw_write(
             runtime.db,
+            v2_store.reserve_message_run,
             conversation_id=conversation["conversationId"],
             tenant_id="customer-a",
             business_user_id="biz-user-001",
@@ -663,12 +659,9 @@ async def test_turn_scope_switch_compare_and_snapshot(runtime):
     assert detail.json()["equipmentId"] == "EQ-B"
     assert previous_compare_ids == {"doc-turn-a", "doc-turn-b"}
     assert _stub_doc_ids(runtime) == {"doc-turn-a", "doc-turn-b"}
-    async with runtime.db.execute(
-        """SELECT entity_scope_json, allowed_doc_ids_json
-             FROM ext_v2_message_run
-            WHERE client_message_id='turn-explicit-compare'"""
-    ) as cursor:
-        snapshot = await cursor.fetchone()
+    snapshot = await gw_read(runtime.db, fetchone, """SELECT entity_scope_json, allowed_doc_ids_json
+        FROM ext_v2_message_run
+        WHERE client_message_id='turn-explicit-compare'""")
     assert set(json.loads(snapshot["entity_scope_json"])) == {"EQ-A", "EQ-B"}
     assert set(json.loads(snapshot["allowed_doc_ids_json"])) == {
         "doc-turn-a",
@@ -697,11 +690,8 @@ async def test_unknown_explicit_equipment_fails_closed(runtime):
 
     assert response.status_code == 200
     assert response.json()["status"] == "无可靠依据"
-    async with runtime.db.execute(
-        """SELECT allowed_doc_ids_json FROM ext_v2_message_run
-            WHERE client_message_id='unknown-equipment'"""
-    ) as cursor:
-        snapshot = await cursor.fetchone()
+    snapshot = await gw_read(runtime.db, fetchone, """SELECT allowed_doc_ids_json FROM ext_v2_message_run
+        WHERE client_message_id='unknown-equipment'""")
     assert json.loads(snapshot["allowed_doc_ids_json"]) == []
 
 
@@ -730,12 +720,9 @@ async def test_product_model_in_bound_question_keeps_scope(runtime):
     assert response.status_code == 200
     assert _stub_doc_ids(runtime) == {"doc-xt30d"}
     assert runtime.stub._last_completion_body is not None
-    async with runtime.db.execute(
-        """SELECT entity_scope_json, allowed_doc_ids_json
-             FROM ext_v2_message_run
-            WHERE client_message_id='model-confirm-bound'"""
-    ) as cursor:
-        snapshot = await cursor.fetchone()
+    snapshot = await gw_read(runtime.db, fetchone, """SELECT entity_scope_json, allowed_doc_ids_json
+        FROM ext_v2_message_run
+        WHERE client_message_id='model-confirm-bound'""")
     assert set(json.loads(snapshot["entity_scope_json"])) == {"GQ01250024"}
     assert set(json.loads(snapshot["allowed_doc_ids_json"])) == {"doc-xt30d"}
 
@@ -768,12 +755,9 @@ async def test_product_model_comparison_question_keeps_bound_scope(runtime):
     assert response.status_code == 200
     assert _stub_doc_ids(runtime) == {"doc-xt30d-cmp"}
     assert runtime.stub._last_completion_body is not None
-    async with runtime.db.execute(
-        """SELECT entity_scope_json, allowed_doc_ids_json
-             FROM ext_v2_message_run
-            WHERE client_message_id='model-compare-bound'"""
-    ) as cursor:
-        snapshot = await cursor.fetchone()
+    snapshot = await gw_read(runtime.db, fetchone, """SELECT entity_scope_json, allowed_doc_ids_json
+        FROM ext_v2_message_run
+        WHERE client_message_id='model-compare-bound'""")
     assert set(json.loads(snapshot["entity_scope_json"])) == {"GQ01250024"}
     assert set(json.loads(snapshot["allowed_doc_ids_json"])) == {"doc-xt30d-cmp"}
 
@@ -807,11 +791,8 @@ async def test_unbound_model_confirm_does_not_empty_acl_scope(runtime):
 
     assert response.status_code == 200
     assert _stub_doc_ids(runtime) == {"doc-acl-a", "doc-acl-b"}
-    async with runtime.db.execute(
-        """SELECT allowed_doc_ids_json FROM ext_v2_message_run
-            WHERE client_message_id='model-confirm-unbound'"""
-    ) as cursor:
-        snapshot = await cursor.fetchone()
+    snapshot = await gw_read(runtime.db, fetchone, """SELECT allowed_doc_ids_json FROM ext_v2_message_run
+        WHERE client_message_id='model-confirm-unbound'""")
     assert set(json.loads(snapshot["allowed_doc_ids_json"])) == {
         "doc-acl-a",
         "doc-acl-b",
@@ -854,12 +835,9 @@ async def test_indexed_equipment_id_still_resolves_with_model_token(runtime):
     assert "GQ01250024" in body["scope_identifiers"]
     assert body["scope_identifiers"] == body["allowed_identifiers"]
     assert body["question"] == "GQ01250024 合格证上的产品型号是什么？是否为 XT30D？"
-    async with runtime.db.execute(
-        """SELECT entity_scope_json, allowed_doc_ids_json
-             FROM ext_v2_message_run
-            WHERE client_message_id='indexed-rebind'"""
-    ) as cursor:
-        snapshot = await cursor.fetchone()
+    snapshot = await gw_read(runtime.db, fetchone, """SELECT entity_scope_json, allowed_doc_ids_json
+        FROM ext_v2_message_run
+        WHERE client_message_id='indexed-rebind'""")
     assert set(json.loads(snapshot["entity_scope_json"])) == {"GQ01250024"}
     assert set(json.loads(snapshot["allowed_doc_ids_json"])) == {"doc-indexed"}
 
@@ -893,12 +871,9 @@ async def test_eam_context_snapshot_persists_submitted_identity(runtime):
             fixedAssetNo="FA-SNAPSHOT",
         )
 
-    async with runtime.db.execute(
-        "SELECT equipment_id, fixed_asset_no, asset_id, registry_version, "
+    snapshot = await gw_read(runtime.db, fetchone, "SELECT equipment_id, fixed_asset_no, asset_id, registry_version, "
         "context_resolved_at FROM ext_v2_conversation WHERE conversation_id=?",
-        (conversation["conversationId"],),
-    ) as cursor:
-        snapshot = await cursor.fetchone()
+        (conversation["conversationId"],),)
 
     assert snapshot["equipment_id"] == "EQ-SNAPSHOT"
     assert snapshot["fixed_asset_no"] == "FA-SNAPSHOT"
@@ -912,8 +887,9 @@ async def test_context_version_write_conflict_is_stable_409(runtime, monkeypatch
     async with _client(runtime) as client:
         conversation = await _create_conversation(client)
 
-    stale_write = await v2_store.update_context(
+    stale_write = await gw_write(
         runtime.db,
+        v2_store.update_context,
         conversation_id=conversation["conversationId"],
         tenant_id="customer-a",
         business_user_id="biz-user-001",
@@ -985,10 +961,7 @@ async def test_context_scope_does_not_match_equipment_alias_fields(runtime):
     )
     # Keep the document mapping to exercise retrieval filtering, but do not
     # let the deliberately inconsistent metadata become a registry fixture.
-    await runtime.db.execute(
-        "DELETE FROM ext_asset_registry WHERE equipment_id='EQ-OTHER'"
-    )
-    await runtime.db.commit()
+    await gw_write(runtime.db, exec_sql, "DELETE FROM ext_asset_registry WHERE equipment_id='EQ-OTHER'")
     async with _client(runtime) as client:
         conversation = await _create_conversation(
             client, equipmentId="EQ-CANONICAL"
@@ -1047,8 +1020,7 @@ async def test_failed_quality_evaluation_is_not_sent_to_ragflow(runtime):
         fixed_asset_no="FA-QUALITY-FAILED",
     )
     now = datetime.now(timezone.utc).isoformat()
-    await runtime.db.execute(
-        """INSERT INTO parse_quality_evaluation
+    await gw_write(runtime.db, exec_sql, """INSERT INTO parse_quality_evaluation
            (tenant_id, source_system, external_document_id, source_version_id,
             evaluation_state, parse_quality_status, created_at, updated_at)
            VALUES (?, ?, ?, ?, 'completed', 'failed', ?, ?)""",
@@ -1061,7 +1033,6 @@ async def test_failed_quality_evaluation_is_not_sent_to_ragflow(runtime):
             now,
         ),
     )
-    await runtime.db.commit()
     async with _client(runtime) as client:
         conversation = await _create_conversation(
             client, equipmentId="EQ-QUALITY-FAILED"
@@ -1078,10 +1049,7 @@ async def test_failed_quality_evaluation_is_not_sent_to_ragflow(runtime):
 
 @pytest.mark.asyncio
 async def test_client_message_id_replay_and_conflict(runtime):
-    await runtime.db.execute(
-        "INSERT INTO ext_asset_registry (tenant_id, equipment_id, fixed_asset_no, asset_id) VALUES ('customer-a', 'EQ-TEST', 'FA-TEST', 'FA-TEST')"
-    )
-    await runtime.db.commit()
+    await gw_write(runtime.db, exec_sql, "INSERT INTO ext_asset_registry (tenant_id, equipment_id, fixed_asset_no, asset_id) VALUES ('customer-a', 'EQ-TEST', 'FA-TEST', 'FA-TEST')")
     async with _client(runtime) as client:
         conversation = await _create_conversation(client, equipmentId="EQ-TEST")
         url = f"{BASE}/conversations/{conversation['conversationId']}/messages"
@@ -1104,10 +1072,7 @@ async def test_client_message_id_replay_and_conflict(runtime):
 
 @pytest.mark.asyncio
 async def test_message_accept_negotiates_json_and_sse(runtime):
-    await runtime.db.execute(
-        "INSERT INTO ext_asset_registry (tenant_id, equipment_id, fixed_asset_no, asset_id) VALUES ('customer-a', 'EQ-TEST', 'FA-TEST', 'FA-TEST')"
-    )
-    await runtime.db.commit()
+    await gw_write(runtime.db, exec_sql, "INSERT INTO ext_asset_registry (tenant_id, equipment_id, fixed_asset_no, asset_id) VALUES ('customer-a', 'EQ-TEST', 'FA-TEST', 'FA-TEST')")
     async with _client(runtime) as client:
         conversation = await _create_conversation(client, equipmentId="EQ-TEST")
         url = f"{BASE}/conversations/{conversation['conversationId']}/messages"
@@ -1132,10 +1097,7 @@ async def test_message_accept_negotiates_json_and_sse(runtime):
 
 @pytest.mark.asyncio
 async def test_messages_are_cursor_paginated_without_duplicates(runtime):
-    await runtime.db.execute(
-        "INSERT INTO ext_asset_registry (tenant_id, equipment_id, fixed_asset_no, asset_id) VALUES ('customer-a', 'EQ-TEST', 'FA-TEST', 'FA-TEST')"
-    )
-    await runtime.db.commit()
+    await gw_write(runtime.db, exec_sql, "INSERT INTO ext_asset_registry (tenant_id, equipment_id, fixed_asset_no, asset_id) VALUES ('customer-a', 'EQ-TEST', 'FA-TEST', 'FA-TEST')")
     async with _client(runtime) as client:
         conversation = await _create_conversation(client, equipmentId="EQ-TEST")
         conversation_id = conversation["conversationId"]
@@ -1169,10 +1131,7 @@ async def test_messages_are_cursor_paginated_without_duplicates(runtime):
 
 @pytest.mark.asyncio
 async def test_archived_conversation_is_read_only(runtime):
-    await runtime.db.execute(
-        "INSERT INTO ext_asset_registry (tenant_id, equipment_id, fixed_asset_no, asset_id) VALUES ('customer-a', 'EQ-TEST', 'FA-TEST', 'FA-TEST')"
-    )
-    await runtime.db.commit()
+    await gw_write(runtime.db, exec_sql, "INSERT INTO ext_asset_registry (tenant_id, equipment_id, fixed_asset_no, asset_id) VALUES ('customer-a', 'EQ-TEST', 'FA-TEST', 'FA-TEST')")
     async with _client(runtime) as client:
         conversation = await _create_conversation(client, equipmentId="EQ-TEST")
         conversation_id = conversation["conversationId"]
@@ -1487,6 +1446,7 @@ class _ThinkStreamStub(RAGFlowQueryStub):
                 "answer": "",
                 "final": True,
                 "session_id": "s",
+                "status": "completed",
                 "reference": {"chunks": []},
                 "grounding": _grounding(grounding_version),
             },
@@ -1551,7 +1511,7 @@ class _MultiDeltaStub(RAGFlowQueryStub):
         del messages, store_history_messages, pass_all_history_messages, kwargs
         yield {"code": 0, "data": {"answer": "first ", "final": False, "session_id": "s"}}
         yield {"code": 0, "data": {"answer": "second", "final": False, "session_id": "s"}}
-        yield {"code": 0, "data": {"answer": "", "final": True, "session_id": "s", "reference": {"chunks": []}, "grounding": _grounding(grounding_version)}}
+        yield {"code": 0, "data": {"answer": "", "final": True, "session_id": "s", "status": "completed", "reference": {"chunks": []}, "grounding": _grounding(grounding_version)}}
         yield {"code": 0, "data": True}
 
 
@@ -1847,7 +1807,12 @@ async def test_v2_json_billing_error_maps_to_safe_message(runtime):
 
 
 @pytest.mark.asyncio
-async def test_v2_stream_keeps_business_state_independent_of_citations(runtime):
+async def test_v2_stream_no_reliable_evidence_clears_citations_defensively(
+    runtime,
+):
+    """SSE: an explicit no_reliable_evidence final frame must not stream
+    citations next to the replaced standard abstain answer, even when the
+    upstream contract-violatingly sent cited markers in the body."""
     await _insert_document(
         runtime.db,
         external_id="DOC-STREAM-STATE",
@@ -1868,7 +1833,86 @@ async def test_v2_stream_keeps_business_state_independent_of_citations(runtime):
 
     assert response.status_code == 200
     assert '"status": "无可靠依据"' in response.text
-    assert "event: citation" in response.text
+    assert "event: answer.replaced" in response.text
+    assert '"content": "未找到可靠依据，无法回答。"' in response.text
+    assert "event: citation" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_v2_json_missing_status_is_contract_error_with_failed_run(runtime):
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-NO-STATUS",
+        ragflow_id="doc-no-status",
+        equipment_id="EQ-NO-STATUS",
+        fixed_asset_no="FA-NO-STATUS",
+    )
+    runtime.stub._omit_status = True
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(
+            client, equipmentId="EQ-NO-STATUS"
+        )
+        response = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={"clientMessageId": "missing-status", "question": "问题"},
+        )
+        run = await gw_read(
+            runtime.db,
+            fetchone,
+            "SELECT status, result_json FROM ext_v2_message_run WHERE client_message_id=?",
+            ("missing-status",),
+        )
+        assistant = await gw_read(
+            runtime.db,
+            fetchone,
+            "SELECT status FROM ext_v2_message WHERE role='assistant'",
+        )
+
+    assert response.status_code == 502
+    body = response.json()
+    assert body["code"] == "RAGFLOW_API_INCOMPATIBLE"
+    assert run["status"] == "failed"
+    assert json.loads(run["result_json"])["_error"]["statusCode"] == 502
+    assert assistant["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_v2_sse_missing_status_replaces_answer_then_fails(runtime):
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-NO-STATUS-SSE",
+        ragflow_id="doc-no-status-sse",
+        equipment_id="EQ-NO-STATUS-SSE",
+        fixed_asset_no="FA-NO-STATUS-SSE",
+    )
+    runtime.stub._omit_status = True
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(
+            client, equipmentId="EQ-NO-STATUS-SSE"
+        )
+        response = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            headers={"Accept": "text/event-stream"},
+            json={"clientMessageId": "missing-status-sse", "question": "问题"},
+        )
+        run = await gw_read(
+            runtime.db,
+            fetchone,
+            "SELECT status FROM ext_v2_message_run WHERE client_message_id=?",
+            ("missing-status-sse",),
+        )
+
+    assert response.status_code == 200
+    assert "event: answer.delta" in response.text
+    assert "event: answer.replaced" in response.text
+    assert '"content": ""' in response.text
+    assert "event: run.failed" in response.text
+    assert '"code": "RAGFLOW_API_INCOMPATIBLE"' in response.text
+    assert "event: answer.completed" not in response.text
+    replaced_at = response.text.index("event: answer.replaced")
+    failed_at = response.text.index("event: run.failed")
+    assert replaced_at < failed_at
+    assert run["status"] == "failed"
 
 
 @pytest.mark.asyncio
@@ -2040,8 +2084,7 @@ async def test_citation_uses_external_fields_and_state_is_independent(runtime):
         assert result.status_code == 200, result.text
         body = result.json()
         citation = body["citations"][0]
-        await update_mapping_status(
-            runtime.db,
+        await gw_write(runtime.db, update_mapping_status,
             document,
             "superseded",
             business_status="superseded",
@@ -2105,7 +2148,11 @@ async def test_v2_keeps_only_chunks_cited_in_the_answer(runtime):
 
 
 @pytest.mark.asyncio
-async def test_v2_keeps_citations_when_no_reliable_evidence(runtime):
+async def test_v2_no_reliable_evidence_clears_citations_defensively(runtime):
+    """RF-PATCH-007 compliant upstream abstains with a marker-free answer, so
+    citations are empty anyway; a contract-violating upstream that reports
+    no_reliable_evidence together with cited markers must not persist the
+    standard abstain text next to dangling citations."""
     await _insert_document(
         runtime.db,
         external_id="EXT-DOC-NONE",
@@ -2126,14 +2173,15 @@ async def test_v2_keeps_citations_when_no_reliable_evidence(runtime):
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["status"] == "无可靠依据"
-    assert len(body["citations"]) == 1
-    assert body["citations"][0]["externalDocumentId"] == "EXT-DOC-NONE"
+    assert body["answer"] == "未找到可靠依据，无法回答。"
+    assert body["citations"] == []
 
 
 @pytest.mark.asyncio
-async def test_v2_abstain_phrase_keeps_state_and_citations_independent(
+async def test_v2_completed_with_abstain_wording_is_not_re_judged(
     runtime,
 ):
+    """RF-PATCH-007: an explicit completed status is never flipped by wording."""
     await _insert_document(
         runtime.db,
         external_id="EXT-DOC-ABSTAIN",
@@ -2154,12 +2202,16 @@ async def test_v2_abstain_phrase_keeps_state_and_citations_independent(
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["status"] == "无可靠依据"
+    assert body["status"] == "已完成"
+    assert body["answer"] == (
+        "当前检索到的知识库中，仅包含调试记录和合格证[ID:0][ID:1]，"
+        "暂无专门的设备维修记录。"
+    )
     assert len(body["citations"]) == 2
     assistant = next(
         item for item in history.json()["items"] if item["role"] == "assistant"
     )
-    assert assistant["status"] == "无可靠依据"
+    assert assistant["status"] == "已完成"
     assert len(assistant["citations"]) == 2
 
 
@@ -2317,8 +2369,7 @@ async def test_citation_download_url_serves_original_without_jwt(
         )
         assert asked.status_code == 200, asked.text
         download_url = asked.json()["citations"][0]["downloadUrl"]
-        await runtime.db.execute(
-            """UPDATE ext_document_map
+        await gw_write(runtime.db, exec_sql, """UPDATE ext_document_map
                SET source_kind='FILE_SHARE', storage_root_id=?, relative_path=?,
                    source_size=?, source_modified_ns=?, source_etag=?,
                    file_name=?
@@ -2333,7 +2384,6 @@ async def test_citation_download_url_serves_original_without_jwt(
                 document.id,
             ),
         )
-        await runtime.db.commit()
         downloaded = await client.get(download_url)
 
     assert downloaded.status_code == 200
@@ -2384,8 +2434,7 @@ async def test_role_group_change_does_not_hide_test_stage_citation(runtime):
             json={"clientMessageId": "acl-history", "question": "question"},
         )
         citation_id = result.json()["citations"][0]["citationId"]
-        await update_mapping_status(
-            runtime.db,
+        await gw_write(runtime.db, update_mapping_status,
             document,
             "ready",
             allow_group_ids=json.dumps(["revoked-group"]),
@@ -2423,12 +2472,10 @@ async def test_ask_does_not_refresh_context_via_asset_registry(runtime, monkeypa
             client, equipmentId="EQ-TTL", fixedAssetNo="FA-OLD"
         )
         conversation_id = conversation["conversationId"]
-        await runtime.db.execute(
-            "UPDATE ext_v2_conversation SET context_resolved_at=? "
+        await gw_write(runtime.db, exec_sql, "UPDATE ext_v2_conversation SET context_resolved_at=? "
             "WHERE conversation_id=?",
             ("2000-01-01T00:00:00+00:00", conversation_id),
         )
-        await runtime.db.commit()
         response = await client.post(
             f"{BASE}/conversations/{conversation_id}/messages",
             json={"clientMessageId": "ttl-refresh", "question": "question"},
@@ -2557,11 +2604,8 @@ async def test_same_conversation_followup_projects_gateway_history(runtime):
     roles = [item["role"] for item in history.json()["items"]]
     assert roles.count("user") == 2
     assert roles.count("assistant") == 2
-    async with runtime.db.execute(
-        "SELECT ragflow_chat_id, ragflow_session_id FROM ext_v2_conversation WHERE conversation_id=?",
-        (conversation_id,),
-    ) as cursor:
-        row = await cursor.fetchone()
+    row = await gw_read(runtime.db, fetchone, "SELECT ragflow_chat_id, ragflow_session_id FROM ext_v2_conversation WHERE conversation_id=?",
+        (conversation_id,),)
     assert row["ragflow_session_id"]
     assert row["ragflow_session_id"] in runtime.stub._sessions
     assert runtime.stub._last_completion_body["session_id"] == row["ragflow_session_id"]
@@ -2589,11 +2633,9 @@ async def test_cleared_legacy_session_is_ignored(runtime):
             json={"clientMessageId": "reset-1", "question": "第一轮"},
         )
         assert first.status_code == 200
-        await runtime.db.execute(
-            "UPDATE ext_v2_conversation SET ragflow_session_id=? WHERE conversation_id=?",
+        await gw_write(runtime.db, exec_sql, "UPDATE ext_v2_conversation SET ragflow_session_id=? WHERE conversation_id=?",
             ("legacy-session", conversation_id),
         )
-        await runtime.db.commit()
         second = await client.post(
             f"{BASE}/conversations/{conversation_id}/messages",
             json={"clientMessageId": "reset-2", "question": "压缩后的新轮次"},
@@ -2659,13 +2701,10 @@ async def test_conversation_is_isolated_across_business_users(runtime):
         item["conversationId"] != conversation_id
         for item in listing.json()["items"]
     )
-    async with runtime.db.execute(
-        """SELECT conversation_id, ragflow_session_id
-           FROM ext_v2_conversation
-           WHERE conversation_id IN (?, ?)""",
-        (conversation_id, other_conversation["conversationId"]),
-    ) as cursor:
-        rows = await cursor.fetchall()
+    rows = await gw_read(runtime.db, fetchall, """SELECT conversation_id, ragflow_session_id
+        FROM ext_v2_conversation
+        WHERE conversation_id IN (?, ?)""",
+        (conversation_id, other_conversation["conversationId"]),)
     assert len(rows) == 2
     assert all(row["ragflow_session_id"] for row in rows)
     assert rows[0]["ragflow_session_id"] != rows[1]["ragflow_session_id"]

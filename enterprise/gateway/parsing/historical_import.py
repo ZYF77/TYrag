@@ -8,15 +8,17 @@ change the document status enum, or infer business state from citations.
 
 from __future__ import annotations
 
+from sqlalchemy.ext.asyncio import AsyncConnection
+
+from enterprise.gateway.db.dialect import begin_transaction, exec_sql, fetchall, fetchone
+from enterprise.gateway.db.exceptions import PersistenceConflictError
+
 import hashlib
 import json
-import sqlite3
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Callable, Iterable
-
-import aiosqlite
+from typing import Any, Awaitable, Callable, Iterable, Mapping
 
 from enterprise.gateway.auth.service_principal import ServicePrincipal
 from enterprise.gateway.auth.user_principal import UserPrincipal
@@ -56,120 +58,6 @@ REVIEW_DECISIONS = frozenset({"approve", "reject", "retry"})
 
 _MAX_REASON_LENGTH = 1000
 _MAX_ERROR_LENGTH = 1000
-
-
-CREATE_HISTORICAL_IMPORT_SCHEMA = """
-CREATE TABLE IF NOT EXISTS parsing_import_batch (
-    batch_id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    source_system TEXT NOT NULL,
-    idempotency_key TEXT NOT NULL,
-    manifest_hash TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending',
-    total_items INTEGER NOT NULL,
-    checkpoint_sequence INTEGER NOT NULL DEFAULT -1,
-    checkpoint_item_id INTEGER,
-    attempt_count INTEGER NOT NULL DEFAULT 0,
-    completed_items INTEGER NOT NULL DEFAULT 0,
-    deduplicated_items INTEGER NOT NULL DEFAULT 0,
-    conflict_items INTEGER NOT NULL DEFAULT 0,
-    failed_items INTEGER NOT NULL DEFAULT 0,
-    review_required_items INTEGER NOT NULL DEFAULT 0,
-    last_error_code TEXT,
-    last_error_message TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    UNIQUE(tenant_id, source_system, idempotency_key)
-);
-
-CREATE TABLE IF NOT EXISTS parsing_import_item (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    batch_id TEXT NOT NULL,
-    sequence INTEGER NOT NULL,
-    item_key TEXT NOT NULL,
-    event_id TEXT NOT NULL,
-    effective_event_id TEXT NOT NULL,
-    tenant_id TEXT NOT NULL,
-    source_system TEXT NOT NULL,
-    external_document_id TEXT NOT NULL,
-    source_version_id TEXT NOT NULL,
-    sha256 TEXT NOT NULL,
-    payload_hash TEXT NOT NULL,
-    payload_json TEXT NOT NULL,
-    item_status TEXT NOT NULL DEFAULT 'pending',
-    outcome_code TEXT,
-    retryable INTEGER NOT NULL DEFAULT 0,
-    attempt_count INTEGER NOT NULL DEFAULT 0,
-    next_retry_at TEXT,
-    claimed_at TEXT,
-    worker_id TEXT,
-    last_error_code TEXT,
-    last_error_message TEXT,
-    document_sync_status TEXT,
-    document_business_status TEXT,
-    document_current_version INTEGER,
-    parser_application_status TEXT,
-    quality_status TEXT,
-    persisted_state_json TEXT NOT NULL DEFAULT '{}',
-    duplicate_of_item_id INTEGER,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    UNIQUE(batch_id, sequence),
-    FOREIGN KEY(batch_id) REFERENCES parsing_import_batch(batch_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_parsing_import_item_status
-    ON parsing_import_item(batch_id, item_status, sequence);
-CREATE INDEX IF NOT EXISTS idx_parsing_import_item_identity
-    ON parsing_import_item(tenant_id, source_system,
-                           external_document_id, source_version_id);
-
-CREATE TABLE IF NOT EXISTS parsing_review (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    batch_id TEXT NOT NULL,
-    item_id INTEGER NOT NULL,
-    tenant_id TEXT NOT NULL,
-    source_system TEXT NOT NULL,
-    external_document_id TEXT NOT NULL,
-    source_version_id TEXT NOT NULL,
-    review_status TEXT NOT NULL DEFAULT 'review_required',
-    decision TEXT,
-    operator_id TEXT,
-    reviewed_at TEXT,
-    reason TEXT NOT NULL,
-    before_state_json TEXT NOT NULL DEFAULT '{}',
-    after_state_json TEXT NOT NULL DEFAULT '{}',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    FOREIGN KEY(batch_id) REFERENCES parsing_import_batch(batch_id),
-    FOREIGN KEY(item_id) REFERENCES parsing_import_item(id)
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_parsing_review_open_item
-    ON parsing_review(item_id) WHERE review_status='review_required';
-CREATE INDEX IF NOT EXISTS idx_parsing_review_queue
-    ON parsing_review(tenant_id, review_status, created_at);
-
-CREATE TABLE IF NOT EXISTS parsing_audit_event (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    tenant_id TEXT NOT NULL,
-    batch_id TEXT,
-    item_id INTEGER,
-    review_id INTEGER,
-    actor_id TEXT NOT NULL,
-    action TEXT NOT NULL,
-    reason TEXT,
-    before_state_json TEXT NOT NULL DEFAULT '{}',
-    after_state_json TEXT NOT NULL DEFAULT '{}',
-    request_id TEXT,
-    occurred_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_parsing_audit_tenant_time
-    ON parsing_audit_event(tenant_id, occurred_at, id);
-CREATE INDEX IF NOT EXISTS idx_parsing_audit_batch
-    ON parsing_audit_event(batch_id, occurred_at, id);
-"""
 
 
 def _utc_now() -> str:
@@ -548,7 +436,7 @@ class ReviewStateError(HistoricalImportError):
 Processor = Callable[[OutboxEvent], Awaitable[Any]]
 
 
-def _row_to_batch(row: aiosqlite.Row) -> BatchRecord:
+def _row_to_batch(row: Mapping[str, Any]) -> BatchRecord:
     return BatchRecord(
         batch_id=row["batch_id"],
         tenant_id=row["tenant_id"],
@@ -572,7 +460,7 @@ def _row_to_batch(row: aiosqlite.Row) -> BatchRecord:
     )
 
 
-def _row_to_item(row: aiosqlite.Row) -> ImportItemRecord:
+def _row_to_item(row: Mapping[str, Any]) -> ImportItemRecord:
     return ImportItemRecord(
         id=row["id"],
         batch_id=row["batch_id"],
@@ -612,7 +500,7 @@ def _row_to_item(row: aiosqlite.Row) -> ImportItemRecord:
     )
 
 
-def _row_to_review(row: aiosqlite.Row) -> ReviewRecord:
+def _row_to_review(row: Mapping[str, Any]) -> ReviewRecord:
     return ReviewRecord(
         id=row["id"],
         batch_id=row["batch_id"],
@@ -633,7 +521,7 @@ def _row_to_review(row: aiosqlite.Row) -> ReviewRecord:
     )
 
 
-def _row_to_audit(row: aiosqlite.Row) -> AuditRecord:
+def _row_to_audit(row: Mapping[str, Any]) -> AuditRecord:
     return AuditRecord(
         id=row["id"],
         tenant_id=row["tenant_id"],
@@ -655,7 +543,7 @@ class HistoricalImportService:
 
     def __init__(
         self,
-        db: aiosqlite.Connection,
+        db: AsyncConnection,
         processor: Processor | None = None,
         *,
         sync_service: Any | None = None,
@@ -666,8 +554,17 @@ class HistoricalImportService:
         self.stale_after_seconds = stale_after_seconds
 
     async def ensure_schema(self) -> None:
-        await self.db.executescript(CREATE_HISTORICAL_IMPORT_SCHEMA)
-        await self.db.commit()
+        existing = await fetchone(
+            self.db,
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema=current_schema() AND table_name=?",
+            ("parsing_import_batch",),
+        )
+        if existing is None:
+            raise RuntimeError(
+                "Gateway schema is not initialized; create HistoricalImportService "
+                "from an initialized GatewayDatabase"
+            )
 
     @staticmethod
     def _actor_id(principal: Any | None, fallback: str | None = None) -> str:
@@ -784,8 +681,8 @@ class HistoricalImportService:
         actor = self._actor_id(principal, actor_id)
         request_id = request_id or str(uuid.uuid4())
         try:
-            await self.db.execute("BEGIN IMMEDIATE")
-            await self.db.execute(
+            await begin_transaction(self.db)
+            await exec_sql(self.db,
                 """INSERT INTO parsing_import_batch
                    (batch_id, tenant_id, source_system, idempotency_key,
                     manifest_hash, status, total_items, created_at, updated_at)
@@ -829,7 +726,7 @@ class HistoricalImportService:
                     "quality_status": None,
                     "source_version_id": item.source_version_id,
                 }
-                cursor = await self.db.execute(
+                result = await exec_sql(self.db,
                     """INSERT INTO parsing_import_item
                        (batch_id, sequence, item_key, event_id,
                         effective_event_id, tenant_id, source_system,
@@ -837,7 +734,8 @@ class HistoricalImportService:
                         payload_hash, payload_json, item_status, outcome_code,
                         persisted_state_json, duplicate_of_item_id,
                         created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       RETURNING id""",
                     (
                         batch_id,
                         sequence,
@@ -862,7 +760,7 @@ class HistoricalImportService:
                 await self._insert_audit(
                     tenant_id=item.tenant_id,
                     batch_id=batch_id,
-                    item_id=cursor.lastrowid,
+                    item_id=int(result.scalar_one()),
                     actor_id=actor,
                     action="batch_item_received",
                     reason=outcome,
@@ -885,7 +783,7 @@ class HistoricalImportService:
                 commit=False,
             )
             await self.db.commit()
-        except sqlite3.IntegrityError as exc:
+        except PersistenceConflictError as exc:
             await self.db.rollback()
             raise BatchConflictError("batch was created concurrently") from exc
         return await self.get_batch(batch_id)
@@ -938,13 +836,13 @@ class HistoricalImportService:
                 return "deduplicated", "DUPLICATE_VERSION", event_id, None
             return "pending", "RETRY_EXISTING_VERSION", existing.event_id, None
 
-        async with self.db.execute(
+        duplicate_row = await fetchone(
+            self.db,
             """SELECT * FROM ext_document_map
                WHERE tenant_id=? AND sha256=?
                ORDER BY updated_at DESC LIMIT 1""",
             (item.tenant_id, item.sha256),
-        ) as cursor:
-            duplicate_row = await cursor.fetchone()
+        )
         if duplicate_row:
             duplicate = row_to_mapping(duplicate_row)
             if (
@@ -970,11 +868,11 @@ class HistoricalImportService:
         ))
 
     async def _get_batch_by_id(self, batch_id: str) -> BatchRecord | None:
-        async with self.db.execute(
+        row = await fetchone(
+            self.db,
             "SELECT * FROM parsing_import_batch WHERE batch_id=?",
             (batch_id,),
-        ) as cursor:
-            row = await cursor.fetchone()
+        )
         return _row_to_batch(row) if row else None
 
     async def _get_batch_by_idempotency(
@@ -983,37 +881,37 @@ class HistoricalImportService:
         source_system: str,
         idempotency_key: str,
     ) -> BatchRecord | None:
-        async with self.db.execute(
+        row = await fetchone(
+            self.db,
             """SELECT * FROM parsing_import_batch
                WHERE tenant_id=? AND source_system=? AND idempotency_key=?""",
             (tenant_id, source_system, idempotency_key),
-        ) as cursor:
-            row = await cursor.fetchone()
+        )
         return _row_to_batch(row) if row else None
 
     async def _get_item(self, item_id: int) -> ImportItemRecord | None:
-        async with self.db.execute(
+        row = await fetchone(
+            self.db,
             "SELECT * FROM parsing_import_item WHERE id=?",
             (item_id,),
-        ) as cursor:
-            row = await cursor.fetchone()
+        )
         return _row_to_item(row) if row else None
 
     async def _get_review(self, review_id: int) -> ReviewRecord | None:
-        async with self.db.execute(
+        row = await fetchone(
+            self.db,
             "SELECT * FROM parsing_review WHERE id=?",
             (review_id,),
-        ) as cursor:
-            row = await cursor.fetchone()
+        )
         return _row_to_review(row) if row else None
 
     async def _get_open_review(self, item_id: int) -> ReviewRecord | None:
-        async with self.db.execute(
+        row = await fetchone(
+            self.db,
             """SELECT * FROM parsing_review
                WHERE item_id=? AND review_status='review_required'""",
             (item_id,),
-        ) as cursor:
-            row = await cursor.fetchone()
+        )
         return _row_to_review(row) if row else None
 
     async def get_batch(self, batch_id: str) -> BatchRecord:
@@ -1039,13 +937,14 @@ class HistoricalImportService:
             clauses.append("item_status=?")
             params.append(status)
         params.append(max(1, min(limit, 500)))
-        async with self.db.execute(
+        rows = await fetchall(
+            self.db,
             f"""SELECT * FROM parsing_import_item
                 WHERE {' AND '.join(clauses)}
                 ORDER BY sequence LIMIT ?""",
             params,
-        ) as cursor:
-            return [_row_to_item(row) for row in await cursor.fetchall()]
+        )
+        return [_row_to_item(row) for row in rows]
 
     async def run_batch(
         self,
@@ -1078,26 +977,26 @@ class HistoricalImportService:
         self, batch_id: str, worker_id: str,
     ) -> ImportItemRecord | None:
         now = _utc_now()
-        await self.db.execute("BEGIN IMMEDIATE")
+        await begin_transaction(self.db)
         try:
-            async with self.db.execute(
+            row = await fetchone(
+                self.db,
                 """SELECT * FROM parsing_import_item
                    WHERE batch_id=? AND item_status='pending'
-                   ORDER BY sequence LIMIT 1""",
+                   ORDER BY sequence LIMIT 1 FOR UPDATE SKIP LOCKED""",
                 (batch_id,),
-            ) as cursor:
-                row = await cursor.fetchone()
+            )
             if not row:
                 await self.db.rollback()
                 return None
-            await self.db.execute(
+            await exec_sql(self.db,
                 """UPDATE parsing_import_item
                    SET item_status='processing', attempt_count=attempt_count+1,
                        claimed_at=?, worker_id=?, next_retry_at=NULL,
                        updated_at=? WHERE id=? AND item_status='pending'""",
                 (now, worker_id, now, row["id"]),
             )
-            await self.db.execute(
+            await exec_sql(self.db,
                 """UPDATE parsing_import_batch
                    SET status='running', attempt_count=attempt_count+1,
                        updated_at=? WHERE batch_id=?""",
@@ -1138,19 +1037,19 @@ class HistoricalImportService:
             datetime.now(timezone.utc)
             - timedelta(seconds=stale_after_seconds)
         ).isoformat()
-        async with self.db.execute(
+        rows = await fetchall(
+            self.db,
             """SELECT * FROM parsing_import_item
                WHERE batch_id=? AND item_status='processing'
                  AND (claimed_at IS NULL OR claimed_at < ?)
                ORDER BY sequence""",
             (batch_id, threshold),
-        ) as cursor:
-            rows = await cursor.fetchall()
+        )
         if not rows:
             return 0
         now = _utc_now()
         recovered = 0
-        await self.db.execute("BEGIN IMMEDIATE")
+        await begin_transaction(self.db)
         try:
             for row in rows:
                 before = {
@@ -1161,7 +1060,7 @@ class HistoricalImportService:
                     "item_status": "pending",
                     "last_error_code": "BATCH_WORKER_INTERRUPTED",
                 }
-                cursor = await self.db.execute(
+                result = await exec_sql(self.db,
                     """UPDATE parsing_import_item
                        SET item_status='pending', claimed_at=NULL, worker_id=NULL,
                            retryable=1, last_error_code=?,
@@ -1176,7 +1075,7 @@ class HistoricalImportService:
                         threshold,
                     ),
                 )
-                if cursor.rowcount != 1:
+                if result.rowcount != 1:
                     continue
                 recovered += 1
                 await self._insert_audit(
@@ -1198,6 +1097,10 @@ class HistoricalImportService:
             raise
         return recovered
 
+    async def _commit_open_transaction(self) -> None:
+        if self.db.in_transaction():
+            await self.db.commit()
+
     async def _process_item(
         self, item: ImportItemRecord, worker_id: str,
     ) -> None:
@@ -1209,6 +1112,7 @@ class HistoricalImportService:
         )
         try:
             result = await self.processor(event)  # type: ignore[misc]
+            await self._commit_open_transaction()
             doc = result[0] if isinstance(result, tuple) else result
             deduplicated = bool(result[1]) if isinstance(result, tuple) and len(result) > 1 else False
             if doc is None:
@@ -1250,8 +1154,10 @@ class HistoricalImportService:
                 ),
             )
         except DocumentSyncError as exc:
+            await self._commit_open_transaction()
             await self._record_processing_failure(item, exc, worker_id)
         except Exception:
+            await self._commit_open_transaction()
             await self._record_processing_failure(
                 item,
                 DocumentSyncError("INTERNAL_ERROR", "Historical import processing failed", True),
@@ -1313,9 +1219,9 @@ class HistoricalImportService:
         if item_status not in ITEM_STATES:
             raise HistoricalImportError("INTERNAL_ERROR", "invalid item result state")
         now = _utc_now()
-        await self.db.execute("BEGIN IMMEDIATE")
+        await begin_transaction(self.db)
         try:
-            cursor = await self.db.execute(
+            result = await exec_sql(self.db,
                 """UPDATE parsing_import_item
                    SET item_status=?, outcome_code=?, retryable=?,
                        claimed_at=NULL, worker_id=NULL,
@@ -1341,7 +1247,7 @@ class HistoricalImportService:
                     item.id,
                 ),
             )
-            if cursor.rowcount != 1:
+            if result.rowcount != 1:
                 await self.db.rollback()
                 return
             if item_status == "review_required":
@@ -1395,6 +1301,9 @@ class HistoricalImportService:
             "sync_status": getattr(doc, "sync_status", None),
             "business_status": getattr(doc, "business_status", None),
             "current_version": bool(getattr(doc, "current_version", 0)),
+            "parser_application_status": getattr(
+                doc, "parser_application_status", None,
+            ),
             "quality_status": getattr(evaluation, "parse_quality_status", None),
             "source_version_id": getattr(doc, "source_version_id", None),
         }
@@ -1437,13 +1346,14 @@ class HistoricalImportService:
         existing = await self._get_open_review(item.id)
         if existing:
             return existing.id
-        cursor = await self.db.execute(
+        result = await exec_sql(self.db,
             """INSERT INTO parsing_review
                (batch_id, item_id, tenant_id, source_system,
                 external_document_id, source_version_id, review_status,
                 reason, before_state_json, after_state_json,
                 created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, 'review_required', ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, 'review_required', ?, ?, ?, ?, ?)
+               RETURNING id""",
             (
                 item.batch_id,
                 item.id,
@@ -1458,7 +1368,7 @@ class HistoricalImportService:
                 now,
             ),
         )
-        return int(cursor.lastrowid)
+        return int(result.scalar_one())
 
     async def _mark_review_required(
         self,
@@ -1467,9 +1377,9 @@ class HistoricalImportService:
         reason: str,
     ) -> None:
         now = _utc_now()
-        await self.db.execute("BEGIN IMMEDIATE")
+        await begin_transaction(self.db)
         try:
-            await self.db.execute(
+            await exec_sql(self.db,
                 """UPDATE parsing_import_item
                    SET item_status='review_required', outcome_code='REVIEW_REQUIRED',
                        retryable=0, persisted_state_json=?,
@@ -1514,12 +1424,12 @@ class HistoricalImportService:
             raise
 
     async def _refresh_batch(self, batch_id: str, *, commit: bool = True) -> None:
-        async with self.db.execute(
+        rows = await fetchall(
+            self.db,
             "SELECT item_status, sequence, id, last_error_code, last_error_message "
             "FROM parsing_import_item WHERE batch_id=? ORDER BY sequence",
             (batch_id,),
-        ) as cursor:
-            rows = await cursor.fetchall()
+        )
         counts: dict[str, int] = {}
         checkpoint_sequence = -1
         checkpoint_item_id: int | None = None
@@ -1551,7 +1461,7 @@ class HistoricalImportService:
                 error_code = row["last_error_code"]
                 error_message = row["last_error_message"]
                 break
-        await self.db.execute(
+        await exec_sql(self.db,
             """UPDATE parsing_import_batch
                SET status=?, checkpoint_sequence=?, checkpoint_item_id=?,
                    completed_items=?, deduplicated_items=?, conflict_items=?,
@@ -1591,7 +1501,7 @@ class HistoricalImportService:
         review_id: int | None = None,
         commit: bool = True,
     ) -> None:
-        await self.db.execute(
+        await exec_sql(self.db,
             """INSERT INTO parsing_audit_event
                (tenant_id, batch_id, item_id, review_id, actor_id, action,
                 reason, before_state_json, after_state_json, request_id,
@@ -1656,13 +1566,14 @@ class HistoricalImportService:
             clauses.append("source_system=?")
             params.append(source_system)
         params.append(max(1, min(limit, 500)))
-        async with self.db.execute(
+        rows = await fetchall(
+            self.db,
             f"""SELECT * FROM parsing_review
                 WHERE {' AND '.join(clauses)}
                 ORDER BY created_at, id LIMIT ?""",
             params,
-        ) as cursor:
-            return [_row_to_review(row) for row in await cursor.fetchall()]
+        )
+        return [_row_to_review(row) for row in rows]
 
     async def list_audit_events(
         self,
@@ -1689,13 +1600,14 @@ class HistoricalImportService:
             clauses.append("batch_id=?")
             params.append(batch_id)
         params.append(max(1, min(limit, 500)))
-        async with self.db.execute(
+        rows = await fetchall(
+            self.db,
             f"""SELECT * FROM parsing_audit_event
                 WHERE {' AND '.join(clauses)}
                 ORDER BY occurred_at, id LIMIT ?""",
             params,
-        ) as cursor:
-            return [_row_to_audit(row) for row in await cursor.fetchall()]
+        )
+        return [_row_to_audit(row) for row in rows]
 
     async def _transition_document_transaction(
         self,
@@ -1710,7 +1622,7 @@ class HistoricalImportService:
             return None
         if doc.sync_status != target_status:
             validate_transition(doc.sync_status, target_status, "document")
-        await self.db.execute(
+        await exec_sql(self.db,
             """UPDATE ext_document_map
                SET sync_status=?, event_status=?,
                    business_status=COALESCE(?, business_status),
@@ -1848,7 +1760,7 @@ class HistoricalImportService:
             raise ReviewStateError("ITEM_NOT_FOUND", "Batch item not found")
         actor = self._actor_id(principal, actor_id)
         request_id = request_id or str(uuid.uuid4())
-        await self.db.execute("BEGIN IMMEDIATE")
+        await begin_transaction(self.db)
         try:
             doc = await get_mapping(
                 self.db,
@@ -1876,7 +1788,7 @@ class HistoricalImportService:
                 review_status = "approved"
                 outcome = "REVIEW_APPROVED_WITHOUT_PROMOTION"
             now = _utc_now()
-            await self.db.execute(
+            await exec_sql(self.db,
                 """UPDATE parsing_review
                    SET review_status=?, decision=?, operator_id=?,
                        reviewed_at=?, reason=?, before_state_json=?,
@@ -1894,7 +1806,7 @@ class HistoricalImportService:
                     review_id,
                 ),
             )
-            await self.db.execute(
+            await exec_sql(self.db,
                 """UPDATE parsing_import_item
                    SET item_status=?, outcome_code=?, retryable=?,
                        claimed_at=NULL, worker_id=NULL,
@@ -2002,7 +1914,7 @@ class HistoricalImportService:
         review = await self._get_open_review(item.id)
         actor = self._actor_id(principal, actor_id)
         request_id = request_id or str(uuid.uuid4())
-        await self.db.execute("BEGIN IMMEDIATE")
+        await begin_transaction(self.db)
         try:
             doc = await get_mapping(
                 self.db,
@@ -2014,7 +1926,7 @@ class HistoricalImportService:
             before = await self._document_state(doc)
             after = await self._queue_retry_in_transaction(doc, before)
             now = _utc_now()
-            await self.db.execute(
+            await exec_sql(self.db,
                 """UPDATE parsing_import_item
                    SET item_status='pending', outcome_code='RETRY_QUEUED',
                        retryable=1, next_retry_at=NULL, claimed_at=NULL,
@@ -2035,7 +1947,7 @@ class HistoricalImportService:
                 ),
             )
             if review:
-                await self.db.execute(
+                await exec_sql(self.db,
                     """UPDATE parsing_review
                        SET review_status='retry_queued', decision='retry',
                            operator_id=?, reviewed_at=?, after_state_json=?,
@@ -2104,7 +2016,7 @@ class HistoricalImportService:
             )
         actor = self._actor_id(principal, actor_id)
         request_id = request_id or str(uuid.uuid4())
-        await self.db.execute("BEGIN IMMEDIATE")
+        await begin_transaction(self.db)
         try:
             doc = await get_mapping(
                 self.db,
@@ -2116,7 +2028,7 @@ class HistoricalImportService:
             before = await self._document_state(doc)
             after = await self._queue_retry_in_transaction(doc, before)
             now = _utc_now()
-            await self.db.execute(
+            await exec_sql(self.db,
                 """UPDATE parsing_import_item
                    SET item_status='pending', outcome_code='RETRY_QUEUED',
                        retryable=1, claimed_at=NULL, worker_id=NULL,
@@ -2179,13 +2091,14 @@ class HistoricalImportService:
                 internal_allowed=False,
             )
         items = await self.list_items(batch_id, limit=limit)
-        async with self.db.execute(
+        audit_rows = await fetchall(
+            self.db,
             """SELECT * FROM parsing_audit_event
                WHERE tenant_id=? AND batch_id=?
                ORDER BY occurred_at, id LIMIT ?""",
             (batch.tenant_id, batch_id, max(1, min(limit, 500))),
-        ) as cursor:
-            audit = [_row_to_audit(row) for row in await cursor.fetchall()]
+        )
+        audit = [_row_to_audit(row) for row in audit_rows]
         return {
             "batch": batch.to_dict(),
             "items": [item.to_dict() for item in items],

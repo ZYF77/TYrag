@@ -1,90 +1,13 @@
 """Enterprise-owned conversation truth store for the v2 external API."""
 from __future__ import annotations
 
+from sqlalchemy.ext.asyncio import AsyncConnection
+
+from enterprise.gateway.db.dialect import begin_transaction, exec_sql, fetchall, fetchone
+
 import base64
 import json
 from datetime import datetime, timezone
-
-
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS ext_v2_conversation (
-    conversation_id TEXT NOT NULL,
-    tenant_id TEXT NOT NULL,
-    business_user_id TEXT NOT NULL,
-    title TEXT NOT NULL DEFAULT 'New conversation',
-    equipment_id TEXT,
-    fixed_asset_no TEXT,
-    asset_id TEXT,
-    fault_code TEXT,
-    context_version INTEGER NOT NULL DEFAULT 0,
-    status TEXT NOT NULL DEFAULT 'active',
-    ragflow_chat_id TEXT,
-    ragflow_session_id TEXT,
-    context_summary TEXT,
-    summary_updated_at TEXT,
-    compressed_turn_watermark INTEGER NOT NULL DEFAULT 0,
-    registry_version TEXT,
-    context_resolved_at TEXT,
-    first_message_at TEXT,
-    created_at TEXT NOT NULL,
-    last_message_at TEXT NOT NULL,
-    PRIMARY KEY (tenant_id, business_user_id, conversation_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_v2_conversation_page
-    ON ext_v2_conversation(
-        tenant_id, business_user_id, last_message_at DESC, conversation_id DESC
-    );
-
-CREATE TABLE IF NOT EXISTS ext_v2_message (
-    message_id TEXT PRIMARY KEY,
-    conversation_id TEXT NOT NULL,
-    tenant_id TEXT NOT NULL,
-    business_user_id TEXT NOT NULL,
-    role TEXT NOT NULL,
-    content TEXT NOT NULL,
-    status TEXT NOT NULL,
-    citations_json TEXT NOT NULL DEFAULT '[]',
-    attachments_json TEXT NOT NULL DEFAULT '[]',
-    reasoning TEXT,
-    created_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_v2_message_page
-    ON ext_v2_message(
-        conversation_id, tenant_id, business_user_id, created_at, message_id
-    );
-
-CREATE TABLE IF NOT EXISTS ext_v2_message_run (
-    conversation_id TEXT NOT NULL,
-    tenant_id TEXT NOT NULL,
-    business_user_id TEXT NOT NULL,
-    client_message_id TEXT NOT NULL,
-    request_hash TEXT NOT NULL,
-    run_id TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'running',
-    lease_expires_at TEXT,
-    user_message_id TEXT,
-    assistant_message_id TEXT,
-    result_json TEXT,
-    entity_scope_json TEXT,
-    allowed_doc_ids_json TEXT,
-    created_at TEXT NOT NULL,
-    PRIMARY KEY (
-        conversation_id, tenant_id, business_user_id, client_message_id
-    )
-);
-
-CREATE TABLE IF NOT EXISTS ext_v2_citation (
-    citation_id TEXT PRIMARY KEY,
-    message_id TEXT NOT NULL,
-    conversation_id TEXT NOT NULL,
-    tenant_id TEXT NOT NULL,
-    business_user_id TEXT NOT NULL,
-    snapshot_json TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-"""
 
 
 def utc_now() -> str:
@@ -112,51 +35,6 @@ def decode_cursor(cursor: str | None) -> tuple[str, str] | None:
         raise ValueError("Invalid cursor")
     return value[0], value[1]
 
-
-async def ensure_schema(db) -> None:
-    await db.executescript(SCHEMA)
-    from enterprise.gateway.query.citation_file import ensure_citation_file_schema
-
-    await ensure_citation_file_schema(db)
-    migrations = {
-        "ext_v2_conversation": {
-            "asset_id": "TEXT",
-            "registry_version": "TEXT",
-            "context_resolved_at": "TEXT",
-            "first_message_at": "TEXT",
-            "context_summary": "TEXT",
-            "summary_updated_at": "TEXT",
-            "compressed_turn_watermark": "INTEGER NOT NULL DEFAULT 0",
-        },
-        "ext_v2_message_run": {
-            "run_id": "TEXT",
-            "status": "TEXT NOT NULL DEFAULT 'running'",
-            "lease_expires_at": "TEXT",
-            "user_message_id": "TEXT",
-            "assistant_message_id": "TEXT",
-            "entity_scope_json": "TEXT",
-            "allowed_doc_ids_json": "TEXT",
-        },
-        "ext_v2_message": {
-            "attachments_json": "TEXT NOT NULL DEFAULT '[]'",
-            "reasoning": "TEXT",
-        },
-    }
-    for table, columns in migrations.items():
-        async with db.execute(f"PRAGMA table_info({table})") as cursor:
-            existing = {row[1] for row in await cursor.fetchall()}
-        for column, definition in columns.items():
-            if column not in existing:
-                await db.execute(
-                    f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
-                )
-    # Existing candidate rows predate durable run identifiers.  They are
-    # offline-only rows and can safely receive deterministic placeholders.
-    await db.execute(
-        """UPDATE ext_v2_message_run SET run_id=lower(hex(randomblob(16)))
-           WHERE run_id IS NULL OR run_id=''"""
-    )
-    await db.commit()
 
 
 PUBLIC_STATUS = {
@@ -191,7 +69,7 @@ def conversation_payload(row) -> dict:
 
 
 async def create_conversation(
-    db,
+    conn,
     *,
     conversation_id: str,
     tenant_id: str,
@@ -207,7 +85,7 @@ async def create_conversation(
     context_version = int(
         any(value is not None for value in (equipment_id, fixed_asset_no, fault_code))
     )
-    await db.execute(
+    result = await exec_sql(conn,
         """INSERT INTO ext_v2_conversation
            (conversation_id, tenant_id, business_user_id, title,
             equipment_id, fixed_asset_no, asset_id, fault_code, context_version,
@@ -230,9 +108,8 @@ async def create_conversation(
             now,
         ),
     )
-    await db.commit()
     return await get_conversation(
-        db,
+        conn,
         conversation_id=conversation_id,
         tenant_id=tenant_id,
         business_user_id=business_user_id,
@@ -240,20 +117,16 @@ async def create_conversation(
 
 
 async def get_conversation(
-    db, *, conversation_id: str, tenant_id: str, business_user_id: str
+    conn, *, conversation_id: str, tenant_id: str, business_user_id: str
 ) -> dict | None:
-    async with db.execute(
-        """SELECT * FROM ext_v2_conversation
+    row = await fetchone(conn, """SELECT * FROM ext_v2_conversation
            WHERE conversation_id=? AND tenant_id=? AND business_user_id=?
-           LIMIT 1""",
-        (conversation_id, tenant_id, business_user_id),
-    ) as cursor:
-        row = await cursor.fetchone()
+           LIMIT 1""", (conversation_id, tenant_id, business_user_id))
     return dict(row) if row else None
 
 
 async def update_conversation_mapping(
-    db,
+    conn,
     *,
     conversation_id: str,
     tenant_id: str,
@@ -261,7 +134,7 @@ async def update_conversation_mapping(
     ragflow_chat_id: str | None,
     ragflow_session_id: str | None,
 ) -> None:
-    await db.execute(
+    result = await exec_sql(conn,
         """UPDATE ext_v2_conversation
            SET ragflow_chat_id=COALESCE(?, ragflow_chat_id),
                ragflow_session_id=COALESCE(?, ragflow_session_id)
@@ -274,11 +147,10 @@ async def update_conversation_mapping(
             business_user_id,
         ),
     )
-    await db.commit()
 
 
 async def list_conversations(
-    db,
+    conn,
     *,
     tenant_id: str,
     business_user_id: str,
@@ -295,12 +167,12 @@ async def list_conversations(
         )
         params.extend([marker[0], marker[0], marker[1]])
     params.append(limit + 1)
-    async with db.execute(
+    rows = await fetchall(
+        conn,
         f"""SELECT * FROM ext_v2_conversation WHERE {where}
             ORDER BY last_message_at DESC, conversation_id DESC LIMIT ?""",
         tuple(params),
-    ) as db_cursor:
-        rows = await db_cursor.fetchall()
+    )
     has_more = len(rows) > limit
     page = rows[:limit]
     next_cursor = None
@@ -310,7 +182,7 @@ async def list_conversations(
 
 
 async def update_context(
-    db,
+    conn,
     *,
     conversation_id: str,
     tenant_id: str,
@@ -343,12 +215,11 @@ async def update_context(
     if expected_context_version is not None:
         query += " AND context_version=?"
         params.append(expected_context_version)
-    cursor = await db.execute(query, tuple(params))
-    await db.commit()
-    if cursor.rowcount != 1:
+    result = await exec_sql(conn, query, tuple(params))
+    if result.rowcount != 1:
         return None
     return await get_conversation(
-        db,
+        conn,
         conversation_id=conversation_id,
         tenant_id=tenant_id,
         business_user_id=business_user_id,
@@ -356,41 +227,33 @@ async def update_context(
 
 
 async def count_messages(
-    db,
+    conn,
     *,
     conversation_id: str,
     tenant_id: str,
     business_user_id: str,
 ) -> int:
-    async with db.execute(
-        """SELECT COUNT(*) AS n FROM ext_v2_message
-           WHERE conversation_id=? AND tenant_id=? AND business_user_id=?""",
-        (conversation_id, tenant_id, business_user_id),
-    ) as cursor:
-        row = await cursor.fetchone()
+    row = await fetchone(conn, """SELECT COUNT(*) AS n FROM ext_v2_message
+           WHERE conversation_id=? AND tenant_id=? AND business_user_id=?""", (conversation_id, tenant_id, business_user_id))
     return int(row["n"] if row else 0)
 
 
 async def list_messages_ordered(
-    db,
+    conn,
     *,
     conversation_id: str,
     tenant_id: str,
     business_user_id: str,
 ) -> list[dict]:
-    async with db.execute(
-        """SELECT message_id, role, content, status, created_at
+    row = await fetchone(conn, """SELECT message_id, role, content, status, created_at
            FROM ext_v2_message
            WHERE conversation_id=? AND tenant_id=? AND business_user_id=?
-           ORDER BY created_at ASC, message_id ASC""",
-        (conversation_id, tenant_id, business_user_id),
-    ) as cursor:
-        rows = await cursor.fetchall()
+           ORDER BY created_at ASC, message_id ASC""", (conversation_id, tenant_id, business_user_id))
     return [dict(row) for row in rows]
 
 
 async def save_context_summary(
-    db,
+    conn,
     *,
     conversation_id: str,
     tenant_id: str,
@@ -401,7 +264,7 @@ async def save_context_summary(
 ) -> dict | None:
     now = utc_now()
     session_clause = ", ragflow_session_id=NULL" if clear_ragflow_session else ""
-    await db.execute(
+    result = await exec_sql(conn,
         f"""UPDATE ext_v2_conversation
            SET context_summary=?, summary_updated_at=?,
                compressed_turn_watermark=?{session_clause}
@@ -415,9 +278,8 @@ async def save_context_summary(
             business_user_id,
         ),
     )
-    await db.commit()
     return await get_conversation(
-        db,
+        conn,
         conversation_id=conversation_id,
         tenant_id=tenant_id,
         business_user_id=business_user_id,
@@ -425,16 +287,15 @@ async def save_context_summary(
 
 
 async def archive_conversation(
-    db, *, conversation_id: str, tenant_id: str, business_user_id: str
+    conn, *, conversation_id: str, tenant_id: str, business_user_id: str
 ) -> dict:
-    await db.execute(
+    result = await exec_sql(conn,
         """UPDATE ext_v2_conversation SET status='archived'
            WHERE conversation_id=? AND tenant_id=? AND business_user_id=?""",
         (conversation_id, tenant_id, business_user_id),
     )
-    await db.commit()
     return await get_conversation(
-        db,
+        conn,
         conversation_id=conversation_id,
         tenant_id=tenant_id,
         business_user_id=business_user_id,
@@ -442,39 +303,35 @@ async def archive_conversation(
 
 
 async def get_message_run(
-    db,
+    conn,
     *,
     conversation_id: str,
     tenant_id: str,
     business_user_id: str,
     client_message_id: str,
 ) -> dict | None:
-    async with db.execute(
-        """SELECT * FROM ext_v2_message_run
+    row = await fetchone(conn, """SELECT * FROM ext_v2_message_run
            WHERE conversation_id=? AND tenant_id=? AND business_user_id=?
-             AND client_message_id=? LIMIT 1""",
-        (conversation_id, tenant_id, business_user_id, client_message_id),
-    ) as cursor:
-        row = await cursor.fetchone()
+             AND client_message_id=? LIMIT 1""", (conversation_id, tenant_id, business_user_id, client_message_id))
     return dict(row) if row else None
 
 
 async def list_recent_entity_scopes(
-    db,
+    conn,
     *,
     conversation_id: str,
     tenant_id: str,
     business_user_id: str,
     limit: int = 2,
 ) -> list[dict]:
-    async with db.execute(
+    rows = await fetchall(
+        conn,
         """SELECT entity_scope_json, created_at FROM ext_v2_message_run
            WHERE conversation_id=? AND tenant_id=? AND business_user_id=?
              AND entity_scope_json IS NOT NULL
            ORDER BY created_at DESC LIMIT ?""",
         (conversation_id, tenant_id, business_user_id, max(1, limit)),
-    ) as cursor:
-        rows = await cursor.fetchall()
+    )
     scopes: list[dict] = []
     for row in rows:
         try:
@@ -489,7 +346,7 @@ async def list_recent_entity_scopes(
 
 
 async def reserve_message_run(
-    db,
+    conn,
     *,
     conversation_id: str,
     tenant_id: str,
@@ -510,8 +367,8 @@ async def reserve_message_run(
         datetime.now(timezone.utc).timestamp() + lease_seconds,
         tz=timezone.utc,
     ).isoformat()
-    await db.execute("BEGIN IMMEDIATE")
-    cursor = await db.execute(
+    await begin_transaction(conn)
+    result = await exec_sql(conn,
         """INSERT INTO ext_v2_message_run
            (conversation_id, tenant_id, business_user_id, client_message_id,
              request_hash, run_id, status, lease_expires_at, user_message_id,
@@ -534,9 +391,9 @@ async def reserve_message_run(
             utc_now(),
         ),
     )
-    if cursor.rowcount == 1 and question is not None and user_message_id:
+    if result.rowcount == 1 and question is not None and user_message_id:
         now = utc_now()
-        await db.execute(
+        result = await exec_sql(conn,
             """INSERT INTO ext_v2_message
                (message_id, conversation_id, tenant_id, business_user_id, role,
                 content, status, citations_json, created_at)
@@ -551,7 +408,7 @@ async def reserve_message_run(
             ),
         )
         title = title or (" ".join((question or "").split())[:80] or "New conversation")
-        await db.execute(
+        result = await exec_sql(conn,
             """UPDATE ext_v2_conversation
                SET last_message_at=?, first_message_at=COALESCE(first_message_at, ?),
                    title=CASE WHEN title='New conversation' THEN ? ELSE title END
@@ -565,11 +422,10 @@ async def reserve_message_run(
                 business_user_id,
             ),
         )
-    await db.commit()
-    if cursor.rowcount != 1:
+    if result.rowcount != 1:
         return None
     return await get_message_run(
-        db,
+        conn,
         conversation_id=conversation_id,
         tenant_id=tenant_id,
         business_user_id=business_user_id,
@@ -578,7 +434,7 @@ async def reserve_message_run(
 
 
 async def complete_message_run(
-    db,
+    conn,
     *,
     conversation_id: str,
     tenant_id: str,
@@ -588,7 +444,7 @@ async def complete_message_run(
     status: str = "completed",
     assistant_message_id: str | None = None,
 ) -> None:
-    await db.execute(
+    result = await exec_sql(conn,
         """UPDATE ext_v2_message_run
            SET result_json=?, status=?, assistant_message_id=?, lease_expires_at=NULL
            WHERE conversation_id=? AND tenant_id=? AND business_user_id=?
@@ -603,11 +459,10 @@ async def complete_message_run(
             client_message_id,
         ),
     )
-    await db.commit()
 
 
 async def mark_expired_run_interrupted(
-    db,
+    conn,
     *,
     conversation_id: str,
     tenant_id: str,
@@ -627,7 +482,7 @@ async def mark_expired_run_interrupted(
             },
         }
     }
-    await db.execute(
+    result = await exec_sql(conn,
         """UPDATE ext_v2_message_run
            SET status='failed', result_json=?, lease_expires_at=NULL
            WHERE conversation_id=? AND tenant_id=? AND business_user_id=?
@@ -642,15 +497,15 @@ async def mark_expired_run_interrupted(
             now,
         ),
     )
-    async with db.execute(
+    row = await fetchone(
+        conn,
         """SELECT assistant_message_id FROM ext_v2_message_run
            WHERE conversation_id=? AND tenant_id=? AND business_user_id=?
              AND client_message_id=?""",
         (conversation_id, tenant_id, business_user_id, client_message_id),
-    ) as cursor:
-        row = await cursor.fetchone()
+    )
     if row and row["assistant_message_id"]:
-        await db.execute(
+        result = await exec_sql(conn,
             """INSERT INTO ext_v2_message
                (message_id, conversation_id, tenant_id, business_user_id, role,
                 content, status, citations_json, created_at)
@@ -664,9 +519,8 @@ async def mark_expired_run_interrupted(
                 now,
             ),
         )
-    await db.commit()
     return await get_message_run(
-        db,
+        conn,
         conversation_id=conversation_id,
         tenant_id=tenant_id,
         business_user_id=business_user_id,
@@ -675,7 +529,7 @@ async def mark_expired_run_interrupted(
 
 
 async def add_message(
-    db,
+    conn,
     *,
     message_id: str,
     conversation_id: str,
@@ -688,7 +542,7 @@ async def add_message(
     reasoning: str | None = None,
 ) -> dict:
     now = utc_now()
-    await db.execute(
+    result = await exec_sql(conn,
         """INSERT INTO ext_v2_message
            (message_id, conversation_id, tenant_id, business_user_id, role,
             content, status, citations_json, reasoning, created_at)
@@ -707,7 +561,7 @@ async def add_message(
         ),
     )
     for citation in citations:
-        await db.execute(
+        result = await exec_sql(conn,
             """INSERT INTO ext_v2_citation
                (citation_id, message_id, conversation_id, tenant_id,
                 business_user_id, snapshot_json, created_at)
@@ -730,12 +584,11 @@ async def add_message(
         title_update = ", title=CASE WHEN title='New conversation' THEN ? ELSE title END"
         params.append(title)
     params.extend([conversation_id, tenant_id, business_user_id])
-    await db.execute(
+    result = await exec_sql(conn,
         f"""UPDATE ext_v2_conversation SET last_message_at=?{title_update}
             WHERE conversation_id=? AND tenant_id=? AND business_user_id=?""",
         tuple(params),
     )
-    await db.commit()
     return {
         "messageId": message_id,
         "role": role,
@@ -747,18 +600,44 @@ async def add_message(
     }
 
 
+async def claim_ragflow_session(
+    conn,
+    *,
+    conversation_id: str,
+    tenant_id: str,
+    business_user_id: str,
+    ragflow_chat_id: str,
+    ragflow_session_id: str,
+) -> int:
+    """Atomically bind session when still unset; returns affected rowcount."""
+    result = await exec_sql(
+        conn,
+        """UPDATE ext_v2_conversation
+           SET ragflow_chat_id=?, ragflow_session_id=?
+           WHERE conversation_id=? AND tenant_id=? AND business_user_id=?
+             AND ragflow_session_id IS NULL""",
+        (
+            ragflow_chat_id,
+            ragflow_session_id,
+            conversation_id,
+            tenant_id,
+            business_user_id,
+        ),
+    )
+    return int(result.rowcount or 0)
+
+
 async def set_message_attachments(
-    db, *, message_id: str, attachments: list[dict]
+    conn, *, message_id: str, attachments: list[dict]
 ) -> None:
-    await db.execute(
+    result = await exec_sql(conn,
         "UPDATE ext_v2_message SET attachments_json=? WHERE message_id=?",
         (json.dumps(attachments, ensure_ascii=False, separators=(",", ":")), message_id),
     )
-    await db.commit()
 
 
 async def list_messages(
-    db,
+    conn,
     *,
     conversation_id: str,
     tenant_id: str,
@@ -773,12 +652,12 @@ async def list_messages(
         where += " AND (created_at > ? OR (created_at = ? AND message_id > ?))"
         params.extend([marker[0], marker[0], marker[1]])
     params.append(limit + 1)
-    async with db.execute(
+    rows = await fetchall(
+        conn,
         f"""SELECT * FROM ext_v2_message WHERE {where}
             ORDER BY created_at ASC, message_id ASC LIMIT ?""",
         tuple(params),
-    ) as db_cursor:
-        rows = await db_cursor.fetchall()
+    )
     has_more = len(rows) > limit
     page = rows[:limit]
     items = []
@@ -817,14 +696,14 @@ async def list_messages(
 
 
 async def get_citation(
-    db, *, citation_id: str, tenant_id: str, business_user_id: str
+    conn, *, citation_id: str, tenant_id: str, business_user_id: str
 ) -> dict | None:
-    async with db.execute(
+    row = await fetchone(
+        conn,
         """SELECT snapshot_json FROM ext_v2_citation
            WHERE citation_id=? AND tenant_id=? AND business_user_id=? LIMIT 1""",
         (citation_id, tenant_id, business_user_id),
-    ) as cursor:
-        row = await cursor.fetchone()
+    )
     if not row:
         return None
     try:

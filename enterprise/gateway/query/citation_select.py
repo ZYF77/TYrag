@@ -27,20 +27,6 @@ _ABSTAIN_SIGNAL_RE = re.compile(
         )
     )
 )
-_INVENTORY_QUESTION_RE = re.compile(
-    r"(有哪些|有什么|现有|目前有).{0,12}(信息|资料|文档|文件|内容)|哪些资料|哪些文档"
-)
-_DOCUMENT_TYPE_RE = re.compile(
-    r"发票|收据|合格证|调试记录|手册|说明书|工单|验收(?:单|记录)|图纸|合同|移交单"
-)
-_CATALOG_TYPE_HINTS = (
-    (("invoice", "发票"), "发票"),
-    (("receipt", "收据"), "收据"),
-    (("manual", "handbook", "手册", "说明书"), "手册"),
-    (("certificate", "合格证"), "合格证"),
-    (("commission", "debug", "调试"), "调试记录"),
-    (("workorder", "work-order", "工单"), "工单"),
-)
 
 # Recoverable mangled citation forms → canonical [ID:n].
 _MARKER_REPAIR_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
@@ -127,61 +113,6 @@ def cited_chunk_indexes(answer: str) -> list[int]:
 def answer_signals_abstain(answer: str) -> bool:
     """True when the user-facing answer asserts the asked fact is unavailable."""
     return bool(_ABSTAIN_SIGNAL_RE.search(answer or ""))
-
-
-def is_inventory_question(question: str) -> bool:
-    """True when the user is asking what documents/information currently exist."""
-    return bool(_INVENTORY_QUESTION_RE.search(question or ""))
-
-
-def answer_lists_available_documents(answer: str) -> bool:
-    """True when the answer names concrete document types or cites a chunk."""
-    text = answer or ""
-    return bool(_DOCUMENT_TYPE_RE.search(text) or CITATION_MARKER_PATTERN.search(text))
-
-
-def catalog_document_types(*labels: str) -> list[str]:
-    """Map registry file names / types onto coarse labels without identifiers."""
-    found: list[str] = []
-    for label in labels:
-        blob = str(label or "").casefold()
-        if not blob:
-            continue
-        matched = "文档"
-        for hints, name in _CATALOG_TYPE_HINTS:
-            if any(hint in blob for hint in hints):
-                matched = name
-                break
-        if matched not in found:
-            found.append(matched)
-    return found
-
-
-def catalog_inventory_answer(*labels: str) -> str:
-    """Build a Guard-safe inventory sentence from document catalog labels."""
-    types = catalog_document_types(*labels)
-    if not types:
-        return ""
-    return "当前知识库中该设备已有以下资料：" + "、".join(types) + "。"
-
-
-def force_abstain_outcome(answer: str, status: str, question: str = "") -> str:
-    """Force no_reliable_evidence when the answer abstains from the user ask.
-
-    Inventory questions ("有哪些信息/资料") may mix a leftover abstain phrase
-    with a real listing of retrieved document types. Keep those completed so
-    Gateway does not wipe the listing. Repair/fault questions still fail closed.
-    """
-    if status == "failed":
-        return status
-    if (
-        is_inventory_question(question)
-        and answer_lists_available_documents(answer)
-    ):
-        return status
-    if answer_signals_abstain(answer):
-        return "no_reliable_evidence"
-    return status
 
 
 def chunk_overlaps_answer(chunk: dict, answer: str) -> bool:

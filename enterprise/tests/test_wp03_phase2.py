@@ -42,10 +42,12 @@ from enterprise.gateway.quality.worker import (  # noqa: E402
 from enterprise.gateway.query import acl_store  # noqa: E402
 from enterprise.gateway.query import router as query_router  # noqa: E402
 from enterprise.gateway.query.ragflow_client import RAGFlowQueryStub  # noqa: E402
+from enterprise.gateway.db.dialect import exec_sql  # noqa: E402
+from enterprise.gateway.db.ops import gw_read, gw_write  # noqa: E402
+from enterprise.gateway.db.testing import create_gateway  # noqa: E402
 from enterprise.gateway.sync.models import (  # noqa: E402
     ExtDocumentMap,
     OutboxEvent,
-    init_db,
     insert_mapping,
     update_mapping_status,
     update_parser_application,
@@ -157,12 +159,11 @@ async def isolated_phase2_db(phase2_env):
     import enterprise.gateway.app as app_module
     import enterprise.gateway.quality.router as quality_router
 
-    if app_module._db is not None:
-        await app_module._db.close()
-        app_module._db = None
-    db = await init_db(phase2_env)
-    repo = ExtUserMapRepo(db_path=phase2_env)
-    await repo.ensure_table()
+    if app_module._gateway_db is not None:
+        await app_module._gateway_db.dispose()
+        app_module._gateway_db = None
+    gateway = await create_gateway(phase2_env)
+    repo = ExtUserMapRepo(gateway=gateway)
     await repo.insert_mapping(
         ExtUserMap(
             tenant_id="customer-a",
@@ -181,16 +182,18 @@ async def isolated_phase2_db(phase2_env):
     )
     await repo.close()
     query_router._query_stub = None
-    app_module.app.dependency_overrides[app_module.get_db] = lambda: db
-    app_module.app.dependency_overrides[query_router.get_db] = lambda: db
-    app_module.app.dependency_overrides[quality_router.get_db] = lambda: db
+    app_module.app.dependency_overrides[app_module.get_gateway_db] = lambda: gateway
+    app_module.app.dependency_overrides[app_module.get_db] = lambda: gateway
+    app_module.app.dependency_overrides[query_router.get_db] = lambda: gateway
+    app_module.app.dependency_overrides[quality_router.get_db] = lambda: gateway
     try:
-        yield db
+        yield gateway
     finally:
+        app_module.app.dependency_overrides.pop(app_module.get_gateway_db, None)
         app_module.app.dependency_overrides.pop(app_module.get_db, None)
         app_module.app.dependency_overrides.pop(query_router.get_db, None)
         app_module.app.dependency_overrides.pop(quality_router.get_db, None)
-        await db.close()
+        await gateway.dispose()
 
 
 async def _insert_ready_document(
@@ -219,9 +222,10 @@ async def _insert_ready_document(
         allow_group_ids=json.dumps(list(allow_groups)),
         deny_group_ids="[]",
     )
-    doc = await insert_mapping(db, doc)
-    await update_mapping_status(
+    doc = await gw_write(db, insert_mapping, doc)
+    await gw_write(
         db,
+        update_mapping_status,
         doc,
         "ready",
         pipeline_status="DONE",
@@ -229,8 +233,9 @@ async def _insert_ready_document(
         current_version=1,
     )
     for user in allowed_users:
-        await acl_store.grant(
+        await gw_write(
             db,
+            acl_store.grant,
             tenant_id=tenant_id,
             external_document_id=doc_id,
             business_user_id=user,
@@ -252,8 +257,9 @@ async def _create_evaluation(
         file_name=doc.file_name,
         source_system=doc.source_system,
     )
-    evaluation = await quality_models.get_or_create_evaluation(
+    evaluation = await gw_write(
         db,
+        quality_models.get_or_create_evaluation,
         tenant_id=doc.tenant_id,
         source_system=doc.source_system,
         external_document_id=doc.external_document_id,
@@ -264,8 +270,9 @@ async def _create_evaluation(
         evaluation_version=evaluation_version,
     )
     if state == "completed":
-        await quality_models.complete_evaluation(
+        await gw_write(
             db,
+            quality_models.complete_evaluation,
             evaluation.id,
             parse_quality_status=quality_status,
             quality_reasons=reasons or ["PASSED"],
@@ -376,31 +383,63 @@ def test_non_file_readiness_keeps_legacy_query_compatibility():
 
 @pytest.mark.asyncio
 async def test_schema_idempotent_and_version_isolated(tmp_path):
-    db = await init_db(str(tmp_path / "schema.db"))
-    await quality_models.ensure_quality_schema(db)
-    routing = route_document(media_type="application/pdf", file_name="a.pdf")
-    e1 = await quality_models.get_or_create_evaluation(
-        db, "tenant-a", "EAM", "DOC-1", "v1",
-        "ds-1", "doc-1", routing,
-    )
-    e2 = await quality_models.get_or_create_evaluation(
-        db, "tenant-a", "EAM", "DOC-1", "v1",
-        "ds-1", "doc-1", routing,
-    )
-    assert e1.id == e2.id
-    e_other = await quality_models.get_or_create_evaluation(
-        db, "tenant-b", "EAM", "DOC-1", "v2",
-        "ds-2", "doc-2", routing,
-    )
-    latest_a = await quality_models.get_latest_evaluation(
-        db, "tenant-a", "EAM", "DOC-1", "v1",
-    )
-    latest_b = await quality_models.get_latest_evaluation(
-        db, "tenant-b", "EAM", "DOC-1", "v2",
-    )
-    assert latest_a.id == e1.id
-    assert latest_b.id == e_other.id
-    await db.close()
+    gateway = await create_gateway(str(tmp_path / "schema.db"))
+    try:
+        routing = route_document(media_type="application/pdf", file_name="a.pdf")
+        e1 = await gw_write(
+            gateway,
+            quality_models.get_or_create_evaluation,
+            "tenant-a",
+            "EAM",
+            "DOC-1",
+            "v1",
+            "ds-1",
+            "doc-1",
+            routing,
+        )
+        e2 = await gw_write(
+            gateway,
+            quality_models.get_or_create_evaluation,
+            "tenant-a",
+            "EAM",
+            "DOC-1",
+            "v1",
+            "ds-1",
+            "doc-1",
+            routing,
+        )
+        assert e1.id == e2.id
+        e_other = await gw_write(
+            gateway,
+            quality_models.get_or_create_evaluation,
+            "tenant-b",
+            "EAM",
+            "DOC-1",
+            "v2",
+            "ds-2",
+            "doc-2",
+            routing,
+        )
+        latest_a = await gw_read(
+            gateway,
+            quality_models.get_latest_evaluation,
+            "tenant-a",
+            "EAM",
+            "DOC-1",
+            "v1",
+        )
+        latest_b = await gw_read(
+            gateway,
+            quality_models.get_latest_evaluation,
+            "tenant-b",
+            "EAM",
+            "DOC-1",
+            "v2",
+        )
+        assert latest_a.id == e1.id
+        assert latest_b.id == e_other.id
+    finally:
+        await gateway.dispose()
 
 
 def test_quality_gate_fail_closed():
@@ -537,8 +576,8 @@ class FailingQueryStub(RAGFlowQueryStub):
         raise RAGFlowAPIError("Stub: RAGFlow unavailable", 503)
 
 
-async def _ready_with_client(db, client, content=b"manual"):
-    service = SyncService(db, SourceStub(content), client)
+async def _ready_with_client(gateway, client, content=b"manual"):
+    service = SyncService(gateway, SourceStub(content), client)
     event = _make_event(content)
     doc, _ = await service.process_event(event)
     assert doc.sync_status == "ready"
@@ -547,63 +586,81 @@ async def _ready_with_client(db, client, content=b"manual"):
 
 @pytest.mark.asyncio
 async def test_worker_completes_passed_with_chunks():
-    db = await init_db(":memory:")
-    client = PassStub()
-    client.run_status = "DONE"
-    doc = await _ready_with_client(db, client)
-    quality = QualityEvaluationService(db, client)
-    await QualityEvaluationWorker(quality).run_once()
-    evaluation = await quality_models.get_latest_evaluation(
-        db, doc.tenant_id, doc.source_system,
-        doc.external_document_id, doc.source_version_id,
-    )
-    assert evaluation.evaluation_state == "completed"
-    assert evaluation.parse_quality_status == "passed"
-    assert evaluation.metrics_json["parserApplication"]["state"] == "ragflow_owned"
-    assert evaluation.parse_repeatability_hash
-    assert evaluation.e2e_repeatability_hash
-    await db.close()
+    gateway = await create_gateway(":memory:")
+    try:
+        client = PassStub()
+        client.run_status = "DONE"
+        doc = await _ready_with_client(gateway, client)
+        quality = QualityEvaluationService(gateway, client)
+        await QualityEvaluationWorker(quality).run_once()
+        evaluation = await gw_read(
+            gateway,
+            quality_models.get_latest_evaluation,
+            doc.tenant_id,
+            doc.source_system,
+            doc.external_document_id,
+            doc.source_version_id,
+        )
+        assert evaluation.evaluation_state == "completed"
+        assert evaluation.parse_quality_status == "passed"
+        assert evaluation.metrics_json["parserApplication"]["state"] == "ragflow_owned"
+        assert evaluation.parse_repeatability_hash
+        assert evaluation.e2e_repeatability_hash
+    finally:
+        await gateway.dispose()
 
 
 @pytest.mark.asyncio
 async def test_worker_ignores_legacy_parser_mismatch_fields():
-    db = await init_db(":memory:")
-    client = PassStub()
-    client.run_status = "DONE"
-    doc = await _ready_with_client(db, client)
-    await update_parser_application(db, doc, status="mismatch")
-    quality = QualityEvaluationService(db, client)
-    await QualityEvaluationWorker(quality).run_once()
-    evaluation = await quality_models.get_latest_evaluation(
-        db, doc.tenant_id, doc.source_system,
-        doc.external_document_id, doc.source_version_id,
-    )
-    assert evaluation.parse_quality_status == "passed"
-    assert evaluation.metrics_json["parserApplication"]["state"] == "ragflow_owned"
-    await db.close()
+    gateway = await create_gateway(":memory:")
+    try:
+        client = PassStub()
+        client.run_status = "DONE"
+        doc = await _ready_with_client(gateway, client)
+        await gw_write(gateway, update_parser_application, doc, status="mismatch")
+        quality = QualityEvaluationService(gateway, client)
+        await QualityEvaluationWorker(quality).run_once()
+        evaluation = await gw_read(
+            gateway,
+            quality_models.get_latest_evaluation,
+            doc.tenant_id,
+            doc.source_system,
+            doc.external_document_id,
+            doc.source_version_id,
+        )
+        assert evaluation.parse_quality_status == "passed"
+        assert evaluation.metrics_json["parserApplication"]["state"] == "ragflow_owned"
+    finally:
+        await gateway.dispose()
 
 
 @pytest.mark.asyncio
 async def test_worker_ignores_dataset_parser_config_differences():
-    db = await init_db(":memory:")
-    client = PassStub()
-    client.run_status = "DONE"
-    doc = await _ready_with_client(db, client)
-    client._documents[doc.ragflow_document_id]["data"][0]["parser_config"][
-        "layout_recognize"
-    ] = "Plain Text"
+    gateway = await create_gateway(":memory:")
+    try:
+        client = PassStub()
+        client.run_status = "DONE"
+        doc = await _ready_with_client(gateway, client)
+        client._documents[doc.ragflow_document_id]["data"][0]["parser_config"][
+            "layout_recognize"
+        ] = "Plain Text"
 
-    quality = QualityEvaluationService(db, client)
-    await QualityEvaluationWorker(quality).run_once()
-    evaluation = await quality_models.get_latest_evaluation(
-        db, doc.tenant_id, doc.source_system,
-        doc.external_document_id, doc.source_version_id,
-    )
-    assert evaluation.parse_quality_status == "passed"
-    assert "PARSER_APPLICATION_READBACK_MISMATCH" not in (
-        evaluation.quality_reasons or []
-    )
-    await db.close()
+        quality = QualityEvaluationService(gateway, client)
+        await QualityEvaluationWorker(quality).run_once()
+        evaluation = await gw_read(
+            gateway,
+            quality_models.get_latest_evaluation,
+            doc.tenant_id,
+            doc.source_system,
+            doc.external_document_id,
+            doc.source_version_id,
+        )
+        assert evaluation.parse_quality_status == "passed"
+        assert "PARSER_APPLICATION_READBACK_MISMATCH" not in (
+            evaluation.quality_reasons or []
+        )
+    finally:
+        await gateway.dispose()
 
 
 class EmptyAfterReadyStub(PassStub):
@@ -628,132 +685,170 @@ class EmptyAfterReadyStub(PassStub):
 
 @pytest.mark.asyncio
 async def test_worker_empty_chunks_is_not_passed():
-    db = await init_db(":memory:")
-    client = EmptyAfterReadyStub()
-    client.run_status = "DONE"
-    doc = await _ready_with_client(db, client)
-    client.empty_chunks = True
-    quality = QualityEvaluationService(db, client)
-    await QualityEvaluationWorker(quality).run_once()
-    evaluation = await quality_models.get_latest_evaluation(
-        db, doc.tenant_id, doc.source_system,
-        doc.external_document_id, doc.source_version_id,
-    )
-    assert evaluation.evaluation_state == "completed"
-    assert evaluation.parse_quality_status != "passed"
-    await db.close()
+    gateway = await create_gateway(":memory:")
+    try:
+        client = EmptyAfterReadyStub()
+        client.run_status = "DONE"
+        doc = await _ready_with_client(gateway, client)
+        client.empty_chunks = True
+        quality = QualityEvaluationService(gateway, client)
+        await QualityEvaluationWorker(quality).run_once()
+        evaluation = await gw_read(
+            gateway,
+            quality_models.get_latest_evaluation,
+            doc.tenant_id,
+            doc.source_system,
+            doc.external_document_id,
+            doc.source_version_id,
+        )
+        assert evaluation.evaluation_state == "completed"
+        assert evaluation.parse_quality_status != "passed"
+    finally:
+        await gateway.dispose()
 
 
 @pytest.mark.asyncio
 async def test_worker_retries_then_recovers():
-    db = await init_db(":memory:")
-    client = FlakyStub(fail_remaining=0)
-    client.run_status = "DONE"
-    doc = await _ready_with_client(db, client)
-    client.fail_remaining = 1
-    evaluation = await quality_models.get_latest_evaluation(
-        db, doc.tenant_id, doc.source_system,
-        doc.external_document_id, doc.source_version_id,
-    )
-    await db.execute(
-        "UPDATE quality_evaluation_job SET max_attempts=2 WHERE evaluation_id=?",
-        (evaluation.id,),
-    )
-    await db.commit()
-    quality = QualityEvaluationService(db, client)
-    worker = QualityEvaluationWorker(quality)
-    await worker.run_once()
-    job = await quality_models.get_job_by_evaluation_id(db, evaluation.id)
-    assert job.status == "pending"
-    await db.execute(
-        "UPDATE quality_evaluation_job SET next_retry_at=NULL WHERE id=?",
-        (job.id,),
-    )
-    await db.commit()
-    await worker.run_once()
-    evaluation = await quality_models.get_evaluation_by_id(db, evaluation.id)
-    job = await quality_models.get_job_by_evaluation_id(db, evaluation.id)
-    assert evaluation.evaluation_state == "completed"
-    assert evaluation.parse_quality_status == "passed"
-    assert job.status == "done"
-    await db.close()
+    gateway = await create_gateway(":memory:")
+    try:
+        client = FlakyStub(fail_remaining=0)
+        client.run_status = "DONE"
+        doc = await _ready_with_client(gateway, client)
+        client.fail_remaining = 1
+        evaluation = await gw_read(
+            gateway,
+            quality_models.get_latest_evaluation,
+            doc.tenant_id,
+            doc.source_system,
+            doc.external_document_id,
+            doc.source_version_id,
+        )
+        async with gateway.transaction(write=True) as conn:
+            await exec_sql(
+                conn,
+                "UPDATE quality_evaluation_job SET max_attempts=2 WHERE evaluation_id=?",
+                (evaluation.id,),
+            )
+        quality = QualityEvaluationService(gateway, client)
+        worker = QualityEvaluationWorker(quality)
+        await worker.run_once()
+        job = await gw_read(
+            gateway, quality_models.get_job_by_evaluation_id, evaluation.id
+        )
+        assert job.status == "pending"
+        async with gateway.transaction(write=True) as conn:
+            await exec_sql(
+                conn,
+                "UPDATE quality_evaluation_job SET next_retry_at=NULL WHERE id=?",
+                (job.id,),
+            )
+        await worker.run_once()
+        evaluation = await gw_read(
+            gateway, quality_models.get_evaluation_by_id, evaluation.id
+        )
+        job = await gw_read(
+            gateway, quality_models.get_job_by_evaluation_id, evaluation.id
+        )
+        assert evaluation.evaluation_state == "completed"
+        assert evaluation.parse_quality_status == "passed"
+        assert job.status == "done"
+    finally:
+        await gateway.dispose()
 
 
 @pytest.mark.asyncio
 async def test_worker_dead_letter_never_passes():
-    db = await init_db(":memory:")
-    client = FlakyStub(fail_remaining=0)
-    client.run_status = "DONE"
-    doc = await _ready_with_client(db, client)
-    client.fail_remaining = 99
-    evaluation = await quality_models.get_latest_evaluation(
-        db, doc.tenant_id, doc.source_system,
-        doc.external_document_id, doc.source_version_id,
-    )
-    await db.execute(
-        "UPDATE quality_evaluation_job SET max_attempts=1 WHERE evaluation_id=?",
-        (evaluation.id,),
-    )
-    await db.commit()
-    quality = QualityEvaluationService(db, client)
-    await QualityEvaluationWorker(quality).run_once()
-    evaluation = await quality_models.get_evaluation_by_id(db, evaluation.id)
-    job = await quality_models.get_job_by_evaluation_id(db, evaluation.id)
-    assert evaluation.parse_quality_status != "passed"
-    assert evaluation.evaluation_state == "failed"
-    assert job.status == "dead"
-    await db.close()
+    gateway = await create_gateway(":memory:")
+    try:
+        client = FlakyStub(fail_remaining=0)
+        client.run_status = "DONE"
+        doc = await _ready_with_client(gateway, client)
+        client.fail_remaining = 99
+        evaluation = await gw_read(
+            gateway,
+            quality_models.get_latest_evaluation,
+            doc.tenant_id,
+            doc.source_system,
+            doc.external_document_id,
+            doc.source_version_id,
+        )
+        async with gateway.transaction(write=True) as conn:
+            await exec_sql(
+                conn,
+                "UPDATE quality_evaluation_job SET max_attempts=1 WHERE evaluation_id=?",
+                (evaluation.id,),
+            )
+        quality = QualityEvaluationService(gateway, client)
+        await QualityEvaluationWorker(quality).run_once()
+        evaluation = await gw_read(
+            gateway, quality_models.get_evaluation_by_id, evaluation.id
+        )
+        job = await gw_read(
+            gateway, quality_models.get_job_by_evaluation_id, evaluation.id
+        )
+        assert evaluation.parse_quality_status != "passed"
+        assert evaluation.evaluation_state == "failed"
+        assert job.status == "dead"
+    finally:
+        await gateway.dispose()
 
 
 @pytest.mark.asyncio
 async def test_worker_marks_failed_document_failed():
-    db = await init_db(":memory:")
-    doc = ExtDocumentMap(
-        tenant_id="customer-a",
-        source_system="DEMO",
-        external_document_id="DOC-FAIL",
-        source_version_id="v1",
-        event_id=str(uuid.uuid4()),
-        sha256=hashlib.sha256(b"broken").hexdigest(),
-        file_name="broken.pdf",
-        ragflow_dataset_id="ds-1",
-        ragflow_document_id="doc-fail",
-        source_page_count=1,
-        sync_status="failed",
-    )
-    doc = await insert_mapping(db, doc)
-    await update_mapping_status(db, doc, "failed", pipeline_status="FAIL")
-    routing = route_document(media_type=doc.media_type, file_name=doc.file_name)
-    evaluation = await quality_models.get_or_create_evaluation(
-        db,
-        tenant_id=doc.tenant_id,
-        source_system=doc.source_system,
-        external_document_id=doc.external_document_id,
-        source_version_id=doc.source_version_id,
-        ragflow_dataset_id=doc.ragflow_dataset_id,
-        ragflow_document_id=doc.ragflow_document_id,
-        routing=routing,
-        evaluation_version="1",
-    )
-    client = RAGFlowDocumentStub()
-    client.run_status = "FAIL"
-    client._documents["doc-fail"] = {
-        "data": [
-            {
-                "id": "doc-fail",
-                "dataset_id": "ds-1",
-                "run": "FAIL",
-                "page_count": 1,
-            }
-        ]
-    }
-    quality = QualityEvaluationService(db, client)
-    await QualityEvaluationWorker(quality).run_once()
-    evaluation = await quality_models.get_evaluation_by_id(db, evaluation.id)
-    assert evaluation.evaluation_state == "completed"
-    assert evaluation.parse_quality_status == "failed"
-    assert "RAGFLOW_PARSE_FAILED" in evaluation.quality_reasons
-    await db.close()
+    gateway = await create_gateway(":memory:")
+    try:
+        doc = ExtDocumentMap(
+            tenant_id="customer-a",
+            source_system="DEMO",
+            external_document_id="DOC-FAIL",
+            source_version_id="v1",
+            event_id=str(uuid.uuid4()),
+            sha256=hashlib.sha256(b"broken").hexdigest(),
+            file_name="broken.pdf",
+            ragflow_dataset_id="ds-1",
+            ragflow_document_id="doc-fail",
+            source_page_count=1,
+            sync_status="failed",
+        )
+        doc = await gw_write(gateway, insert_mapping, doc)
+        await gw_write(
+            gateway, update_mapping_status, doc, "failed", pipeline_status="FAIL"
+        )
+        routing = route_document(media_type=doc.media_type, file_name=doc.file_name)
+        evaluation = await gw_write(
+            gateway,
+            quality_models.get_or_create_evaluation,
+            tenant_id=doc.tenant_id,
+            source_system=doc.source_system,
+            external_document_id=doc.external_document_id,
+            source_version_id=doc.source_version_id,
+            ragflow_dataset_id=doc.ragflow_dataset_id,
+            ragflow_document_id=doc.ragflow_document_id,
+            routing=routing,
+            evaluation_version="1",
+        )
+        client = RAGFlowDocumentStub()
+        client.run_status = "FAIL"
+        client._documents["doc-fail"] = {
+            "data": [
+                {
+                    "id": "doc-fail",
+                    "dataset_id": "ds-1",
+                    "run": "FAIL",
+                    "page_count": 1,
+                }
+            ]
+        }
+        quality = QualityEvaluationService(gateway, client)
+        await QualityEvaluationWorker(quality).run_once()
+        evaluation = await gw_read(
+            gateway, quality_models.get_evaluation_by_id, evaluation.id
+        )
+        assert evaluation.evaluation_state == "completed"
+        assert evaluation.parse_quality_status == "failed"
+        assert "RAGFLOW_PARSE_FAILED" in evaluation.quality_reasons
+    finally:
+        await gateway.dispose()
 
 
 @pytest.mark.usefixtures("isolated_phase2_db")
@@ -828,8 +923,13 @@ class TestQualityAPI:
             )
             assert re_resp.status_code == 202
             assert re_resp.json()["evaluationVersion"] == "2"
-            latest = await quality_models.get_latest_evaluation(
-                db, "customer-a", "DEMO", "DOC-A", "v1",
+            latest = await gw_read(
+                db,
+                quality_models.get_latest_evaluation,
+                "customer-a",
+                "DEMO",
+                "DOC-A",
+                "v1",
             )
             assert latest.evaluation_version == "2"
 
@@ -944,8 +1044,9 @@ class TestQualityAPI:
 @pytest.mark.asyncio
 async def test_backfill_dry_run_then_real(tmp_path):
     db_path = str(tmp_path / "backfill.db")
-    db = await init_db(db_path)
-    await _insert_ready_document(db, doc_id="DOC-E")
+    gateway = await create_gateway(db_path)
+    await _insert_ready_document(gateway, doc_id="DOC-E")
+    await gateway.dispose()
     args = argparse.Namespace(
         db=db_path,
         tenant="customer-a",
@@ -957,28 +1058,48 @@ async def test_backfill_dry_run_then_real(tmp_path):
         max_attempts=5,
     )
     await backfill_run(args)
-    latest = await quality_models.get_latest_evaluation(
-        db, "customer-a", "DEMO", "DOC-E", "v1",
-    )
-    assert latest is None
-    args.dry_run = False
-    await backfill_run(args)
-    latest = await quality_models.get_latest_evaluation(
-        db, "customer-a", "DEMO", "DOC-E", "v1",
-    )
-    assert latest is not None
-    assert latest.evaluation_state == "pending"
-    await db.close()
+    gateway = await create_gateway(db_path)
+    try:
+        latest = await gw_read(
+            gateway,
+            quality_models.get_latest_evaluation,
+            "customer-a",
+            "DEMO",
+            "DOC-E",
+            "v1",
+        )
+        assert latest is None
+        args.dry_run = False
+        await gateway.dispose()
+        await backfill_run(args)
+        gateway = await create_gateway(db_path)
+        latest = await gw_read(
+            gateway,
+            quality_models.get_latest_evaluation,
+            "customer-a",
+            "DEMO",
+            "DOC-E",
+            "v1",
+        )
+        assert latest is not None
+        assert latest.evaluation_state == "pending"
+    finally:
+        await gateway.dispose()
 
 
 @pytest.mark.asyncio
 async def test_backfill_skips_disabled_and_is_idempotent(tmp_path):
     db_path = str(tmp_path / "backfill2.db")
-    db = await init_db(db_path)
-    doc = await _insert_ready_document(db, doc_id="DOC-DISABLED")
-    await update_mapping_status(
-        db, doc, "disabled", business_status="disabled",
+    gateway = await create_gateway(db_path)
+    doc = await _insert_ready_document(gateway, doc_id="DOC-DISABLED")
+    await gw_write(
+        gateway,
+        update_mapping_status,
+        doc,
+        "disabled",
+        business_status="disabled",
     )
+    await gateway.dispose()
     args = argparse.Namespace(
         db=db_path,
         tenant="customer-a",
@@ -990,19 +1111,28 @@ async def test_backfill_skips_disabled_and_is_idempotent(tmp_path):
         max_attempts=5,
     )
     await backfill_run(args)
-    latest = await quality_models.get_latest_evaluation(
-        db, "customer-a", "DEMO", "DOC-DISABLED", "v1",
-    )
-    assert latest is None
-    await db.close()
+    gateway = await create_gateway(db_path)
+    try:
+        latest = await gw_read(
+            gateway,
+            quality_models.get_latest_evaluation,
+            "customer-a",
+            "DEMO",
+            "DOC-DISABLED",
+            "v1",
+        )
+        assert latest is None
+    finally:
+        await gateway.dispose()
 
 
 @pytest.mark.asyncio
 async def test_backfill_resume_and_idempotent(tmp_path):
     db_path = str(tmp_path / "backfill3.db")
-    db = await init_db(db_path)
+    gateway = await create_gateway(db_path)
     for index in range(3):
-        await _insert_ready_document(db, doc_id=f"DOC-RESUME-{index}")
+        await _insert_ready_document(gateway, doc_id=f"DOC-RESUME-{index}")
+    await gateway.dispose()
     base = argparse.Namespace(
         db=db_path,
         tenant="customer-a",
@@ -1014,56 +1144,78 @@ async def test_backfill_resume_and_idempotent(tmp_path):
         max_attempts=5,
     )
     await backfill_run(base)
-    first = await quality_models.list_evaluations(
-        db, tenant_id="customer-a", source_system="DEMO",
-    )
-    assert len(first) == 2
-    base.offset = 2
-    await backfill_run(base)
-    second = await quality_models.list_evaluations(
-        db, tenant_id="customer-a", source_system="DEMO",
-    )
-    assert len(second) == 3
-    await backfill_run(base)
-    third = await quality_models.list_evaluations(
-        db, tenant_id="customer-a", source_system="DEMO",
-    )
-    assert len(third) == 3
-    await db.close()
+    gateway = await create_gateway(db_path)
+    try:
+        first = await gw_read(
+            gateway,
+            quality_models.list_evaluations,
+            tenant_id="customer-a",
+            source_system="DEMO",
+        )
+        assert len(first) == 2
+        await gateway.dispose()
+        base.offset = 2
+        await backfill_run(base)
+        gateway = await create_gateway(db_path)
+        second = await gw_read(
+            gateway,
+            quality_models.list_evaluations,
+            tenant_id="customer-a",
+            source_system="DEMO",
+        )
+        assert len(second) == 3
+        await gateway.dispose()
+        await backfill_run(base)
+        gateway = await create_gateway(db_path)
+        third = await gw_read(
+            gateway,
+            quality_models.list_evaluations,
+            tenant_id="customer-a",
+            source_system="DEMO",
+        )
+        assert len(third) == 3
+    finally:
+        await gateway.dispose()
 
 
 @pytest.mark.asyncio
 async def test_quality_reconciler_fails_stuck_running():
     from datetime import datetime, timedelta, timezone
 
-    db = await init_db(":memory:")
-    doc = await _insert_ready_document(db, doc_id="DOC-STUCK")
-    routing = route_document(media_type=doc.media_type, file_name=doc.file_name)
-    evaluation = await quality_models.get_or_create_evaluation(
-        db,
-        tenant_id=doc.tenant_id,
-        source_system=doc.source_system,
-        external_document_id=doc.external_document_id,
-        source_version_id=doc.source_version_id,
-        ragflow_dataset_id=doc.ragflow_dataset_id,
-        ragflow_document_id=doc.ragflow_document_id,
-        routing=routing,
-        evaluation_version="1",
-    )
-    locked_at = (
-        datetime.now(timezone.utc) - timedelta(hours=1)
-    ).isoformat()
-    await db.execute(
-        """UPDATE quality_evaluation_job
-           SET status='running', locked_at=?, worker_id='stuck-worker'
-           WHERE evaluation_id=?""",
-        (locked_at, evaluation.id),
-    )
-    await db.commit()
-    service = QualityEvaluationService(db, RAGFlowDocumentStub())
-    reconciler = QualityReconciler(service, running_timeout_seconds=60)
-    await reconciler.run_once()
-    evaluation = await quality_models.get_evaluation_by_id(db, evaluation.id)
-    assert evaluation.evaluation_state == "failed"
-    assert evaluation.last_error_code == "QUALITY_RUNNING_TIMEOUT"
-    await db.close()
+    gateway = await create_gateway(":memory:")
+    try:
+        doc = await _insert_ready_document(gateway, doc_id="DOC-STUCK")
+        routing = route_document(media_type=doc.media_type, file_name=doc.file_name)
+        evaluation = await gw_write(
+            gateway,
+            quality_models.get_or_create_evaluation,
+            tenant_id=doc.tenant_id,
+            source_system=doc.source_system,
+            external_document_id=doc.external_document_id,
+            source_version_id=doc.source_version_id,
+            ragflow_dataset_id=doc.ragflow_dataset_id,
+            ragflow_document_id=doc.ragflow_document_id,
+            routing=routing,
+            evaluation_version="1",
+        )
+        locked_at = (
+            datetime.now(timezone.utc) - timedelta(hours=1)
+        ).isoformat()
+        async with gateway.transaction(write=True) as conn:
+            await exec_sql(
+                conn,
+                """UPDATE quality_evaluation_job
+                   SET status='running', locked_at=?, worker_id='stuck-worker'
+                   WHERE evaluation_id=?""",
+                (locked_at, evaluation.id),
+            )
+        service = QualityEvaluationService(gateway, RAGFlowDocumentStub())
+        reconciler = QualityReconciler(service, running_timeout_seconds=60)
+        await reconciler.run_once()
+        evaluation = await gw_read(
+            gateway, quality_models.get_evaluation_by_id, evaluation.id
+        )
+        assert evaluation.evaluation_state == "failed"
+        assert evaluation.last_error_code == "QUALITY_RUNNING_TIMEOUT"
+    finally:
+        await gateway.dispose()

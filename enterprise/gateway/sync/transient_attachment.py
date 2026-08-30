@@ -1,11 +1,17 @@
 """Conversation-scoped transient attachments.
 
-Only metadata and hashed one-time tickets are stored in Enterprise SQLite.
+Only metadata and hashed one-time tickets are stored in the Gateway database.
 Bytes remain in the configured S3-compatible object store and all browser
 downloads go through the Gateway.
 """
 
 from __future__ import annotations
+
+from sqlalchemy.ext.asyncio import AsyncConnection
+
+from enterprise.gateway.db import GatewayDatabase
+from enterprise.gateway.db.dialect import begin_transaction, exec_sql, fetchall, fetchone
+from enterprise.gateway.db.exceptions import PersistenceConflictError, PersistenceUnavailableError
 
 import asyncio
 import base64
@@ -20,10 +26,10 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import PurePath
+from typing import Any, Mapping
 from typing import Any, Awaitable, Callable, Protocol
 from urllib.parse import quote
 
-import aiosqlite
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials
@@ -145,120 +151,54 @@ class CreateAttachmentRequest(BaseModel):
     content: str = Field(min_length=1)
 
 
-CREATE_TRANSIENT_ATTACHMENT = """
-CREATE TABLE IF NOT EXISTS ext_transient_attachment (
-    attachment_id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    conversation_id TEXT NOT NULL,
-    business_user_id TEXT NOT NULL,
-    object_bucket TEXT NOT NULL,
-    object_key TEXT NOT NULL,
-    file_name TEXT NOT NULL,
-    media_type TEXT NOT NULL,
-    extension TEXT NOT NULL,
-    size_bytes INTEGER NOT NULL,
-    sha256 TEXT NOT NULL,
-    expires_at TEXT NOT NULL,
-    max_downloads INTEGER NOT NULL DEFAULT 1,
-    download_count INTEGER NOT NULL DEFAULT 0,
-    status TEXT NOT NULL DEFAULT 'uploading',
-    upload_attempts INTEGER NOT NULL DEFAULT 0,
-    delete_attempts INTEGER NOT NULL DEFAULT 0,
-    next_retry_at TEXT,
-    last_error_code TEXT,
-    last_error_message TEXT,
-    deleted_at TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_ext_transient_attachment_expiry
-    ON ext_transient_attachment(status, expires_at, next_retry_at);
-CREATE INDEX IF NOT EXISTS idx_ext_transient_attachment_owner
-    ON ext_transient_attachment(tenant_id, conversation_id, business_user_id);
-
-CREATE TABLE IF NOT EXISTS ext_transient_attachment_ticket (
-    ticket_hash TEXT PRIMARY KEY,
-    attachment_id TEXT NOT NULL,
-    tenant_id TEXT NOT NULL,
-    conversation_id TEXT NOT NULL,
-    business_user_id TEXT NOT NULL,
-    expires_at TEXT NOT NULL,
-    claimed_at TEXT,
-    claim_expires_at TEXT,
-    consumed_at TEXT,
-    download_attempts INTEGER NOT NULL DEFAULT 0,
-    last_error_code TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_ext_transient_ticket_expiry
-    ON ext_transient_attachment_ticket(expires_at, consumed_at);
-
-CREATE TABLE IF NOT EXISTS ext_transient_attachment_audit (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    attachment_id TEXT NOT NULL,
-    tenant_id TEXT NOT NULL,
-    conversation_id TEXT NOT NULL,
-    business_user_id TEXT NOT NULL,
-    action TEXT NOT NULL,
-    outcome TEXT NOT NULL,
-    request_id TEXT,
-    metadata_json TEXT NOT NULL DEFAULT '{}',
-    created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_ext_transient_audit_attachment
-    ON ext_transient_attachment_audit(attachment_id, created_at);
-
-CREATE TABLE IF NOT EXISTS ext_ragflow_temp_file (
-    file_id TEXT PRIMARY KEY,
-    created_at TEXT NOT NULL,
-    deleted_at TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_ext_ragflow_temp_file_pending
-    ON ext_ragflow_temp_file(deleted_at, created_at);
-"""
+async def ensure_attachment_schema(conn: AsyncConnection) -> None:
+    row = await fetchone(
+        conn,
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_schema=current_schema() AND table_name=?",
+        ("ext_transient_attachment",),
+    )
+    if row is None:
+        raise RuntimeError(
+            "Gateway schema is not initialized; create attachments from an "
+            "initialized GatewayDatabase"
+        )
 
 
-async def ensure_attachment_schema(db: aiosqlite.Connection) -> None:
-    await db.executescript(CREATE_TRANSIENT_ATTACHMENT)
-    async with db.execute("PRAGMA table_info(ext_transient_attachment)") as cursor:
-        existing = {row[1] for row in await cursor.fetchall()}
-    for column, definition in (
-        ("ragflow_file_id", "TEXT"),
-        ("ragflow_file_deleted_at", "TEXT"),
-    ):
-        if column not in existing:
-            await db.execute(
-                f"ALTER TABLE ext_transient_attachment ADD COLUMN {column} {definition}"
-            )
-    await db.commit()
-
-
-async def remember_ragflow_temp_file(db: aiosqlite.Connection, file_id: str) -> None:
+async def remember_ragflow_temp_file(db, file_id: str) -> None:
     if not file_id:
         return
-    await ensure_attachment_schema(db)
-    now = utc_now().isoformat()
-    await db.execute(
-        """INSERT INTO ext_ragflow_temp_file (file_id, created_at, deleted_at)
-           VALUES (?, ?, NULL)
-           ON CONFLICT(file_id) DO UPDATE SET
-             created_at=excluded.created_at,
-             deleted_at=NULL""",
-        (file_id, now),
-    )
-    await db.commit()
+    from enterprise.gateway.db.ops import gw_write
+
+    async def _do(conn: AsyncConnection) -> None:
+        await ensure_attachment_schema(conn)
+        now = utc_now().isoformat()
+        await exec_sql(
+            conn,
+            """INSERT INTO ext_ragflow_temp_file (file_id, created_at, deleted_at)
+               VALUES (?, ?, NULL)
+               ON CONFLICT(file_id) DO UPDATE SET
+                 created_at=excluded.created_at,
+                 deleted_at=NULL""",
+            (file_id, now),
+        )
+
+    await gw_write(db, _do)
 
 
-async def mark_ragflow_temp_file_deleted(db: aiosqlite.Connection, file_id: str) -> None:
+async def mark_ragflow_temp_file_deleted(db, file_id: str) -> None:
     if not file_id:
         return
-    await db.execute(
-        "UPDATE ext_ragflow_temp_file SET deleted_at=? WHERE file_id=?",
-        (utc_now().isoformat(), file_id),
-    )
-    await db.commit()
+    from enterprise.gateway.db.ops import gw_write
 
+    async def _do(conn: AsyncConnection) -> None:
+        await exec_sql(
+            conn,
+            "UPDATE ext_ragflow_temp_file SET deleted_at=? WHERE file_id=?",
+            (utc_now().isoformat(), file_id),
+        )
+
+    await gw_write(db, _do)
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -453,7 +393,7 @@ def decode_attachment_content(encoded: str) -> bytes:
     return decoded
 
 
-def _row_to_record(row: aiosqlite.Row | dict[str, Any]) -> AttachmentRecord:
+def _row_to_record(row: Mapping[str, Any] | dict[str, Any]) -> AttachmentRecord:
     return AttachmentRecord(
         attachment_id=row["attachment_id"],
         tenant_id=row["tenant_id"],
@@ -475,23 +415,22 @@ def _row_to_record(row: aiosqlite.Row | dict[str, Any]) -> AttachmentRecord:
     )
 
 
-def _row_value(row: aiosqlite.Row | dict[str, Any], key: str):
+def _row_value(row: Mapping[str, Any] | dict[str, Any], key: str):
     try:
         return row[key]
     except (KeyError, IndexError):
         return None
 
 
-async def _get_attachment(db: aiosqlite.Connection, attachment_id: str):
-    async with db.execute(
+async def _get_attachment(conn: AsyncConnection, attachment_id: str):
+    return await fetchone(
+        conn,
         "SELECT * FROM ext_transient_attachment WHERE attachment_id=?",
         (attachment_id,),
-    ) as cursor:
-        return await cursor.fetchone()
-
+    )
 
 async def _audit(
-    db: aiosqlite.Connection,
+    conn: AsyncConnection,
     *,
     attachment_id: str,
     tenant_id: str,
@@ -502,7 +441,7 @@ async def _audit(
     request_id: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> None:
-    await db.execute(
+    result = await exec_sql(conn,
         """INSERT INTO ext_transient_attachment_audit
            (attachment_id, tenant_id, conversation_id, business_user_id,
             action, outcome, request_id, metadata_json, created_at)
@@ -540,14 +479,22 @@ async def _retry_storage_operation(
 class TransientAttachmentService:
     def __init__(
         self,
-        db: aiosqlite.Connection,
+        gateway: GatewayDatabase,
         storage: AttachmentStorage | None = None,
         *,
         now_fn: Callable[[], datetime] = utc_now,
     ) -> None:
-        self.db = db
+        self.gateway = gateway
         self.storage = storage or _storage()
         self.now_fn = now_fn
+
+    async def _write(self, fn, /, *args, **kwargs):
+        async with self.gateway.transaction(write=True) as conn:
+            return await fn(conn, *args, **kwargs)
+
+    async def _read(self, fn, /, *args, **kwargs):
+        async with self.gateway.transaction(write=False) as conn:
+            return await fn(conn, *args, **kwargs)
 
     def _now(self) -> datetime:
         value = self.now_fn()
@@ -588,48 +535,52 @@ class TransientAttachmentService:
         )
         digest = hashlib.sha256(content).hexdigest()
         max_downloads = attachment_max_downloads()
+        await self._write(ensure_attachment_schema)
 
-        await self.db.execute(
-            """INSERT INTO ext_transient_attachment
-               (attachment_id, tenant_id, conversation_id, business_user_id,
-                object_bucket, object_key, file_name, media_type, extension,
-                size_bytes, sha256, expires_at, max_downloads, download_count,
-                status, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'uploading', ?, ?)""",
-            (
-                attachment_id,
-                tenant_id,
-                conversation_id,
-                business_user_id,
-                bucket,
-                object_key,
-                file_name,
-                media_type,
-                extension,
-                len(content),
-                digest,
-                expires_at,
-                max_downloads,
-                created_at,
-                created_at,
-            ),
-        )
-        await _audit(
-            self.db,
-            attachment_id=attachment_id,
-            tenant_id=tenant_id,
-            conversation_id=conversation_id,
-            business_user_id=business_user_id,
-            action="create",
-            outcome="accepted",
-            request_id=request_id,
-            metadata={
-                "indexPolicy": "never",
-                "mediaType": media_type,
-                "sizeBytes": len(content),
-            },
-        )
-        await self.db.commit()
+        async def _insert(conn: AsyncConnection) -> None:
+            await exec_sql(
+                conn,
+                """INSERT INTO ext_transient_attachment
+                   (attachment_id, tenant_id, conversation_id, business_user_id,
+                    object_bucket, object_key, file_name, media_type, extension,
+                    size_bytes, sha256, expires_at, max_downloads, download_count,
+                    status, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'uploading', ?, ?)""",
+                (
+                    attachment_id,
+                    tenant_id,
+                    conversation_id,
+                    business_user_id,
+                    bucket,
+                    object_key,
+                    file_name,
+                    media_type,
+                    extension,
+                    len(content),
+                    digest,
+                    expires_at,
+                    max_downloads,
+                    created_at,
+                    created_at,
+                ),
+            )
+            await _audit(
+                conn,
+                attachment_id=attachment_id,
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                business_user_id=business_user_id,
+                action="create",
+                outcome="accepted",
+                request_id=request_id,
+                metadata={
+                    "indexPolicy": "never",
+                    "mediaType": media_type,
+                    "sizeBytes": len(content),
+                },
+            )
+
+        await self._write(_insert)
 
         try:
             await _retry_storage_operation(
@@ -667,13 +618,16 @@ class TransientAttachmentService:
                 retryable=True,
             ) from exc
 
-        await self.db.execute(
-            """UPDATE ext_transient_attachment
-               SET status='active', upload_attempts=?, updated_at=?
-               WHERE attachment_id=?""",
-            (attachment_retry_attempts(), utc_now().isoformat(), attachment_id),
-        )
-        await self.db.commit()
+        async def _activate(conn: AsyncConnection) -> None:
+            await exec_sql(
+                conn,
+                """UPDATE ext_transient_attachment
+                   SET status='active', upload_attempts=?, updated_at=?
+                   WHERE attachment_id=?""",
+                (attachment_retry_attempts(), utc_now().isoformat(), attachment_id),
+            )
+
+        await self._write(_activate)
         record = await self._record_or_not_found(attachment_id)
         try:
             ticket = await self.issue_download_ticket(
@@ -725,35 +679,39 @@ class TransientAttachmentService:
         request_id: str | None,
     ) -> None:
         now = self._now().isoformat()
-        await self.db.execute(
-            """UPDATE ext_transient_attachment
-               SET status='delete_retry', upload_attempts=?, next_retry_at=?,
-                   last_error_code=?, last_error_message=?, updated_at=?
-               WHERE attachment_id=?""",
-            (
-                attachment_retry_attempts(),
-                now,
-                error_code,
-                "Object storage operation failed",
-                now,
-                attachment_id,
-            ),
-        )
-        await _audit(
-            self.db,
-            attachment_id=attachment_id,
-            tenant_id=tenant_id,
-            conversation_id=conversation_id,
-            business_user_id=business_user_id,
-            action="create",
-            outcome="failed",
-            request_id=request_id,
-            metadata={
-                "errorCode": error_code,
-                "attempts": attachment_retry_attempts(),
-            },
-        )
-        await self.db.commit()
+
+        async def _do(conn: AsyncConnection) -> None:
+            await exec_sql(
+                conn,
+                """UPDATE ext_transient_attachment
+                   SET status='delete_retry', upload_attempts=?, next_retry_at=?,
+                       last_error_code=?, last_error_message=?, updated_at=?
+                   WHERE attachment_id=?""",
+                (
+                    attachment_retry_attempts(),
+                    now,
+                    error_code,
+                    "Object storage operation failed",
+                    now,
+                    attachment_id,
+                ),
+            )
+            await _audit(
+                conn,
+                attachment_id=attachment_id,
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                business_user_id=business_user_id,
+                action="create",
+                outcome="failed",
+                request_id=request_id,
+                metadata={
+                    "errorCode": error_code,
+                    "attempts": attachment_retry_attempts(),
+                },
+            )
+
+        await self._write(_do)
 
     async def _schedule_cleanup(
         self,
@@ -766,43 +724,52 @@ class TransientAttachmentService:
         request_id: str | None,
     ) -> None:
         now = self._now().isoformat()
-        await self.db.execute(
-            """UPDATE ext_transient_attachment
-               SET status='delete_retry', next_retry_at=?,
-                   last_error_code=?, last_error_message=?, updated_at=?
-               WHERE attachment_id=?""",
-            (
-                now,
-                error_code,
-                "Attachment cleanup is scheduled",
-                now,
-                attachment_id,
-            ),
-        )
-        await _audit(
-            self.db,
-            attachment_id=attachment_id,
-            tenant_id=tenant_id,
-            conversation_id=conversation_id,
-            business_user_id=business_user_id,
-            action="cleanup",
-            outcome="scheduled",
-            request_id=request_id,
-            metadata={"errorCode": error_code},
-        )
-        await self.db.commit()
+
+        async def _do(conn: AsyncConnection) -> None:
+            await exec_sql(
+                conn,
+                """UPDATE ext_transient_attachment
+                   SET status='delete_retry', next_retry_at=?,
+                       last_error_code=?, last_error_message=?, updated_at=?
+                   WHERE attachment_id=?""",
+                (
+                    now,
+                    error_code,
+                    "Attachment cleanup is scheduled",
+                    now,
+                    attachment_id,
+                ),
+            )
+            await _audit(
+                conn,
+                attachment_id=attachment_id,
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                business_user_id=business_user_id,
+                action="cleanup",
+                outcome="scheduled",
+                request_id=request_id,
+                metadata={"errorCode": error_code},
+            )
+
+        await self._write(_do)
 
     async def _record_or_not_found(self, attachment_id: str) -> AttachmentRecord:
-        row = await _get_attachment(self.db, attachment_id)
+        row = await self._read(_get_attachment, attachment_id)
         if not row:
             raise TransientAttachmentError(
                 "ATTACHMENT_NOT_FOUND", 404, "Attachment not found"
             )
         return _row_to_record(row)
 
-    async def _conversation_is_active(self, row: dict[str, Any]) -> bool:
+    async def _conversation_is_active(
+        self, conn: AsyncConnection, row: Mapping[str, Any]
+    ) -> bool:
+        from enterprise.gateway.db import PersistenceUnavailableError
+
         try:
-            async with self.db.execute(
+            conversation = await fetchone(
+                conn,
                 """SELECT status FROM ext_v2_conversation
                    WHERE conversation_id=? AND tenant_id=? AND business_user_id=?""",
                 (
@@ -810,9 +777,8 @@ class TransientAttachmentService:
                     row["tenant_id"],
                     row["business_user_id"],
                 ),
-            ) as cursor:
-                conversation = await cursor.fetchone()
-        except aiosqlite.OperationalError as exc:
+            )
+        except PersistenceUnavailableError as exc:
             raise TransientAttachmentError(
                 "CONVERSATION_UNAVAILABLE",
                 503,
@@ -842,118 +808,112 @@ class TransientAttachmentService:
         request_id: str | None = None,
     ) -> DownloadTicket:
         now = self._now()
-        row = await _get_attachment(self.db, attachment_id)
-        if not row:
-            raise TransientAttachmentError(
-                "ATTACHMENT_NOT_FOUND", 404, "Attachment not found"
-            )
-        if row["tenant_id"] != tenant_id or row["business_user_id"] != business_user_id:
-            await self._record_denied(
-                row,
-                tenant_id,
-                business_user_id,
-                "ticket_issue",
-                "owner_mismatch",
-                request_id,
-            )
-            raise TransientAttachmentError(
-                "ATTACHMENT_FORBIDDEN", 403, "Attachment access is denied"
-            )
-        if not await self._conversation_is_active(row):
-            await self._record_denied(
-                row,
-                tenant_id,
-                business_user_id,
-                "ticket_issue",
-                "conversation_archived",
-                request_id,
-            )
-            raise TransientAttachmentError(
-                "CONVERSATION_ARCHIVED", 409, "Conversation is archived"
-            )
-        if row["status"] != "active" or _parse_timestamp(row["expires_at"]) <= now:
-            await self._record_denied(
-                row,
-                tenant_id,
-                business_user_id,
-                "ticket_issue",
-                "expired_or_deleted",
-                request_id,
-            )
-            raise TransientAttachmentError(
-                "ATTACHMENT_EXPIRED", 410, "Attachment has expired"
-            )
-        if row["download_count"] >= row["max_downloads"]:
-            await self._record_denied(
-                row,
-                tenant_id,
-                business_user_id,
-                "ticket_issue",
-                "download_limit",
-                request_id,
-            )
-            raise TransientAttachmentError(
-                "ATTACHMENT_DOWNLOAD_LIMIT",
-                410,
-                "Attachment download limit has been reached",
-            )
+        deny: tuple[Mapping[str, Any], str] | None = None
 
-        remaining = max(1, int((_parse_timestamp(row["expires_at"]) - now).total_seconds()))
-        expires_at = (
-            now + timedelta(seconds=min(attachment_ttl_seconds(), remaining))
-        ).isoformat()
-        token = secrets.token_urlsafe(32)
-        await self.db.execute(
-            """INSERT INTO ext_transient_attachment_ticket
-               (ticket_hash, attachment_id, tenant_id, conversation_id,
-                business_user_id, expires_at, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                hashlib.sha256(token.encode()).hexdigest(),
-                attachment_id,
-                tenant_id,
-                row["conversation_id"],
-                business_user_id,
-                expires_at,
-                now.isoformat(),
-                now.isoformat(),
-            ),
-        )
-        await _audit(
-            self.db,
-            attachment_id=attachment_id,
-            tenant_id=tenant_id,
-            conversation_id=row["conversation_id"],
-            business_user_id=business_user_id,
-            action="ticket_issue",
-            outcome="accepted",
-            request_id=request_id,
-            metadata={"expiresAt": expires_at},
-        )
-        await self.db.commit()
-        return DownloadTicket(token, attachment_id, expires_at)
+        async def _do(conn: AsyncConnection) -> DownloadTicket:
+            nonlocal deny
+            row = await _get_attachment(conn, attachment_id)
+            if not row:
+                raise TransientAttachmentError(
+                    "ATTACHMENT_NOT_FOUND", 404, "Attachment not found"
+                )
+            if row["tenant_id"] != tenant_id or row["business_user_id"] != business_user_id:
+                deny = (row, "owner_mismatch")
+                raise TransientAttachmentError(
+                    "ATTACHMENT_FORBIDDEN", 403, "Attachment access is denied"
+                )
+            if not await self._conversation_is_active(conn, row):
+                deny = (row, "conversation_archived")
+                raise TransientAttachmentError(
+                    "CONVERSATION_ARCHIVED", 409, "Conversation is archived"
+                )
+            if row["status"] != "active" or _parse_timestamp(row["expires_at"]) <= now:
+                deny = (row, "expired_or_deleted")
+                raise TransientAttachmentError(
+                    "ATTACHMENT_EXPIRED", 410, "Attachment has expired"
+                )
+            if row["download_count"] >= row["max_downloads"]:
+                deny = (row, "download_limit")
+                raise TransientAttachmentError(
+                    "ATTACHMENT_DOWNLOAD_LIMIT",
+                    410,
+                    "Attachment download limit has been reached",
+                )
+
+            remaining = max(
+                1, int((_parse_timestamp(row["expires_at"]) - now).total_seconds())
+            )
+            expires_at = (
+                now + timedelta(seconds=min(attachment_ttl_seconds(), remaining))
+            ).isoformat()
+            token = secrets.token_urlsafe(32)
+            await exec_sql(
+                conn,
+                """INSERT INTO ext_transient_attachment_ticket
+                   (ticket_hash, attachment_id, tenant_id, conversation_id,
+                    business_user_id, expires_at, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    hashlib.sha256(token.encode()).hexdigest(),
+                    attachment_id,
+                    tenant_id,
+                    row["conversation_id"],
+                    business_user_id,
+                    expires_at,
+                    now.isoformat(),
+                    now.isoformat(),
+                ),
+            )
+            await _audit(
+                conn,
+                attachment_id=attachment_id,
+                tenant_id=tenant_id,
+                conversation_id=row["conversation_id"],
+                business_user_id=business_user_id,
+                action="ticket_issue",
+                outcome="accepted",
+                request_id=request_id,
+                metadata={"expiresAt": expires_at},
+            )
+            return DownloadTicket(token, attachment_id, expires_at)
+
+        try:
+            return await self._write(_do)
+        except TransientAttachmentError:
+            if deny is not None:
+                await self._record_denied(
+                    deny[0],
+                    tenant_id,
+                    business_user_id,
+                    "ticket_issue",
+                    deny[1],
+                    request_id,
+                )
+            raise
 
     async def _record_denied(
         self,
-        row: dict[str, Any],
+        row: Mapping[str, Any],
         tenant_id: str,
         business_user_id: str,
         action: str,
         reason: str,
         request_id: str | None,
     ) -> None:
-        await _audit(
-            self.db,
-            attachment_id=row["attachment_id"],
-            tenant_id=tenant_id,
-            conversation_id=row["conversation_id"],
-            business_user_id=business_user_id,
-            action=action,
-            outcome="denied",
-            request_id=request_id,
-            metadata={"reason": reason},
-        )
-        await self.db.commit()
+        async def _do(conn: AsyncConnection) -> None:
+            await _audit(
+                conn,
+                attachment_id=row["attachment_id"],
+                tenant_id=tenant_id,
+                conversation_id=row["conversation_id"],
+                business_user_id=business_user_id,
+                action=action,
+                outcome="denied",
+                request_id=request_id,
+                metadata={"reason": reason},
+            )
+
+        await self._write(_do)
 
     async def download(
         self,
@@ -1045,222 +1005,227 @@ class TransientAttachmentService:
         now: datetime,
         request_id: str | None,
     ):
-        await self.db.execute("BEGIN IMMEDIATE")
-        async with self.db.execute(
-            """SELECT a.*, t.ticket_hash AS ticket_hash,
-                      t.expires_at AS ticket_expires_at,
-                      t.claimed_at, t.claim_expires_at
-               FROM ext_transient_attachment a
-               JOIN ext_transient_attachment_ticket t
-                 ON t.attachment_id=a.attachment_id
-              WHERE a.attachment_id=? AND t.ticket_hash=?""",
-            (attachment_id, ticket_hash),
-        ) as cursor:
-            row = await cursor.fetchone()
-        if row is None:
-            await self.db.rollback()
-            existing = await _get_attachment(self.db, attachment_id)
-            if existing:
-                await self._record_denied(
-                    existing,
-                    existing["tenant_id"],
-                    principal.business_user_id if principal else "unknown",
-                    "download",
-                    "invalid_ticket",
-                    request_id,
-                )
-            raise TransientAttachmentError(
-                "ATTACHMENT_TICKET_INVALID", 404, "Download ticket is invalid"
-            )
+        deny: tuple[Mapping[str, Any], str, str, str] | None = None
 
-        if principal and (
-            principal.tenant_id != row["tenant_id"]
-            or principal.business_user_id != row["business_user_id"]
-            or not {"ask", "admin"}.intersection(principal.capabilities)
-        ):
-            await self.db.rollback()
-            await self._record_denied(
-                row,
-                principal.tenant_id,
-                principal.business_user_id,
-                "download",
-                "principal_mismatch",
-                request_id,
+        async def _do(conn: AsyncConnection):
+            nonlocal deny
+            row = await fetchone(
+                conn,
+                """SELECT a.*, t.ticket_hash AS ticket_hash,
+                          t.expires_at AS ticket_expires_at,
+                          t.claimed_at, t.claim_expires_at
+                   FROM ext_transient_attachment a
+                   JOIN ext_transient_attachment_ticket t
+                     ON t.attachment_id=a.attachment_id
+                  WHERE a.attachment_id=? AND t.ticket_hash=?""",
+                (attachment_id, ticket_hash),
             )
-            raise TransientAttachmentError(
-                "ATTACHMENT_FORBIDDEN", 403, "Attachment access is denied"
+            if row is None:
+                existing = await _get_attachment(conn, attachment_id)
+                if existing:
+                    deny = (
+                        existing,
+                        existing["tenant_id"],
+                        principal.business_user_id if principal else "unknown",
+                        "invalid_ticket",
+                    )
+                raise TransientAttachmentError(
+                    "ATTACHMENT_TICKET_INVALID", 404, "Download ticket is invalid"
+                )
+
+            if principal and (
+                principal.tenant_id != row["tenant_id"]
+                or principal.business_user_id != row["business_user_id"]
+                or not {"ask", "admin"}.intersection(principal.capabilities)
+            ):
+                deny = (
+                    row,
+                    principal.tenant_id,
+                    principal.business_user_id,
+                    "principal_mismatch",
+                )
+                raise TransientAttachmentError(
+                    "ATTACHMENT_FORBIDDEN", 403, "Attachment access is denied"
+                )
+
+            conversation_active = await self._conversation_is_active(conn, row)
+            if not conversation_active:
+                deny = (
+                    row,
+                    row["tenant_id"],
+                    principal.business_user_id if principal else row["business_user_id"],
+                    "conversation_archived",
+                )
+                raise TransientAttachmentError(
+                    "CONVERSATION_ARCHIVED", 409, "Conversation is archived"
+                )
+
+            expired = (
+                row["status"] != "active"
+                or _parse_timestamp(row["ticket_expires_at"]) <= now
+                or _parse_timestamp(row["expires_at"]) <= now
             )
+            if expired:
+                deny = (
+                    row,
+                    row["tenant_id"],
+                    principal.business_user_id if principal else row["business_user_id"],
+                    "expired_or_deleted",
+                )
+                raise TransientAttachmentError(
+                    "ATTACHMENT_EXPIRED", 410, "Attachment has expired"
+                )
+            if row["download_count"] >= row["max_downloads"]:
+                deny = (
+                    row,
+                    row["tenant_id"],
+                    principal.business_user_id if principal else row["business_user_id"],
+                    "download_limit",
+                )
+                raise TransientAttachmentError(
+                    "ATTACHMENT_DOWNLOAD_LIMIT",
+                    410,
+                    "Attachment download limit has been reached",
+                )
+            if (
+                row["claimed_at"]
+                and row["claim_expires_at"]
+                and _parse_timestamp(row["claim_expires_at"]) > now
+            ):
+                raise TransientAttachmentError(
+                    "ATTACHMENT_TICKET_INVALID", 404, "Download ticket is invalid"
+                )
+
+            claim_time = now.isoformat()
+            claim_expires = (
+                now
+                + timedelta(
+                    seconds=_env_int("ENTERPRISE_ATTACHMENT_CLAIM_SECONDS", 60)
+                )
+            ).isoformat()
+            result = await exec_sql(
+                conn,
+                """UPDATE ext_transient_attachment_ticket
+                   SET claimed_at=?, claim_expires_at=?, updated_at=?
+                   WHERE ticket_hash=? AND consumed_at IS NULL
+                     AND (claimed_at IS NULL OR claim_expires_at<=?)""",
+                (claim_time, claim_expires, claim_time, ticket_hash, now.isoformat()),
+            )
+            if result.rowcount != 1:
+                raise TransientAttachmentError(
+                    "ATTACHMENT_TICKET_INVALID", 404, "Download ticket is invalid"
+                )
+            return dict(row) | {"claimed_at": claim_time}
 
         try:
-            conversation_active = await self._conversation_is_active(row)
+            return await self._write(_do)
         except TransientAttachmentError:
-            try:
-                await self.db.rollback()
-            except Exception:
-                pass
+            if deny is not None:
+                await self._record_denied(
+                    deny[0], deny[1], deny[2], "download", deny[3], request_id
+                )
             raise
-        if not conversation_active:
-            await self.db.rollback()
-            await self._record_denied(
-                row,
-                row["tenant_id"],
-                principal.business_user_id if principal else row["business_user_id"],
-                "download",
-                "conversation_archived",
-                request_id,
-            )
-            raise TransientAttachmentError(
-                "CONVERSATION_ARCHIVED", 409, "Conversation is archived"
-            )
-
-        expired = (
-            row["status"] != "active"
-            or _parse_timestamp(row["ticket_expires_at"]) <= now
-            or _parse_timestamp(row["expires_at"]) <= now
-        )
-        if expired:
-            await self.db.rollback()
-            await self._record_denied(
-                row,
-                row["tenant_id"],
-                principal.business_user_id if principal else row["business_user_id"],
-                "download",
-                "expired_or_deleted",
-                request_id,
-            )
-            raise TransientAttachmentError(
-                "ATTACHMENT_EXPIRED", 410, "Attachment has expired"
-            )
-        if row["download_count"] >= row["max_downloads"]:
-            await self.db.rollback()
-            await self._record_denied(
-                row,
-                row["tenant_id"],
-                principal.business_user_id if principal else row["business_user_id"],
-                "download",
-                "download_limit",
-                request_id,
-            )
-            raise TransientAttachmentError(
-                "ATTACHMENT_DOWNLOAD_LIMIT",
-                410,
-                "Attachment download limit has been reached",
-            )
-        if (
-            row["claimed_at"]
-            and row["claim_expires_at"]
-            and _parse_timestamp(row["claim_expires_at"]) > now
-        ):
-            await self.db.rollback()
-            raise TransientAttachmentError(
-                "ATTACHMENT_TICKET_INVALID", 404, "Download ticket is invalid"
-            )
-
-        claim_time = now.isoformat()
-        claim_expires = (
-            now
-            + timedelta(
-                seconds=_env_int("ENTERPRISE_ATTACHMENT_CLAIM_SECONDS", 60)
-            )
-        ).isoformat()
-        cursor = await self.db.execute(
-            """UPDATE ext_transient_attachment_ticket
-               SET claimed_at=?, claim_expires_at=?, updated_at=?
-               WHERE ticket_hash=? AND consumed_at IS NULL
-                 AND (claimed_at IS NULL OR claim_expires_at<=?)""",
-            (claim_time, claim_expires, claim_time, ticket_hash, now.isoformat()),
-        )
-        if cursor.rowcount != 1:
-            await self.db.rollback()
-            raise TransientAttachmentError(
-                "ATTACHMENT_TICKET_INVALID", 404, "Download ticket is invalid"
-            )
-        await self.db.commit()
-        return dict(row) | {"claimed_at": claim_time}
 
     async def _release_claim(
         self,
-        row: dict[str, Any],
+        row: Mapping[str, Any],
         claim_time: str,
         request_id: str | None,
         error_code: str,
     ) -> None:
-        await self.db.execute(
-            """UPDATE ext_transient_attachment_ticket
-               SET claimed_at=NULL, claim_expires_at=NULL,
-                   download_attempts=download_attempts+1,
-                   last_error_code=?, updated_at=?
-               WHERE ticket_hash=? AND claimed_at=? AND consumed_at IS NULL""",
-            (error_code, utc_now().isoformat(), row["ticket_hash"], claim_time),
-        )
-        await _audit(
-            self.db,
-            attachment_id=row["attachment_id"],
-            tenant_id=row["tenant_id"],
-            conversation_id=row["conversation_id"],
-            business_user_id=row["business_user_id"],
-            action="download",
-            outcome="failed",
-            request_id=request_id,
-            metadata={"errorCode": error_code},
-        )
-        await self.db.commit()
+        async def _do(conn: AsyncConnection) -> None:
+            await exec_sql(
+                conn,
+                """UPDATE ext_transient_attachment_ticket
+                   SET claimed_at=NULL, claim_expires_at=NULL,
+                       download_attempts=download_attempts+1,
+                       last_error_code=?, updated_at=?
+                   WHERE ticket_hash=? AND claimed_at=? AND consumed_at IS NULL""",
+                (error_code, utc_now().isoformat(), row["ticket_hash"], claim_time),
+            )
+            await _audit(
+                conn,
+                attachment_id=row["attachment_id"],
+                tenant_id=row["tenant_id"],
+                conversation_id=row["conversation_id"],
+                business_user_id=row["business_user_id"],
+                action="download",
+                outcome="failed",
+                request_id=request_id,
+                metadata={"errorCode": error_code},
+            )
+
+        await self._write(_do)
 
     async def _complete_claim(
         self,
-        row: dict[str, Any],
+        row: Mapping[str, Any],
         claim_time: str,
         request_id: str | None,
     ) -> AttachmentRecord:
         now = utc_now().isoformat()
-        await self.db.execute("BEGIN IMMEDIATE")
-        cursor = await self.db.execute(
-            """UPDATE ext_transient_attachment_ticket
-               SET consumed_at=?, claimed_at=NULL, claim_expires_at=NULL,
-                   updated_at=?
-               WHERE ticket_hash=? AND claimed_at=? AND consumed_at IS NULL""",
-            (now, now, row["ticket_hash"], claim_time),
-        )
-        if cursor.rowcount != 1:
-            await self.db.rollback()
-            raise RuntimeError("attachment ticket claim was lost")
-        await self.db.execute(
-            """UPDATE ext_transient_attachment
-               SET download_count=download_count+1, updated_at=?
-               WHERE attachment_id=? AND status='active'""",
-            (now, row["attachment_id"]),
-        )
-        await _audit(
-            self.db,
-            attachment_id=row["attachment_id"],
-            tenant_id=row["tenant_id"],
-            conversation_id=row["conversation_id"],
-            business_user_id=row["business_user_id"],
-            action="download",
-            outcome="accepted",
-            request_id=request_id,
-            metadata={"sizeBytes": row["size_bytes"]},
-        )
-        await self.db.commit()
-        return await self._record_or_not_found(row["attachment_id"])
+
+        async def _do(conn: AsyncConnection) -> AttachmentRecord:
+            result = await exec_sql(
+                conn,
+                """UPDATE ext_transient_attachment_ticket
+                   SET consumed_at=?, claimed_at=NULL, claim_expires_at=NULL,
+                       updated_at=?
+                   WHERE ticket_hash=? AND claimed_at=? AND consumed_at IS NULL""",
+                (now, now, row["ticket_hash"], claim_time),
+            )
+            if result.rowcount != 1:
+                raise RuntimeError("attachment ticket claim was lost")
+            await exec_sql(
+                conn,
+                """UPDATE ext_transient_attachment
+                   SET download_count=download_count+1, updated_at=?
+                   WHERE attachment_id=? AND status='active'""",
+                (now, row["attachment_id"]),
+            )
+            await _audit(
+                conn,
+                attachment_id=row["attachment_id"],
+                tenant_id=row["tenant_id"],
+                conversation_id=row["conversation_id"],
+                business_user_id=row["business_user_id"],
+                action="download",
+                outcome="accepted",
+                request_id=request_id,
+                metadata={"sizeBytes": row["size_bytes"]},
+            )
+            refreshed = await _get_attachment(conn, row["attachment_id"])
+            if not refreshed:
+                raise TransientAttachmentError(
+                    "ATTACHMENT_NOT_FOUND", 404, "Attachment not found"
+                )
+            return _row_to_record(refreshed)
+
+        return await self._write(_do)
 
     async def set_ragflow_file(self, attachment_id: str, file_id: str) -> None:
-        await self.db.execute(
-            """UPDATE ext_transient_attachment
-               SET ragflow_file_id=?, ragflow_file_deleted_at=NULL, updated_at=?
-               WHERE attachment_id=?""",
-            (file_id, utc_now().isoformat(), attachment_id),
-        )
-        await self.db.commit()
+        async def _do(conn: AsyncConnection) -> None:
+            await exec_sql(
+                conn,
+                """UPDATE ext_transient_attachment
+                   SET ragflow_file_id=?, ragflow_file_deleted_at=NULL, updated_at=?
+                   WHERE attachment_id=?""",
+                (file_id, utc_now().isoformat(), attachment_id),
+            )
+
+        await self._write(_do)
 
     async def mark_ragflow_file_deleted(self, attachment_id: str) -> None:
-        await self.db.execute(
-            """UPDATE ext_transient_attachment
-               SET ragflow_file_deleted_at=?, updated_at=?
-               WHERE attachment_id=?""",
-            (utc_now().isoformat(), utc_now().isoformat(), attachment_id),
-        )
-        await self.db.commit()
+        async def _do(conn: AsyncConnection) -> None:
+            await exec_sql(
+                conn,
+                """UPDATE ext_transient_attachment
+                   SET ragflow_file_deleted_at=?, updated_at=?
+                   WHERE attachment_id=?""",
+                (utc_now().isoformat(), utc_now().isoformat(), attachment_id),
+            )
+
+        await self._write(_do)
 
     async def cleanup_expired(
         self,
@@ -1270,20 +1235,25 @@ class TransientAttachmentService:
     ) -> dict[str, int]:
         now = self._now()
         now_iso = now.isoformat()
-        async with self.db.execute(
-            """SELECT * FROM ext_transient_attachment
-               WHERE (expires_at<=? AND status IN
-                      ('active', 'uploading', 'upload_failed', 'expired'))
-                   OR (status='delete_retry' AND
-                       (next_retry_at IS NULL OR next_retry_at<=?))
-                   OR (ragflow_file_id IS NOT NULL
-                       AND (ragflow_file_deleted_at IS NULL
-                            OR ragflow_file_deleted_at='')
-                       AND status IN ('expired', 'deleted', 'delete_retry'))
-               ORDER BY expires_at ASC LIMIT ?""",
-            (now_iso, now_iso, max(1, min(limit, 1000))),
-        ) as cursor:
-            rows = await cursor.fetchall()
+        await self._write(ensure_attachment_schema)
+
+        async def _select(conn: AsyncConnection):
+            return await fetchall(
+                conn,
+                """SELECT * FROM ext_transient_attachment
+                   WHERE (expires_at<=? AND status IN
+                          ('active', 'uploading', 'upload_failed', 'expired'))
+                       OR (status='delete_retry' AND
+                           (next_retry_at IS NULL OR next_retry_at<=?))
+                       OR (ragflow_file_id IS NOT NULL
+                           AND (ragflow_file_deleted_at IS NULL
+                                OR ragflow_file_deleted_at='')
+                           AND status IN ('expired', 'deleted', 'delete_retry'))
+                   ORDER BY expires_at ASC LIMIT ?""",
+                (now_iso, now_iso, max(1, min(limit, 1000))),
+            )
+
+        rows = await self._read(_select)
 
         deleted = 0
         failed = 0
@@ -1293,13 +1263,17 @@ class TransientAttachmentService:
                 try:
                     deleter = delete_ragflow_file or _default_delete_ragflow_file
                     await deleter(file_id)
-                    await self.db.execute(
-                        """UPDATE ext_transient_attachment
-                           SET ragflow_file_deleted_at=?, updated_at=?
-                           WHERE attachment_id=?""",
-                        (now_iso, now_iso, row["attachment_id"]),
-                    )
-                    await self.db.commit()
+
+                    async def _mark_deleted(conn: AsyncConnection, rid=row["attachment_id"]):
+                        await exec_sql(
+                            conn,
+                            """UPDATE ext_transient_attachment
+                               SET ragflow_file_deleted_at=?, updated_at=?
+                               WHERE attachment_id=?""",
+                            (now_iso, now_iso, rid),
+                        )
+
+                    await self._write(_mark_deleted)
                 except Exception:
                     logger.warning(
                         "RAGFlow orphan file delete failed attachment_id=%s",
@@ -1308,94 +1282,112 @@ class TransientAttachmentService:
             if row["status"] == "deleted":
                 continue
             if row["status"] in {"active", "uploading", "upload_failed"}:
-                await self.db.execute(
-                    """UPDATE ext_transient_attachment
-                       SET status='expired', updated_at=?
-                       WHERE attachment_id=?""",
-                    (now_iso, row["attachment_id"]),
-                )
-                await _audit(
-                    self.db,
-                    attachment_id=row["attachment_id"],
-                    tenant_id=row["tenant_id"],
-                    conversation_id=row["conversation_id"],
-                    business_user_id=row["business_user_id"],
-                    action="expire",
-                    outcome="accepted",
-                    metadata={"expiresAt": row["expires_at"]},
-                )
-                await self.db.commit()
+
+                async def _expire(conn: AsyncConnection, r=row) -> None:
+                    await exec_sql(
+                        conn,
+                        """UPDATE ext_transient_attachment
+                           SET status='expired', updated_at=?
+                           WHERE attachment_id=?""",
+                        (now_iso, r["attachment_id"]),
+                    )
+                    await _audit(
+                        conn,
+                        attachment_id=r["attachment_id"],
+                        tenant_id=r["tenant_id"],
+                        conversation_id=r["conversation_id"],
+                        business_user_id=r["business_user_id"],
+                        action="expire",
+                        outcome="accepted",
+                        metadata={"expiresAt": r["expires_at"]},
+                    )
+
+                await self._write(_expire)
             try:
                 await _retry_storage_operation(
-                    lambda: self.storage.delete_object(
-                        row["object_bucket"], row["object_key"]
+                    lambda r=row: self.storage.delete_object(
+                        r["object_bucket"], r["object_key"]
                     )
                 )
             except Exception:
                 failed += 1
                 attempts = row["delete_attempts"] + attachment_retry_attempts()
-                await self.db.execute(
-                    """UPDATE ext_transient_attachment
-                       SET status='delete_retry', delete_attempts=?,
-                           next_retry_at=?, last_error_code=?,
-                           last_error_message=?, updated_at=?
-                       WHERE attachment_id=?""",
-                    (
-                        attempts,
-                        (now + timedelta(seconds=_retry_delay_seconds(attempts))).isoformat(),
-                        "ATTACHMENT_CLEANUP_RETRY",
-                        "Object storage cleanup failed",
-                        utc_now().isoformat(),
-                        row["attachment_id"],
-                    ),
-                )
-                await _audit(
-                    self.db,
-                    attachment_id=row["attachment_id"],
-                    tenant_id=row["tenant_id"],
-                    conversation_id=row["conversation_id"],
-                    business_user_id=row["business_user_id"],
-                    action="cleanup",
-                    outcome="failed",
-                    metadata={
-                        "errorCode": "ATTACHMENT_CLEANUP_RETRY",
-                        "attempts": attempts,
-                    },
-                )
-                await self.db.commit()
+
+                async def _retry_fail(conn: AsyncConnection, r=row, att=attempts) -> None:
+                    await exec_sql(
+                        conn,
+                        """UPDATE ext_transient_attachment
+                           SET status='delete_retry', delete_attempts=?,
+                               next_retry_at=?, last_error_code=?,
+                               last_error_message=?, updated_at=?
+                           WHERE attachment_id=?""",
+                        (
+                            att,
+                            (
+                                now + timedelta(seconds=_retry_delay_seconds(att))
+                            ).isoformat(),
+                            "ATTACHMENT_CLEANUP_RETRY",
+                            "Object storage cleanup failed",
+                            utc_now().isoformat(),
+                            r["attachment_id"],
+                        ),
+                    )
+                    await _audit(
+                        conn,
+                        attachment_id=r["attachment_id"],
+                        tenant_id=r["tenant_id"],
+                        conversation_id=r["conversation_id"],
+                        business_user_id=r["business_user_id"],
+                        action="cleanup",
+                        outcome="failed",
+                        metadata={
+                            "errorCode": "ATTACHMENT_CLEANUP_RETRY",
+                            "attempts": att,
+                        },
+                    )
+
+                await self._write(_retry_fail)
                 continue
 
             deleted += 1
-            await self.db.execute(
-                """UPDATE ext_transient_attachment
-                   SET status='deleted', deleted_at=?, next_retry_at=NULL,
-                       last_error_code=NULL, last_error_message=NULL,
-                       updated_at=?
-                   WHERE attachment_id=?""",
-                (now_iso, now_iso, row["attachment_id"]),
-            )
-            await self.db.execute(
-                "DELETE FROM ext_transient_attachment_ticket WHERE attachment_id=?",
-                (row["attachment_id"],),
-            )
-            await _audit(
-                self.db,
-                attachment_id=row["attachment_id"],
-                tenant_id=row["tenant_id"],
-                conversation_id=row["conversation_id"],
-                business_user_id=row["business_user_id"],
-                action="cleanup",
-                outcome="accepted",
-                metadata={"deleted": True},
-            )
-            await self.db.commit()
 
-        await self.db.execute(
-            """DELETE FROM ext_transient_attachment_ticket
-               WHERE consumed_at IS NOT NULL OR expires_at<=?""",
-            (now_iso,),
-        )
-        await self.db.commit()
+            async def _finish(conn: AsyncConnection, r=row) -> None:
+                await exec_sql(
+                    conn,
+                    """UPDATE ext_transient_attachment
+                       SET status='deleted', deleted_at=?, next_retry_at=NULL,
+                           last_error_code=NULL, last_error_message=NULL,
+                           updated_at=?
+                       WHERE attachment_id=?""",
+                    (now_iso, now_iso, r["attachment_id"]),
+                )
+                await exec_sql(
+                    conn,
+                    "DELETE FROM ext_transient_attachment_ticket WHERE attachment_id=?",
+                    (r["attachment_id"],),
+                )
+                await _audit(
+                    conn,
+                    attachment_id=r["attachment_id"],
+                    tenant_id=r["tenant_id"],
+                    conversation_id=r["conversation_id"],
+                    business_user_id=r["business_user_id"],
+                    action="cleanup",
+                    outcome="accepted",
+                    metadata={"deleted": True},
+                )
+
+            await self._write(_finish)
+
+        async def _purge_tickets(conn: AsyncConnection) -> None:
+            await exec_sql(
+                conn,
+                """DELETE FROM ext_transient_attachment_ticket
+                   WHERE consumed_at IS NOT NULL OR expires_at<=?""",
+                (now_iso,),
+            )
+
+        await self._write(_purge_tickets)
         temp = await self._cleanup_ragflow_temp_files(
             limit=limit, delete_ragflow_file=delete_ragflow_file
         )
@@ -1413,32 +1405,35 @@ class TransientAttachmentService:
         limit: int,
         delete_ragflow_file=None,
     ) -> dict[str, int]:
-        await ensure_attachment_schema(self.db)
+        await self._write(ensure_attachment_schema)
         deleter = delete_ragflow_file or _default_delete_ragflow_file
         expires_before = (
             self._now() - timedelta(seconds=attachment_ttl_seconds())
         ).isoformat()
-        async with self.db.execute(
-            """SELECT file_id FROM ext_ragflow_temp_file
-               WHERE (deleted_at IS NULL OR deleted_at='')
-                 AND created_at<=?
-               ORDER BY created_at ASC LIMIT ?""",
-            (expires_before, max(1, min(limit, 1000))),
-        ) as cursor:
-            rows = await cursor.fetchall()
+
+        async def _select(conn: AsyncConnection):
+            return await fetchall(
+                conn,
+                """SELECT file_id FROM ext_ragflow_temp_file
+                   WHERE (deleted_at IS NULL OR deleted_at='')
+                     AND created_at<=?
+                   ORDER BY created_at ASC LIMIT ?""",
+                (expires_before, max(1, min(limit, 1000))),
+            )
+
+        rows = await self._read(_select)
         deleted = 0
         failed = 0
         for row in rows:
             file_id = row["file_id"]
             try:
                 await deleter(file_id)
-                await mark_ragflow_temp_file_deleted(self.db, file_id)
+                await mark_ragflow_temp_file_deleted(self.gateway, file_id)
                 deleted += 1
             except Exception:
                 failed += 1
                 logger.warning("RAGFlow orphan file delete failed file_id=%s", file_id)
         return {"examined": len(rows), "deleted": deleted, "failed": failed}
-
 
 class TransientAttachmentCleanupWorker:
     def __init__(self, service: TransientAttachmentService) -> None:
@@ -1458,14 +1453,18 @@ class TransientAttachmentCleanupWorker:
             await asyncio.sleep(interval_seconds)
 
 
-async def get_db() -> aiosqlite.Connection:
+async def get_db() -> GatewayDatabase:
     from enterprise.gateway import app as app_module
 
-    dependency = app_module.app.dependency_overrides.get(
-        app_module.get_db, app_module.get_db
-    )
-    value = dependency()
-    return await value if asyncio.iscoroutine(value) else value
+    # Honor overrides registered against either the local Depends target or the
+    # app-level get_db / get_gateway_db aliases used by gateway contract tests.
+    for key in (get_db, app_module.get_db, app_module.get_gateway_db):
+        override = app_module.app.dependency_overrides.get(key)
+        if override is None:
+            continue
+        value = override()
+        return await value if asyncio.iscoroutine(value) else value
+    return await app_module.get_gateway_db()
 
 
 async def get_storage() -> AttachmentStorage:
@@ -1693,14 +1692,16 @@ async def create_transient_attachment(
     conversation_id: str,
     req: CreateAttachmentRequest,
     request: Request,
-    db: aiosqlite.Connection = Depends(get_db),
+    gateway: GatewayDatabase = Depends(get_db),
     storage: AttachmentStorage = Depends(get_storage),
     principal: UserPrincipal = Depends(require_capability("ask")),
 ):
+    from enterprise.gateway.db.ops import gw_read
+
     request_id = str(uuid.uuid4())
-    await v2_store.ensure_schema(db)
-    conversation = await v2_store.get_conversation(
-        db,
+    conversation = await gw_read(
+        gateway,
+        v2_store.get_conversation,
         conversation_id=conversation_id,
         tenant_id=principal.tenant_id,
         business_user_id=principal.business_user_id,
@@ -1720,7 +1721,7 @@ async def create_transient_attachment(
             request_id,
         )
     try:
-        service = TransientAttachmentService(db, storage)
+        service = TransientAttachmentService(gateway, storage)
         record, ticket = await service.create(
             tenant_id=principal.tenant_id,
             conversation_id=conversation_id,
@@ -1742,16 +1743,18 @@ async def create_transient_attachment(
 async def issue_transient_attachment_ticket(
     attachment_id: str,
     request: Request,
-    db: aiosqlite.Connection = Depends(get_db),
+    gateway: GatewayDatabase = Depends(get_db),
     principal: UserPrincipal = Depends(require_capability("ask")),
 ):
+    from enterprise.gateway.db.ops import gw_read
+
     request_id = str(uuid.uuid4())
     try:
-        await v2_store.ensure_schema(db)
-        service = TransientAttachmentService(db)
+        service = TransientAttachmentService(gateway)
         record = await service._record_or_not_found(attachment_id)
-        conversation = await v2_store.get_conversation(
-            db,
+        conversation = await gw_read(
+            gateway,
+            v2_store.get_conversation,
             conversation_id=record.conversation_id,
             tenant_id=principal.tenant_id,
             business_user_id=principal.business_user_id,
@@ -1780,13 +1783,13 @@ async def download_transient_attachment(
     attachment_id: str,
     ticket: str,
     request: Request,
-    db: aiosqlite.Connection = Depends(get_db),
+    gateway: GatewayDatabase = Depends(get_db),
     storage: AttachmentStorage = Depends(get_storage),
     principal: UserPrincipal | None = Depends(optional_user_principal),
 ):
     request_id = str(uuid.uuid4())
     try:
-        downloaded = await TransientAttachmentService(db, storage).download(
+        downloaded = await TransientAttachmentService(gateway, storage).download(
             attachment_id=attachment_id,
             token=ticket,
             principal=principal,
@@ -1805,7 +1808,6 @@ async def download_transient_attachment(
             "X-Attachment-Id": downloaded.record.attachment_id,
         },
     )
-
 
 __all__ = [
     "AttachmentRecord",

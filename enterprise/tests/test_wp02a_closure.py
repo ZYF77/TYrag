@@ -1,3 +1,5 @@
+from enterprise.gateway.db.dialect import fetchone
+from enterprise.gateway.db.ops import gw_read, gw_write
 """WP-02A Closure tests: service auth, status mapping, regression."""
 import hashlib
 import json
@@ -234,11 +236,8 @@ class TestRegressionIdempotency:
             d2 = r2.json()
             assert d2["deduplicated"] is True
 
-            async with db.execute(
-                "SELECT COUNT(*) AS n FROM ext_document_map WHERE event_id=?",
-                (evt_id,),
-            ) as cursor:
-                row = await cursor.fetchone()
+            row = await gw_read(db, fetchone, "SELECT COUNT(*) AS n FROM ext_document_map WHERE event_id=?",
+                (evt_id,),)
             assert row["n"] == 1
 
     @pytest.mark.asyncio

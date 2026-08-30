@@ -9,9 +9,14 @@ import os
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import Any, Mapping
+
+from sqlalchemy.ext.asyncio import AsyncConnection
+
+from enterprise.gateway.db.dialect import begin_transaction, exec_sql, fetchall, fetchone
+from enterprise.gateway.db.exceptions import PersistenceUnavailableError
 from typing import Awaitable, Callable
 
-import aiosqlite
 
 from enterprise.gateway.auth.user_principal import UserPrincipal
 
@@ -35,25 +40,6 @@ PUBLIC_CITATION_KEYS = (
     "downloadUrl",
     "downloadExpiresAt",
 )
-
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS ext_citation_file_ticket (
-    ticket_hash TEXT PRIMARY KEY,
-    citation_id TEXT NOT NULL,
-    tenant_id TEXT NOT NULL,
-    business_user_id TEXT NOT NULL,
-    kind TEXT NOT NULL,
-    image_id TEXT,
-    principal_json TEXT NOT NULL,
-    expires_at TEXT NOT NULL,
-    max_downloads INTEGER NOT NULL,
-    download_count INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_ext_citation_file_ticket_expiry
-    ON ext_citation_file_ticket(expires_at, citation_id);
-"""
 
 ImageFetcher = Callable[[str], Awaitable[tuple[bytes, str] | None]]
 _image_fetcher: ImageFetcher | None = None
@@ -111,20 +97,15 @@ def citation_file_kind(citation: dict) -> str:
     return "crop" if image_id else "original"
 
 
-async def ensure_citation_file_schema(db: aiosqlite.Connection) -> None:
-    await db.executescript(SCHEMA)
-    await db.commit()
-
 
 async def issue_citation_file_ticket(
-    db: aiosqlite.Connection,
+    conn: AsyncConnection,
     *,
     citation: dict,
     principal: UserPrincipal,
 ) -> CitationFileTicket:
-    await ensure_citation_file_schema(db)
     now = utc_now()
-    await db.execute(
+    result = await exec_sql(conn,
         "DELETE FROM ext_citation_file_ticket WHERE expires_at<=?",
         (now.isoformat(),),
     )
@@ -141,7 +122,7 @@ async def issue_citation_file_ticket(
         ensure_ascii=False,
         separators=(",", ":"),
     )
-    await db.execute(
+    result = await exec_sql(conn,
         """INSERT INTO ext_citation_file_ticket
            (ticket_hash, citation_id, tenant_id, business_user_id, kind,
             image_id, principal_json, expires_at, max_downloads, download_count,
@@ -160,7 +141,6 @@ async def issue_citation_file_ticket(
             now.isoformat(),
         ),
     )
-    await db.commit()
     return CitationFileTicket(token=token, expires_at=expires_at, kind=kind)
 
 
@@ -189,7 +169,7 @@ def public_citation(
     }
 
 
-def principal_from_ticket(row: aiosqlite.Row) -> UserPrincipal:
+def principal_from_ticket(row: Mapping[str, Any]) -> UserPrincipal:
     try:
         payload = json.loads(row["principal_json"] or "{}")
     except json.JSONDecodeError:
@@ -211,28 +191,27 @@ def _not_found() -> CitationFileError:
 
 
 async def claim_citation_file_ticket(
-    db: aiosqlite.Connection,
+    conn: AsyncConnection,
     citation_id: str,
     token: str,
 ) -> dict:
-    await ensure_citation_file_schema(db)
     ticket_hash = hashlib.sha256(token.encode()).hexdigest()
     now = utc_now()
-    async with db.execute(
+    row = await fetchone(
+        conn,
         """SELECT citation_id, tenant_id, business_user_id, kind, image_id,
                   principal_json, expires_at, max_downloads, download_count
            FROM ext_citation_file_ticket
            WHERE ticket_hash=? AND citation_id=?""",
         (ticket_hash, citation_id),
-    ) as cursor:
-        row = await cursor.fetchone()
+    )
     if row is None:
         raise _not_found()
     if _parse_timestamp(row["expires_at"]) <= now:
         raise _not_found()
     if int(row["download_count"]) >= int(row["max_downloads"]):
         raise _not_found()
-    cursor = await db.execute(
+    result = await exec_sql(conn,
         """UPDATE ext_citation_file_ticket
            SET download_count=download_count+1
            WHERE ticket_hash=? AND citation_id=?
@@ -240,9 +219,8 @@ async def claim_citation_file_ticket(
              AND expires_at>?""",
         (ticket_hash, citation_id, now.isoformat()),
     )
-    if cursor.rowcount != 1:
+    if result.rowcount != 1:
         raise _not_found()
-    await db.commit()
     return dict(row)
 
 

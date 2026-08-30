@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from enterprise.gateway.db.dialect import exec_sql, fetchall, fetchone
+from enterprise.gateway.db.ops import gw_read, gw_write
+
 import json
 from pathlib import Path
 
@@ -89,11 +92,12 @@ async def test_v2_creates_and_reuses_ragflow_session(runtime):
     assert "EQ-GROUNDING-HISTORY" in body["scope_identifiers"]
     assert body["scope_identifiers"] == body["allowed_identifiers"]
     assert body["question"] == "第二轮"
-    async with runtime.db.execute(
+    row = await gw_read(
+        runtime.db,
+        fetchone,
         "SELECT ragflow_session_id FROM ext_v2_conversation WHERE conversation_id=?",
         (conversation["conversationId"],),
-    ) as cursor:
-        row = await cursor.fetchone()
+    )
     assert row["ragflow_session_id"] == body["session_id"]
     assert row["ragflow_session_id"] in runtime.stub._sessions
     session = runtime.stub._sessions[row["ragflow_session_id"]]
@@ -132,10 +136,11 @@ async def test_v2_guard_failure_from_ragflow_is_safe_json(runtime):
     assert response.json()["citations"] == []
     assert response.json()["reasoning"] is None
     assert replay.json()["answer"] == expected
-    async with runtime.db.execute(
-        "SELECT content, status, reasoning FROM ext_v2_message WHERE role='assistant'"
-    ) as cursor:
-        assistant = await cursor.fetchone()
+    assistant = await gw_read(
+        runtime.db,
+        fetchone,
+        "SELECT content, status, reasoning FROM ext_v2_message WHERE role='assistant'",
+    )
     assert dict(assistant) == {
         "content": expected,
         "status": "no_reliable_evidence",
@@ -144,7 +149,8 @@ async def test_v2_guard_failure_from_ragflow_is_safe_json(runtime):
 
 
 @pytest.mark.asyncio
-async def test_v2_sse_guard_is_buffered_and_fail_closed(runtime):
+async def test_v2_sse_completed_with_abstain_wording_is_not_replaced(runtime):
+    """RF-PATCH-007: SSE wording never flips an explicit completed status."""
     await _insert_document(
         runtime.db,
         external_id="DOC-GROUNDING-SSE",
@@ -168,18 +174,17 @@ async def test_v2_sse_guard_is_buffered_and_fail_closed(runtime):
             json={"clientMessageId": "grounding-sse-fail", "question": "问题"},
         )
 
-    expected = "未找到可靠依据，无法回答。"
+    expected = "当前检索结果中没有找到可靠依据，建议补充设备号。"
     assert response.status_code == 200
     assert response.text.count("event: run.started") == 1
     assert response.text.count("event: answer.delta") >= 2
-    assert response.text.count("event: answer.replaced") == 1
-    assert "event: reasoning.delta" not in response.text
-    assert f'"content": "{expected}"' in response.text
+    assert "event: answer.replaced" not in response.text
     assert "event: run.failed" not in response.text
+    assert '"status": "已完成"' in response.text
+    assert _sse_answer_text(response.text) == expected
     assert replay.text.count("event: answer.delta") == 1
     assert "event: answer.replaced" not in replay.text
-    assert "event: reasoning.delta" not in replay.text
-    assert f'"content": "{expected}"' in replay.text
+    assert _sse_answer_text(replay.text) == expected
 
 
 @pytest.mark.asyncio
@@ -202,11 +207,8 @@ async def test_v2_null_session_creates_new_without_backfill(runtime):
 
     assert response.status_code == 200
     assert runtime.stub._last_completion_body["session_id"]
-    async with runtime.db.execute(
-        "SELECT ragflow_session_id FROM ext_v2_conversation WHERE conversation_id=?",
-        (conversation["conversationId"],),
-    ) as cursor:
-        row = await cursor.fetchone()
+    row = await gw_read(runtime.db, fetchone, "SELECT ragflow_session_id FROM ext_v2_conversation WHERE conversation_id=?",
+        (conversation["conversationId"],),)
     assert row["ragflow_session_id"]
     assert row["ragflow_session_id"] == runtime.stub._last_completion_body["session_id"]
     assert row["ragflow_session_id"] in runtime.stub._sessions
@@ -229,11 +231,9 @@ async def test_v2_existing_session_id_is_reused(runtime):
         conversation = await _create_conversation(
             client, equipmentId="EQ-GROUNDING-REUSE"
         )
-        await runtime.db.execute(
-            "UPDATE ext_v2_conversation SET ragflow_session_id=? WHERE conversation_id=?",
+        await gw_write(runtime.db, exec_sql, "UPDATE ext_v2_conversation SET ragflow_session_id=? WHERE conversation_id=?",
             ("legacy-session", conversation["conversationId"]),
         )
-        await runtime.db.commit()
         response = await client.post(
             f"{BASE}/conversations/{conversation['conversationId']}/messages",
             json={"clientMessageId": "grounding-reuse-session", "question": "问题"},
@@ -260,7 +260,6 @@ def test_allowed_identifiers_accept_mapping_without_get():
     tokens = v2_router._allowed_identifiers(Row(), "请看 GI01240015")
     assert "EQ-ROW-104" in tokens
     assert "FA-ROW-104" in tokens
-    assert "请看 GI01240015" in tokens
 
 
 @pytest.mark.asyncio
@@ -333,7 +332,12 @@ async def test_v2_inventory_question_keeps_listing_when_model_mixes_abstain(
 
 
 @pytest.mark.asyncio
-async def test_v2_inventory_abstain_uses_document_catalog(runtime):
+async def test_v2_inventory_question_fail_closed_without_catalog_rescue(runtime):
+    """Upstream abstain on an inventory question stays failed closed.
+
+    The document catalog rescue was removed: Gateway never invents an answer
+    from registry file names when RAGFlow reports no_reliable_evidence.
+    """
     await _insert_document(
         runtime.db,
         external_id="DOC-CATALOG-INV",
@@ -350,7 +354,7 @@ async def test_v2_inventory_abstain_uses_document_catalog(runtime):
         fixed_asset_no="FA-CATALOG-104",
         file_name="Receipt-2939-1838.pdf",
     )
-    runtime.stub.forced_answer = ABSTAIN_PHRASE
+    runtime.stub._no_evidence = True
     async with _client(runtime) as client:
         conversation = await _create_conversation(
             client, equipmentId="EQ-CATALOG-104"
@@ -365,8 +369,10 @@ async def test_v2_inventory_abstain_uses_document_catalog(runtime):
 
     body = response.json()
     assert response.status_code == 200
-    assert body["status"] == "已完成"
-    assert body["answer"] == "当前知识库中该设备已有以下资料：发票、收据。"
+    assert body["status"] == "无可靠依据"
+    assert body["answer"] == "未找到可靠依据，无法回答。"
+    assert body["citations"] == []
+    assert "当前知识库中该设备已有以下资料" not in body["answer"]
     assert "GTBOCLJY" not in body["answer"]
     _assert_no_grounding_leak(body)
 

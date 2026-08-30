@@ -1,20 +1,20 @@
 """Conversation attachment observations used to enrich retrieval.
 
 Original files are uploaded once and may also be passed to the final
-RAGFlow completion via ``files[]``. Gateway only extracts cheap local
-observations (image Understand, TXT/PDF text-layer); it does not parse
-Office bodies.
+RAGFlow completion via ``files[]``; RAGFlow parses TXT/PDF/Office bodies.
+Gateway only performs the cheap image Understand observation; it does not
+extract document text locally.
 """
 
 from __future__ import annotations
 
-import io
 import logging
 import os
-import re
 from dataclasses import dataclass, field
 from email.header import decode_header
 from typing import Any
+
+from enterprise.gateway.query.ragflow_client import RAGFlowAPIError
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,6 @@ _MIME_SUFFIXES = {
     XLSX_MEDIA_TYPE: (".xlsx",),
 }
 MAX_MESSAGE_FILES = 5
-_ERROR_CODE_RE = re.compile(r"\b[A-Z]?E-?\d{2,4}\b")
 _VISION_MODEL_TYPES = frozenset({"chat", "vision", "image2text", "img2txt"})
 _PASS_IMAGES_OFF = frozenset({"0", "false", "no"})
 
@@ -141,18 +140,6 @@ def completion_files(
     return files
 
 
-def _pdf_text(content: bytes) -> str:
-    try:
-        from pypdf import PdfReader
-    except ImportError:
-        return ""
-    try:
-        pages = PdfReader(io.BytesIO(content)).pages
-        return "\n".join((page.extract_text() or "") for page in pages).strip()
-    except Exception:
-        return ""
-
-
 def _from_raw(raw: dict[str, Any] | None) -> AttachmentObservation:
     data = raw if isinstance(raw, dict) else {}
     error_codes = [str(item).strip() for item in data.get("errorCodes") or [] if str(item).strip()]
@@ -180,22 +167,9 @@ def _from_raw(raw: dict[str, Any] | None) -> AttachmentObservation:
     )
 
 
-def _from_text(text: str) -> AttachmentObservation:
-    cleaned = " ".join(text.split())
-    if not cleaned:
-        return AttachmentObservation(trust_level="observed", understood=False)
-    codes = list(dict.fromkeys(_ERROR_CODE_RE.findall(cleaned)))
-    return AttachmentObservation(
-        trust_level="observed",
-        text_spans=[cleaned[:500]],
-        error_codes=codes[:8],
-        understood=True,
-    )
-
-
 async def _upload_pending(
     item: PendingAttachment, client: Any, db: Any | None
-) -> dict | None:
+) -> dict:
     from enterprise.gateway.sync.transient_attachment import remember_ragflow_temp_file
 
     try:
@@ -204,6 +178,8 @@ async def _upload_pending(
             item.content,
             item.media_type,
         )
+    except RAGFlowAPIError:
+        raise
     except Exception as exc:
         logger.warning(
             "attachment upload failed name=%s err=%s: %s",
@@ -211,18 +187,20 @@ async def _upload_pending(
             type(exc).__name__,
             exc,
         )
-        return None
-    if not isinstance(file_desc, dict):
-        return None
-    file_id = str(file_desc.get("id") or "")
-    if not file_id:
-        return None
+        raise RAGFlowAPIError("attachment upload failed", 503) from exc
+    if not isinstance(file_desc, dict) or not str(file_desc.get("id") or ""):
+        raise RAGFlowAPIError(
+            "attachment upload returned an invalid response", 502
+        )
     item.ragflow_file = file_desc
     if db is not None:
         try:
-            await remember_ragflow_temp_file(db, file_id)
+            await remember_ragflow_temp_file(db, file_id=file_desc["id"])
         except Exception:
-            logger.warning("RAGFlow temp file ledger write failed file_id=%s", file_id)
+            logger.warning(
+                "RAGFlow temp file ledger write failed file_id=%s",
+                file_desc["id"],
+            )
     return file_desc
 
 
@@ -236,22 +214,15 @@ async def observe_attachments(
 
     observations: list[AttachmentObservation] = []
     for item in pending:
+        # Upload failure raises RAGFlowAPIError; TXT/PDF/Office bodies are
+        # parsed by RAGFlow from ``files[]`` and never observed locally.
         file_desc = await _upload_pending(item, client, db)
-        if item.media_type == "text/plain":
-            observations.append(_from_text(item.content.decode("utf-8", "replace")))
-            continue
-        if item.media_type == "application/pdf":
-            observations.append(_from_text(_pdf_text(item.content)))
-            continue
         if item.media_type in OFFICE_MEDIA_TYPES:
             observations.append(
                 AttachmentObservation(trust_level="observed", understood=bool(file_desc))
             )
             continue
         if item.media_type not in IMAGE_MEDIA_TYPES:
-            observations.append(AttachmentObservation(trust_level="observed"))
-            continue
-        if not file_desc:
             observations.append(AttachmentObservation(trust_level="observed"))
             continue
         try:
@@ -297,10 +268,6 @@ async def cleanup_ragflow_files(
                 logger.warning(
                     "RAGFlow temp file ledger mark failed file_id=%s", file_id
                 )
-
-
-def any_understood(observations: list[AttachmentObservation]) -> bool:
-    return any(item.understood for item in observations)
 
 
 def enrich_question(original: str, observations: list[AttachmentObservation]) -> str:

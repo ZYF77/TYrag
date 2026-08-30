@@ -5,14 +5,13 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-import aiosqlite
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from enterprise.gateway.quality.gate import enforce_quality_gate
 from enterprise.gateway.quality.models import get_latest_evaluation
 from enterprise.gateway.sync.models import ExtDocumentMap
 
-
-_FILE_SHARE_PIPELINE_DONE = frozenset({"DONE", "3"})
+_MANAGED_FEED_PIPELINE_DONE = frozenset({"DONE", "3"})
 
 
 @dataclass(frozen=True)
@@ -56,14 +55,14 @@ def document_candidate_readiness(
     not a user authorization decision.
     """
 
-    is_file_share = doc.source_kind == "FILE_SHARE"
-    quality_required = quality_required or is_file_share
+    is_managed_feed = doc.source_kind in {"FILE_SHARE", "INLINE_JSON"}
+    quality_required = quality_required or is_managed_feed
     current_version = bool(doc.current_version)
     active = doc.business_status == "active"
     sync_ready = doc.sync_status == "ready"
     parser_readback = (
-        str(doc.pipeline_status or "").upper() in _FILE_SHARE_PIPELINE_DONE
-        if is_file_share
+        str(doc.pipeline_status or "").upper() in _MANAGED_FEED_PIPELINE_DONE
+        if is_managed_feed
         else True
     )
     ragflow_ids_present = bool(doc.ragflow_dataset_id and doc.ragflow_document_id)
@@ -77,9 +76,9 @@ def document_candidate_readiness(
         blocking_reason = "SYNC_NOT_READY"
     elif not parser_readback:
         blocking_reason = "RAGFLOW_READBACK_NOT_READY"
-    elif is_file_share and doc.event_status != "completed":
+    elif is_managed_feed and doc.event_status != "completed":
         blocking_reason = "SYNC_EVENT_NOT_COMPLETED"
-    elif is_file_share and doc.source_state != "AVAILABLE":
+    elif is_managed_feed and doc.source_state != "AVAILABLE":
         blocking_reason = "SOURCE_NOT_READY"
     elif not ragflow_ids_present:
         blocking_reason = "RAGFLOW_IDS_MISSING"
@@ -99,13 +98,16 @@ def document_candidate_readiness(
 
 
 async def document_candidate_readiness_from_db(
-    db: aiosqlite.Connection, doc: ExtDocumentMap,
+    conn: AsyncConnection,
+    doc: ExtDocumentMap,
 ) -> tuple[DocumentCandidateReadiness, str | None]:
     """Load quality evidence and evaluate the shared document gate."""
 
-    quality_required = query_quality_required() or doc.source_kind == "FILE_SHARE"
+    quality_required = query_quality_required() or doc.source_kind in {
+        "FILE_SHARE", "INLINE_JSON",
+    }
     evaluation = await get_latest_evaluation(
-        db,
+        conn,
         doc.tenant_id,
         doc.source_system,
         doc.external_document_id,

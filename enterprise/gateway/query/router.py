@@ -31,6 +31,7 @@ from enterprise.gateway.query.ragflow_client import (
     RAGFlowQueryClient,
     RAGFlowQueryStub,
 )
+from enterprise.gateway.db.ops import gw_read, gw_write
 from enterprise.gateway.sync.models import (
     ExtDocumentMap,
     get_mapping,
@@ -54,7 +55,7 @@ NO_RELIABLE_EVIDENCE_ANSWER = "未找到可靠依据，无法回答。"
 
 
 async def get_db():
-    """Reuse the app-level SQLite connection without importing app eagerly."""
+    """Reuse the app-level PostgreSQL connection without importing app eagerly."""
     from enterprise.gateway import app as app_module
 
     dep = app_module.app.dependency_overrides.get(
@@ -111,33 +112,41 @@ class DemoScopeResolver(ScopeResolver):
         self.source_version_id = source_version_id
 
     async def resolve(self, context: AclContext) -> AclScope:
-        doc = await get_mapping(
-            self.db,
-            context.principal.tenant_id,
-            self.source_system,
-            self.external_document_id,
-            self.source_version_id,
-        )
-        if (
-            not doc
-            or not doc.ragflow_dataset_id
-            or not doc.ragflow_document_id
-            or doc.business_status != "active"
-        ):
-            return AclScope.empty(context.policy_version)
-        allowed = await acl_store.is_allowed(
-            self.db,
-            tenant_id=context.principal.tenant_id,
-            external_document_id=self.external_document_id,
-            business_user_id=context.principal.business_user_id,
-        )
-        if not allowed:
-            return AclScope.empty(context.policy_version)
-        return AclScope.materialized(
-            (doc.ragflow_dataset_id,),
-            (doc.ragflow_document_id,),
-            policy_version=context.policy_version,
-        )
+        from enterprise.gateway.db import GatewayDatabase
+
+        async def _resolve(conn) -> AclScope:
+            doc = await get_mapping(
+                conn,
+                context.principal.tenant_id,
+                self.source_system,
+                self.external_document_id,
+                self.source_version_id,
+            )
+            if (
+                not doc
+                or not doc.ragflow_dataset_id
+                or not doc.ragflow_document_id
+                or doc.business_status != "active"
+            ):
+                return AclScope.empty(context.policy_version)
+            allowed = await acl_store.is_allowed(
+                conn,
+                tenant_id=context.principal.tenant_id,
+                external_document_id=self.external_document_id,
+                business_user_id=context.principal.business_user_id,
+            )
+            if not allowed:
+                return AclScope.empty(context.policy_version)
+            return AclScope.materialized(
+                (doc.ragflow_dataset_id,),
+                (doc.ragflow_document_id,),
+                policy_version=context.policy_version,
+            )
+
+        if isinstance(self.db, GatewayDatabase):
+            async with self.db.transaction(write=False) as conn:
+                return await _resolve(conn)
+        return await _resolve(self.db)
 
 
 async def _resolve_authorized_document(
@@ -146,8 +155,7 @@ async def _resolve_authorized_document(
     external_document_id: str,
     request_id: str,
 ):
-    doc = await get_mapping(
-        db,
+    doc = await gw_read(db, get_mapping,
         principal.tenant_id,
         "DEMO",
         external_document_id,
@@ -156,7 +164,6 @@ async def _resolve_authorized_document(
     if not doc:
         return None, None, None
     context = AclContext(principal=principal)
-    await acl_store.ensure_schema(db)
     scope = await compile_scope(
         context,
         DemoScopeResolver(db, external_document_id),
@@ -176,8 +183,7 @@ async def _authorized_document_for_gate(
 ):
     """Authorize a document for quality-gate checks without materializing a
     retrieval scope (failed documents have no RAGFlow document id yet)."""
-    doc = await get_mapping(
-        db,
+    doc = await gw_read(db, get_mapping,
         principal.tenant_id,
         "DEMO",
         external_document_id,
@@ -185,9 +191,7 @@ async def _authorized_document_for_gate(
     )
     if not doc:
         return None, _error(404, "DOCUMENT_NOT_FOUND", "Document not found", request_id)
-    await acl_store.ensure_schema(db)
-    allowed = await acl_store.is_allowed(
-        db,
+    allowed = await gw_read(db, acl_store.is_allowed,
         tenant_id=principal.tenant_id,
         external_document_id=external_document_id,
         business_user_id=principal.business_user_id,
@@ -403,13 +407,10 @@ async def upload_document(
 
     tenant_id = principal.tenant_id
     sha256 = hashlib.sha256(content).hexdigest()
-    existing = await get_mapping(
-        db, tenant_id, "DEMO", external_document_id, "v1"
+    existing = await gw_read(db, get_mapping, tenant_id, "DEMO", external_document_id, "v1"
     )
     if existing:
-        await acl_store.ensure_schema(db)
-        allowed = await acl_store.is_allowed(
-            db,
+        allowed = await gw_read(db, acl_store.is_allowed,
             tenant_id=tenant_id,
             external_document_id=external_document_id,
             business_user_id=principal.business_user_id,
@@ -444,14 +445,14 @@ async def upload_document(
         sync_status="received",
     )
     try:
-        doc = await insert_mapping(db, doc)
+        doc = await gw_write(db, insert_mapping, doc)
     except Exception:
         logger.exception("Query demo document insert failed")
         return _error(
             500, "INTERNAL_ERROR", "Internal service error", request_id
         )
 
-    await update_mapping_status(db, doc, "validated")
+    await gw_write(db, update_mapping_status, doc, "validated")
     client = _query_client()
     try:
         datasets = await client.list_datasets()
@@ -478,8 +479,9 @@ async def upload_document(
             else []
         )
         if not docs_data:
-            await update_mapping_status(
+            await gw_write(
                 db,
+                update_mapping_status,
                 doc,
                 "failed",
                 error_code="DOCUMENT_SYNC_FAILED",
@@ -496,15 +498,16 @@ async def upload_document(
         doc.ragflow_dataset_id = dataset_id
         doc.ragflow_document_id = ragflow_doc.get("id", "")
         doc.ragflow_task_id = doc.ragflow_document_id
-        await update_mapping_status(
+        await gw_write(
             db,
+            update_mapping_status,
             doc,
             "registered",
             pipeline_status=ragflow_doc.get("run", "UNSTART"),
         )
         await client.start_parsing(dataset_id, [doc.ragflow_document_id])
-        await update_mapping_status(
-            db, doc, "parsing", pipeline_status="RUNNING"
+        await gw_write(
+            db, update_mapping_status, doc, "parsing", pipeline_status="RUNNING"
         )
     except RAGFlowAPIError as e:
         code = (
@@ -512,8 +515,9 @@ async def upload_document(
             if e.status_code and 400 <= e.status_code < 500
             else "RAGFLOW_UNAVAILABLE"
         )
-        await update_mapping_status(
+        await gw_write(
             db,
+            update_mapping_status,
             doc,
             "failed",
             error_code=code,
@@ -596,9 +600,13 @@ async def ask(
         return acl_error
     if doc is None:
         return _error(404, "DOCUMENT_NOT_FOUND", "Document not found", request_id)
-    evaluation = await get_latest_evaluation(
-        db, doc.tenant_id, doc.source_system,
-        doc.external_document_id, doc.source_version_id,
+    evaluation = await gw_read(
+        db,
+        get_latest_evaluation,
+        doc.tenant_id,
+        doc.source_system,
+        doc.external_document_id,
+        doc.source_version_id,
     )
     quality_code = None
     quality_gate_default = (
@@ -655,8 +663,7 @@ async def ask(
     conversation_id = req.conversationId or str(uuid.uuid4())
     session_id = None
     if req.conversationId:
-        conversation = await conversation_store.get_conversation_map(
-            db,
+        conversation = await gw_read(db, conversation_store.get_conversation_map,
             conversation_id=conversation_id,
             tenant_id=principal.tenant_id,
             business_user_id=principal.business_user_id,
@@ -768,8 +775,7 @@ async def ask(
             req.externalDocumentId,
             request_id,
         )
-        await conversation_store.upsert_conversation_map(
-            db,
+        await gw_write(db, conversation_store.upsert_conversation_map,
             tenant_id=principal.tenant_id,
             business_user_id=principal.business_user_id,
             conversation_id=conversation_id,
@@ -779,8 +785,7 @@ async def ask(
             source_version_id=doc.source_version_id,
             asset_id=doc.asset_id,
         )
-        await conversation_store.add_message(
-            db,
+        await gw_write(db, conversation_store.add_message,
             conversation_id=conversation_id,
             tenant_id=principal.tenant_id,
             business_user_id=principal.business_user_id,
@@ -789,8 +794,7 @@ async def ask(
             status="completed",
             ragflow_message_id=ragflow_message_id,
         )
-        await conversation_store.add_message(
-            db,
+        await gw_write(db, conversation_store.add_message,
             conversation_id=conversation_id,
             tenant_id=principal.tenant_id,
             business_user_id=principal.business_user_id,
@@ -814,8 +818,7 @@ async def ask(
             ).model_dump(),
         )
 
-    await conversation_store.upsert_conversation_map(
-        db,
+    await gw_write(db, conversation_store.upsert_conversation_map,
         tenant_id=principal.tenant_id,
         business_user_id=principal.business_user_id,
         conversation_id=conversation_id,
@@ -825,8 +828,7 @@ async def ask(
         source_version_id=doc.source_version_id,
         asset_id=doc.asset_id,
     )
-    await conversation_store.add_message(
-        db,
+    await gw_write(db, conversation_store.add_message,
         conversation_id=conversation_id,
         tenant_id=principal.tenant_id,
         business_user_id=principal.business_user_id,
@@ -835,8 +837,7 @@ async def ask(
         status="completed",
         ragflow_message_id=ragflow_message_id,
     )
-    await conversation_store.add_message(
-        db,
+    await gw_write(db, conversation_store.add_message,
         conversation_id=conversation_id,
         tenant_id=principal.tenant_id,
         business_user_id=principal.business_user_id,
@@ -934,8 +935,7 @@ async def get_conversation(
 ):
     request_id = str(uuid.uuid4())
     await conversation_store.ensure_schema(db)
-    conversation = await conversation_store.get_conversation_map(
-        db,
+    conversation = await gw_read(db, conversation_store.get_conversation_map,
         conversation_id=conversation_id,
         tenant_id=principal.tenant_id,
         business_user_id=principal.business_user_id,
@@ -965,8 +965,7 @@ async def get_conversation(
     ragflow_session_id = conversation.get("ragflow_session_id")
     if ragflow_chat_id and ragflow_session_id:
         try:
-            status_by_message = await conversation_store.list_message_statuses(
-                db,
+            status_by_message = await gw_read(db, conversation_store.list_message_statuses,
                 conversation_id=conversation["business_conversation_id"],
             )
             session_data = await _query_client().get_session(

@@ -133,8 +133,10 @@ def test_duplicate_channel_keeps_first_rank_and_merges_payload_without_overwrite
 
 
 def test_acl_and_tenant_filter_happens_before_fusion():
-    denied = _hit(
-        "denied",
+    # Role/group deny lists are intentionally open in TEST_TENANT_OPEN stage;
+    # fusion still drops cross-tenant hits and hits without acl_facts.
+    same_tenant_denied_group = _hit(
+        "same-tenant",
         1000.0,
         facts=_facts(deny_groups=("maintenance",)),
     )
@@ -148,11 +150,13 @@ def test_acl_and_tenant_filter_happens_before_fusion():
     )
     results = HybridFusionEngine().fuse(
         _principal(),
-        [denied, other_tenant, missing_facts],
+        [same_tenant_denied_group, other_tenant, missing_facts],
         [_hit("allowed", 0.1)],
     )
 
-    assert [item.candidate_id for item in results] == ["allowed"]
+    ids = [item.candidate_id for item in results]
+    assert set(ids) == {"same-tenant", "allowed"}
+    assert "other-tenant" not in ids and "missing-acl" not in ids
 
 
 def test_inactive_or_missing_principal_fails_closed():

@@ -16,6 +16,7 @@ RUN groupadd --system --gid 10001 tyrag \
 # docker build --build-context contracts=./contracts -f enterprise/gateway/Dockerfile ... enterprise
 COPY --chown=tyrag:tyrag gateway /ragflow/enterprise/gateway
 COPY --chown=tyrag:tyrag scripts/wp03 /ragflow/enterprise/scripts/wp03
+COPY --chown=tyrag:tyrag scripts/migrate_gateway_sqlite_to_postgres.py /ragflow/enterprise/scripts/migrate_gateway_sqlite_to_postgres.py
 COPY --from=contracts --chown=tyrag:tyrag metadata-schema.json /ragflow/contracts/metadata-schema.json
 COPY requirements-runtime.txt /tmp/enterprise-gateway-requirements.txt
 
@@ -34,7 +35,7 @@ ENV PYTHONPATH=/ragflow \
     PYTHONDONTWRITEBYTECODE=1 \
     HOME=/tmp
 
-RUN /ragflow/.venv/bin/python -c "import aiosqlite, fastapi, httpx, jsonschema, jwt, pydantic, uvicorn"
+RUN /ragflow/.venv/bin/python -c "import asyncpg, fastapi, httpx, jsonschema, jwt, pydantic, sqlalchemy, uvicorn"
 
 USER tyrag
 ENTRYPOINT []

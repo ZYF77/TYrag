@@ -6,8 +6,9 @@ import logging
 import os
 from typing import Any
 
-import aiosqlite
+from sqlalchemy.ext.asyncio import AsyncConnection
 
+from enterprise.gateway.db import GatewayDatabase
 from enterprise.gateway.sync.models import (
     ExtDocumentMap,
     OutboxEvent,
@@ -17,7 +18,10 @@ from enterprise.gateway.sync.models import (
     insert_mapping,
     list_all_mappings,
     promote_version_if_latest,
+    clear_ragflow_binding,
+    get_outbox_by_event_id,
     reset_outbox_to_pending,
+    claim_failed_processing_round,
     update_mapping_status,
 )
 from enterprise.gateway.sync.ragflow_document_client import (
@@ -63,6 +67,18 @@ def _ragflow_file_name(doc: ExtDocumentMap, original_name: str) -> str:
     return f"{stem[:80]}-{digest}{suffix}"
 
 
+def inline_json_bytes_and_sha256(content: dict[str, Any]) -> tuple[bytes, str]:
+    """Return the exact stable bytes uploaded for an INLINE_JSON document."""
+    serialized = json.dumps(
+        content,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return serialized, hashlib.sha256(serialized).hexdigest()
+
+
 def _validate_ragflow_response(
     response: Any,
     operation: str,
@@ -76,8 +92,10 @@ def _validate_ragflow_response(
         )
     code = response.get("code")
     if code is not None and str(code) not in {"0", "200"}:
+        detail = str(response.get("message") or "").strip()
+        suffix = f" (code={code}): {detail}" if detail else f" (code={code})"
         raise RAGFlowAPIError(
-            f"RAGFlow rejected {operation}", 400,
+            f"RAGFlow rejected {operation}{suffix}", 400,
         )
     if check_document_results:
         data = response.get("data")
@@ -96,7 +114,7 @@ def _validate_ragflow_response(
 
 
 async def promote_quality_passed_version(
-    db: aiosqlite.Connection,
+    conn: AsyncConnection,
     ragflow_client: RAGFlowDocumentClient,
     doc: ExtDocumentMap,
     parse_quality_status: str,
@@ -117,8 +135,8 @@ async def promote_quality_passed_version(
         "enable document",
         check_document_results=True,
     )
-    if not await promote_version_if_latest(db, doc):
-        # A newer version may have won the SQLite promotion transaction while
+    if not await promote_version_if_latest(conn, doc):
+        # A newer version may have won the PostgreSQL promotion transaction while
         # this quality job was running.  Never leave that stale RAGFlow
         # document enabled when its promotion was rejected.
         _validate_ragflow_response(
@@ -130,7 +148,7 @@ async def promote_quality_passed_version(
         )
         return False
     versions = await get_versions_for_document(
-        db, doc.tenant_id, doc.source_system, doc.external_document_id,
+        conn, doc.tenant_id, doc.source_system, doc.external_document_id,
     )
     old_docs: dict[str, list[str]] = {}
     for version in versions:
@@ -179,22 +197,26 @@ class DocumentNotFoundError(TerminalDocumentSyncError):
 class SyncService:
     def __init__(
         self,
-        db: aiosqlite.Connection,
+        gateway: GatewayDatabase,
         source_adapter: SourceAdapter,
         ragflow_client: RAGFlowDocumentClient,
         external_source_provider: FileShareSourceAdapter | None = None,
     ) -> None:
-        self.db = db
+        self.gateway = gateway
         self.source_adapter = source_adapter
         self.ragflow_client = ragflow_client
         self.external_source_provider = external_source_provider
+
+    async def _db_call(self, fn, /, *args, write: bool = True, **kwargs):
+        async with self.gateway.transaction(write=write) as conn:
+            return await fn(conn, *args, **kwargs)
 
     async def process_event(
         self, event: OutboxEvent,
     ) -> tuple[ExtDocumentMap, bool]:
         payload = json.loads(event.payload)
         metadata = payload.get("metadata") or {}
-        existing = await get_mapping_by_event_id(self.db, event.event_id)
+        existing = await self._db_call(get_mapping_by_event_id, event.event_id)
         deduplicated = False
         if existing:
             if (
@@ -205,8 +227,7 @@ class SyncService:
                 return existing, True
             doc = existing
             if not doc.document_type and metadata.get("document_type"):
-                await update_mapping_status(
-                    self.db,
+                await self._db_call(update_mapping_status,
                     doc,
                     doc.sync_status,
                     document_type=metadata["document_type"],
@@ -255,7 +276,7 @@ class SyncService:
                 sync_status="received",
                 business_status="active",
             )
-            doc = await insert_mapping(self.db, doc)
+            doc = await self._db_call(insert_mapping, doc)
             if doc.event_id != event.event_id:
                 if doc.sha256.lower() != payload["sha256"].lower():
                     raise TerminalDocumentSyncError(
@@ -272,6 +293,7 @@ class SyncService:
                 failure_fields = {
                     "error_code": e.code,
                     "error_message": str(e),
+                    "last_error_retryable": e.retryable,
                     "attempt_count": event.attempts,
                 }
                 if not doc.current_version:
@@ -280,7 +302,6 @@ class SyncService:
                     doc, "failed", event_status="failed",
                     **failure_fields,
                 )
-                await self._ensure_quality_evaluation(doc)
                 await self._emit_terminal_failed_if_no_quality(doc)
             raise
         except RetryableDocumentSyncError as e:
@@ -288,6 +309,7 @@ class SyncService:
                 await self._set_status(
                     doc, "retry_wait", event_status="retry_wait",
                     error_code=e.code, error_message=str(e),
+                    last_error_retryable=e.retryable,
                     attempt_count=event.attempts,
                 )
             raise
@@ -337,7 +359,26 @@ class SyncService:
             )
 
         source_file = None
-        if not (
+        source_kind = payload.get("source", {}).get("kind") or doc.source_kind
+        if source_kind == "INLINE_JSON":
+            content = payload.get("source", {}).get("content")
+            if not isinstance(content, dict):
+                raise TerminalDocumentSyncError(
+                    "DOCUMENT_SOURCE_NOT_FOUND", "INLINE_JSON content is missing"
+                )
+            content_bytes, content_hash = inline_json_bytes_and_sha256(content)
+            if content_hash != doc.sha256.lower() or content_hash != payload["sha256"].lower():
+                raise TerminalDocumentSyncError(
+                    "DOCUMENT_HASH_MISMATCH", "INLINE_JSON content hash mismatch"
+                )
+            source_file = SourceFile(
+                content=content_bytes,
+                file_name=payload["fileName"],
+                media_type="application/json",
+                size=len(content_bytes),
+                sha256=content_hash,
+            )
+        elif not (
             doc.source_kind == "FILE_SHARE"
             or payload.get("source", {}).get("kind") == "FILE_SHARE"
         ):
@@ -419,12 +460,12 @@ class SyncService:
                 "pipeline_status": doc.pipeline_status,
                 "error_code": "DOCUMENT_PARSE_FAILED",
                 "error_message": "文档解析失败。",
+                "last_error_retryable": True,
                 "event_status": "failed",
             }
             if not doc.current_version:
                 failure_fields["business_status"] = "review_required"
             await self._set_status(doc, "failed", **failure_fields)
-            await self._ensure_quality_evaluation(doc)
             await self._emit_terminal_failed_if_no_quality(doc)
         else:
             await self._set_status(
@@ -438,33 +479,37 @@ class SyncService:
         sync_status: str,
         event_status: str | None = None,
         **kwargs: Any,
-    ) -> None:
+    ) -> bool:
         if doc.sync_status != sync_status:
             validate_transition(doc.sync_status, sync_status, "document")
-        await update_mapping_status(
-            self.db, doc, sync_status, event_status=event_status, **kwargs,
+        return await self._db_call(
+            update_mapping_status,
+            doc,
+            sync_status,
+            event_status=event_status,
+            **kwargs,
         )
 
     async def _emit_terminal_failed_if_no_quality(self, doc: ExtDocumentMap) -> None:
-        """Emit failed only when the quality worker will not produce a terminal."""
+        """Emit the ingestion failure terminal callback for the current round."""
         from enterprise.gateway.callback_delivery import emit_terminal_callback_safe
-        from enterprise.gateway.config import config
-
-        if config.quality_worker_enabled and doc.ragflow_document_id:
-            return
         from enterprise.gateway.app import safe_error_message
 
         code = doc.last_error_code or "DOCUMENT_SYNC_FAILED"
         message = safe_error_message(
             code, doc.last_error_message or "文档同步失败，请稍后重试。"
         )
-        await emit_terminal_callback_safe(
-            self.db,
+        await self._db_call(emit_terminal_callback_safe,
             doc,
             "failed",
             quality_status=None,
             retrievable=False,
-            error={"code": code, "message": message, "retryable": False},
+            error={
+                "code": code,
+                "message": message,
+                "retryable": bool(doc.last_error_retryable),
+            },
+            processing_round=doc.processing_round,
         )
 
     async def finalize_outbox_exhausted(
@@ -472,6 +517,7 @@ class SyncService:
         event: OutboxEvent,
         error_code: str | None,
         error_message: str | None,
+        retryable: bool | None = None,
     ) -> None:
         """Mark the document failed and enqueue EAM failed callback after outbox death.
 
@@ -479,10 +525,25 @@ class SyncService:
         are exhausted. Without this finalizer, outbox ``dead`` would leave the
         document non-terminal and never notify EAM.
         """
-        doc = await get_mapping_by_event_id(self.db, event.event_id)
+        current_outbox = await self._db_call(
+            get_outbox_by_event_id, event.event_id,
+        )
+        if current_outbox is not None and (
+            current_outbox.processing_round != event.processing_round
+            or current_outbox.status not in {"failed", "dead"}
+        ):
+            logger.info(
+                "skip stale outbox finalization event_id=%s event_round=%s "
+                "current_round=%s current_status=%s",
+                event.event_id,
+                event.processing_round,
+                current_outbox.processing_round,
+                current_outbox.status,
+            )
+            return
+        doc = await self._db_call(get_mapping_by_event_id, event.event_id)
         if doc is None:
-            doc = await get_mapping(
-                self.db,
+            doc = await self._db_call(get_mapping,
                 event.tenant_id,
                 event.source_system,
                 event.external_document_id,
@@ -493,6 +554,15 @@ class SyncService:
                 "Outbox exhausted with no mapping event_id=%s external_document_id=%s",
                 event.event_id,
                 event.external_document_id,
+            )
+            return
+        if doc.processing_round != event.processing_round:
+            logger.info(
+                "skip stale document finalization event_id=%s event_round=%s "
+                "current_round=%s",
+                event.event_id,
+                event.processing_round,
+                doc.processing_round,
             )
             return
         if is_terminal_document_status(doc.sync_status):
@@ -510,14 +580,22 @@ class SyncService:
         failure_fields = {
             "error_code": code,
             "error_message": message,
+            "last_error_retryable": bool(
+                doc.last_error_retryable if retryable is None else retryable
+            ),
             "attempt_count": event.attempts,
         }
         if not doc.current_version:
             failure_fields["business_status"] = "review_required"
-        await self._set_status(
-            doc, "failed", event_status="failed", **failure_fields,
+        updated = await self._set_status(
+            doc,
+            "failed",
+            event_status="failed",
+            expected_processing_round=event.processing_round,
+            **failure_fields,
         )
-        await self._ensure_quality_evaluation(doc)
+        if not updated:
+            return
         await self._emit_terminal_failed_if_no_quality(doc)
 
     async def _ensure_dataset(self, tenant_id: str) -> dict:
@@ -600,17 +678,32 @@ class SyncService:
         # Persist the RAGFlow document id before the optional metadata write so
         # an interrupted retry can reuse the uploaded document instead of
         # creating a duplicate knowledge version.
-        await update_mapping_status(
-            self.db, doc, doc.sync_status,
+        await self._db_call(update_mapping_status, doc, doc.sync_status,
             pipeline_status=doc.pipeline_status,
         )
 
+        force_reparse = (
+            doc.processing_round > 1
+            and bool(doc.ragflow_document_id)
+            and (doc.pipeline_status or "UNSTART").upper() in RAGFLOW_UNSTARTED
+        )
         ragflow_doc = await self._ensure_enterprise_metadata(
             doc, dataset_id, event,
         )
         doc.pipeline_status = ragflow_doc.get("run") or doc.pipeline_status or "UNSTART"
 
         run = (doc.pipeline_status or "UNSTART").upper()
+        if force_reparse and map_ragflow_run_to_sync_status(run) not in {"ready", "parsing"}:
+            # A retryable failure may leave the existing RAGFlow document in
+            # FAIL; a new Gateway processing round must explicitly replay
+            # parsing instead of treating that old terminal run as final.
+            # Parsing must NOT be re-dispatched unconditionally: RAGFlow
+            # rejects parse requests while a document is RUNNING, and
+            # reissuing parsing for a DONE document can wedge it at
+            # RUNNING/0%.  DONE/RUNNING are left to the existing
+            # process_event/StatusReconciler paths to advance; only
+            # FAIL/CANCEL/UNSTART runs replay parsing explicitly.
+            run = "UNSTART"
         if run in RAGFLOW_UNSTARTED:
             try:
                 _validate_ragflow_response(
@@ -622,8 +715,7 @@ class SyncService:
             except RAGFlowAPIError as e:
                 raise self._ragflow_error(e) from e
             doc.pipeline_status = "RUNNING"
-            await update_mapping_status(
-                self.db, doc, doc.sync_status,
+            await self._db_call(update_mapping_status, doc, doc.sync_status,
                 pipeline_status=doc.pipeline_status,
             )
 
@@ -645,8 +737,7 @@ class SyncService:
                 "RAGFlow document readback is empty",
             )
 
-        await update_mapping_status(
-            self.db, doc, doc.sync_status,
+        await self._db_call(update_mapping_status, doc, doc.sync_status,
             pipeline_status=doc.pipeline_status,
         )
         return doc
@@ -676,8 +767,7 @@ class SyncService:
                 expected_etag=source.get("etag") or doc.source_etag,
             )
         except SourceFetchError as exc:
-            await update_mapping_status(
-                self.db,
+            await self._db_call(update_mapping_status,
                 doc,
                 doc.sync_status,
                 source_state="UNAVAILABLE",
@@ -713,7 +803,9 @@ class SyncService:
         # some RAGFlow indices, so use a new scalar key instead of changing
         # that field's type.
         ground_truth_fields = {}
-        required_capabilities = ["text", "position"]
+        required_capabilities = (
+            ["text"] if doc.source_kind == "INLINE_JSON" else ["text", "position"]
+        )
         meta = {
             "enterprise_event_id": event.event_id,
             "enterprise_external_document_id": doc.external_document_id,
@@ -759,14 +851,21 @@ class SyncService:
         current_meta = current.get("meta_fields")
         if not isinstance(current_meta, dict):
             current_meta = {}
-        if all(current_meta.get(key) == value for key, value in enterprise_meta.items()):
+        chunk_method_matches = (
+            doc.source_kind != "INLINE_JSON" or current.get("chunk_method") == "naive"
+        )
+        if (
+            chunk_method_matches
+            and all(current_meta.get(key) == value for key, value in enterprise_meta.items())
+        ):
             return current
         try:
             _validate_ragflow_response(
-                await self.ragflow_client.update_document_metadata(
+                await self.ragflow_client.update_document(
                     dataset_id,
                     doc.ragflow_document_id,
-                    {**current_meta, **enterprise_meta},
+                    meta_fields={**current_meta, **enterprise_meta},
+                    chunk_method="naive" if doc.source_kind == "INLINE_JSON" else None,
                 ),
                 "upsert enterprise metadata",
             )
@@ -868,10 +967,69 @@ class SyncService:
     async def promote_quality_passed_version(
         self, doc: ExtDocumentMap, parse_quality_status: str,
     ) -> bool:
+        """Promote outside a single long DB transaction.
+
+        RAGFlow HTTP calls must not hold a Gateway transaction; only the
+        promote/supersede steps run inside gateway.transaction(write=True).
+        """
         try:
-            return await promote_quality_passed_version(
-                self.db, self.ragflow_client, doc, parse_quality_status,
+            if (
+                parse_quality_status != "passed"
+                or doc.sync_status != "ready"
+                or doc.business_status in {"disabled", "deleted", "superseded"}
+                or not doc.ragflow_dataset_id
+                or not doc.ragflow_document_id
+            ):
+                return False
+            _validate_ragflow_response(
+                await self.ragflow_client.batch_update_status(
+                    doc.ragflow_dataset_id, [doc.ragflow_document_id], enabled=True,
+                ),
+                "enable document",
+                check_document_results=True,
             )
+            async with self.gateway.transaction(write=True) as conn:
+                promoted = await promote_version_if_latest(conn, doc)
+                if not promoted:
+                    versions = []
+                else:
+                    versions = await get_versions_for_document(
+                        conn,
+                        doc.tenant_id,
+                        doc.source_system,
+                        doc.external_document_id,
+                    )
+            if not promoted:
+                _validate_ragflow_response(
+                    await self.ragflow_client.batch_update_status(
+                        doc.ragflow_dataset_id,
+                        [doc.ragflow_document_id],
+                        enabled=False,
+                    ),
+                    "disable document",
+                    check_document_results=True,
+                )
+                return False
+            old_docs: dict[str, list[str]] = {}
+            for version in versions:
+                if (
+                    version.id != doc.id
+                    and version.ragflow_document_id
+                    and version.ragflow_dataset_id
+                    and version.business_status == "superseded"
+                ):
+                    old_docs.setdefault(version.ragflow_dataset_id, []).append(
+                        version.ragflow_document_id
+                    )
+            for dataset_id, document_ids in old_docs.items():
+                _validate_ragflow_response(
+                    await self.ragflow_client.batch_update_status(
+                        dataset_id, document_ids, enabled=False,
+                    ),
+                    "disable superseded documents",
+                    check_document_results=True,
+                )
+            return True
         except RAGFlowAPIError as exc:
             raise self._ragflow_error(exc) from exc
 
@@ -880,15 +1038,14 @@ class SyncService:
         from enterprise.gateway.quality.models import get_or_create_evaluation
 
         try:
-            await get_or_create_evaluation(
-                self.db,
+            await self._db_call(get_or_create_evaluation,
                 tenant_id=doc.tenant_id,
                 source_system=doc.source_system,
                 external_document_id=doc.external_document_id,
                 source_version_id=doc.source_version_id,
                 ragflow_dataset_id=doc.ragflow_dataset_id,
                 ragflow_document_id=doc.ragflow_document_id,
-                evaluation_version="1",
+                evaluation_version=str(max(1, doc.processing_round)),
                 max_attempts=config.quality_max_attempts,
             )
         except Exception:
@@ -939,8 +1096,7 @@ class SyncService:
                     )
                     await self._ensure_quality_evaluation(doc)
                 else:
-                    await update_mapping_status(
-                        self.db, doc, "ready",
+                    await self._db_call(update_mapping_status, doc, "ready",
                         pipeline_status=run,
                         event_status="completed",
                     )
@@ -949,12 +1105,12 @@ class SyncService:
                     "pipeline_status": run,
                     "error_code": "DOCUMENT_PARSE_FAILED",
                     "error_message": "文档解析失败。",
+                    "last_error_retryable": True,
                     "event_status": "failed",
                 }
                 if not doc.current_version:
                     failure_fields["business_status"] = "review_required"
                 await self._set_status(doc, "failed", **failure_fields)
-                await self._ensure_quality_evaluation(doc)
                 await self._emit_terminal_failed_if_no_quality(doc)
             elif (
                 doc.sync_status != mapped
@@ -966,8 +1122,7 @@ class SyncService:
             break
         if not readback_found:
             return await self.mark_ragflow_document_missing(doc)
-        return await get_mapping(
-            self.db, doc.tenant_id, doc.source_system,
+        return await self._db_call(get_mapping, doc.tenant_id, doc.source_system,
             doc.external_document_id, doc.source_version_id,
         ) or doc
 
@@ -978,8 +1133,7 @@ class SyncService:
         if doc.sync_status in ("superseded", "disabled", "deleted"):
             if doc.sync_status == "deleted" and doc.ragflow_document_id:
                 await self._clear_ragflow_binding(doc)
-            return await get_mapping(
-                self.db, doc.tenant_id, doc.source_system,
+            return await self._db_call(get_mapping, doc.tenant_id, doc.source_system,
                 doc.external_document_id, doc.source_version_id,
             ) or doc
         if transition_allowed(doc.sync_status, "deleted", "document"):
@@ -1002,26 +1156,15 @@ class SyncService:
             error_message="文档已从知识库中移除",
         )
         await self._clear_ragflow_binding(doc)
-        return await get_mapping(
-            self.db, doc.tenant_id, doc.source_system,
+        return await self._db_call(get_mapping, doc.tenant_id, doc.source_system,
             doc.external_document_id, doc.source_version_id,
         ) or doc
 
     async def _clear_ragflow_binding(self, doc: ExtDocumentMap) -> None:
-        await self.db.execute(
-            """UPDATE ext_document_map
-                  SET ragflow_document_id=NULL,
-                      ragflow_task_id=NULL
-                WHERE id=?""",
-            (doc.id,),
-        )
-        await self.db.commit()
-        doc.ragflow_document_id = None
-        doc.ragflow_task_id = None
+        await self._db_call(clear_ragflow_binding, doc)
 
     async def reconcile_missing_ragflow_documents(self) -> int:
-        mappings = await list_all_mappings(
-            self.db, statuses=["ready", "review_required"],
+        mappings = await self._db_call(list_all_mappings, statuses=["ready", "review_required"],
         )
         by_dataset: dict[str, list[ExtDocumentMap]] = {}
         for doc in mappings:
@@ -1057,10 +1200,7 @@ class SyncService:
     def _needs_ragflow_reingest(self, doc: ExtDocumentMap) -> bool:
         if doc.sync_status == "deleted":
             return True
-        return (
-            doc.sync_status in {"ready", "review_required", "failed"}
-            and not doc.ragflow_document_id
-        )
+        return doc.sync_status in {"ready", "review_required"} and not doc.ragflow_document_id
 
     async def ensure_present_or_requeue(
         self, doc: ExtDocumentMap,
@@ -1083,6 +1223,21 @@ class SyncService:
             ):
                 doc = await self.mark_ragflow_document_missing(doc)
         if not self._needs_ragflow_reingest(doc):
+            if doc.sync_status == "failed" and doc.last_error_retryable and doc.id:
+                claimed = await self._db_call(
+                    claim_failed_processing_round, doc.id,
+                )
+                if claimed is None:
+                    current = await self._db_call(
+                        get_mapping,
+                        doc.tenant_id,
+                        doc.source_system,
+                        doc.external_document_id,
+                        doc.source_version_id,
+                        write=False,
+                    )
+                    return current or doc, False
+                return claimed, True
             return doc, False
         return await self.requeue_after_ragflow_delete(doc), True
 
@@ -1100,24 +1255,21 @@ class SyncService:
                 error_code=None,
                 error_message=None,
             )
-        await reset_outbox_to_pending(self.db, doc.event_id)
-        return await get_mapping(
-            self.db, doc.tenant_id, doc.source_system,
+        await self._db_call(reset_outbox_to_pending, doc.event_id)
+        return await self._db_call(get_mapping, doc.tenant_id, doc.source_system,
             doc.external_document_id, doc.source_version_id,
         ) or doc
 
     async def disable_document(
         self, tenant_id: str, source_system: str, external_document_id: str,
     ) -> list[ExtDocumentMap]:
-        versions = await get_versions_for_document(
-            self.db, tenant_id, source_system, external_document_id,
+        versions = await self._db_call(get_versions_for_document, tenant_id, source_system, external_document_id,
         )
         if not versions:
             raise DocumentNotFoundError()
         await self._set_ragflow_enabled(versions, False)
         for version in versions:
-            await update_mapping_status(
-                self.db, version, "disabled",
+            await self._db_call(update_mapping_status, version, "disabled",
                 business_status="disabled", event_status="completed",
             )
         return versions
@@ -1129,8 +1281,7 @@ class SyncService:
         external_document_id: str,
         source_version_id: str,
     ) -> ExtDocumentMap:
-        doc = await get_mapping(
-            self.db,
+        doc = await self._db_call(get_mapping,
             tenant_id,
             source_system,
             external_document_id,
@@ -1164,8 +1315,7 @@ class SyncService:
     async def restore_document(
         self, tenant_id: str, source_system: str, external_document_id: str,
     ) -> ExtDocumentMap:
-        versions = await get_versions_for_document(
-            self.db, tenant_id, source_system, external_document_id,
+        versions = await self._db_call(get_versions_for_document, tenant_id, source_system, external_document_id,
         )
         if not versions:
             raise DocumentNotFoundError()
@@ -1187,7 +1337,30 @@ class SyncService:
             ),
         }
         source_file = None
-        if doc.source_kind != "FILE_SHARE":
+        if doc.source_kind == "INLINE_JSON":
+            outbox = await self._db_call(
+                get_outbox_by_event_id, doc.event_id, write=False,
+            )
+            stored_payload = json.loads(outbox.payload) if outbox else {}
+            content = stored_payload.get("source", {}).get("content")
+            if not isinstance(content, dict):
+                raise TerminalDocumentSyncError(
+                    "DOCUMENT_SOURCE_NOT_FOUND", "INLINE_JSON content is missing"
+                )
+            payload = stored_payload
+            content_bytes, content_hash = inline_json_bytes_and_sha256(content)
+            if content_hash != doc.sha256.lower():
+                raise TerminalDocumentSyncError(
+                    "DOCUMENT_HASH_MISMATCH", "INLINE_JSON content hash mismatch"
+                )
+            source_file = SourceFile(
+                content=content_bytes,
+                file_name=doc.file_name,
+                media_type="application/json",
+                size=len(content_bytes),
+                sha256=content_hash,
+            )
+        elif doc.source_kind != "FILE_SHARE":
             try:
                 source_file = await self.source_adapter.fetch(
                     doc.bucket, doc.object_key, doc.sha256,
@@ -1232,8 +1405,7 @@ class SyncService:
                     "RAGFLOW_UNAVAILABLE",
                     "RAGFlow restore readback is empty",
                 )
-            await update_mapping_status(
-                self.db, doc, doc.sync_status, business_status="active",
+            await self._db_call(update_mapping_status, doc, doc.sync_status, business_status="active",
                 event_status="completed",
             )
         else:
@@ -1265,23 +1437,20 @@ class SyncService:
             )
             await self._ensure_quality_evaluation(doc)
         else:
-            await update_mapping_status(
-                self.db, doc, doc.sync_status, event_status="completed",
+            await self._db_call(update_mapping_status, doc, doc.sync_status, event_status="completed",
             )
         return doc
 
     async def delete_document(
         self, tenant_id: str, source_system: str, external_document_id: str,
     ) -> list[ExtDocumentMap]:
-        versions = await get_versions_for_document(
-            self.db, tenant_id, source_system, external_document_id,
+        versions = await self._db_call(get_versions_for_document, tenant_id, source_system, external_document_id,
         )
         if not versions:
             raise DocumentNotFoundError()
         await self._set_ragflow_enabled(versions, False)
         for version in versions:
-            await update_mapping_status(
-                self.db, version, "deleted",
+            await self._db_call(update_mapping_status, version, "deleted",
                 business_status="deleted", event_status="completed",
             )
         return versions
@@ -1309,10 +1478,12 @@ class SyncService:
 
     @staticmethod
     def _ragflow_error(e: RAGFlowAPIError) -> DocumentSyncError:
+        detail = str(e)
+        if "currently being processed" in detail:
+            # RAGFlow answers "currently being processed" when parsing is
+            # requested while a document is RUNNING; that run must settle
+            # first, so this rejection is transient and stays retryable.
+            return RetryableDocumentSyncError("RAGFLOW_UNAVAILABLE", detail)
         if e.status_code and 400 <= e.status_code < 500:
-            return TerminalDocumentSyncError(
-                "RAGFLOW_API_INCOMPATIBLE", "RAGFlow API request rejected"
-            )
-        return RetryableDocumentSyncError(
-            "RAGFLOW_UNAVAILABLE", "RAGFlow service is temporarily unavailable"
-        )
+            return TerminalDocumentSyncError("RAGFLOW_API_INCOMPATIBLE", detail)
+        return RetryableDocumentSyncError("RAGFLOW_UNAVAILABLE", detail)

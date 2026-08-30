@@ -96,6 +96,13 @@ async def _seed_mapping(db_path: str, status: str = "active") -> None:
 
 # ---------- JWT Validation ----------
 
+
+async def _reset_app_gateway() -> None:
+    import enterprise.gateway.app as app_module
+    if getattr(app_module, "_gateway_db", None) is not None:
+        await app_module._gateway_db.dispose()
+        app_module._gateway_db = None
+
 class TestJWTValidation:
     def test_valid_token(self):
         v = _validator()
@@ -439,7 +446,9 @@ class TestAuthMeAPI:
         os.environ["JWT_ALLOWED_ALGS"] = "HS256"
         os.environ["JWT_JWKS_URL"] = ""
         db_path = str(tmp_path / "test_auth_me.db")
+        await _reset_app_gateway()
         os.environ["ENTERPRISE_DB_PATH"] = db_path
+        os.environ["ENTERPRISE_SYNC_DB_PATH"] = db_path
         try:
             await _seed_mapping(db_path)
             token = _make_token()
@@ -454,7 +463,7 @@ class TestAuthMeAPI:
                 assert data["businessUserId"] == "biz-user-001"
         finally:
             for k in ["JWT_ISSUER", "JWT_AUDIENCE", "JWT_ENABLE_HS",
-                       "JWT_ALLOWED_ALGS", "JWT_JWKS_URL", "ENTERPRISE_DB_PATH"]:
+                       "JWT_ALLOWED_ALGS", "JWT_JWKS_URL", "ENTERPRISE_DB_PATH", "ENTERPRISE_SYNC_DB_PATH"]:
                 os.environ.pop(k, None)
 
     async def test_missing_mapping_jit_provisions_and_succeeds(self, tmp_path):
@@ -464,7 +473,9 @@ class TestAuthMeAPI:
         os.environ["JWT_ALLOWED_ALGS"] = "HS256"
         os.environ["JWT_JWKS_URL"] = ""
         db_path = str(tmp_path / "test_missing_mapping.db")
+        await _reset_app_gateway()
         os.environ["ENTERPRISE_DB_PATH"] = db_path
+        os.environ["ENTERPRISE_SYNC_DB_PATH"] = db_path
         try:
             token = _make_token()
             transport = ASGITransport(app=app)
@@ -487,7 +498,7 @@ class TestAuthMeAPI:
                 await repo.close()
         finally:
             for k in ["JWT_ISSUER", "JWT_AUDIENCE", "JWT_ENABLE_HS",
-                       "JWT_ALLOWED_ALGS", "JWT_JWKS_URL", "ENTERPRISE_DB_PATH"]:
+                       "JWT_ALLOWED_ALGS", "JWT_JWKS_URL", "ENTERPRISE_DB_PATH", "ENTERPRISE_SYNC_DB_PATH"]:
                 os.environ.pop(k, None)
 
     async def test_disabled_user_returns_stable_error_code(self, tmp_path):
@@ -497,7 +508,9 @@ class TestAuthMeAPI:
         os.environ["JWT_ALLOWED_ALGS"] = "HS256"
         os.environ["JWT_JWKS_URL"] = ""
         db_path = str(tmp_path / "test_disabled_auth_me.db")
+        await _reset_app_gateway()
         os.environ["ENTERPRISE_DB_PATH"] = db_path
+        os.environ["ENTERPRISE_SYNC_DB_PATH"] = db_path
         try:
             await _seed_mapping(db_path, status="disabled")
             token = _make_token()
@@ -513,7 +526,7 @@ class TestAuthMeAPI:
                 assert "requestId" in body
         finally:
             for k in ["JWT_ISSUER", "JWT_AUDIENCE", "JWT_ENABLE_HS",
-                       "JWT_ALLOWED_ALGS", "JWT_JWKS_URL", "ENTERPRISE_DB_PATH"]:
+                       "JWT_ALLOWED_ALGS", "JWT_JWKS_URL", "ENTERPRISE_DB_PATH", "ENTERPRISE_SYNC_DB_PATH"]:
                 os.environ.pop(k, None)
 
     async def test_response_no_token_leakage(self, tmp_path):
@@ -523,7 +536,9 @@ class TestAuthMeAPI:
         os.environ["JWT_ALLOWED_ALGS"] = "HS256"
         os.environ["JWT_JWKS_URL"] = ""
         db_path = str(tmp_path / "test_leak.db")
+        await _reset_app_gateway()
         os.environ["ENTERPRISE_DB_PATH"] = db_path
+        os.environ["ENTERPRISE_SYNC_DB_PATH"] = db_path
         try:
             await _seed_mapping(db_path)
             token = _make_token()
@@ -540,7 +555,7 @@ class TestAuthMeAPI:
                 assert "password" not in dumped.lower()
         finally:
             for k in ["JWT_ISSUER", "JWT_AUDIENCE", "JWT_ENABLE_HS",
-                       "JWT_ALLOWED_ALGS", "JWT_JWKS_URL", "ENTERPRISE_DB_PATH"]:
+                       "JWT_ALLOWED_ALGS", "JWT_JWKS_URL", "ENTERPRISE_DB_PATH", "ENTERPRISE_SYNC_DB_PATH"]:
                 os.environ.pop(k, None)
 
 
@@ -581,7 +596,7 @@ class TestRegressionWP02A:
                 assert resp.status_code == 401
         finally:
             for k in ["JWT_ISSUER", "JWT_AUDIENCE", "JWT_ENABLE_HS",
-                       "JWT_ALLOWED_ALGS", "JWT_JWKS_URL", "ENTERPRISE_DB_PATH",
+                       "JWT_ALLOWED_ALGS", "JWT_JWKS_URL", "ENTERPRISE_DB_PATH", "ENTERPRISE_SYNC_DB_PATH",
                        "ENTERPRISE_SYNC_SERVICE_TOKEN"]:
                 os.environ.pop(k, None)
 

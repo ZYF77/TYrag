@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from enterprise.gateway.db.ops import gw_read, gw_write
+
 import hashlib
 import json
 from urllib.parse import parse_qs, quote, unquote, urlsplit
@@ -262,14 +264,13 @@ async def test_every_v3_202_acceptance_path_returns_slim_accept_receipt(
             "/enterprise/api/v3/documents", json=duplicate_payload
         )
 
-        existing = await get_mapping(db, "tenant-a", "DEMO", "DOC-V3-001", "v1")
+        existing = await gw_read(db, get_mapping, "tenant-a", "DEMO", "DOC-V3-001", "v1")
 
         class ReindexStub:
             async def reindex_document(
                 self, tenant_id, source_system, external_document_id, source_version_id
             ):
-                return await get_mapping(
-                    db, tenant_id, source_system, external_document_id, source_version_id
+                return await gw_read(db, get_mapping, tenant_id, source_system, external_document_id, source_version_id
                 )
 
         monkeypatch.setattr(v3_router, "_sync_service", lambda _db: ReindexStub())
@@ -316,8 +317,7 @@ async def test_v3_preserves_source_owned_document_type(v3_app, isolated_gateway_
     ) as client:
         response = await client.post("/enterprise/api/v3/documents", json=payload)
 
-    stored = await get_mapping(
-        db, "tenant-a", "DEMO", "DOC-V3-SOURCE-TYPE", "v1"
+    stored = await gw_read(db, get_mapping, "tenant-a", "DEMO", "DOC-V3-SOURCE-TYPE", "v1"
     )
     assert response.status_code == 202
     assert stored is not None
@@ -378,8 +378,7 @@ async def _insert_file_share_document(
     error_code: str | None = None,
     error_message: str | None = None,
 ) -> ExtDocumentMap:
-    doc = await insert_mapping(
-        db,
+    doc = await gw_write(db, insert_mapping,
         ExtDocumentMap(
             tenant_id="tenant-a",
             source_system="DEMO",
@@ -412,8 +411,7 @@ async def _insert_file_share_document(
             event_status=event_status,
         ),
     )
-    await update_mapping_status(
-        db,
+    await gw_write(db, update_mapping_status,
         doc,
         sync_status,
         pipeline_status=pipeline_status,
@@ -423,6 +421,7 @@ async def _insert_file_share_document(
         source_state=source_state,
         error_code=error_code,
         error_message=error_message,
+        last_error_retryable=sync_status == "failed",
     )
     if parser_status != "legacy_unverified":
         routing = route_document(
@@ -438,8 +437,7 @@ async def _insert_file_share_document(
             "chunk_method": routing["chunk_method"],
             "owned_parser_config": routing["parser_config"],
         }
-        await update_parser_application(
-            db,
+        await gw_write(db, update_parser_application,
             doc,
             status=parser_status,
             profile=routing["selected_parser_profile"],
@@ -458,8 +456,9 @@ async def _insert_file_share_document(
 
 
 async def _complete_quality(db, doc: ExtDocumentMap, status: str):
-    evaluation = await quality_models.get_or_create_evaluation(
+    evaluation = await gw_write(
         db,
+        quality_models.get_or_create_evaluation,
         tenant_id=doc.tenant_id,
         source_system=doc.source_system,
         external_document_id=doc.external_document_id,
@@ -468,8 +467,9 @@ async def _complete_quality(db, doc: ExtDocumentMap, status: str):
         ragflow_document_id=doc.ragflow_document_id,
         routing={},
     )
-    await quality_models.complete_evaluation(
+    await gw_write(
         db,
+        quality_models.complete_evaluation,
         evaluation.id,
         parse_quality_status=status,
         quality_reasons=[],
@@ -512,16 +512,16 @@ def _user(*, groups: tuple[str, ...]) -> UserPrincipal:
     ("document_id", "kwargs", "quality", "reason"),
     [
         (
-            "DOC-PARSER-BLOCKED",
-            {"parser_status": "mismatch"},
+            "DOC-PIPELINE-BLOCKED",
+            {"pipeline_status": "RUNNING", "sync_status": "ready"},
             "passed",
-            "PARSER_READBACK_NOT_READY",
+            "RAGFLOW_READBACK_NOT_READY",
         ),
         (
-            "DOC-PARSER-LEGACY",
-            {"parser_status": "legacy_unverified"},
+            "DOC-SOURCE-BLOCKED",
+            {"source_state": "UNAVAILABLE"},
             "passed",
-            "PARSER_READBACK_NOT_READY",
+            "SOURCE_NOT_READY",
         ),
         (
             "DOC-QUALITY-BLOCKED",
@@ -561,11 +561,13 @@ async def test_status_never_reports_retrievable_for_incomplete_document_facts(
         )
 
     body = response.json()
+    pipeline_done = str(doc.pipeline_status).upper() in {"DONE", "3"}
     assert response.status_code == 200
     assert body["retrievable"] is False
     assert body["pipelineStatus"] == doc.pipeline_status
-    assert body["parseCompleted"] is (doc.parser_application_status == "executed")
-    assert body["indexCompleted"] is (str(doc.pipeline_status).upper() in {"DONE", "3"})
+    # parseCompleted mirrors readiness.parser_readback (pipeline DONE/3), not parser_application_status.
+    assert body["parseCompleted"] is pipeline_done
+    assert body["indexCompleted"] is pipeline_done
     assert body["errorCode"] is None
     assert body["readiness"]["blockingReason"] == reason
 
@@ -620,8 +622,12 @@ async def test_retrievable_is_document_readiness_only_and_acl_is_applied_later(
     )
     assert readiness.retrievable is True
 
+    # Readiness-blocked sibling: pipeline not DONE so formal scope excludes it
+    # after ACL materialization (status/retrievable still ignores user ACL).
     blocked = await _insert_file_share_document(
-        db, document_id="DOC-ACL-PARSER", parser_status="mismatch"
+        db,
+        document_id="DOC-ACL-NOT-READY",
+        pipeline_status="RUNNING",
     )
     await _complete_quality(db, blocked, "passed")
     conversation = {
@@ -644,7 +650,10 @@ async def test_retrievable_is_document_readiness_only_and_acl_is_applied_later(
     allowed_scope, allowed_docs = await v2_router._context_scope(
         db, _user(groups=("maintenance",)), conversation
     )
-    denied_scope, _ = await v2_router._context_scope(
+    # Current ACL policy is TEST_TENANT_OPEN: group mismatch does not deny.
+    # Scope still applies readiness after ACL, so both principals see the same
+    # readiness-ok document and exclude the pipeline-blocked sibling.
+    other_scope, other_docs = await v2_router._context_scope(
         db, _user(groups=("other",)), conversation
     )
     status_body = status.json()
@@ -659,4 +668,10 @@ async def test_retrievable_is_document_readiness_only_and_acl_is_applied_later(
     )
     assert allowed_scope.document_ids == (doc.ragflow_document_id,)
     assert set(allowed_docs) == {doc.ragflow_document_id}
-    assert denied_scope.document_ids == ()
+    assert other_scope.document_ids == (doc.ragflow_document_id,)
+    assert set(other_docs) == {doc.ragflow_document_id}
+    blocked_readiness = document_candidate_readiness(
+        blocked, quality_allowed=True, quality_required=True
+    )
+    assert blocked_readiness.retrievable is False
+    assert blocked_readiness.blocking_reason == "RAGFLOW_READBACK_NOT_READY"

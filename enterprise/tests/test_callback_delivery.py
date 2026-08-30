@@ -12,6 +12,7 @@ from httpx import ASGITransport, AsyncClient, MockTransport, Request, Response
 from enterprise.gateway.app import app
 from enterprise.gateway.auth.service_auth import require_service_principal
 from enterprise.gateway.auth.service_principal import ServicePrincipal
+from enterprise.gateway.db.ops import gw_read, gw_write
 from enterprise.gateway.callback import classify_delivery, sign_payload, verify_signature
 from enterprise.gateway.callback_delivery import (
     CallbackDeliveryWorker,
@@ -185,16 +186,14 @@ async def test_enqueue_is_idempotent_per_terminal_status(
         file_name="manual.pdf",
         source_kind="FILE_SHARE",
     )
-    doc = await insert_mapping(db, doc)
-    first = await enqueue_terminal_callback(
-        db,
+    doc = await gw_write(db, insert_mapping, doc)
+    first = await gw_write(db, enqueue_terminal_callback,
         doc=doc,
         terminal_status="review_required",
         quality_status="review_required",
         retrievable=False,
     )
-    second = await enqueue_terminal_callback(
-        db,
+    second = await gw_write(db, enqueue_terminal_callback,
         doc=doc,
         terminal_status="review_required",
         quality_status="review_required",
@@ -203,8 +202,7 @@ async def test_enqueue_is_idempotent_per_terminal_status(
     assert first is not None
     assert second is not None
     assert first.delivery_id == second.delivery_id
-    stored = await get_callback_delivery(
-        db,
+    stored = await gw_read(db, get_callback_delivery,
         tenant_id="tenant-a",
         source_system="DEMO",
         external_document_id="DOC-CB-001",
@@ -213,6 +211,69 @@ async def test_enqueue_is_idempotent_per_terminal_status(
     )
     assert stored is not None
     assert stored.state == "pending"
+
+
+@pytest.mark.asyncio
+async def test_enqueue_allows_same_terminal_status_in_new_processing_round(
+    isolated_gateway_db, monkeypatch
+):
+    db, _ = isolated_gateway_db
+    monkeypatch.setattr(
+        __import__("enterprise.gateway.config", fromlist=["config"]).config,
+        "callback_enabled",
+        True,
+    )
+    endpoints = {
+        "DEMO": CallbackEndpoint(url="https://eam.example/callback", secret="cb-secret")
+    }
+    doc = ExtDocumentMap(
+        tenant_id="tenant-a",
+        source_system="DEMO",
+        external_document_id="DOC-CB-ROUND",
+        source_version_id="v1",
+        event_id="evt-cb-round",
+        sha256="a" * 64,
+        file_name="manual.pdf",
+        source_kind="FILE_SHARE",
+    )
+    doc = await gw_write(db, insert_mapping, doc)
+    first = await gw_write(
+        db,
+        enqueue_terminal_callback,
+        doc=doc,
+        terminal_status="failed",
+        error={"code": "RAGFLOW_UNAVAILABLE", "message": "temporary", "retryable": True},
+        endpoints=endpoints,
+        enabled=True,
+        default_secret="cb-secret",
+    )
+    doc.processing_round = 2
+    second = await gw_write(
+        db,
+        enqueue_terminal_callback,
+        doc=doc,
+        terminal_status="failed",
+        error={"code": "RAGFLOW_UNAVAILABLE", "message": "temporary", "retryable": True},
+        endpoints=endpoints,
+        enabled=True,
+        default_secret="cb-secret",
+    )
+    assert first is not None and second is not None
+    assert first.processing_round == 1
+    assert second.processing_round == 2
+    assert first.delivery_id != second.delivery_id
+    same_round = await gw_read(
+        db,
+        get_callback_delivery,
+        tenant_id="tenant-a",
+        source_system="DEMO",
+        external_document_id="DOC-CB-ROUND",
+        source_version_id="v1",
+        processing_round=2,
+        terminal_status="failed",
+    )
+    assert same_round is not None
+    assert same_round.delivery_id == second.delivery_id
 
 
 @pytest.mark.asyncio
@@ -241,9 +302,8 @@ async def test_enqueue_skips_internal_fixture_document_ids(
         file_name="probe.pdf",
         source_kind="FILE_SHARE",
     )
-    probe = await insert_mapping(db, probe)
-    skipped = await enqueue_terminal_callback(
-        db,
+    probe = await gw_write(db, insert_mapping, probe)
+    skipped = await gw_write(db, enqueue_terminal_callback,
         doc=probe,
         terminal_status="failed",
         quality_status="failed",
@@ -251,8 +311,7 @@ async def test_enqueue_skips_internal_fixture_document_ids(
         error={"code": "DOCUMENT_PARSE_FAILED", "message": "RAGFlow parsing failed"},
     )
     assert skipped is None
-    assert await get_callback_delivery(
-        db,
+    assert await gw_read(db, get_callback_delivery,
         tenant_id="wp04e2e",
         source_system="EAM",
         external_document_id="PROBE-GE22002-CERT-1",
@@ -294,9 +353,8 @@ async def test_delivery_worker_posts_signed_payload_and_marks_delivered(
         file_name="manual.pdf",
         source_kind="FILE_SHARE",
     )
-    doc = await insert_mapping(db, doc)
-    await enqueue_terminal_callback(
-        db,
+    doc = await gw_write(db, insert_mapping, doc)
+    await gw_write(db, enqueue_terminal_callback,
         doc=doc,
         terminal_status="retrievable",
         quality_status="passed",
@@ -334,8 +392,7 @@ async def test_delivery_worker_posts_signed_payload_and_marks_delivered(
     assert payload["eventType"] == "document.terminal"
     assert payload["payloadVersion"] == "1"
     assert payload["retrievable"] is True
-    stored = await get_callback_delivery(
-        db,
+    stored = await gw_read(db, get_callback_delivery,
         tenant_id="tenant-a",
         source_system="DEMO",
         external_document_id="DOC-CB-002",
@@ -371,9 +428,8 @@ async def test_delivery_worker_retries_on_5xx(isolated_gateway_db, monkeypatch):
         file_name="manual.pdf",
         source_kind="FILE_SHARE",
     )
-    doc = await insert_mapping(db, doc)
-    await enqueue_terminal_callback(
-        db,
+    doc = await gw_write(db, insert_mapping, doc)
+    await gw_write(db, enqueue_terminal_callback,
         doc=doc,
         terminal_status="failed",
         quality_status="failed",
@@ -393,8 +449,7 @@ async def test_delivery_worker_retries_on_5xx(isolated_gateway_db, monkeypatch):
         await worker.run_once()
     finally:
         await worker.close()
-    stored = await get_callback_delivery(
-        db,
+    stored = await gw_read(db, get_callback_delivery,
         tenant_id="tenant-a",
         source_system="DEMO",
         external_document_id="DOC-CB-003",
