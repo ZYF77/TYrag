@@ -114,7 +114,12 @@ Windows 上传的脚本先 `sed -i 's/\r$//'`。
 | `ragflow/web/**`（8080 UI） | **优先** 把 `web/dist` `docker cp` 进正在跑的 RAGFlow + `nginx reload`，**不要** recreate |
 | 仅配置 / 未改代码 | 不要发版 |
 
-一次只动改动对应的服务。未改 RAGFlow 就不要碰 `ragflow-cpu`。
+一次只动改动对应的服务。当前工作包已改 `ragflow/**`，所以必须更新 `ragflow-cpu`。
+
+30 现有 `docker-compose.yml` 不得被发布包整体覆盖。使用包内的
+`docker-compose.30-release.yml` 作为叠加文件；它只增加 Gateway PostgreSQL、切换三个镜像并
+清空旧 SQLite 路径，保留 30 原有的外部附件卷、外部源回调、Asset Resolver 和其他服务配置。
+发布包内的 `release.env` 只含镜像 tag 和非敏感开关，不替代 30 的 `.env`。
 
 ---
 
@@ -129,15 +134,20 @@ Windows 上传的脚本先 `sed -i 's/\r$//'`。
    ```bash
    cd /home/zkadmin/tyrag-production
    docker compose --env-file .env --env-file gateway-overrides.env \
-     -f docker-compose.yml up -d --no-deps --pull never gateway-postgres
-   docker compose -f docker-compose.yml ps gateway-postgres
+     --env-file /tmp/offline-release-<commit>/release.env \
+     -f docker-compose.yml -f docker-compose.30-release.yml \
+     up -d --no-deps --pull never gateway-postgres
+   docker compose --env-file .env --env-file gateway-overrides.env \
+     --env-file /tmp/offline-release-<commit>/release.env \
+     -f docker-compose.yml -f docker-compose.30-release.yml ps gateway-postgres
    ```
 
 3. 用新 Gateway 镜像执行一次性迁移。迁移工具只读 SQLite、拒绝非空 PG，且不会把正文或 secret 写入 manifest：
 
    ```bash
    docker compose --env-file .env --env-file gateway-overrides.env \
-     -f docker-compose.yml run --rm --no-deps \
+     --env-file /tmp/offline-release-<commit>/release.env \
+     -f docker-compose.yml -f docker-compose.30-release.yml run --rm --no-deps \
      -e ENTERPRISE_DB_PATH= -e ENTERPRISE_SYNC_DB_PATH= \
      --entrypoint /ragflow/.venv/bin/python enterprise-gateway \
      /ragflow/enterprise/scripts/migrate_gateway_sqlite_to_postgres.py \
@@ -187,7 +197,8 @@ docker build -f "$BUILD/Dockerfile.overlay" -t "$TAG" "$BUILD"
 
 cd "$PROD"
 docker compose --env-file .env --env-file gateway-overrides.env \
-  -f docker-compose.yml \
+  --env-file /tmp/offline-release-<commit>/release.env \
+  -f docker-compose.yml -f docker-compose.30-release.yml \
   up -d --no-deps --force-recreate --pull never enterprise-gateway
 ```
 
@@ -292,7 +303,8 @@ docker build --pull=false \
 
 cd /home/zkadmin/tyrag-production
 docker compose --env-file .env --env-file gateway-overrides.env \
-  -f docker-compose.yml \
+  --env-file /tmp/offline-release-<commit>/release.env \
+  -f docker-compose.yml -f docker-compose.30-release.yml \
   --profile diagnostics \
   up -d --no-deps --force-recreate --pull never enterprise-web
 ```
@@ -321,7 +333,8 @@ docker compose --env-file .env --env-file gateway-overrides.env \
 cd /home/zkadmin/tyrag-production
 docker compose --env-file .env --env-file core.env --env-file dev-ragflow.env \
   --env-file gateway-overrides.env \
-  -f docker-compose.yml \
+  --env-file /tmp/offline-release-<commit>/release.env \
+  -f docker-compose.yml -f docker-compose.30-release.yml \
   up -d --no-deps --force-recreate --pull never ragflow-cpu
 ```
 

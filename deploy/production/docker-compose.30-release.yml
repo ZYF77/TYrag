@@ -1,0 +1,45 @@
+# Existing 30-server release overlay.
+# Keep the server's docker-compose.yml as the base so its EAM attachment volume,
+# external-source settings, and other local pilot configuration are preserved.
+
+services:
+  gateway-postgres:
+    image: ${ENTERPRISE_GATEWAY_POSTGRES_IMAGE:?set ENTERPRISE_GATEWAY_POSTGRES_IMAGE}
+    environment:
+      POSTGRES_DB: ${ENTERPRISE_GATEWAY_DB_NAME:-tyrag_gateway}
+      POSTGRES_USER: ${ENTERPRISE_GATEWAY_DB_USER:-tyrag_gateway}
+      POSTGRES_PASSWORD: ${ENTERPRISE_GATEWAY_DB_PASSWORD:?set ENTERPRISE_GATEWAY_DB_PASSWORD}
+    volumes:
+      - gateway_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    networks:
+      - tyrag
+    restart: unless-stopped
+
+  ragflow-cpu:
+    image: ${RAGFLOW_IMAGE:?set RAGFLOW_IMAGE}
+
+  enterprise-gateway:
+    image: ${ENTERPRISE_GATEWAY_IMAGE:?set ENTERPRISE_GATEWAY_IMAGE}
+    environment:
+      ENTERPRISE_GATEWAY_DB_HOST: gateway-postgres
+      ENTERPRISE_GATEWAY_DB_PORT: "5432"
+      ENTERPRISE_GATEWAY_DB_NAME: ${ENTERPRISE_GATEWAY_DB_NAME:-tyrag_gateway}
+      ENTERPRISE_GATEWAY_DB_USER: ${ENTERPRISE_GATEWAY_DB_USER:-tyrag_gateway}
+      ENTERPRISE_GATEWAY_DB_PASSWORD: ${ENTERPRISE_GATEWAY_DB_PASSWORD:?set ENTERPRISE_GATEWAY_DB_PASSWORD}
+      ENTERPRISE_DB_PATH: ""
+      ENTERPRISE_SYNC_DB_PATH: ""
+      ENTERPRISE_RAG_DIAGNOSTICS_ENABLED: ${ENTERPRISE_RAG_DIAGNOSTICS_ENABLED:-false}
+    depends_on:
+      gateway-postgres:
+        condition: service_healthy
+
+  enterprise-web:
+    image: ${ENTERPRISE_WEB_IMAGE:?set ENTERPRISE_WEB_IMAGE}
+
+volumes:
+  gateway_postgres_data:

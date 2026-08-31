@@ -67,6 +67,7 @@ foreach ($image in $Images) {
 
 $ProductionRoot = Join-Path $RepoRoot 'deploy\production'
 Copy-Item (Join-Path $ProductionRoot 'docker-compose.yml') (Join-Path $OutputDirectory 'docker-compose.yml')
+Copy-Item (Join-Path $ProductionRoot 'docker-compose.30-release.yml') (Join-Path $OutputDirectory 'docker-compose.30-release.yml')
 Copy-Item (Join-Path $ProductionRoot 'production.env.example') (Join-Path $OutputDirectory 'production.env.example')
 Copy-Item (Join-Path $ProductionRoot 'install-offline.sh') (Join-Path $OutputDirectory 'install-offline.sh')
 Copy-Item (Join-Path $ProductionRoot 'README.md') (Join-Path $OutputDirectory 'README.md')
@@ -108,10 +109,13 @@ $Manifest = [ordered]@{
     upstreamTag = $UpstreamTag
     upstreamCommit = $UpstreamCommit
     composeSha256 = (Get-FileHash -LiteralPath (Join-Path $OutputDirectory 'docker-compose.yml') -Algorithm SHA256).Hash.ToLowerInvariant()
+    releaseOverlaySha256 = (Get-FileHash -LiteralPath (Join-Path $OutputDirectory 'docker-compose.30-release.yml') -Algorithm SHA256).Hash.ToLowerInvariant()
     patchManifestSha256 = (Get-FileHash -LiteralPath $PatchManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
     images = @($ImageManifest)
     diagnosticsIncluded = [bool]$IncludeDiagnostics
     compose = 'docker-compose.yml'
+    releaseOverlay = 'docker-compose.30-release.yml'
+    releaseEnv = 'release.env'
     testCompose = 'docker-compose.test.yml'
     envTemplate = 'production.env.example'
     verification = @(
