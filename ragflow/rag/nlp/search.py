@@ -30,6 +30,7 @@ from common.tag_feature_utils import parse_tag_features
 from common import settings
 
 from common.misc_utils import thread_pool_exec
+from rag.diagnostics import record_rag_diagnostics
 
 
 def index_name(uid):
@@ -567,6 +568,18 @@ class Dealer:
     ):
         ranks = {"total": 0, "chunks": [], "doc_aggs": {}}
         if not question:
+            record_rag_diagnostics(
+                "retrieval",
+                {
+                    "query": "",
+                    "similarityThreshold": similarity_threshold,
+                    "topN": page_size,
+                    "topK": top,
+                    "candidateCount": 0,
+                    "selectedCount": 0,
+                    "candidates": [],
+                },
+            )
             return ranks
 
         # Candidate window for block-based pagination. It MUST stay a multiple
@@ -603,6 +616,18 @@ class Dealer:
         sres = await self._prune_deleted_chunks(sres)
         if sres.total == 0:
             ranks["doc_aggs"] = []
+            record_rag_diagnostics(
+                "retrieval",
+                {
+                    "query": question,
+                    "similarityThreshold": similarity_threshold,
+                    "topN": page_size,
+                    "topK": top,
+                    "candidateCount": 0,
+                    "selectedCount": 0,
+                    "candidates": [],
+                },
+            )
             return ranks
 
         term_similarity_weight = 1 - vector_similarity_weight
@@ -660,6 +685,18 @@ class Dealer:
         sim_np = np.array(sim, dtype=np.float64)
         if sim_np.size == 0:
             ranks["doc_aggs"] = []
+            record_rag_diagnostics(
+                "retrieval",
+                {
+                    "query": question,
+                    "similarityThreshold": similarity_threshold,
+                    "topN": page_size,
+                    "topK": top,
+                    "candidateCount": 0,
+                    "selectedCount": 0,
+                    "candidates": [],
+                },
+            )
             return ranks
 
         # Use stable sort for deterministic ordering when scores are tied
@@ -672,13 +709,48 @@ class Dealer:
         filtered_count = len(valid_idx)
         ranks["total"] = int(filtered_count)
 
-        if filtered_count == 0:
-            ranks["doc_aggs"] = []
-            return ranks
-
         begin = global_offset % RERANK_LIMIT
         end = begin + page_size
         page_idx = valid_idx[begin:end]
+        try:
+            selected = set(page_idx)
+            candidates = []
+            for rank, raw_index in enumerate(sorted_idx, start=1):
+                i = int(raw_index)
+                chunk_id = sres.ids[i]
+                chunk = sres.field[chunk_id]
+                candidates.append(
+                    {
+                        "chunkId": chunk_id,
+                        "documentId": chunk.get("doc_id", ""),
+                        "rank": rank,
+                        "score": float(sim_np[i]),
+                        "termScore": float(tsim[i]),
+                        "secondaryScore": float(vsim[i]),
+                        "secondaryScoreKind": "rerank" if rerank_mdl else "vector",
+                        "passedThreshold": i in valid_idx,
+                        "selected": i in selected,
+                    }
+                )
+            record_rag_diagnostics(
+                "retrieval",
+                {
+                    "query": question,
+                    "similarityThreshold": post_threshold,
+                    "topN": page_size,
+                    "topK": top,
+                    "candidateCount": len(sres.ids),
+                    "qualifiedCount": filtered_count,
+                    "selectedCount": len(page_idx),
+                    "candidates": candidates,
+                },
+            )
+        except Exception:
+            pass
+
+        if filtered_count == 0:
+            ranks["doc_aggs"] = []
+            return ranks
 
         dim = len(sres.query_vector)
         vector_column = f"q_{dim}_vec"

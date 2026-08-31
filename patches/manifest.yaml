@@ -101,3 +101,22 @@ patches:
       - "ragflow/test/unit_test/api/db/services/test_secure_observability.py"
       - "enterprise/tests/test_v2_grounding_integration.py"
     upgrade_notes: "Replay the grounding prompt summary, static think-log descriptions, final agentic stage aggregation, and conversation prompt persistence. Do not restore raw Prompt, query, evidence, tool arguments, or tool results."
+  - id: RF-PATCH-009
+    reason: "request-scoped bounded RAG diagnostics correlated by the Gateway runId without recording prompts, chunk bodies, or raw model output"
+    upstream_files:
+      - ragflow/rag/diagnostics.py
+      - ragflow/api/apps/restful_apis/chat_api.py
+      - ragflow/rag/nlp/search.py
+      - ragflow/api/db/services/dialog_service.py
+      - ragflow/rag/advanced_rag/agentic_rag_graph.py
+      - ragflow/api/db/services/llm_service.py
+    adr: "decisions/ADR-017-RAG诊断旁路.md"
+    change_request: "patches/CHANGE-REQUEST-RF-PATCH-009-RAG-DIAGNOSTICS.md"
+    introduced_in: "RF-PATCH-009-rag-diagnostics"
+    tests:
+      - "ragflow/test/unit_test/rag/test_diagnostics.py"
+      - "enterprise/tests/test_ragflow_client.py"
+      - "enterprise/tests/test_v2_conversation_contract.py"
+      - "enterprise/tests/test_system_admin.py"
+      - "enterprise/scripts/run_rag_diagnostics_e2e.py"
+    upgrade_notes: "Replay the request ContextVar sink, chat entry attachment, retrieval/context/LLM metadata calls, and their isolated tests. Keep diagnostics disabled by default and never restore Prompt, chunk body, tool payload, or raw response capture."

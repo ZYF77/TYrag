@@ -341,6 +341,7 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
         scope_identifiers: list[str] | None = None,
         attachment_observations: list[str] | None = None,
         reasoning: int | None = None,
+        enterprise_diagnostics: bool = False,
     ) -> dict:
         rid = request_id or self._new_request_id()
         body: dict[str, Any] = {
@@ -385,6 +386,8 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
             ]
         if reasoning is not None:
             body["reasoning"] = int(reasoning)
+        if enterprise_diagnostics:
+            body["enterprise_diagnostics"] = True
         _trace_doc_ids(rid, doc_ids)
         result = await self._run_sync(
             self._sync_request,
@@ -531,6 +534,7 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
         scope_identifiers: list[str] | None = None,
         attachment_observations: list[str] | None = None,
         reasoning: int | None = None,
+        enterprise_diagnostics: bool = False,
     ):
         """Stream RAGFlow chat completion over the public SSE API.
 
@@ -577,6 +581,8 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
             ]
         if reasoning is not None:
             body["reasoning"] = int(reasoning)
+        if enterprise_diagnostics:
+            body["enterprise_diagnostics"] = True
         _trace_doc_ids(rid, doc_ids)
         timeout = httpx.Timeout(self.timeout, connect=self.timeout)
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -839,6 +845,93 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
             data["status"] = status
         return data
 
+    @staticmethod
+    def _apply_diagnostics(
+        data: dict,
+        *,
+        enabled: bool,
+        request_id: str | None,
+        question: str,
+        doc_ids: list[str] | None,
+        reasoning: int | None,
+        chunks: list[dict],
+    ) -> dict:
+        if not enabled or not request_id:
+            return data
+        chunk_rows = [
+            {
+                "chunkId": str(chunk.get("id") or chunk.get("chunk_id") or ""),
+                "documentId": str(
+                    chunk.get("document_id") or chunk.get("doc_id") or ""
+                ),
+                "rank": index,
+                "selected": True,
+            }
+            for index, chunk in enumerate(chunks, start=1)
+        ]
+        chunk_ids = [row["chunkId"] for row in chunk_rows if row["chunkId"]]
+        data["_diagnostics"] = {
+            "version": 1,
+            "runId": request_id,
+            "startedAt": "stub",
+            "durationMs": 0,
+            "events": [
+                {
+                    "type": "request",
+                    "atMs": 0,
+                    "data": {
+                        "query": question,
+                        "inferenceMode": reasoning or "simple",
+                        "stream": False,
+                    },
+                },
+                {
+                    "type": "scope",
+                    "atMs": 0,
+                    "data": {
+                        "requestedDocumentIds": list(doc_ids or []),
+                        "actualDocumentIds": list(doc_ids or []),
+                    },
+                },
+                {
+                    "type": "retrieval",
+                    "atMs": 0,
+                    "data": {
+                        "candidateCount": len(chunk_rows),
+                        "selectedCount": len(chunk_rows),
+                        "candidates": chunk_rows,
+                    },
+                },
+                {
+                    "type": "context",
+                    "atMs": 0,
+                    "data": {
+                        "retrievedChunkIds": chunk_ids,
+                        "includedChunkIds": chunk_ids,
+                        "droppedChunkIds": [],
+                    },
+                },
+                {
+                    "type": "llm",
+                    "atMs": 0,
+                    "data": {
+                        "modelId": "stub",
+                        "durationMs": 0,
+                        "inputTokens": 0,
+                        "outputTokens": 0,
+                        "status": "success",
+                    },
+                },
+                {
+                    "type": "outcome",
+                    "atMs": 0,
+                    "data": {"outcome": data.get("status") or "completed"},
+                },
+            ],
+            "truncated": False,
+        }
+        return data
+
     async def chat_completion(
         self,
         chat_id: str | None,
@@ -856,6 +949,7 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         scope_identifiers: list[str] | None = None,
         attachment_observations: list[str] | None = None,
         reasoning: int | None = None,
+        enterprise_diagnostics: bool = False,
     ) -> dict:
         turn_id = f"msg-{uuid.uuid4().hex[:12]}"
         body_messages = [dict(item) for item in messages] if messages is not None else None
@@ -881,6 +975,8 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         }
         if reasoning is not None:
             self._last_completion_body["reasoning"] = int(reasoning)
+        if enterprise_diagnostics:
+            self._last_completion_body["enterprise_diagnostics"] = True
         base_chunk = {
             "id": "chunk-1",
             "content": "故障码 E-104 时先检查液压油位。",
@@ -903,6 +999,15 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
             )
             if session_id:
                 data["session_id"] = session_id
+            self._apply_diagnostics(
+                data,
+                enabled=enterprise_diagnostics,
+                request_id=request_id,
+                question=question,
+                doc_ids=doc_ids,
+                reasoning=reasoning,
+                chunks=[],
+            )
             return {
                 "code": 0,
                 "data": data,
@@ -922,6 +1027,15 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
             )
             if session_id:
                 data["session_id"] = session_id
+            self._apply_diagnostics(
+                data,
+                enabled=enterprise_diagnostics,
+                request_id=request_id,
+                question=question,
+                doc_ids=doc_ids,
+                reasoning=reasoning,
+                chunks=[base_chunk],
+            )
             return {
                 "code": 0,
                 "data": data,
@@ -941,6 +1055,15 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
             )
             if session_id:
                 data["session_id"] = session_id
+            self._apply_diagnostics(
+                data,
+                enabled=enterprise_diagnostics,
+                request_id=request_id,
+                question=question,
+                doc_ids=doc_ids,
+                reasoning=reasoning,
+                chunks=[],
+            )
             return {
                 "code": 0,
                 "data": data,
@@ -995,6 +1118,15 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         )
         if session_id:
             data["session_id"] = session_id
+        self._apply_diagnostics(
+            data,
+            enabled=enterprise_diagnostics,
+            request_id=request_id,
+            question=question,
+            doc_ids=doc_ids,
+            reasoning=reasoning,
+            chunks=chunks,
+        )
         return {
             "code": 0,
             "data": data,
@@ -1017,6 +1149,7 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         scope_identifiers: list[str] | None = None,
         attachment_observations: list[str] | None = None,
         reasoning: int | None = None,
+        enterprise_diagnostics: bool = False,
     ):
         if self._stream_fail_after == 0:
             completion = await self.chat_completion(
@@ -1035,6 +1168,7 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
                 scope_identifiers=scope_identifiers,
                 attachment_observations=attachment_observations,
                 reasoning=reasoning,
+                enterprise_diagnostics=enterprise_diagnostics,
             )
             data = completion.get("data", {})
             stream_id = None if self._omit_stream_id else (
@@ -1068,6 +1202,8 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
             }
             if status is not None:
                 final_data["status"] = status
+            if isinstance(data, dict) and isinstance(data.get("_diagnostics"), dict):
+                final_data["_diagnostics"] = data["_diagnostics"]
             yield {
                 "code": 0,
                 "message": "",

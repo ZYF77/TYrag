@@ -50,6 +50,12 @@ from enterprise.gateway.query.citation_select import (
     sanitize_citation_markers,
     select_cited_chunk_refs,
 )
+from enterprise.gateway.query.diagnostics import (
+    finish_trace,
+    merge_upstream,
+    record_event as record_diagnostics_event,
+    start_trace,
+)
 from enterprise.gateway.query.formal_router import (
     FormalScopeResolver,
     NO_RELIABLE_EVIDENCE_ANSWER,
@@ -490,6 +496,8 @@ def _v2_completion_kwargs(
     mapped = _REASONING_MODE_TO_INT.get(reasoning_mode)
     if mapped is not None:
         kwargs["reasoning"] = mapped
+    if config.rag_diagnostics_enabled:
+        kwargs["enterprise_diagnostics"] = True
     return kwargs
 
 
@@ -1284,17 +1292,23 @@ async def _save_failed_run(
         citations=[],
     )
     error_response = _error(status_code, code, message)
+    failed_result = {
+        "_error": {
+            "statusCode": status_code,
+            "body": json.loads(error_response.body),
+        }
+    }
+    diagnostics = finish_trace(
+        run.get("_diagnostics"), outcome="failed", error_code=code
+    )
+    if diagnostics:
+        failed_result["_diagnostics"] = diagnostics
     await _gw_write(db, v2_store.complete_message_run,
         conversation_id=conversation["conversation_id"],
         tenant_id=principal.tenant_id,
         business_user_id=principal.business_user_id,
         client_message_id=req.clientMessageId,
-        result={
-            "_error": {
-                "statusCode": status_code,
-                "body": json.loads(error_response.body),
-            }
-        },
+        result=failed_result,
         status="failed",
         assistant_message_id=assistant_message_id,
     )
@@ -1334,12 +1348,32 @@ async def _execute_json_run(
     assistant_message_id = run.get("assistant_message_id") or str(uuid.uuid4())
     pending = pending or []
     client = None
+    if config.rag_diagnostics_enabled:
+        try:
+            run["_diagnostics"] = start_trace(
+                run["run_id"],
+                query=question,
+                reasoning_mode=req.reasoningMode,
+                stream=False,
+            )
+        except Exception:
+            run["_diagnostics"] = None
     try:
         try:
             question, client, observations = await _retrieval_question(
                 db, principal, conversation, question, pending
             )
             scope, docs_by_internal_id = await _context_scope(db, principal, conversation)
+            record_diagnostics_event(
+                run.get("_diagnostics"),
+                "scope",
+                {
+                    "source": "gateway",
+                    "entityIds": conversation.get("_turn_entity_ids") or [],
+                    "requestedDocumentIds": conversation.get("_turn_document_ids") or [],
+                    "allowedDocumentIds": list(scope.document_ids),
+                },
+            )
             answer = NO_RELIABLE_EVIDENCE_ANSWER
             status = "no_reliable_evidence"
             citations: list[dict] = []
@@ -1372,9 +1406,12 @@ async def _execute_json_run(
                     chat_id,
                     _ragflow_question(conversation, question),
                     doc_ids=list(scope.document_ids),
+                    request_id=run["run_id"],
                     **completion_kwargs,
                 )
                 data = completion.get("data", {}) if isinstance(completion, dict) else {}
+                if isinstance(data, dict):
+                    merge_upstream(run.get("_diagnostics"), data.get("_diagnostics"))
                 reference = data.get("reference", {}) if isinstance(data, dict) else {}
                 chunks = [
                     item
@@ -1446,6 +1483,11 @@ async def _execute_json_run(
                     for item in pending
                     if item.attachment_id
                 ]
+            diagnostics = finish_trace(
+                run.get("_diagnostics"), outcome=status
+            )
+            if diagnostics:
+                result["_diagnostics"] = diagnostics
             await _gw_write(db, v2_store.complete_message_run,
                 conversation_id=conversation["conversation_id"],
                 tenant_id=principal.tenant_id,
@@ -1498,6 +1540,16 @@ async def _stream_run_events(
 ) -> AsyncIterator[str]:
     conversation_id = conversation["conversation_id"]
     assistant_message_id = run.get("assistant_message_id") or str(uuid.uuid4())
+    if config.rag_diagnostics_enabled:
+        try:
+            run["_diagnostics"] = start_trace(
+                run["run_id"],
+                query=question,
+                reasoning_mode=req.reasoningMode,
+                stream=True,
+            )
+        except Exception:
+            run["_diagnostics"] = None
     yield _sse(
         "run.started",
         {
@@ -1525,6 +1577,16 @@ async def _stream_run_events(
             db, principal, conversation, question, pending
         )
         scope, docs_by_internal_id = await _context_scope(db, principal, conversation)
+        record_diagnostics_event(
+            run.get("_diagnostics"),
+            "scope",
+            {
+                "source": "gateway",
+                "entityIds": conversation.get("_turn_entity_ids") or [],
+                "requestedDocumentIds": conversation.get("_turn_document_ids") or [],
+                "allowedDocumentIds": list(scope.document_ids),
+            },
+        )
         if not scope.is_empty:
             client = client or _query_client()
             chat_id, chat = await _ensure_chat_info(client, principal, scope)
@@ -1553,6 +1615,7 @@ async def _stream_run_events(
                 chat_id,
                 _ragflow_question(conversation, question),
                 doc_ids=list(scope.document_ids),
+                request_id=run["run_id"],
                 **stream_kwargs,
             ):
                 data = payload.get("data") if isinstance(payload, dict) else None
@@ -1560,6 +1623,7 @@ async def _stream_run_events(
                     break
                 if not isinstance(data, dict):
                     continue
+                merge_upstream(run.get("_diagnostics"), data.get("_diagnostics"))
                 explicit_status = data.get("status")
                 if explicit_status in {"completed", "no_reliable_evidence", "failed"}:
                     upstream_status = explicit_status
@@ -1688,6 +1752,9 @@ async def _stream_run_events(
                 for item in pending
                 if item.attachment_id
             ]
+        diagnostics = finish_trace(run.get("_diagnostics"), outcome=status)
+        if diagnostics:
+            result["_diagnostics"] = diagnostics
         await _gw_write(db, v2_store.complete_message_run,
             conversation_id=conversation_id,
             tenant_id=principal.tenant_id,

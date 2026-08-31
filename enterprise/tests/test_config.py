@@ -50,6 +50,13 @@ class TestGatewayConfig:
         assert overridden.context_compress_enabled is False
         assert overridden.context_compress_turns == 8
 
+    def test_rag_diagnostics_defaults_off_and_can_be_enabled(self, monkeypatch):
+        monkeypatch.delenv("ENTERPRISE_RAG_DIAGNOSTICS_ENABLED", raising=False)
+        assert GatewayConfig().rag_diagnostics_enabled is False
+
+        monkeypatch.setenv("ENTERPRISE_RAG_DIAGNOSTICS_ENABLED", "true")
+        assert GatewayConfig().rag_diagnostics_enabled is True
+
     def test_pg_defaults(self):
         cfg = GatewayConfig()
         assert cfg.pg_host == "localhost"

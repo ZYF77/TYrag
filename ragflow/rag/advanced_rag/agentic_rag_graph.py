@@ -34,13 +34,47 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
 from rag.prompts.generator import form_message, kb_prompt, message_fit_in
+from rag.diagnostics import record_rag_diagnostics
 
 _LOG = logging.getLogger(__name__)
+
+
+def _record_formalize_context(kbinfos: dict, message_content: str) -> None:
+    try:
+        chunks = kbinfos.get("chunks", [])
+        retrieved_ids = [
+            str(chunk.get("chunk_id") or chunk.get("id") or "")
+            for chunk in chunks
+            if chunk.get("chunk_id") or chunk.get("id")
+        ]
+        included_indexes = {
+            int(match)
+            for match in re.findall(r"(?:^|\n)ID:\s*(\d+)", message_content)
+            if int(match) < len(chunks)
+        }
+        included_ids = [
+            str(chunks[index].get("chunk_id") or chunks[index].get("id") or "")
+            for index in sorted(included_indexes)
+            if chunks[index].get("chunk_id") or chunks[index].get("id")
+        ]
+        included = set(included_ids)
+        record_rag_diagnostics(
+            "context",
+            {
+                "retrievedChunkIds": retrieved_ids,
+                "includedChunkIds": included_ids,
+                "droppedChunkIds": [item for item in retrieved_ids if item not in included],
+                "effectiveKnowledgeChars": len(message_content),
+            },
+        )
+    except Exception:
+        pass
 
 
 def _build_formalize_evidence_text(tools, kbinfos) -> str:
@@ -301,6 +335,7 @@ def build_agentic_graph(tools, token_queue: asyncio.Queue, gen_conf: dict | None
         user_content = "\n".join(parts)
 
         _, msg = message_fit_in(form_message(system, user_content), tools.chat_mdl.max_length)
+        _record_formalize_context(kbinfos, str(msg[1].get("content") or ""))
         try:
             async for tok in tools.chat_mdl.async_chat_streamly_delta(msg[0]["content"], msg[1:], answer_conf):
                 token_queue.put_nowait(tok)

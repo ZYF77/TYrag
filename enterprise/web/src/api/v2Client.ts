@@ -35,6 +35,8 @@ import type {
   GatewayHttpLogPage,
   MetadataSortOrder,
   MetadataSummary,
+  RagDiagnosticTraceDetail,
+  RagDiagnosticTracePage,
   SystemIntegrations,
 } from './consoleTypes';
 
@@ -492,6 +494,22 @@ export const v2Api = {
   getAdminConversationMessages(conversationId: string): Promise<AdminConversationMessagesPage> {
     return request<AdminConversationMessagesPage>(
       `/admin/system/metadata/conversations/${encodeURIComponent(conversationId)}/messages`,
+      {},
+      V1_BASE,
+    );
+  },
+
+  listRagDiagnosticTraces(limit = 50): Promise<RagDiagnosticTracePage> {
+    return request<RagDiagnosticTracePage>(
+      `/admin/system/diagnostics/traces?limit=${limit}`,
+      {},
+      V1_BASE,
+    );
+  },
+
+  getRagDiagnosticTrace(runId: string): Promise<RagDiagnosticTraceDetail> {
+    return request<RagDiagnosticTraceDetail>(
+      `/admin/system/diagnostics/traces/${encodeURIComponent(runId)}`,
       {},
       V1_BASE,
     );

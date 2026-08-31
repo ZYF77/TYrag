@@ -198,3 +198,44 @@ export interface AdminConversationMessagesPage {
   conversationId: string;
   items: AdminConversationMessage[];
 }
+
+export interface RagDiagnosticEvent {
+  type: string;
+  atMs: number;
+  data: Record<string, unknown>;
+}
+
+export interface RagDiagnostics {
+  version: number;
+  runId: string;
+  startedAt: string;
+  durationMs: number;
+  events: RagDiagnosticEvent[];
+  truncated: boolean;
+}
+
+export interface RagDiagnosticTraceItem {
+  runId: string;
+  conversationId: string;
+  clientMessageId: string;
+  status: string;
+  outcome: string | null;
+  startedAt: string | null;
+  durationMs: number | null;
+  truncated: boolean;
+  createdAt: string;
+}
+
+export interface RagDiagnosticTracePage {
+  items: RagDiagnosticTraceItem[];
+  hasMore: boolean;
+}
+
+export interface RagDiagnosticTraceDetail {
+  runId: string;
+  conversationId: string;
+  clientMessageId: string;
+  status: string;
+  createdAt: string;
+  diagnostics: RagDiagnostics;
+}

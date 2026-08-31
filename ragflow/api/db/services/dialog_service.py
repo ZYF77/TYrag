@@ -61,6 +61,7 @@ from rag.grounding.guard import (
     _unmatched_keys_are_zero_only,
 )
 from rag.nlp.search import index_name
+from rag.diagnostics import record_rag_diagnostics
 from rag.prompts.generator import chunks_format, citation_prompt, cross_languages, full_question, kb_prompt, keyword_extraction, message_fit_in, PROMPT_JINJA_ENV, ASK_SUMMARY
 from common.token_utils import num_tokens_from_string
 from common.misc_utils import thread_pool_exec
@@ -103,6 +104,37 @@ def _extract_effective_knowledge(content: str, start: str | None, end: str | Non
     body_start = start_index + len(start)
     end_index = content.find(end, body_start) if end else -1
     return content[body_start:end_index if end_index >= 0 else len(content)]
+
+
+def _record_context_diagnostics(chunks: list[dict], prompt_text: str) -> None:
+    try:
+        retrieved_ids = [
+            str(chunk.get("chunk_id") or chunk.get("id") or "")
+            for chunk in chunks
+            if chunk.get("chunk_id") or chunk.get("id")
+        ]
+        included_indexes = {
+            int(match)
+            for match in re.findall(r"(?:^|\n)ID:\s*(\d+)", prompt_text or "")
+            if int(match) < len(chunks)
+        }
+        included_ids = [
+            str(chunks[index].get("chunk_id") or chunks[index].get("id") or "")
+            for index in sorted(included_indexes)
+            if chunks[index].get("chunk_id") or chunks[index].get("id")
+        ]
+        included = set(included_ids)
+        record_rag_diagnostics(
+            "context",
+            {
+                "retrievedChunkIds": retrieved_ids,
+                "includedChunkIds": included_ids,
+                "droppedChunkIds": [item for item in retrieved_ids if item not in included],
+                "effectiveKnowledgeChars": len(prompt_text or ""),
+            },
+        )
+    except Exception:
+        pass
 
 
 # Identifier/Numeric Fuse implementation is retained below, but not applied on
@@ -999,6 +1031,15 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
             allowed = set(gateway_doc_ids)
             attachments = [doc_id for doc_id in attachments or [] if doc_id in allowed]
 
+    record_rag_diagnostics(
+        "scope",
+        {
+            "inferenceMode": "simple",
+            "requestedDocumentIds": gateway_doc_ids or [],
+            "actualDocumentIds": attachments or [],
+        },
+    )
+
     include_reference_metadata, metadata_fields = _resolve_reference_metadata(prompt_config, request_payload=kwargs)
     field_map = KnowledgebaseService.get_field_map(dialog.kb_ids)
     logging.debug(f"field_map retrieved: {field_map}")
@@ -1185,6 +1226,7 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
     retrieval_ts = timer()
     if not knowledges and prompt_config.get("empty_response") and not messages[-1].get("files"):
         empty_res = prompt_config["empty_response"]
+        _record_context_diagnostics(kbinfos.get("chunks", []), "")
         if grounding_enabled:
             logging.info(
                 "grounding prompt fit: retrieved_knowledge_count=%d included_knowledge_count=0 effective_knowledge_length=0",
@@ -1253,6 +1295,9 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
         knowledges = knowledges[:-1]
 
     effective_knowledge = _extract_effective_knowledge(prompt, grounding_start, grounding_end)
+    _record_context_diagnostics(
+        kbinfos.get("chunks", []), effective_knowledge if grounding_enabled else prompt
+    )
     if grounding_enabled:
         logging.info(
             "grounding prompt fit: retrieved_knowledge_count=%d included_knowledge_count=%d effective_knowledge_length=%d",
@@ -2419,6 +2464,15 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
             doc_scope = [
                 doc_id for doc_id in filtered_doc_scope or [] if doc_id in allowed
             ]
+
+    record_rag_diagnostics(
+        "scope",
+        {
+            "inferenceMode": thinking_mode,
+            "requestedDocumentIds": initial_doc_scope if dialog.meta_data_filter else (doc_scope or []),
+            "actualDocumentIds": doc_scope or [],
+        },
+    )
 
     scope_identifiers = list(kwargs.get("scope_identifiers") or []) or list(
         kwargs.get("allowed_identifiers") or []

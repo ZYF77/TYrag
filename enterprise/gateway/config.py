@@ -279,6 +279,12 @@ class GatewayConfig:
             os.getenv("ENTERPRISE_CONTEXT_COMPRESS_KEEP_RECENT", "4")
         )
     )
+    rag_diagnostics_enabled: bool = field(
+        default_factory=lambda: os.getenv(
+            "ENTERPRISE_RAG_DIAGNOSTICS_ENABLED", "false"
+        ).lower()
+        in ("1", "true", "yes", "on")
+    )
 
     # --- JWT / User Auth (WP-01A) ---
     jwt_issuer: str = field(

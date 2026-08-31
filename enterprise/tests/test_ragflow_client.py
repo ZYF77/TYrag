@@ -110,6 +110,29 @@ async def test_v2_completion_sends_session_without_projected_messages():
     assert body["scope_identifiers"] == ["EQ-1"]
 
 
+@pytest.mark.asyncio
+async def test_completion_forwards_private_diagnostics_flag_and_run_id():
+    client = RAGFlowQueryClient()
+    captured = {}
+
+    async def fake_run_sync(fn, *args, **kwargs):
+        del fn
+        captured["args"] = args
+        captured["body"] = kwargs["json_data"]
+        return {"code": 0, "data": {"answer": "ok"}}
+
+    client._run_sync = fake_run_sync
+    await client.chat_completion(
+        "chat-1",
+        "question",
+        request_id="run-1",
+        enterprise_diagnostics=True,
+    )
+
+    assert captured["args"][2] == "run-1"
+    assert captured["body"]["enterprise_diagnostics"] is True
+
+
 def test_json_missing_payload_treats_code_102_as_missing():
     payload = b'{"code":102,"message":"The document is not found."}'
     assert _json_missing_payload(payload, "application/json") is True

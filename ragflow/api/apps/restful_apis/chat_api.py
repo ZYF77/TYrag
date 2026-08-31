@@ -55,6 +55,12 @@ from api.utils.pagination_utils import validate_rest_api_page, validate_rest_api
 from common.constants import LLMType, RetCode, StatusEnum
 from common import settings
 from common.misc_utils import get_uuid, thread_pool_exec
+from rag.diagnostics import (
+    begin_rag_diagnostics,
+    record_rag_diagnostics,
+    reset_rag_diagnostics,
+    snapshot_rag_diagnostics,
+)
 from rag.prompts.generator import chunks_format
 from rag.prompts.template import load_prompt
 
@@ -1232,10 +1238,20 @@ async def recommendation():
 async def session_completion(chat_id_in_arg=""):
     """Handle chat completion requests, streaming or non-streaming, scoped to the authenticated user."""
     req = await get_request_json()
+    diagnostics_enabled = _get_bool_request_flag(
+        req, "enterprise_diagnostics", default=False
+    )
+    diagnostics_run_id = (
+        str(request.headers.get("X-Request-ID") or "").strip()
+        if diagnostics_enabled
+        else ""
+    )
     normalized, error = _normalize_completion_messages(req)
     if error:
         return error
     request_messages, request_msg = normalized
+    diagnostics_query = str(request_msg[-1].get("content") or "")
+    diagnostics_reasoning = req.get("reasoning")
     pass_all_history_messages = _get_bool_request_flag(req, "pass_all_history_messages", "pass_all_history", default=False)
     store_history_messages = _get_bool_request_flag(req, "store_history_messages", "store_history", default=True)
     if not store_history_messages and not pass_all_history_messages:
@@ -1335,6 +1351,12 @@ async def session_completion(chat_id_in_arg=""):
 
         def _format_answer(ans):
             """Wrap a raw answer dict with session and chat identifiers."""
+            if diagnostics_run_id and ans.get("final", True):
+                record_rag_diagnostics(
+                    "outcome", {"outcome": ans.get("status") or "success"}
+                )
+                ans = dict(ans)
+                ans["_diagnostics"] = snapshot_rag_diagnostics()
             formatted = structure_answer(conv, ans, message_id, session_id)
             if chat_id:
                 formatted["chat_id"] = chat_id
@@ -1343,6 +1365,17 @@ async def session_completion(chat_id_in_arg=""):
         async def stream():
             """Yield SSE-formatted chunks from the async chat generator."""
             nonlocal dia, msg, req, conv
+            diagnostics_token = begin_rag_diagnostics(
+                bool(diagnostics_run_id), diagnostics_run_id
+            )
+            record_rag_diagnostics(
+                "request",
+                {
+                    "query": diagnostics_query,
+                    "inferenceMode": diagnostics_reasoning or "simple",
+                    "stream": True,
+                },
+            )
             try:
                 if legacy:
                     # v0.23.0-style streaming: emit accumulated answer text and
@@ -1395,7 +1428,20 @@ async def session_completion(chat_id_in_arg=""):
                     await thread_pool_exec(ConversationService.update_by_id, conv.id, conv.to_dict())
             except Exception as ex:
                 logging.exception(ex)
-                yield "data:" + json.dumps({"code": 500, "message": str(ex), "data": {"answer": "**ERROR**: " + str(ex), "reference": [], "status": "failed"}}, ensure_ascii=False) + "\n\n"
+                record_rag_diagnostics(
+                    "outcome",
+                    {"outcome": "failed", "errorType": type(ex).__name__},
+                )
+                error_data = {
+                    "answer": "**ERROR**: " + str(ex),
+                    "reference": [],
+                    "status": "failed",
+                }
+                if diagnostics_run_id:
+                    error_data["_diagnostics"] = snapshot_rag_diagnostics()
+                yield "data:" + json.dumps({"code": 500, "message": str(ex), "data": error_data}, ensure_ascii=False) + "\n\n"
+            finally:
+                reset_rag_diagnostics(diagnostics_token)
             yield "data:" + json.dumps({"code": 0, "message": "", "data": True}, ensure_ascii=False) + "\n\n"
 
         if stream_mode:
@@ -1406,12 +1452,32 @@ async def session_completion(chat_id_in_arg=""):
             resp.headers.add_header("Content-Type", "text/event-stream; charset=utf-8")
             return resp
 
+        diagnostics_token = begin_rag_diagnostics(
+            bool(diagnostics_run_id), diagnostics_run_id
+        )
+        record_rag_diagnostics(
+            "request",
+            {
+                "query": diagnostics_query,
+                "inferenceMode": diagnostics_reasoning or "simple",
+                "stream": False,
+            },
+        )
         answer = None
-        async for ans in rag_agent(dia, msg, False, session_id=session_id, **req):
-            answer = _format_answer(ans)
-            if conv is not None and store_history_messages:
-                await thread_pool_exec(ConversationService.update_by_id, conv.id, conv.to_dict())
-            break
+        try:
+            async for ans in rag_agent(dia, msg, False, session_id=session_id, **req):
+                answer = _format_answer(ans)
+                if conv is not None and store_history_messages:
+                    await thread_pool_exec(ConversationService.update_by_id, conv.id, conv.to_dict())
+                break
+        except Exception as ex:
+            record_rag_diagnostics(
+                "outcome",
+                {"outcome": "failed", "errorType": type(ex).__name__},
+            )
+            raise
+        finally:
+            reset_rag_diagnostics(diagnostics_token)
         return get_json_result(data=_sanitize_json_floats(answer))
     except Exception as ex:
         return server_error_response(ex)

@@ -268,6 +268,46 @@ function conversationMessagesHandler(
   );
 }
 
+function ragDiagnosticsHandlers() {
+  const diagnostics = {
+    version: 1,
+    runId: 'run-diagnostics-1',
+    startedAt: '2026-08-31T08:00:00.000Z',
+    durationMs: 120,
+    truncated: false,
+    events: [
+      { type: 'retrieval', atMs: 20, data: { candidateCount: 2, selectedCount: 1 } },
+      { type: 'context', atMs: 40, data: { includedChunkIds: ['chunk-1'] } },
+      { type: 'llm', atMs: 100, data: { modelId: 'qwen', ttftMs: 30 } },
+      { type: 'outcome', atMs: 120, data: { outcome: 'completed' } },
+    ],
+  };
+  return [
+    http.get(`${V1}/admin/system/diagnostics/traces`, () => HttpResponse.json({
+      items: [{
+        runId: diagnostics.runId,
+        conversationId: 'conv-1',
+        clientMessageId: 'client-1',
+        status: 'completed',
+        outcome: 'completed',
+        startedAt: diagnostics.startedAt,
+        durationMs: diagnostics.durationMs,
+        truncated: false,
+        createdAt: diagnostics.startedAt,
+      }],
+      hasMore: false,
+    })),
+    http.get(`${V1}/admin/system/diagnostics/traces/:runId`, () => HttpResponse.json({
+      runId: diagnostics.runId,
+      conversationId: 'conv-1',
+      clientMessageId: 'client-1',
+      status: 'completed',
+      createdAt: diagnostics.startedAt,
+      diagnostics,
+    })),
+  ];
+}
+
 beforeEach(() => {
   sessionStorage.clear();
   localStorage.removeItem(DOC_HIDDEN_COLUMNS_KEY);
@@ -283,6 +323,7 @@ describe('SystemSettingsPanels (admin system settings)', () => {
     expect(adminView.getByRole('button', { name: '会话元数据' })).toBeTruthy();
     expect(adminView.getByRole('button', { name: '会话管理' })).toBeTruthy();
     expect(adminView.getByRole('button', { name: '文件元数据' })).toBeTruthy();
+    expect(adminView.getByRole('button', { name: 'RAG 诊断' })).toBeTruthy();
     adminView.unmount();
 
     server.use(
@@ -300,9 +341,29 @@ describe('SystemSettingsPanels (admin system settings)', () => {
     expect(await userView.findByText('需要 admin capability 才能查看系统设置。')).toBeTruthy();
     expect(userView.queryByRole('button', { name: '接口配置' })).toBeNull();
     expect(userView.queryByRole('button', { name: '会话管理' })).toBeNull();
+    expect(userView.queryByRole('button', { name: 'RAG 诊断' })).toBeNull();
     expect(userView.queryByTestId('console-integrations-card')).toBeNull();
     userView.unmount();
     window.location.hash = '';
+  });
+
+  it('queries one private RAG trace by runId and renders its stages', async () => {
+    server.use(...adminScenario(), ...ragDiagnosticsHandlers());
+    const user = userEvent.setup();
+    render(<EnterpriseConsolePage />);
+
+    await user.click(await screen.findByRole('button', { name: 'RAG 诊断' }));
+    const panel = await screen.findByTestId('rag-diagnostics-panel');
+    expect(await within(panel).findByText('run-diagnostics-1')).toBeTruthy();
+    await user.click(within(panel).getByRole('button', { name: '查看' }));
+
+    await waitFor(() => {
+      expect(within(panel).getByText('retrieval')).toBeTruthy();
+      expect(within(panel).getByText('context')).toBeTruthy();
+      expect(within(panel).getByText('llm')).toBeTruthy();
+      expect(panel.textContent).toContain('chunk-1');
+      expect(panel.textContent).toContain('ttftMs');
+    });
   });
 
   it('renders integration config fields and probes rows independently', async () => {

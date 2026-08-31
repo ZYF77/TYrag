@@ -20,6 +20,7 @@ import queue
 import re
 import threading
 from functools import partial
+from time import perf_counter
 from typing import Generator
 
 from langfuse import propagate_attributes
@@ -28,6 +29,7 @@ from api.db.db_models import LLM
 from api.db.services.common_service import CommonService
 from api.db.services.tenant_llm_service import LLM4Tenant
 from common.token_utils import langfuse_run_attrs, num_tokens_from_string, record_run_token_usage, truncate
+from rag.diagnostics import record_rag_diagnostics
 
 
 class LLMService(CommonService):
@@ -81,6 +83,39 @@ class LLMBundle(LLM4Tenant):
             prompt, completion = 0, 0
         record_run_token_usage(prompt, completion, total_tokens)
         return {"input": prompt, "output": completion, "total": total_tokens}
+
+    def _record_chat_diagnostics(
+        self,
+        call_type: str,
+        started: float,
+        *,
+        status: str,
+        usage: dict | None = None,
+        ttft_ms: float | None = None,
+        error_type: str | None = None,
+    ) -> None:
+        try:
+            payload = {
+                "modelId": str(self.model_config.get("llm_name") or ""),
+                "callType": call_type,
+                "durationMs": round((perf_counter() - started) * 1000, 3),
+                "status": status,
+            }
+            if ttft_ms is not None:
+                payload["ttftMs"] = round(ttft_ms, 3)
+            if usage:
+                payload.update(
+                    {
+                        "inputTokens": int(usage.get("input") or 0),
+                        "outputTokens": int(usage.get("output") or 0),
+                        "totalTokens": int(usage.get("total") or 0),
+                    }
+                )
+            if error_type:
+                payload["errorType"] = error_type
+            record_rag_diagnostics("llm", payload)
+        except Exception:
+            pass
 
     def close(self):
         """Release resources held by this LLMBundle instance."""
@@ -433,6 +468,7 @@ class LLMBundle(LLM4Tenant):
         return queue
 
     async def async_chat(self, system: str, history: list, gen_conf: dict = {}, **kwargs):
+        diagnostics_started = perf_counter()
         if self.is_tools and hasattr(self.mdl, "async_chat_with_tools"):
             base_fn = self.mdl.async_chat_with_tools
         elif hasattr(self.mdl, "async_chat"):
@@ -453,6 +489,12 @@ class LLMBundle(LLM4Tenant):
         try:
             txt, used_tokens = await chat_partial(**use_kwargs)
         except Exception as e:
+            self._record_chat_diagnostics(
+                "chat",
+                diagnostics_started,
+                status="failed",
+                error_type=type(e).__name__,
+            )
             if generation:
                 generation.update(output={"error": str(e)})
                 generation.end()
@@ -466,6 +508,9 @@ class LLMBundle(LLM4Tenant):
             logging.info("LLMBundle.async_chat used_tokens: %d", used_tokens)
 
         usage_details = self._report_usage(used_tokens)
+        self._record_chat_diagnostics(
+            "chat", diagnostics_started, status="success", usage=usage_details
+        )
 
         if generation:
             generation.update(output={"output": txt}, usage_details=usage_details)
@@ -474,6 +519,8 @@ class LLMBundle(LLM4Tenant):
         return txt
 
     async def async_chat_streamly(self, system: str, history: list, gen_conf: dict = {}, **kwargs):
+        diagnostics_started = perf_counter()
+        diagnostics_ttft = None
         total_tokens = 0
         ans = ""
         _bundle_is_tools = self.is_tools
@@ -502,6 +549,9 @@ class LLMBundle(LLM4Tenant):
                         total_tokens = txt
                         break
 
+                    if diagnostics_ttft is None:
+                        diagnostics_ttft = (perf_counter() - diagnostics_started) * 1000
+
                     if txt.endswith("</think>") and ans.endswith("</think>"):
                         ans = ans[: -len("</think>")]
 
@@ -511,6 +561,13 @@ class LLMBundle(LLM4Tenant):
                     ans += txt
                     yield ans
             except Exception as e:
+                self._record_chat_diagnostics(
+                    "chat_stream",
+                    diagnostics_started,
+                    status="failed",
+                    ttft_ms=diagnostics_ttft,
+                    error_type=type(e).__name__,
+                )
                 if generation:
                     generation.update(output={"error": str(e)})
                     generation.end()
@@ -518,12 +575,21 @@ class LLMBundle(LLM4Tenant):
             if total_tokens:
                 logging.info("LLMBundle.async_chat_streamly used_tokens: %d", total_tokens)
             usage_details = self._report_usage(total_tokens)
+            self._record_chat_diagnostics(
+                "chat_stream",
+                diagnostics_started,
+                status="success",
+                usage=usage_details,
+                ttft_ms=diagnostics_ttft,
+            )
             if generation:
                 generation.update(output={"output": ans}, usage_details=usage_details)
                 generation.end()
             return
 
     async def async_chat_streamly_delta(self, system: str, history: list, gen_conf: dict = {}, **kwargs):
+        diagnostics_started = perf_counter()
+        diagnostics_ttft = None
         total_tokens = 0
         ans = ""
         if self.is_tools and getattr(self.mdl, "is_tools", False) and hasattr(self.mdl, "async_chat_streamly_with_tools"):
@@ -549,6 +615,9 @@ class LLMBundle(LLM4Tenant):
                         total_tokens = txt
                         break
 
+                    if diagnostics_ttft is None:
+                        diagnostics_ttft = (perf_counter() - diagnostics_started) * 1000
+
                     if txt.endswith("</think>") and ans.endswith("</think>"):
                         ans = ans[: -len("</think>")]
 
@@ -558,6 +627,13 @@ class LLMBundle(LLM4Tenant):
                     ans += txt
                     yield txt
             except Exception as e:
+                self._record_chat_diagnostics(
+                    "chat_stream_delta",
+                    diagnostics_started,
+                    status="failed",
+                    ttft_ms=diagnostics_ttft,
+                    error_type=type(e).__name__,
+                )
                 if generation:
                     generation.update(output={"error": str(e)})
                     generation.end()
@@ -565,6 +641,13 @@ class LLMBundle(LLM4Tenant):
             if total_tokens:
                 logging.info("LLMBundle.async_chat_streamly_delta used_tokens: %d", total_tokens)
             usage_details = self._report_usage(total_tokens)
+            self._record_chat_diagnostics(
+                "chat_stream_delta",
+                diagnostics_started,
+                status="success",
+                usage=usage_details,
+                ttft_ms=diagnostics_ttft,
+            )
             if generation:
                 generation.update(output={"output": ans}, usage_details=usage_details)
                 generation.end()

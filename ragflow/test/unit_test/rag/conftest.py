@@ -65,11 +65,20 @@ def _make_pdf_parser_stub():
     pdf_parser = types.ModuleType(_PDF_PARSER_KEY)
 
     class _StubPdfParser:
+        def __init__(self, *args, **kwargs):
+            del args, kwargs
+
         @staticmethod
         def remove_tag(text):
             return text
 
     pdf_parser.RAGFlowPdfParser = _StubPdfParser
+    pdf_parser.PlainParser = _StubPdfParser
+    pdf_parser.VisionParser = _StubPdfParser
+    from common.constants import MAXIMUM_PAGE_NUMBER
+
+    pdf_parser.MAXIMUM_PAGE_NUMBER = MAXIMUM_PAGE_NUMBER
+    pdf_parser.LOCK_KEY_pdfplumber = "global_shared_lock_pdfplumber"
     return pdf_parser
 
 

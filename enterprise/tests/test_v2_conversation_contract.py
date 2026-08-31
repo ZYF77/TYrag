@@ -1916,6 +1916,118 @@ async def test_v2_sse_missing_status_replaces_answer_then_fails(runtime):
 
 
 @pytest.mark.asyncio
+async def test_rag_diagnostics_are_private_for_json_sse_and_replay(
+    runtime, monkeypatch
+):
+    monkeypatch.setattr(v2_router.config, "rag_diagnostics_enabled", True)
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-DIAGNOSTICS",
+        ragflow_id="doc-1",
+        equipment_id="EQ-DIAGNOSTICS",
+        fixed_asset_no="FA-DIAGNOSTICS",
+    )
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(
+            client, equipmentId="EQ-DIAGNOSTICS"
+        )
+        json_payload = {
+            "clientMessageId": "diagnostics-json",
+            "question": "如何处理报警？",
+        }
+        response = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json=json_payload,
+        )
+        replay = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json=json_payload,
+        )
+        stream = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            headers={"Accept": "text/event-stream"},
+            json={
+                "clientMessageId": "diagnostics-sse",
+                "question": "请继续说明",
+                "reasoningMode": "high",
+            },
+        )
+        rows = await gw_read(
+            runtime.db,
+            fetchall,
+            """SELECT client_message_id, result_json
+                 FROM ext_v2_message_run
+                WHERE client_message_id IN (?, ?)
+                ORDER BY client_message_id""",
+            ("diagnostics-json", "diagnostics-sse"),
+        )
+
+    assert response.status_code == replay.status_code == stream.status_code == 200
+    assert "_diagnostics" not in response.json()
+    assert "_diagnostics" not in replay.json()
+    assert "_diagnostics" not in stream.text
+    assert runtime.stub._last_completion_body["enterprise_diagnostics"] is True
+    stored = {
+        row["client_message_id"]: json.loads(row["result_json"])["_diagnostics"]
+        for row in rows
+    }
+    assert stored["diagnostics-json"]["runId"] == response.json()["runId"]
+    assert stored["diagnostics-sse"]["runId"] in stream.text
+    assert {event["type"] for event in stored["diagnostics-sse"]["events"]} >= {
+        "request",
+        "scope",
+        "retrieval",
+        "context",
+        "llm",
+        "outcome",
+    }
+
+
+@pytest.mark.asyncio
+async def test_failed_run_keeps_partial_private_diagnostics(runtime, monkeypatch):
+    monkeypatch.setattr(v2_router.config, "rag_diagnostics_enabled", True)
+    runtime.stub._omit_status = True
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-DIAGNOSTICS-FAIL",
+        ragflow_id="doc-1",
+        equipment_id="EQ-DIAGNOSTICS-FAIL",
+        fixed_asset_no="FA-DIAGNOSTICS-FAIL",
+    )
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(
+            client, equipmentId="EQ-DIAGNOSTICS-FAIL"
+        )
+        response = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={
+                "clientMessageId": "diagnostics-failed",
+                "question": "触发上游契约失败",
+            },
+        )
+        row = await gw_read(
+            runtime.db,
+            fetchone,
+            "SELECT status, result_json FROM ext_v2_message_run WHERE client_message_id=?",
+            ("diagnostics-failed",),
+        )
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "RAGFLOW_API_INCOMPATIBLE"
+    assert "_diagnostics" not in response.text
+    stored = json.loads(row["result_json"])
+    assert row["status"] == "failed"
+    assert stored["_error"]["statusCode"] == 502
+    diagnostics = stored["_diagnostics"]
+    assert diagnostics["runId"]
+    assert diagnostics["events"][-1]["data"] == {
+        "source": "gateway",
+        "outcome": "failed",
+        "errorCode": "RAGFLOW_API_INCOMPATIBLE",
+    }
+
+
+@pytest.mark.asyncio
 async def test_message_level_internet_returns_replayable_web_citation(runtime):
     await _insert_document(
         runtime.db,

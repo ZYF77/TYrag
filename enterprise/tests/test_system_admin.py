@@ -210,6 +210,48 @@ async def _seed_message(
         )
 
 
+async def _seed_diagnostic_run(
+    gateway,
+    *,
+    run_id: str,
+    conversation_id: str,
+    tenant_id: str = "customer-a",
+    business_user_id: str = "admin-user-001",
+    with_diagnostics: bool = True,
+) -> None:
+    result = {"answer": "must-not-be-returned-by-admin-diagnostics"}
+    if with_diagnostics:
+        result["_diagnostics"] = {
+            "version": 1,
+            "runId": run_id,
+            "startedAt": "2026-08-31T08:00:00.000Z",
+            "durationMs": 12.5,
+            "truncated": False,
+            "events": [
+                {"type": "scope", "atMs": 1, "data": {"actualDocumentIds": ["doc-1"]}},
+                {"type": "outcome", "atMs": 12, "data": {"outcome": "completed"}},
+            ],
+        }
+    async with gateway.transaction(write=True) as conn:
+        await exec_sql(
+            conn,
+            """INSERT INTO ext_v2_message_run
+               (conversation_id, tenant_id, business_user_id, client_message_id,
+                request_hash, run_id, status, result_json, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, 'completed', ?, ?)""",
+            (
+                conversation_id,
+                tenant_id,
+                business_user_id,
+                f"client-{run_id}",
+                f"hash-{run_id}",
+                run_id,
+                json.dumps(result),
+                "2026-08-31T08:00:00.000Z",
+            ),
+        )
+
+
 async def _seed_document(
     gateway,
     *,
@@ -306,6 +348,7 @@ class TestAdminAuthorization:
             "/integrations",
             "/metadata/conversations",
             "/metadata/documents",
+            "/diagnostics/traces",
         ]
         async with _client() as client:
             for path in paths:
@@ -327,6 +370,7 @@ class TestAdminAuthorization:
                 "/integrations",
                 "/metadata/conversations",
                 "/metadata/documents",
+                "/diagnostics/traces",
             ):
                 resp = await client.get(f"{BASE}{path}", headers=_auth(token))
                 assert resp.status_code == 403
@@ -345,6 +389,7 @@ class TestAdminAuthorization:
                 "/integrations",
                 "/metadata/conversations",
                 "/metadata/documents",
+                "/diagnostics/traces",
             ):
                 resp = await client.get(f"{BASE}{path}", headers=_auth(token))
                 assert resp.status_code == 403
@@ -369,11 +414,72 @@ class TestAdminAuthorization:
             f"{BASE}/eam-probe",
             f"{BASE}/metadata/conversations",
             f"{BASE}/metadata/documents",
+            f"{BASE}/diagnostics/traces",
+            f"{BASE}/diagnostics/traces/{{run_id}}",
         ):
             assert path not in schema["paths"]
 
 
 # ---------- Integrations ----------
+
+
+@pytest.mark.asyncio
+class TestRagDiagnostics:
+    async def test_list_and_detail_are_tenant_isolated(
+        self, isolated_gateway_db, jwt_env
+    ):
+        gateway, _ = isolated_gateway_db
+        await _seed_diagnostic_run(
+            gateway, run_id="run-visible", conversation_id="conv-visible"
+        )
+        await _seed_diagnostic_run(
+            gateway,
+            run_id="run-other-tenant",
+            conversation_id="conv-other",
+            tenant_id="customer-b",
+        )
+        await _seed_diagnostic_run(
+            gateway,
+            run_id="run-without-diagnostics",
+            conversation_id="conv-no-diagnostics",
+            with_diagnostics=False,
+        )
+        token = _make_token()
+        async with _client() as client:
+            listed = await client.get(
+                f"{BASE}/diagnostics/traces", headers=_auth(token)
+            )
+            detail = await client.get(
+                f"{BASE}/diagnostics/traces/run-visible", headers=_auth(token)
+            )
+            cross_tenant = await client.get(
+                f"{BASE}/diagnostics/traces/run-other-tenant", headers=_auth(token)
+            )
+            absent = await client.get(
+                f"{BASE}/diagnostics/traces/run-without-diagnostics",
+                headers=_auth(token),
+            )
+
+        assert listed.status_code == detail.status_code == 200
+        assert [item["runId"] for item in listed.json()["items"]] == ["run-visible"]
+        assert "must-not-be-returned" not in listed.text
+        assert detail.json()["diagnostics"]["runId"] == "run-visible"
+        assert detail.json()["diagnostics"]["events"][0]["type"] == "scope"
+        assert cross_tenant.status_code == absent.status_code == 404
+
+    async def test_detail_requires_admin(self, isolated_gateway_db, jwt_env):
+        gateway, _ = isolated_gateway_db
+        await _seed_diagnostic_run(
+            gateway, run_id="run-admin-only", conversation_id="conv-admin-only"
+        )
+        token = _make_token({"sub": "end-user-001", "roles": ["end_user"]})
+        async with _client() as client:
+            response = await client.get(
+                f"{BASE}/diagnostics/traces/run-admin-only", headers=_auth(token)
+            )
+
+        assert response.status_code == 403
+        assert response.json()["code"] == "ACL_DENIED"
 
 
 @pytest.mark.asyncio

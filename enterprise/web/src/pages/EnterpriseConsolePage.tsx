@@ -18,6 +18,7 @@ import type {
 } from '../api/v2Types';
 import { TransientAttachmentPanel } from '../components/harness/TransientAttachmentPanel';
 import { ConversationAdminPanel } from '../components/console/ConversationAdminPanel';
+import { RagDiagnosticsPanel } from '../components/console/RagDiagnosticsPanel';
 import { ConversationMetadataPanel, DocumentMetadataPanel, IntegrationsPanel } from '../components/console/SystemSettingsPanels';
 import { WorkbenchShell, useWorkbenchTab } from '../components/layout/WorkbenchShell';
 import './enterprise-console.css';
@@ -30,6 +31,7 @@ const CONSOLE_TABS = [
   'meta-conversations',
   'conversation-admin',
   'meta-documents',
+  'rag-diagnostics',
 ] as const;
 type ConsoleTab = (typeof CONSOLE_TABS)[number];
 
@@ -53,6 +55,7 @@ const SYSTEM_NAV_GROUP = {
     { id: 'meta-conversations', label: '会话元数据' },
     { id: 'conversation-admin', label: '会话管理' },
     { id: 'meta-documents', label: '文件元数据' },
+    { id: 'rag-diagnostics', label: 'RAG 诊断' },
   ],
 };
 
@@ -639,6 +642,7 @@ export function EnterpriseConsolePage() {
       {isAdmin && tab === 'meta-conversations' && <ConversationMetadataPanel />}
       {isAdmin && tab === 'conversation-admin' && <ConversationAdminPanel />}
       {isAdmin && tab === 'meta-documents' && <DocumentMetadataPanel />}
+      {isAdmin && tab === 'rag-diagnostics' && <RagDiagnosticsPanel />}
       {!isAdmin && SYSTEM_TAB_IDS.includes(tab) && (
         <p className="console-empty">需要 admin capability 才能查看系统设置。</p>
       )}

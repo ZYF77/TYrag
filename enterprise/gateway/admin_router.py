@@ -553,3 +553,106 @@ async def list_conversation_messages(
             for row in rows
         ],
     }
+
+
+def _diagnostics_from_row(row) -> dict | None:
+    try:
+        result = json.loads(row["result_json"] or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return None
+    diagnostics = result.get("_diagnostics") if isinstance(result, dict) else None
+    return diagnostics if isinstance(diagnostics, dict) and diagnostics else None
+
+
+def _diagnostics_outcome(diagnostics: dict) -> str | None:
+    for event in reversed(diagnostics.get("events") or []):
+        if not isinstance(event, dict) or event.get("type") != "outcome":
+            continue
+        data = event.get("data")
+        if isinstance(data, dict) and data.get("outcome"):
+            return str(data["outcome"])
+    return None
+
+
+@router.get("/diagnostics/traces", include_in_schema=False)
+async def list_rag_diagnostics(
+    request: Request,
+    gateway=Depends(get_db),
+    principal: UserPrincipal = Depends(require_capability("admin")),
+):
+    """List private RAG traces for the JWT tenant without answer content."""
+    limit, offset = _pagination(request)
+    conversation_id = (request.query_params.get("conversationId") or "").strip()
+    status = (request.query_params.get("status") or "").strip()
+    clauses = ["tenant_id=?", "result_json LIKE ?"]
+    params: list[object] = [principal.tenant_id, '%"_diagnostics"%']
+    if conversation_id:
+        clauses.append("conversation_id=?")
+        params.append(conversation_id)
+    if status:
+        clauses.append("status=?")
+        params.append(status)
+    params.extend([limit + 1, offset])
+    async with gateway.transaction(write=False) as conn:
+        rows = await fetchall(
+            conn,
+            f"""SELECT run_id, conversation_id, client_message_id, status,
+                       result_json, created_at
+                FROM ext_v2_message_run
+                WHERE {' AND '.join(clauses)}
+                ORDER BY created_at DESC, run_id DESC
+                LIMIT ? OFFSET ?""",
+            tuple(params),
+        )
+    items = []
+    for row in rows[:limit]:
+        diagnostics = _diagnostics_from_row(row)
+        if diagnostics is None:
+            continue
+        items.append(
+            {
+                "runId": row["run_id"],
+                "conversationId": row["conversation_id"],
+                "clientMessageId": row["client_message_id"],
+                "status": row["status"],
+                "outcome": _diagnostics_outcome(diagnostics),
+                "startedAt": diagnostics.get("startedAt"),
+                "durationMs": diagnostics.get("durationMs"),
+                "truncated": bool(diagnostics.get("truncated")),
+                "createdAt": row["created_at"],
+            }
+        )
+    return {"items": items, "hasMore": len(rows) > limit}
+
+
+@router.get("/diagnostics/traces/{run_id}", include_in_schema=False)
+async def get_rag_diagnostics(
+    run_id: str,
+    gateway=Depends(get_db),
+    principal: UserPrincipal = Depends(require_capability("admin")),
+):
+    """Return one tenant-isolated trace; unknown and cross-tenant ids are 404."""
+    request_id = str(uuid.uuid4())
+    run_id = (run_id or "").strip()
+    if not run_id:
+        return _error(404, "NOT_FOUND", request_id)
+    async with gateway.transaction(write=False) as conn:
+        row = await fetchone(
+            conn,
+            """SELECT run_id, conversation_id, client_message_id, status,
+                      result_json, created_at
+               FROM ext_v2_message_run
+               WHERE run_id=? AND tenant_id=?""",
+            (run_id, principal.tenant_id),
+        )
+    diagnostics = _diagnostics_from_row(row) if row is not None else None
+    if row is None or diagnostics is None:
+        return _error(404, "NOT_FOUND", request_id)
+    return {
+        "runId": row["run_id"],
+        "conversationId": row["conversation_id"],
+        "clientMessageId": row["client_message_id"],
+        "status": row["status"],
+        "createdAt": row["created_at"],
+        "diagnostics": diagnostics,
+    }
