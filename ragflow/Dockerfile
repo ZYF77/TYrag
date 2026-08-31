@@ -64,7 +64,6 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
 ENV PYTHONPATH=/ragflow/
 # copy entrypoint.sh and entrypoint-pasar.sh
-COPY docker/service_conf.yaml.template ./conf/service_conf.yaml.template
 COPY docker/entrypoint*.sh ./
 RUN chmod +x ./entrypoint*.sh
 
@@ -94,6 +93,10 @@ RUN rm -f /etc/nginx/sites-enabled/default
 COPY admin admin
 COPY api api
 COPY conf conf
+# Keep the runtime template after the full conf copy; conf contains an empty
+# placeholder with the same name that would otherwise overwrite this file.
+COPY docker/service_conf.yaml.template ./conf/service_conf.yaml.template
+RUN test -s ./conf/service_conf.yaml.template
 COPY deepdoc deepdoc
 COPY rag rag
 COPY agent agent
