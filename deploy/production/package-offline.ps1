@@ -4,6 +4,7 @@ param(
     [string]$RagflowImage = 'tyrag/ragflow:v0.26.4',
     [string]$GatewayImage = 'tyrag/enterprise-gateway:v0.26.4',
     [string]$WebImage = 'tyrag/enterprise-web:v0.26.4',
+    [string]$PostgresImage = 'postgres:17.11-alpine3.24',
     [switch]$IncludeDiagnostics,
     [switch]$CreateZip
 )
@@ -43,6 +44,7 @@ $Images.Add('mysql:8.0.40')
 $Images.Add('elasticsearch:8.11.3')
 $Images.Add('pgsty/minio:RELEASE.2026-03-25T00-00-00Z')
 $Images.Add('valkey/valkey:8')
+$Images.Add($PostgresImage)
 if ($IncludeDiagnostics) {
     $Images.Add($WebImage)
 }
