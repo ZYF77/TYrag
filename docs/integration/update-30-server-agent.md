@@ -110,6 +110,7 @@ Windows 上传的脚本先 `sed -i 's/\r$//'`。
 |---|---|
 | `enterprise/gateway/**` | overlay 打进 `tyrag/enterprise-gateway:v0.26.4`，只 recreate `enterprise-gateway` |
 | `enterprise/web/**` | 源码打到 30 构建 `tyrag/enterprise-web:v0.26.4`，只 recreate `enterprise-web` |
+| `ragflow/**`（Python/API/RAG/Go 等镜像内代码） | 必须把当前完整源码构建成新的 RAGFlow 镜像并导入，随后只 recreate `ragflow-cpu`；不能只 restart 或只更新 Gateway |
 | `ragflow/web/**`（8080 UI） | **优先** 把 `web/dist` `docker cp` 进正在跑的 RAGFlow + `nginx reload`，**不要** recreate |
 | 仅配置 / 未改代码 | 不要发版 |
 
@@ -200,6 +201,55 @@ docker compose --env-file .env --env-file gateway-overrides.env \
 4. 只跑与本次改动对应的冒烟；JWT 在容器内从环境变量签发，**禁止打印 token**
 
 回滚：`docker tag $BACKUP $TAG`，同一条 compose recreate。
+
+---
+
+## 5A. RAGFlow Python/后端镜像（当前工作包）
+
+生产 Compose 不挂载 RAGFlow 源码；`ragflow/**` 的任何 Python、API、RAG 或运行时代码改动，
+必须进入新的 RAGFlow 镜像。不能只重启现有容器，也不能只更新 Gateway overlay。
+
+在有 Docker 的构建机，从**干净的目标 Git commit**构建并记录唯一 release tag：
+
+```bash
+docker build --pull=false \
+  -t tyrag/ragflow:<release-tag> \
+  -f ragflow/Dockerfile ragflow
+
+docker build --pull=false \
+  --build-context contracts=./contracts \
+  --build-arg GATEWAY_BASE_IMAGE=tyrag/ragflow:<release-tag> \
+  -t tyrag/enterprise-gateway:<release-tag> \
+  -f enterprise/gateway/Dockerfile enterprise
+
+docker build --pull=false \
+  --build-arg VITE_API_MODE=gateway \
+  --build-arg VITE_UI_MODE=harness \
+  -t tyrag/enterprise-web:<release-tag> \
+  -f enterprise/web/Dockerfile enterprise/web
+```
+
+使用 `deploy/production/package-offline.ps1 -IncludeDiagnostics` 生成离线包。包内的
+`image-manifest.json` 必须同时记录 source commit、RAGFlow upstream tag/commit、三个镜像
+内容 ID/digest、Compose SHA-256 和补丁清单 SHA-256。30 上先校验 `SHA256SUMS`，再执行
+`docker load`；不得用未登记的同名旧 tag 覆盖运行版本。
+
+导入后，仅使用原有 `.env`、`core.env`、`dev-ragflow.env` 和 `gateway-overrides.env`，并执行：
+
+```bash
+cd /home/zkadmin/tyrag-production
+docker compose --env-file .env --env-file core.env \
+  --env-file dev-ragflow.env --env-file gateway-overrides.env \
+  -f docker-compose.yml \
+  up -d --no-deps --force-recreate --pull never ragflow-cpu
+```
+
+确认 `ragflow-cpu` 的镜像 ID/digest 与发布清单一致，并在容器内检查本次 RAGFlow marker。
+随后再按 §4 完成 PG 迁移和 Gateway recreate；RAGFlow 未通过 marker、health、9380/ping
+或外部端口门禁时，不得继续更新 Gateway。
+
+回滚：保留旧 RAGFlow tag，使用旧 tag 按同一 env-file 组合只 recreate `ragflow-cpu`，不删除
+MySQL、ES、MinIO、Redis 数据卷。
 
 ---
 

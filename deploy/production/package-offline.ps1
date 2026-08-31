@@ -17,6 +17,25 @@ if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
 }
 $OutputDirectory = [System.IO.Path]::GetFullPath($OutputDirectory)
 
+$GitStatus = @(git -C $RepoRoot status --porcelain --untracked-files=all)
+if ($LASTEXITCODE -ne 0) {
+    throw 'Unable to read Git status'
+}
+if ($GitStatus.Count -gt 0) {
+    throw 'Release packaging requires a clean Git worktree'
+}
+$SourceCommit = (& git -C $RepoRoot rev-parse --verify HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($SourceCommit)) {
+    throw 'Unable to resolve the release source commit'
+}
+$PatchManifestPath = Join-Path $RepoRoot 'patches\manifest.yaml'
+$PatchManifestText = Get-Content -LiteralPath $PatchManifestPath
+$UpstreamTag = (($PatchManifestText | Select-String '^\s+upstream_tag:\s*(\S+)\s*$' | Select-Object -First 1).Matches.Groups[1].Value).Trim('"''')
+$UpstreamCommit = (($PatchManifestText | Select-String '^\s+upstream_commit:\s*(\S+)\s*$' | Select-Object -First 1).Matches.Groups[1].Value).Trim('"''')
+if ([string]::IsNullOrWhiteSpace($UpstreamTag) -or [string]::IsNullOrWhiteSpace($UpstreamCommit)) {
+    throw 'patches/manifest.yaml must declare upstream_tag and upstream_commit'
+}
+
 $Images = [System.Collections.Generic.List[string]]::new()
 $Images.Add($RagflowImage)
 $Images.Add($GatewayImage)
@@ -80,7 +99,11 @@ $ImageManifest = foreach ($image in $Images) {
 $Manifest = [ordered]@{
     release = 'TYRAG production pilot v0.26.4'
     generatedAtUtc = [DateTime]::UtcNow.ToString('o')
-    sourceCommit = (& git -C $RepoRoot rev-parse HEAD).Trim()
+    sourceCommit = $SourceCommit
+    upstreamTag = $UpstreamTag
+    upstreamCommit = $UpstreamCommit
+    composeSha256 = (Get-FileHash -LiteralPath (Join-Path $OutputDirectory 'docker-compose.yml') -Algorithm SHA256).Hash.ToLowerInvariant()
+    patchManifestSha256 = (Get-FileHash -LiteralPath $PatchManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
     images = @($ImageManifest)
     diagnosticsIncluded = [bool]$IncludeDiagnostics
     compose = 'docker-compose.yml'
