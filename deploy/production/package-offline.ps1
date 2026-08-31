@@ -82,6 +82,14 @@ if ($upstreamInitText -ne $releaseInitText) {
 Copy-Item $upstreamInitPath (Join-Path $FileDirectory 'init.sql')
 Copy-Item (Join-Path $RepoRoot 'enterprise\scripts\run_file_share_v3_v2_e2e.py') (Join-Path $VerificationDirectory 'run_file_share_v3_v2_e2e.py')
 Copy-Item (Join-Path $RepoRoot 'enterprise\scripts\run_rag_diagnostics_e2e.py') (Join-Path $VerificationDirectory 'run_rag_diagnostics_e2e.py')
+$ReleaseEnv = @(
+    "RAGFLOW_IMAGE=$RagflowImage"
+    "ENTERPRISE_GATEWAY_IMAGE=$GatewayImage"
+    "ENTERPRISE_WEB_IMAGE=$WebImage"
+    "ENTERPRISE_GATEWAY_POSTGRES_IMAGE=$PostgresImage"
+    'ENTERPRISE_RAG_DIAGNOSTICS_ENABLED=false'
+)
+Set-Content -LiteralPath (Join-Path $OutputDirectory 'release.env') -Value $ReleaseEnv -Encoding ascii
 
 $ImageArchive = Join-Path $ImageDirectory 'tyrag-images.tar'
 & docker save --output $ImageArchive @Images
