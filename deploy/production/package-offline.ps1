@@ -55,7 +55,8 @@ if (Test-Path -LiteralPath $OutputDirectory) {
 
 $ImageDirectory = Join-Path $OutputDirectory 'images'
 $FileDirectory = Join-Path $OutputDirectory 'files'
-New-Item -ItemType Directory -Path $ImageDirectory, $FileDirectory -Force | Out-Null
+$VerificationDirectory = Join-Path $OutputDirectory 'verification'
+New-Item -ItemType Directory -Path $ImageDirectory, $FileDirectory, $VerificationDirectory -Force | Out-Null
 
 foreach ($image in $Images) {
     docker image inspect $image *> $null
@@ -78,6 +79,8 @@ if ($upstreamInitText -ne $releaseInitText) {
     throw 'Production init.sql is not identical to ragflow/docker/init.sql'
 }
 Copy-Item $upstreamInitPath (Join-Path $FileDirectory 'init.sql')
+Copy-Item (Join-Path $RepoRoot 'enterprise\scripts\run_file_share_v3_v2_e2e.py') (Join-Path $VerificationDirectory 'run_file_share_v3_v2_e2e.py')
+Copy-Item (Join-Path $RepoRoot 'enterprise\scripts\run_rag_diagnostics_e2e.py') (Join-Path $VerificationDirectory 'run_rag_diagnostics_e2e.py')
 
 $ImageArchive = Join-Path $ImageDirectory 'tyrag-images.tar'
 & docker save --output $ImageArchive @Images
@@ -111,6 +114,10 @@ $Manifest = [ordered]@{
     compose = 'docker-compose.yml'
     testCompose = 'docker-compose.test.yml'
     envTemplate = 'production.env.example'
+    verification = @(
+        'verification/run_file_share_v3_v2_e2e.py',
+        'verification/run_rag_diagnostics_e2e.py'
+    )
     dataPolicy = 'Docker volumes and production .env are not included; back them up separately.'
 }
 $Manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'image-manifest.json') -Encoding utf8

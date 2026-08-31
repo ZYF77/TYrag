@@ -99,7 +99,8 @@ def _sse_run_id(text: str) -> str:
     raise RuntimeError("sse_run_id_missing")
 
 
-def main(*, expect_upstream_failure: bool = False) -> int:
+def main(*, base_url: str = BASE, expect_upstream_failure: bool = False) -> int:
+    base_url = base_url.rstrip("/")
     fixture = asyncio.run(_fixture())
     headers = {"Authorization": f"Bearer {_token(fixture)}"}
     context = {}
@@ -110,14 +111,14 @@ def main(*, expect_upstream_failure: bool = False) -> int:
 
     required = {"request", "scope", "retrieval", "context", "llm", "outcome"}
     with httpx.Client(timeout=180) as client:
-        created = client.post(f"{BASE}/v2/conversations", headers=headers, json=context)
+        created = client.post(f"{base_url}/v2/conversations", headers=headers, json=context)
         created.raise_for_status()
         conversation_id = created.json()["conversationId"]
 
         if expect_upstream_failure:
             client_message_id = f"diag-fail-{uuid.uuid4().hex[:12]}"
             failed = client.post(
-                f"{BASE}/v2/conversations/{conversation_id}/messages",
+                f"{base_url}/v2/conversations/{conversation_id}/messages",
                 headers=headers,
                 json={
                     "clientMessageId": client_message_id,
@@ -129,7 +130,7 @@ def main(*, expect_upstream_failure: bool = False) -> int:
             if "_diagnostics" in failed.text:
                 raise RuntimeError("public_failure_leaked_diagnostics")
             listed = client.get(
-                f"{BASE}/v1/admin/system/diagnostics/traces?limit=50",
+                f"{base_url}/v1/admin/system/diagnostics/traces?limit=50",
                 headers=headers,
             )
             listed.raise_for_status()
@@ -144,7 +145,7 @@ def main(*, expect_upstream_failure: bool = False) -> int:
             if not item:
                 raise RuntimeError("partial_failure_trace_missing")
             detail = client.get(
-                f"{BASE}/v1/admin/system/diagnostics/traces/{item['runId']}",
+                f"{base_url}/v1/admin/system/diagnostics/traces/{item['runId']}",
                 headers=headers,
             )
             detail.raise_for_status()
@@ -167,7 +168,7 @@ def main(*, expect_upstream_failure: bool = False) -> int:
             return 0
 
         normal = client.post(
-            f"{BASE}/v2/conversations/{conversation_id}/messages",
+            f"{base_url}/v2/conversations/{conversation_id}/messages",
             headers=headers,
             json={
                 "clientMessageId": f"diag-json-{uuid.uuid4().hex[:12]}",
@@ -179,7 +180,7 @@ def main(*, expect_upstream_failure: bool = False) -> int:
         if "_diagnostics" in normal_body:
             raise RuntimeError("public_json_leaked_diagnostics")
         normal_trace = client.get(
-            f"{BASE}/v1/admin/system/diagnostics/traces/{normal_body['runId']}",
+            f"{base_url}/v1/admin/system/diagnostics/traces/{normal_body['runId']}",
             headers=headers,
         )
         normal_trace.raise_for_status()
@@ -188,7 +189,7 @@ def main(*, expect_upstream_failure: bool = False) -> int:
             raise RuntimeError("json_trace_stages_incomplete")
 
         streamed = client.post(
-            f"{BASE}/v2/conversations/{conversation_id}/messages",
+            f"{base_url}/v2/conversations/{conversation_id}/messages",
             headers={**headers, "Accept": "text/event-stream"},
             json={
                 "clientMessageId": f"diag-sse-{uuid.uuid4().hex[:12]}",
@@ -201,7 +202,7 @@ def main(*, expect_upstream_failure: bool = False) -> int:
             raise RuntimeError("public_sse_leaked_diagnostics")
         stream_run_id = _sse_run_id(streamed.text)
         stream_trace = client.get(
-            f"{BASE}/v1/admin/system/diagnostics/traces/{stream_run_id}",
+            f"{base_url}/v1/admin/system/diagnostics/traces/{stream_run_id}",
             headers=headers,
         )
         stream_trace.raise_for_status()
@@ -224,6 +225,9 @@ def main(*, expect_upstream_failure: bool = False) -> int:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--base-url", default=os.getenv("GATEWAY_URL", BASE))
     parser.add_argument("--expect-upstream-failure", action="store_true")
     args = parser.parse_args()
-    raise SystemExit(main(expect_upstream_failure=args.expect_upstream_failure))
+    raise SystemExit(
+        main(base_url=args.base_url, expect_upstream_failure=args.expect_upstream_failure)
+    )

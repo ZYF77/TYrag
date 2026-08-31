@@ -234,6 +234,19 @@ docker build --pull=false \
 内容 ID/digest、Compose SHA-256 和补丁清单 SHA-256。30 上先校验 `SHA256SUMS`，再执行
 `docker load`；不得用未登记的同名旧 tag 覆盖运行版本。
 
+验收 runner 位于包内的 `verification/`，不复制进运行时镜像。需要在容器内使用服务环境
+变量执行时，从开发机临时复制到 Gateway 容器的 `/tmp`，测试结束后删除：
+
+```bash
+docker cp verification/run_file_share_v3_v2_e2e.py \
+  tyrag-production-enterprise-gateway-1:/tmp/run_file_share_v3_v2_e2e.py
+docker cp verification/run_rag_diagnostics_e2e.py \
+  tyrag-production-enterprise-gateway-1:/tmp/run_rag_diagnostics_e2e.py
+```
+
+runner 只输出脱敏结果，不得把 JWT、HMAC、API key、答案、Prompt 或文档正文带出容器。
+完成后删除这两个 `/tmp` 文件；不要把 E2E runner 永久加入生产镜像。
+
 导入后，仅使用原有 `.env`、`core.env`、`dev-ragflow.env` 和 `gateway-overrides.env`，并执行：
 
 ```bash
