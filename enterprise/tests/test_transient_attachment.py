@@ -1095,7 +1095,7 @@ async def test_explicit_disable_keeps_cleanup_worker_running(tmp_path, monkeypat
     )
 
     async with app_module.lifespan(app_module.app):
-        assert len(app_module._background_tasks) == 3
+        assert len(app_module._background_tasks) == 6
         assert cleanup_constructions == 1
 
     assert app_module._background_tasks == []

@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from enterprise.gateway.db.dialect import add_column_if_missing, exec_sql
 from enterprise.gateway.db.tables import metadata
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def _quote_identifier(value: str) -> str:
@@ -96,6 +96,19 @@ async def _upgrade_v1_to_v2(conn) -> None:
         )
 
 
+async def _upgrade_v2_to_v3(conn) -> None:
+    """Add the singleton runtime-settings row store."""
+    await exec_sql(
+        conn,
+        """CREATE TABLE IF NOT EXISTS gateway_runtime_settings (
+               id INTEGER PRIMARY KEY CHECK (id = 1),
+               settings_json TEXT NOT NULL,
+               updated_at TEXT NOT NULL,
+               updated_by TEXT
+           )""",
+    )
+
+
 async def initialize_schema(engine: AsyncEngine, *, schema: str = "public") -> None:
     """Create or upgrade the Gateway schema and reject unknown versions."""
     if not schema.replace("_", "").isalnum() or not schema[0].isalpha():
@@ -111,15 +124,18 @@ async def initialize_schema(engine: AsyncEngine, *, schema: str = "public") -> N
         )
         existing_names = {str(row[0]) for row in existing}
         expected_names = set(metadata.tables)
-        if existing_names and existing_names != expected_names:
+        if existing_names:
             missing = sorted(expected_names - existing_names)
             extra = sorted(existing_names - expected_names)
-            raise RuntimeError(
-                f"incomplete Gateway schema: missing={missing!r}, extra={extra!r}"
-            )
+            if extra or (missing and missing != ["gateway_runtime_settings"]):
+                raise RuntimeError(
+                    f"incomplete Gateway schema: missing={missing!r}, extra={extra!r}"
+                )
         if not existing_names:
             await conn.run_sync(metadata.create_all)
-        # 新库由 create_all 建列；老库（含 v1/v2）在此幂等补列，不 bump 版本。
+        elif "gateway_runtime_settings" not in existing_names:
+            await conn.run_sync(metadata.create_all)
+        # 新库由 create_all 建列；老库（含 v1/v2）在此幂等补列并升级版本。
         await add_column_if_missing(
             conn, "ext_document_map", "parsed_at", "TEXT"
         )
@@ -129,10 +145,13 @@ async def initialize_schema(engine: AsyncEngine, *, schema: str = "public") -> N
         values = [int(row[0]) for row in result]
         if values == [1]:
             await _upgrade_v1_to_v2(conn)
+            values = [2]
+        if values == [2]:
+            await _upgrade_v2_to_v3(conn)
         elif values not in ([], [SCHEMA_VERSION]):
             raise RuntimeError(
                 f"unsupported Gateway schema version: {values!r}; "
-                f"expected [1] or [{SCHEMA_VERSION}]"
+                f"expected [1], [2], or [{SCHEMA_VERSION}]"
             )
         await conn.execute(text("DELETE FROM gateway_schema_version"))
         await conn.execute(

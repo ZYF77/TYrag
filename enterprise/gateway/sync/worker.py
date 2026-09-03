@@ -10,6 +10,7 @@ from enterprise.gateway.sync.models import (
     mark_outbox_failed,
     mark_outbox_retry,
 )
+from enterprise.gateway.config import config
 from enterprise.gateway.sync.sync_service import (
     DocumentSyncError,
     SyncService,
@@ -79,13 +80,20 @@ class OutboxWorker:
                     )
         return len(events)
 
-    async def run_forever(self, interval_seconds: float = 2.0) -> None:
+    async def run_forever(self, interval_seconds: float | None = None) -> None:
         while True:
             try:
-                await self.run_once()
+                settings = config.runtime_settings()
+                if settings.outbox_enabled:
+                    await self.run_once()
             except Exception:
                 logger.exception("Outbox worker iteration failed")
-            await asyncio.sleep(interval_seconds)
+            settings = config.runtime_settings()
+            await asyncio.sleep(
+                interval_seconds
+                if interval_seconds is not None
+                else settings.outbox_poll_seconds
+            )
 
 
 class StatusReconciler:
@@ -124,10 +132,17 @@ class StatusReconciler:
         updated += await self.service.reconcile_missing_ragflow_documents()
         return updated
 
-    async def run_forever(self, interval_seconds: float = 10.0) -> None:
+    async def run_forever(self, interval_seconds: float | None = None) -> None:
         while True:
             try:
-                await self.run_once()
+                settings = config.runtime_settings()
+                if settings.status_reconciler_enabled:
+                    await self.run_once()
             except Exception:
                 logger.exception("Status reconciler iteration failed")
-            await asyncio.sleep(interval_seconds)
+            settings = config.runtime_settings()
+            await asyncio.sleep(
+                interval_seconds
+                if interval_seconds is not None
+                else settings.reconcile_seconds
+            )

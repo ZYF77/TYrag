@@ -69,6 +69,9 @@ errors:
   - code: DOCUMENT_METADATA_INVALID
     http_status: 422
     retryable: false
+  - code: DOCUMENT_TOO_LARGE
+    http_status: 413
+    retryable: false
   - code: DOCUMENT_SYNC_FAILED
     http_status: 502
     retryable: true

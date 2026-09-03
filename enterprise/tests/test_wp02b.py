@@ -200,6 +200,10 @@ class TestS3SourceAdapter:
             else:
                 os.environ["S3_PATH_STYLE"] = previous
 
+    def test_default_document_feed_limit_is_capped_at_128_mib(self, monkeypatch):
+        monkeypatch.setenv("S3_MAX_SIZE_MB", "512")
+        assert S3SourceAdapter().max_size_bytes == 128 * 1024 * 1024
+
 
 class TestSyncService:
     @pytest.mark.asyncio

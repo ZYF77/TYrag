@@ -61,7 +61,11 @@ from rag.grounding.guard import (
     _unmatched_keys_are_zero_only,
 )
 from rag.nlp.search import index_name
-from rag.diagnostics import record_rag_diagnostics
+from rag.diagnostics import (
+    rag_diagnostics_stage,
+    record_rag_diagnostics,
+    record_timed_rag_stage,
+)
 from rag.prompts.generator import chunks_format, citation_prompt, cross_languages, full_question, kb_prompt, keyword_extraction, message_fit_in, PROMPT_JINJA_ENV, ASK_SUMMARY
 from common.token_utils import num_tokens_from_string
 from common.misc_utils import thread_pool_exec
@@ -990,7 +994,21 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
     model_kwargs = {"trace_context": trace_context, "langfuse_session_id": session_id}
     if grounding_enabled:
         model_kwargs["disable_langfuse"] = True
-    kbs, embd_mdl, rerank_mdl, chat_mdl, tts_mdl = get_models(dialog, **model_kwargs)
+    model_bind_started = timer()
+    model_bind_status = "success"
+    try:
+        kbs, embd_mdl, rerank_mdl, chat_mdl, tts_mdl = get_models(dialog, **model_kwargs)
+    except Exception:
+        model_bind_status = "failed"
+        raise
+    finally:
+        record_timed_rag_stage(
+            "model_bind",
+            model_bind_started,
+            chatModelConfigured=bool(dialog.llm_id),
+            rerankEnabled=bool(dialog.rerank_id),
+            status=model_bind_status,
+        )
     toolcall_session, tools = kwargs.get("toolcall_session"), kwargs.get("tools")
     if toolcall_session and tools:
         chat_mdl.bind_tools(toolcall_session, tools)
@@ -1017,19 +1035,38 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
     gateway_doc_ids = list(attachments) if attachments else None
 
     prompt_config = dialog.prompt_config
-    if dialog.meta_data_filter:
-        attachments = await apply_meta_data_filter(
-            dialog.meta_data_filter,
-            None,
-            questions[-1],
-            chat_mdl,
-            attachments,
-            kb_ids=dialog.kb_ids,
-            metas_loader=lambda: DocMetadataService.get_flatted_meta_by_kbs(dialog.kb_ids),
+    metadata_filter = dialog.meta_data_filter if isinstance(dialog.meta_data_filter, dict) else {}
+    metadata_method = str(metadata_filter.get("method") or "disabled")
+    metadata_started = timer()
+    metadata_executed = metadata_method in {"auto", "semi_auto", "manual"}
+    metadata_status = "success"
+    try:
+        if dialog.meta_data_filter:
+            with rag_diagnostics_stage("metadata_filter"):
+                attachments = await apply_meta_data_filter(
+                    dialog.meta_data_filter,
+                    None,
+                    questions[-1],
+                    chat_mdl,
+                    attachments,
+                    kb_ids=dialog.kb_ids,
+                    metas_loader=lambda: DocMetadataService.get_flatted_meta_by_kbs(dialog.kb_ids),
+                )
+            if gateway_doc_ids is not None:
+                allowed = set(gateway_doc_ids)
+                attachments = [doc_id for doc_id in attachments or [] if doc_id in allowed]
+    except Exception:
+        metadata_status = "failed"
+        raise
+    finally:
+        record_timed_rag_stage(
+            "metadata_filter",
+            metadata_started,
+            enabled=bool(dialog.meta_data_filter),
+            executed=metadata_executed,
+            method=metadata_method,
+            status=metadata_status,
         )
-        if gateway_doc_ids is not None:
-            allowed = set(gateway_doc_ids)
-            attachments = [doc_id for doc_id in attachments or [] if doc_id in allowed]
 
     record_rag_diagnostics(
         "scope",
@@ -1046,7 +1083,21 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
     # try to use sql if field mapping is good to go
     if field_map and not grounding_enabled:
         logging.debug("Use SQL to retrieval:{}".format(questions[-1]))
-        ans = await use_sql(questions[-1], field_map, dialog.tenant_id, chat_mdl, prompt_config.get("quote", True), dialog.kb_ids, doc_ids=attachments)
+        sql_started = timer()
+        sql_status = "success"
+        try:
+            with rag_diagnostics_stage("sql_generation"):
+                ans = await use_sql(questions[-1], field_map, dialog.tenant_id, chat_mdl, prompt_config.get("quote", True), dialog.kb_ids, doc_ids=attachments)
+        except Exception:
+            sql_status = "failed"
+            raise
+        finally:
+            record_timed_rag_stage(
+                "sql_generation",
+                sql_started,
+                executed=True,
+                status=sql_status,
+            )
         # For aggregate queries (COUNT, SUM, etc.), chunks may be empty but answer is still valid
         if ans and (ans.get("reference", {}).get("chunks") or ans.get("answer")):
             if gateway_doc_ids is not None and isinstance(ans.get("reference"), dict):
@@ -1080,31 +1131,89 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
         if p["key"] not in kwargs:
             prompt_config["system"] = prompt_config["system"].replace("{%s}" % p["key"], " ")
 
-    if len(questions) > 1 and prompt_config.get("refine_multiturn"):
-        questions = [
-            await full_question(
-                dialog.tenant_id,
-                dialog.llm_id,
-                messages,
-                chat_mdl=chat_mdl if grounding_enabled else None,
-            )
-        ]
-    else:
-        questions = questions[-1:]
+    refine_enabled = bool(prompt_config.get("refine_multiturn"))
+    refine_started = timer()
+    refine_executed = False
+    refine_status = "success"
+    refine_skip_reason = None
+    try:
+        if len(questions) > 1 and refine_enabled:
+            with rag_diagnostics_stage("refine_multiturn"):
+                questions = [
+                    await full_question(
+                        dialog.tenant_id,
+                        dialog.llm_id,
+                        messages,
+                        chat_mdl=chat_mdl if grounding_enabled else None,
+                    )
+                ]
+            refine_executed = True
+        else:
+            questions = questions[-1:]
+            refine_skip_reason = "disabled" if not refine_enabled else "single_turn"
+    except Exception:
+        refine_status = "failed"
+        raise
+    finally:
+        record_timed_rag_stage(
+            "refine_multiturn",
+            refine_started,
+            enabled=refine_enabled,
+            executed=refine_executed,
+            inputQuestionCount=len([m for m in messages if m.get("role") == "user"]),
+            skipReason=refine_skip_reason,
+            status=refine_status,
+        )
 
-    if prompt_config.get("cross_languages"):
-        questions = [
-            await cross_languages(
-                dialog.tenant_id,
-                dialog.llm_id,
-                questions[0],
-                prompt_config["cross_languages"],
-                chat_mdl=chat_mdl if grounding_enabled else None,
-            )
-        ]
+    cross_languages_config = prompt_config.get("cross_languages") or []
+    cross_started = timer()
+    cross_executed = bool(cross_languages_config)
+    cross_status = "success"
+    try:
+        if cross_executed:
+            with rag_diagnostics_stage("cross_languages"):
+                questions = [
+                    await cross_languages(
+                        dialog.tenant_id,
+                        dialog.llm_id,
+                        questions[0],
+                        cross_languages_config,
+                        chat_mdl=chat_mdl if grounding_enabled else None,
+                    )
+                ]
+    except Exception:
+        cross_status = "failed"
+        raise
+    finally:
+        record_timed_rag_stage(
+            "cross_languages",
+            cross_started,
+            enabled=cross_executed,
+            executed=cross_executed,
+            languageCount=len(cross_languages_config) if isinstance(cross_languages_config, list) else 0,
+            status=cross_status,
+        )
 
-    if prompt_config.get("keyword", False):
-        questions[-1] = questions[-1] + "," + await keyword_extraction(chat_mdl, questions[-1])
+    keyword_enabled = bool(prompt_config.get("keyword", False))
+    keyword_started = timer()
+    keyword_executed = False
+    keyword_status = "success"
+    try:
+        if keyword_enabled:
+            with rag_diagnostics_stage("keyword_analysis"):
+                questions[-1] = questions[-1] + "," + await keyword_extraction(chat_mdl, questions[-1])
+            keyword_executed = True
+    except Exception:
+        keyword_status = "failed"
+        raise
+    finally:
+        record_timed_rag_stage(
+            "keyword_analysis",
+            keyword_started,
+            enabled=keyword_enabled,
+            executed=keyword_executed,
+            status=keyword_status,
+        )
     refine_question_ts = timer()
 
     thought = ""
@@ -1171,46 +1280,102 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
                     rank_feature=label_question(" ".join(questions), kbs),
                 )
                 if prompt_config.get("toc_enhance"):
-                    cks = await retriever.retrieval_by_toc(" ".join(questions), kbinfos["chunks"], tenant_ids, chat_mdl, dialog.top_n)
+                    toc_started = timer()
+                    toc_status = "success"
+                    try:
+                        with rag_diagnostics_stage("toc_enhance"):
+                            cks = await retriever.retrieval_by_toc(" ".join(questions), kbinfos["chunks"], tenant_ids, chat_mdl, dialog.top_n)
+                    except Exception:
+                        toc_status = "failed"
+                        raise
+                    finally:
+                        record_timed_rag_stage(
+                            "toc_enhance",
+                            toc_started,
+                            executed=True,
+                            status=toc_status,
+                        )
                     if cks:
                         kbinfos["chunks"] = cks
                 kbinfos["chunks"] = retriever.retrieval_by_children(kbinfos["chunks"], tenant_ids)
             if use_web_search:
+                web_started = timer()
+                web_status = "success"
                 try:
-                    web_search = create_web_search_provider(prompt_config)
-                    web_res = await thread_pool_exec(
-                        web_search.retrieve_chunks, " ".join(questions)
-                    )
-                    kbinfos["chunks"].extend(web_res.get("chunks", []))
-                    kbinfos["doc_aggs"].extend(web_res.get("doc_aggs", []))
+                    with rag_diagnostics_stage("web_search"):
+                        web_search = create_web_search_provider(prompt_config)
+                        web_res = await thread_pool_exec(
+                            web_search.retrieve_chunks, " ".join(questions)
+                        )
+                        kbinfos["chunks"].extend(web_res.get("chunks", []))
+                        kbinfos["doc_aggs"].extend(web_res.get("doc_aggs", []))
                 except Exception:
+                    web_status = "failed"
                     logging.warning(
                         "web search unavailable; continuing with internal knowledge"
+                    )
+                finally:
+                    record_timed_rag_stage(
+                        "web_search",
+                        web_started,
+                        executed=True,
+                        status=web_status,
                     )
             if prompt_config.get("use_kg"):
                 default_chat_model = get_tenant_default_model_by_type(dialog.tenant_id, LLMType.CHAT)
                 kg_bundle_kwargs = {"trace_context": trace_context, "langfuse_session_id": session_id}
                 if grounding_enabled:
                     kg_bundle_kwargs["disable_langfuse"] = True
-                ck = await settings.kg_retriever.retrieval(
-                    " ".join(questions), tenant_ids, dialog.kb_ids, embd_mdl, LLMBundle(dialog.tenant_id, default_chat_model, **kg_bundle_kwargs)
-                )
+                kg_started = timer()
+                kg_status = "success"
+                try:
+                    with rag_diagnostics_stage("knowledge_graph"):
+                        ck = await settings.kg_retriever.retrieval(
+                            " ".join(questions), tenant_ids, dialog.kb_ids, embd_mdl, LLMBundle(dialog.tenant_id, default_chat_model, **kg_bundle_kwargs)
+                        )
+                except Exception:
+                    kg_status = "failed"
+                    raise
+                finally:
+                    record_timed_rag_stage(
+                        "knowledge_graph",
+                        kg_started,
+                        executed=True,
+                        status=kg_status,
+                    )
                 if ck["content_with_weight"]:
                     kbinfos["chunks"].insert(0, ck)
 
-    if include_reference_metadata:
-        logging.debug(
-            "reference_metadata enrichment enabled for async_chat: chunk_count=%d metadata_fields=%s",
-            len(kbinfos.get("chunks", [])),
-            metadata_fields,
+    reference_metadata_started = timer()
+    reference_metadata_status = "success"
+    try:
+        if include_reference_metadata:
+            logging.debug(
+                "reference_metadata enrichment enabled for async_chat: chunk_count=%d metadata_fields=%s",
+                len(kbinfos.get("chunks", [])),
+                metadata_fields,
+            )
+            _enrich_chunks_with_document_metadata(kbinfos.get("chunks", []), metadata_fields)
+    except Exception:
+        reference_metadata_status = "failed"
+        raise
+    finally:
+        record_timed_rag_stage(
+            "reference_metadata",
+            reference_metadata_started,
+            enabled=include_reference_metadata,
+            executed=include_reference_metadata,
+            fieldCount=len(metadata_fields or []),
+            chunkCount=len(kbinfos.get("chunks", [])),
+            status=reference_metadata_status,
         )
-        _enrich_chunks_with_document_metadata(kbinfos.get("chunks", []), metadata_fields)
 
     if gateway_doc_ids is not None:
         kbinfos = filter_kbinfos_to_doc_ids(
             kbinfos, gateway_doc_ids, allow_web=use_web_search
         )
 
+    context_started = timer()
     knowledges = kb_prompt(kbinfos, max_tokens)
     knowledges = _prepend_scope_identity_knowledge(
         knowledges,
@@ -1227,6 +1392,14 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
     if not knowledges and prompt_config.get("empty_response") and not messages[-1].get("files"):
         empty_res = prompt_config["empty_response"]
         _record_context_diagnostics(kbinfos.get("chunks", []), "")
+        record_timed_rag_stage(
+            "context_build",
+            context_started,
+            retrievedChunkCount=retrieved_knowledge_count,
+            includedChunkCount=0,
+            effectiveKnowledgeChars=0,
+            status="empty",
+        )
         if grounding_enabled:
             logging.info(
                 "grounding prompt fit: retrieved_knowledge_count=%d included_knowledge_count=0 effective_knowledge_length=0",
@@ -1297,6 +1470,14 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
     effective_knowledge = _extract_effective_knowledge(prompt, grounding_start, grounding_end)
     _record_context_diagnostics(
         kbinfos.get("chunks", []), effective_knowledge if grounding_enabled else prompt
+    )
+    record_timed_rag_stage(
+        "context_build",
+        context_started,
+        retrievedChunkCount=retrieved_knowledge_count,
+        includedChunkCount=len(knowledges),
+        effectiveKnowledgeChars=len(effective_knowledge if grounding_enabled else prompt),
+        status="success",
     )
     if grounding_enabled:
         logging.info(
@@ -1474,20 +1655,34 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
             langfuse_generation = None
 
     if stream:
-        if llm_model_config["model_type"] == "chat":
-            stream_iter = chat_mdl.async_chat_streamly_delta(prompt + prompt4citation, msg[1:], gen_conf)
-        else:
-            stream_iter = chat_mdl.async_chat_streamly_delta(prompt + prompt4citation, msg[1:], gen_conf, images=image_files)
+        generation_started = timer()
+        generation_status = "success"
         last_state = None
-        async for kind, value, state in _stream_with_think_delta(stream_iter):
-            last_state = state
-            if _buffer_candidate_tokens(grounding_enabled):
-                continue
-            if kind == "marker":
-                flags = {"start_to_think": True} if value == "<think>" else {"end_to_think": True}
-                yield {"answer": "", "reference": {}, "audio_binary": None, "final": False, **flags}
-                continue
-            yield {"answer": value, "reference": {}, "audio_binary": tts(tts_mdl, value), "final": False}
+        try:
+            with rag_diagnostics_stage("answer_generation"):
+                if llm_model_config["model_type"] == "chat":
+                    stream_iter = chat_mdl.async_chat_streamly_delta(prompt + prompt4citation, msg[1:], gen_conf)
+                else:
+                    stream_iter = chat_mdl.async_chat_streamly_delta(prompt + prompt4citation, msg[1:], gen_conf, images=image_files)
+                async for kind, value, state in _stream_with_think_delta(stream_iter):
+                    last_state = state
+                    if _buffer_candidate_tokens(grounding_enabled):
+                        continue
+                    if kind == "marker":
+                        flags = {"start_to_think": True} if value == "<think>" else {"end_to_think": True}
+                        yield {"answer": "", "reference": {}, "audio_binary": None, "final": False, **flags}
+                        continue
+                    yield {"answer": value, "reference": {}, "audio_binary": tts(tts_mdl, value), "final": False}
+        except Exception:
+            generation_status = "failed"
+            raise
+        finally:
+            record_timed_rag_stage(
+                "answer_generation",
+                generation_started,
+                mode="stream",
+                status=generation_status,
+            )
         full_answer = last_state.full_text if last_state else ""
         if full_answer:
             final = await decorate_answer(_extract_visible_answer(thought + full_answer))
@@ -1504,10 +1699,24 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
             logging.info("grounding answer finalized: answer_length=0 contains_empty_response=False")
             yield _grounding_abstain_event()
     else:
-        if llm_model_config["model_type"] == "chat":
-            answer = await chat_mdl.async_chat(prompt + prompt4citation, msg[1:], gen_conf)
-        else:
-            answer = await chat_mdl.async_chat(prompt + prompt4citation, msg[1:], gen_conf, images=image_files)
+        generation_started = timer()
+        generation_status = "success"
+        try:
+            with rag_diagnostics_stage("answer_generation"):
+                if llm_model_config["model_type"] == "chat":
+                    answer = await chat_mdl.async_chat(prompt + prompt4citation, msg[1:], gen_conf)
+                else:
+                    answer = await chat_mdl.async_chat(prompt + prompt4citation, msg[1:], gen_conf, images=image_files)
+        except Exception:
+            generation_status = "failed"
+            raise
+        finally:
+            record_timed_rag_stage(
+                "answer_generation",
+                generation_started,
+                mode="non_stream",
+                status=generation_status,
+            )
         user_content = msg[-1].get("content", "[content not available]")
         if not grounding_enabled:
             logging.debug("User: {}|Assistant: {}".format(user_content, answer))
@@ -2422,7 +2631,21 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
     model_kwargs = {"langfuse_session_id": kwargs.get("session_id")}
     if grounding_enabled:
         model_kwargs["disable_langfuse"] = True
-    kbs, embd_mdl, rerank_mdl, chat_mdl, tts_mdl = get_models(dialog, **model_kwargs)
+    model_bind_started = timer()
+    model_bind_status = "success"
+    try:
+        kbs, embd_mdl, rerank_mdl, chat_mdl, tts_mdl = get_models(dialog, **model_kwargs)
+    except Exception:
+        model_bind_status = "failed"
+        raise
+    finally:
+        record_timed_rag_stage(
+            "model_bind",
+            model_bind_started,
+            chatModelConfigured=bool(dialog.llm_id),
+            rerankEnabled=bool(dialog.rerank_id),
+            status=model_bind_status,
+        )
     use_web_search = _should_use_web_search(prompt_config, kwargs.get("internet"))
     logging.debug("web_search kb=%s configured=%s internet=%r enabled=%s", bool(dialog.kb_ids), has_web_search_provider(prompt_config), kwargs.get("internet"), use_web_search)
     tenant_ids = list(set([kb.tenant_id for kb in kbs]))
@@ -2446,24 +2669,43 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
             doc_scope = [doc_id for doc_id in kwargs["doc_ids"] if doc_id]
     if "doc_ids" in messages[-1]:
         doc_scope = [doc_id for doc_id in messages[-1]["doc_ids"] if doc_id]
-    if dialog.meta_data_filter:
-        initial_doc_scope = None if doc_scope is None else list(doc_scope)
-        filtered_doc_scope = await apply_meta_data_filter(
-            dialog.meta_data_filter,
-            None,
-            messages[-1].get("content", ""),
-            chat_mdl,
-            doc_scope,
-            kb_ids=dialog.kb_ids,
-            metas_loader=lambda: DocMetadataService.get_flatted_meta_by_kbs(dialog.kb_ids),
+    metadata_filter = dialog.meta_data_filter if isinstance(dialog.meta_data_filter, dict) else {}
+    metadata_method = str(metadata_filter.get("method") or "disabled")
+    metadata_started = timer()
+    metadata_executed = metadata_method in {"auto", "semi_auto", "manual"}
+    metadata_status = "success"
+    try:
+        if dialog.meta_data_filter:
+            initial_doc_scope = None if doc_scope is None else list(doc_scope)
+            with rag_diagnostics_stage("metadata_filter"):
+                filtered_doc_scope = await apply_meta_data_filter(
+                    dialog.meta_data_filter,
+                    None,
+                    messages[-1].get("content", ""),
+                    chat_mdl,
+                    doc_scope,
+                    kb_ids=dialog.kb_ids,
+                    metas_loader=lambda: DocMetadataService.get_flatted_meta_by_kbs(dialog.kb_ids),
+                )
+            if initial_doc_scope is None:
+                doc_scope = filtered_doc_scope
+            else:
+                allowed = set(initial_doc_scope)
+                doc_scope = [
+                    doc_id for doc_id in filtered_doc_scope or [] if doc_id in allowed
+                ]
+    except Exception:
+        metadata_status = "failed"
+        raise
+    finally:
+        record_timed_rag_stage(
+            "metadata_filter",
+            metadata_started,
+            enabled=bool(dialog.meta_data_filter),
+            executed=metadata_executed,
+            method=metadata_method,
+            status=metadata_status,
         )
-        if initial_doc_scope is None:
-            doc_scope = filtered_doc_scope
-        else:
-            allowed = set(initial_doc_scope)
-            doc_scope = [
-                doc_id for doc_id in filtered_doc_scope or [] if doc_id in allowed
-            ]
 
     record_rag_diagnostics(
         "scope",
@@ -2591,13 +2833,23 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
                 pass
 
         async def _drive_stream():
+            generation_started = timer()
+            generation_status = "success"
             try:
-                stream_iter = chat_mdl.async_chat_streamly_delta(rag_tools.sys_prompt(), messages, gen_conf)
-                async for kind, value, state in _stream_with_think_delta(stream_iter):
-                    event_queue.put_nowait(("stream", kind, value, state))
+                with rag_diagnostics_stage("answer_generation"):
+                    stream_iter = chat_mdl.async_chat_streamly_delta(rag_tools.sys_prompt(), messages, gen_conf)
+                    async for kind, value, state in _stream_with_think_delta(stream_iter):
+                        event_queue.put_nowait(("stream", kind, value, state))
             except Exception:
+                generation_status = "failed"
                 logging.exception("rag_agent: agentic stream failed")
             finally:
+                record_timed_rag_stage(
+                    "answer_generation",
+                    generation_started,
+                    mode="agentic_stream",
+                    status=generation_status,
+                )
                 event_queue.put_nowait(("stream_done",))
 
         token = set_think_log_sink(_log_sink, redact_content=grounding_enabled)

@@ -224,14 +224,16 @@ GET `/enterprise/api/v3/documents/{id}/status` 仍保留给 Console/运维诊断
 | `403` | `AUTH_BINDING_CONFLICT` | 顶层 body 和 metadata 中出现互相冲突的租户或来源 |
 | `409` | `EVENT_ID_CONFLICT` | 相同 eventId 对应了不同业务内容 |
 | `409` | `DOCUMENT_VERSION_CONFLICT` | 同一文档版本的 SHA、路径、类型、size 或 etag 不一致 |
+| `413` | `DOCUMENT_TOO_LARGE` | `source.size` 或实际源文件超过 128 MiB |
 | `422` | `VALIDATION_ERROR` | 顶层字段、source 字段、文件名或 JSON 结构不符合要求 |
 | `422` | `DOCUMENT_METADATA_INVALID` | metadata 缺字段、字段类型错误、身份不一致或包含未知字段 |
 | 状态 `failed` | `DOCUMENT_SOURCE_NOT_FOUND` | 文件不存在、共享目录未挂载、路径错误、size/etag 不匹配 |
+| 状态 `failed` | `DOCUMENT_TOO_LARGE` | 源文件超过 128 MiB |
 | 状态 `failed` | `DOCUMENT_HASH_MISMATCH` | PDF 实际内容与提交的 SHA-256 不一致 |
 | 状态 `failed` | `DOCUMENT_PARSE_FAILED` | RAGFlow 解析任务失败 |
 | 状态 `failed` | `RAGFLOW_UNAVAILABLE` | RAGFlow 不可用或文档读回失败 |
 
-收到 `422` 时，登记没有成功落库，无需等待回调。收到 `202` 后，以终态回调为准；运维诊断可用 GET status 读取 `status`、`errorCode` 和 `error`。
+收到 `413` 或 `422` 时，登记没有成功落库，无需等待回调。收到 `202` 后，以终态回调为准；运维诊断可用 GET status 读取 `status`、`errorCode` 和 `error`。
 
 ## 7. 重试规则
 

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
+from enterprise.gateway.config import config, document_feed_max_size_mb
 from enterprise.gateway.sync.source_adapter import (
     SourceFetchError,
     SourceHashMismatch,
@@ -28,10 +29,14 @@ class SourceStat:
 
 
 def _max_size_bytes() -> int:
-    try:
-        return max(1, int(os.getenv("ENTERPRISE_FILE_SHARE_MAX_SIZE_MB", "512"))) * 1024 * 1024
-    except ValueError:
-        return 512 * 1024 * 1024
+    runtime = config.runtime_settings_override()
+    if runtime is not None:
+        return runtime.file_share_max_size_mb * 1024 * 1024
+    return (
+        document_feed_max_size_mb("ENTERPRISE_FILE_SHARE_MAX_SIZE_MB")
+        * 1024
+        * 1024
+    )
 
 
 def _configured_roots() -> dict[str, Path]:

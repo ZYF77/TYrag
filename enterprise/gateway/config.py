@@ -8,6 +8,175 @@ No real credentials, keys, or secrets belong in this file.
 import json
 import os
 from dataclasses import dataclass, field
+from typing import Any
+
+
+DEFAULT_DOCUMENT_FEED_MAX_SIZE_MB = 128
+DEFAULT_TRANSIENT_ATTACHMENT_MAX_SIZE_MB = 10
+
+
+def _bounded_int(value: Any, default: int, *, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(parsed, maximum))
+
+
+def document_feed_max_size_mb(env_name: str) -> int:
+    """Return a RAGFlow-compatible document feed limit in MiB.
+
+    The downstream parser currently has a hard 128 MiB ceiling.  Keep any
+    deployment override useful for lowering the limit, but never let Gateway
+    advertise or read more than RAGFlow can parse.
+    """
+    try:
+        configured = int(os.getenv(env_name, str(DEFAULT_DOCUMENT_FEED_MAX_SIZE_MB)))
+    except (TypeError, ValueError):
+        configured = DEFAULT_DOCUMENT_FEED_MAX_SIZE_MB
+    return max(1, min(configured, DEFAULT_DOCUMENT_FEED_MAX_SIZE_MB))
+
+
+def _positive_env_int(name: str, default: int, fallback_name: str | None = None) -> int:
+    raw = os.getenv(name)
+    if raw is None and fallback_name:
+        raw = os.getenv(fallback_name)
+    try:
+        return max(1, int(raw if raw is not None else default))
+    except (TypeError, ValueError):
+        return default
+
+
+def transient_attachment_max_size_mb_from_env() -> int:
+    """Resolve the UI-sized transient attachment limit with its hard ceiling."""
+    raw_bytes = os.getenv("ENTERPRISE_ATTACHMENT_MAX_SIZE_BYTES")
+    if raw_bytes is not None:
+        try:
+            # Keep a sub-MiB deployment override usable while exposing MiB in UI.
+            value = max(1, int(raw_bytes))
+            return _bounded_int(
+                (value + 1024 * 1024 - 1) // (1024 * 1024),
+                DEFAULT_TRANSIENT_ATTACHMENT_MAX_SIZE_MB,
+                minimum=1,
+                maximum=DEFAULT_TRANSIENT_ATTACHMENT_MAX_SIZE_MB,
+            )
+        except (TypeError, ValueError):
+            pass
+    return _bounded_int(
+        os.getenv(
+            "ENTERPRISE_ATTACHMENT_MAX_SIZE_MB",
+            str(DEFAULT_TRANSIENT_ATTACHMENT_MAX_SIZE_MB),
+        ),
+        DEFAULT_TRANSIENT_ATTACHMENT_MAX_SIZE_MB,
+        minimum=1,
+        maximum=DEFAULT_TRANSIENT_ATTACHMENT_MAX_SIZE_MB,
+    )
+
+
+@dataclass(frozen=True)
+class GatewayRuntimeSettings:
+    """Mutable-at-runtime Gateway controls persisted by the admin API."""
+
+    outbox_enabled: bool
+    outbox_poll_seconds: float
+    status_reconciler_enabled: bool
+    reconcile_seconds: float
+    transient_cleanup_enabled: bool
+    attachment_cleanup_interval_seconds: float
+    attachment_ttl_seconds: int
+    quality_worker_enabled: bool
+    quality_poll_seconds: float
+    quality_reconciler_enabled: bool
+    quality_reconcile_seconds: float
+    quality_running_timeout_seconds: int
+    callback_enabled: bool
+    callback_poll_seconds: float
+    file_share_max_size_mb: int
+    s3_max_size_mb: int
+    transient_attachment_max_size_mb: int
+    rag_diagnostics_enabled: bool
+
+    @classmethod
+    def from_config(cls, source: "GatewayConfig") -> "GatewayRuntimeSettings":
+        return cls(
+            outbox_enabled=source.worker_enabled,
+            outbox_poll_seconds=source.outbox_poll_seconds,
+            status_reconciler_enabled=source.worker_enabled,
+            reconcile_seconds=source.reconcile_seconds,
+            transient_cleanup_enabled=source.worker_enabled,
+            attachment_cleanup_interval_seconds=float(
+                _safe_env_float(
+                    "ENTERPRISE_ATTACHMENT_CLEANUP_INTERVAL_SECONDS",
+                    60.0,
+                )
+            ),
+            attachment_ttl_seconds=_safe_env_int(
+                "ENTERPRISE_ATTACHMENT_TTL_SECONDS", 24 * 60 * 60
+            ),
+            quality_worker_enabled=source.quality_worker_enabled,
+            quality_poll_seconds=source.quality_poll_seconds,
+            quality_reconciler_enabled=source.quality_worker_enabled,
+            quality_reconcile_seconds=source.quality_reconcile_seconds,
+            quality_running_timeout_seconds=source.quality_running_timeout_seconds,
+            callback_enabled=source.callback_enabled,
+            callback_poll_seconds=source.callback_poll_seconds,
+            file_share_max_size_mb=source.file_share_max_size_mb,
+            s3_max_size_mb=source.s3_max_size_mb,
+            transient_attachment_max_size_mb=transient_attachment_max_size_mb_from_env(),
+            rag_diagnostics_enabled=source.rag_diagnostics_enabled,
+        )
+
+    def to_api(self) -> dict[str, Any]:
+        return {
+            "outbox": {
+                "enabled": self.outbox_enabled,
+                "pollSeconds": self.outbox_poll_seconds,
+            },
+            "statusReconciler": {
+                "enabled": self.status_reconciler_enabled,
+                "pollSeconds": self.reconcile_seconds,
+            },
+            "transientAttachmentCleanup": {
+                "enabled": self.transient_cleanup_enabled,
+                "pollSeconds": self.attachment_cleanup_interval_seconds,
+                "ttlSeconds": self.attachment_ttl_seconds,
+            },
+            "qualityEvaluation": {
+                "enabled": self.quality_worker_enabled,
+                "pollSeconds": self.quality_poll_seconds,
+            },
+            "qualityReconciler": {
+                "enabled": self.quality_reconciler_enabled,
+                "pollSeconds": self.quality_reconcile_seconds,
+                "runningTimeoutSeconds": self.quality_running_timeout_seconds,
+            },
+            "callbackDelivery": {
+                "enabled": self.callback_enabled,
+                "pollSeconds": self.callback_poll_seconds,
+            },
+            "limits": {
+                "fileShareMaxMiB": self.file_share_max_size_mb,
+                "s3MaxMiB": self.s3_max_size_mb,
+                "transientAttachmentMaxMiB": self.transient_attachment_max_size_mb,
+            },
+            "diagnostics": {
+                "enabled": self.rag_diagnostics_enabled,
+            },
+        }
+
+
+def _safe_env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
 
 
 @dataclass
@@ -109,7 +278,31 @@ class GatewayConfig:
         default_factory=lambda: os.getenv("S3_PATH_STYLE", "true").lower() == "true"
     )
     s3_max_size_mb: int = field(
-        default_factory=lambda: int(os.getenv("S3_MAX_SIZE_MB", "512"))
+        default_factory=lambda: document_feed_max_size_mb("S3_MAX_SIZE_MB")
+    )
+    file_share_max_size_mb: int = field(
+        default_factory=lambda: document_feed_max_size_mb(
+            "ENTERPRISE_FILE_SHARE_MAX_SIZE_MB"
+        )
+    )
+
+    # --- RAGFlow task-executor mirrors (read-only display in Gateway Web) ---
+    ragflow_max_concurrent_tasks: int = field(
+        default_factory=lambda: _positive_env_int(
+            "RAGFLOW_MAX_CONCURRENT_TASKS", 5, "MAX_CONCURRENT_TASKS"
+        )
+    )
+    ragflow_max_concurrent_chunk_builders: int = field(
+        default_factory=lambda: _positive_env_int(
+            "RAGFLOW_MAX_CONCURRENT_CHUNK_BUILDERS",
+            1,
+            "MAX_CONCURRENT_CHUNK_BUILDERS",
+        )
+    )
+    ragflow_executor_workers: int = field(
+        default_factory=lambda: _positive_env_int(
+            "RAGFLOW_EXECUTOR_WORKERS", 1, "WORKERS"
+        )
     )
 
     # --- WP-02 outbox / worker ---
@@ -183,6 +376,28 @@ class GatewayConfig:
             os.getenv("ENTERPRISE_CALLBACK_POLL_SECONDS", "2.0")
         )
     )
+
+    _runtime_settings: GatewayRuntimeSettings | None = field(
+        default=None, init=False, repr=False
+    )
+
+    def runtime_settings(self) -> GatewayRuntimeSettings:
+        return self._runtime_settings or GatewayRuntimeSettings.from_config(self)
+
+    def runtime_settings_override(self) -> GatewayRuntimeSettings | None:
+        return self._runtime_settings
+
+    def apply_runtime_settings(self, settings: GatewayRuntimeSettings) -> None:
+        self._runtime_settings = settings
+        # Keep legacy callers that read this feature flag directly in sync
+        # with the persisted runtime snapshot.
+        self.rag_diagnostics_enabled = settings.rag_diagnostics_enabled
+
+    def clear_runtime_settings(self) -> None:
+        self._runtime_settings = None
+        self.rag_diagnostics_enabled = os.getenv(
+            "ENTERPRISE_RAG_DIAGNOSTICS_ENABLED", "false"
+        ).lower() in ("1", "true", "yes", "on")
 
     @property
     def demo_routes_enabled(self) -> bool:

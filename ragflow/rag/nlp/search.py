@@ -17,6 +17,7 @@ import json
 import logging
 import re
 import math
+from time import perf_counter
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 
@@ -30,7 +31,7 @@ from common.tag_feature_utils import parse_tag_features
 from common import settings
 
 from common.misc_utils import thread_pool_exec
-from rag.diagnostics import record_rag_diagnostics
+from rag.diagnostics import record_rag_diagnostics, record_timed_rag_stage
 
 
 def index_name(uid):
@@ -54,7 +55,15 @@ class Dealer:
         group_docs: list[list] | None = None
 
     async def get_vector(self, txt, emb_mdl, topk=10, similarity=0.1):
-        qv, _ = await thread_pool_exec(emb_mdl.encode_queries, txt)
+        started = perf_counter()
+        status = "success"
+        try:
+            qv, _ = await thread_pool_exec(emb_mdl.encode_queries, txt)
+        except Exception:
+            status = "failed"
+            raise
+        finally:
+            record_timed_rag_stage("embedding", started, status=status)
         shape = np.array(qv).shape
         if len(shape) > 1:
             raise Exception(f"Dealer.get_vector returned array's shape {shape} doesn't match expectation(exact one dimension).")
@@ -175,13 +184,52 @@ class Dealer:
 
         qst = req.get("question", "")
         q_vec = []
+
+        async def timed_store_search(*args, **kwargs):
+            started = perf_counter()
+            status = "success"
+            result = None
+            try:
+                result = await thread_pool_exec(self.dataStore.search, *args, **kwargs)
+                return result
+            except Exception:
+                status = "failed"
+                raise
+            finally:
+                payload = {"status": status}
+                if result is not None:
+                    try:
+                        payload["candidateCount"] = int(self.dataStore.get_total(result))
+                    except Exception:
+                        pass
+                record_timed_rag_stage("candidate_search", started, **payload)
+
         if not qst:
             if req.get("sort"):
                 orderBy.asc("chunk_order_int")
                 orderBy.asc("page_num_int")
                 orderBy.asc("top_int")
                 orderBy.desc("create_timestamp_flt")
-            res = self.dataStore.search(src, [], filters, [], orderBy, offset, limit, idx_names, kb_ids)
+            started = perf_counter()
+            status = "success"
+            res = None
+            try:
+                res = self.dataStore.search(src, [], filters, [], orderBy, offset, limit, idx_names, kb_ids)
+            except Exception:
+                status = "failed"
+                raise
+            finally:
+                payload = {"status": status}
+                if res is not None:
+                    try:
+                        payload["candidateCount"] = int(self.dataStore.get_total(res))
+                    except Exception:
+                        pass
+                record_timed_rag_stage(
+                    "candidate_search",
+                    started,
+                    **payload,
+                )
             total = self.dataStore.get_total(res)
             logging.debug("Dealer.search TOTAL: {}".format(total))
         else:
@@ -193,7 +241,7 @@ class Dealer:
             matchText, keywords = self.qryr.question(qst, min_match=(0.3 if min_match else 0))
             if emb_mdl is None:
                 matchExprs = [matchText]
-                res = await thread_pool_exec(self.dataStore.search, src, highlightFields, filters, matchExprs, orderBy, offset, limit, idx_names, kb_ids, rank_feature=rank_feature)
+                res = await timed_store_search(src, highlightFields, filters, matchExprs, orderBy, offset, limit, idx_names, kb_ids, rank_feature=rank_feature)
                 total = self.dataStore.get_total(res)
                 logging.debug("Dealer.search TOTAL: {}".format(total))
             else:
@@ -211,20 +259,20 @@ class Dealer:
                 fusionExpr = FusionExpr("weighted_sum", topk, {"weights": "0.001,1"})
                 matchExprs = [matchText, matchDense, fusionExpr]
 
-                res = await thread_pool_exec(self.dataStore.search, src, highlightFields, filters, matchExprs, orderBy, offset, limit, idx_names, kb_ids, rank_feature=rank_feature)
+                res = await timed_store_search(src, highlightFields, filters, matchExprs, orderBy, offset, limit, idx_names, kb_ids, rank_feature=rank_feature)
                 total = self.dataStore.get_total(res)
                 logging.debug("Dealer.search TOTAL: {}".format(total))
 
                 # If result is empty, try again with lower min_match
                 if total == 0:
                     if filters.get("doc_id"):
-                        res = await thread_pool_exec(self.dataStore.search, src, [], filters, [], orderBy, offset, limit, idx_names, kb_ids)
+                        res = await timed_store_search(src, [], filters, [], orderBy, offset, limit, idx_names, kb_ids)
                         total = self.dataStore.get_total(res)
                     else:
                         matchText, _ = self.qryr.question(qst, min_match=(0.1 if min_match else 0))
                         matchDense.extra_options["similarity"] = 0.17
-                        res = await thread_pool_exec(
-                            self.dataStore.search, src, highlightFields, filters, [matchText, matchDense, fusionExpr], orderBy, offset, limit, idx_names, kb_ids, rank_feature=rank_feature
+                        res = await timed_store_search(
+                            src, highlightFields, filters, [matchText, matchDense, fusionExpr], orderBy, offset, limit, idx_names, kb_ids, rank_feature=rank_feature
                         )
                         total = self.dataStore.get_total(res)
                     logging.debug("Dealer.search 2 TOTAL: {}".format(total))
@@ -567,10 +615,16 @@ class Dealer:
         must_not: dict | None = None,
     ):
         ranks = {"total": 0, "chunks": [], "doc_aggs": {}}
+        retrieval_started = perf_counter()
+
+        def retrieval_duration_ms() -> float:
+            return round(max(0.0, (perf_counter() - retrieval_started) * 1000), 3)
+
         if not question:
             record_rag_diagnostics(
                 "retrieval",
                 {
+                    "durationMs": retrieval_duration_ms(),
                     "query": "",
                     "similarityThreshold": similarity_threshold,
                     "topN": page_size,
@@ -619,6 +673,7 @@ class Dealer:
             record_rag_diagnostics(
                 "retrieval",
                 {
+                    "durationMs": retrieval_duration_ms(),
                     "query": question,
                     "similarityThreshold": similarity_threshold,
                     "topN": page_size,
@@ -641,23 +696,41 @@ class Dealer:
             bool(rerank_mdl),
         )
 
+        rerank_started = perf_counter()
+        rerank_status = "success"
         if rerank_mdl and sres.total > 0:
-            sim, tsim, vsim = self.rerank_by_model(
-                rerank_mdl,
-                sres,
-                question,
-                term_similarity_weight,
-                vector_similarity_weight,
-                rank_feature=rank_feature,
-            )
+            rerank_mode = "model"
+            try:
+                sim, tsim, vsim = self.rerank_by_model(
+                    rerank_mdl,
+                    sres,
+                    question,
+                    term_similarity_weight,
+                    vector_similarity_weight,
+                    rank_feature=rank_feature,
+                )
+            except Exception:
+                rerank_status = "failed"
+                record_timed_rag_stage(
+                    "rerank",
+                    rerank_started,
+                    enabled=True,
+                    executed=True,
+                    mode="model",
+                    candidateCount=sres.total,
+                    status=rerank_status,
+                )
+                raise
         else:
             if settings.DOC_ENGINE_INFINITY:
+                rerank_mode = "infinity_score_fusion"
                 # Don't need rerank here since Infinity normalizes each way score before fusion.
                 sim = [sres.field[id].get("_score", 0.0) for id in sres.ids]
                 sim = [s if s is not None else 0.0 for s in sim]
                 tsim = sim
                 vsim = sim
             elif settings.DOC_ENGINE_OCEANBASE or settings.DOC_ENGINE_SERENEDB:
+                rerank_mode = "local_vector"
                 # OceanBase still returns chunk vectors in the result; use
                 # the historical local rerank that depends on them.
                 sim, tsim, vsim = self.rerank(
@@ -668,6 +741,7 @@ class Dealer:
                     rank_feature=rank_feature,
                 )
             else:
+                rerank_mode = "es_knn_fusion"
                 # ES path: ask ES for the clean cosine score via a second
                 # KNN-only call filtered by the candidate ids, then merge it
                 # with locally computed term similarity using the user's
@@ -681,6 +755,15 @@ class Dealer:
                     vector_similarity_weight,
                     rank_feature=rank_feature,
                 )
+        record_timed_rag_stage(
+            "rerank",
+            rerank_started,
+            enabled=bool(rerank_mdl),
+            executed=bool(rerank_mdl and sres.total > 0),
+            mode=rerank_mode,
+            candidateCount=sres.total,
+            status=rerank_status,
+        )
 
         sim_np = np.array(sim, dtype=np.float64)
         if sim_np.size == 0:
@@ -688,6 +771,7 @@ class Dealer:
             record_rag_diagnostics(
                 "retrieval",
                 {
+                    "durationMs": retrieval_duration_ms(),
                     "query": question,
                     "similarityThreshold": similarity_threshold,
                     "topN": page_size,
@@ -735,6 +819,7 @@ class Dealer:
             record_rag_diagnostics(
                 "retrieval",
                 {
+                    "durationMs": retrieval_duration_ms(),
                     "query": question,
                     "similarityThreshold": post_threshold,
                     "topN": page_size,

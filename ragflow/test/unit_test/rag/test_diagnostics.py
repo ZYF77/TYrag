@@ -1,3 +1,5 @@
+import time
+
 from rag import diagnostics
 
 
@@ -65,3 +67,28 @@ def test_sink_failure_is_isolated_from_caller():
         assert diagnostics.snapshot_rag_diagnostics() == {}
     finally:
         diagnostics._CURRENT_SINK.reset(token)
+
+
+def test_timed_stage_exposes_step_duration_and_stage_for_llm_calls():
+    token = diagnostics.begin_rag_diagnostics(True, "run-timing")
+    try:
+        with diagnostics.rag_diagnostics_stage("keyword_analysis"):
+            diagnostics.record_rag_diagnostics(
+                "llm",
+                {"callType": "chat", "durationMs": 12.5, "status": "success"},
+            )
+        diagnostics.record_timed_rag_stage(
+            "rerank", time.perf_counter() - 0.001, enabled=True, executed=True
+        )
+        snapshot = diagnostics.snapshot_rag_diagnostics()
+    finally:
+        diagnostics.reset_rag_diagnostics(token)
+
+    assert snapshot["timing"] == {
+        "atMs": "cumulative_from_trace_start",
+        "durationMs": "current_event",
+    }
+    assert snapshot["events"][0]["data"]["stage"] == "keyword_analysis"
+    assert snapshot["events"][0]["durationMs"] == 12.5
+    assert snapshot["events"][1]["data"]["stage"] == "rerank"
+    assert snapshot["events"][1]["durationMs"] >= 0

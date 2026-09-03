@@ -29,6 +29,7 @@ import httpx
 
 from enterprise.gateway.audit_log import write_feed_callback_audit
 from enterprise.gateway.callback import classify_delivery, sign_payload
+from enterprise.gateway.config import config
 from enterprise.gateway.sync.models import ExtDocumentMap, utc_now
 
 logger = logging.getLogger(__name__)
@@ -285,7 +286,7 @@ async def enqueue_terminal_callback(
 
     try:
         if enabled is None:
-            enabled = config.callback_enabled
+            enabled = config.runtime_settings().callback_enabled
         if not enabled:
             return None
         if is_internal_callback_document(doc.external_document_id):
@@ -699,9 +700,7 @@ class CallbackDeliveryWorker:
         return outcome
 
     async def run_once(self, limit: int = 10) -> int:
-        from enterprise.gateway.config import config
-
-        if not config.callback_enabled:
+        if not config.runtime_settings().callback_enabled:
             return 0
         async with self.gateway.transaction(write=True) as conn:
             deliveries = await claim_pending_callback_deliveries(
@@ -725,14 +724,19 @@ class CallbackDeliveryWorker:
                 )
         return len(deliveries)
 
-    async def run_forever(self, interval_seconds: float = 2.0) -> None:
+    async def run_forever(self, interval_seconds: float | None = None) -> None:
         try:
             while True:
                 try:
                     await self.run_once()
                 except Exception:
                     logger.exception("Callback delivery worker iteration failed")
-                await asyncio.sleep(interval_seconds)
+                settings = config.runtime_settings()
+                await asyncio.sleep(
+                    interval_seconds
+                    if interval_seconds is not None
+                    else settings.callback_poll_seconds
+                )
         finally:
             await self.close()
 

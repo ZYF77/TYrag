@@ -996,6 +996,14 @@ components:
         excerpt: { type: [string, 'null'] }
         recordType: { type: [string, 'null'] }
         recordId: { type: [string, 'null'] }
+        fileKind:
+          type: [string, 'null']
+          enum: [original, crop, null]
+          description: >-
+            The authorized citation download representation. `crop` means the
+            RAGFlow embedded figure/image region; `original` means the source
+            document. This is display metadata only and does not expose the
+            internal image identifier.
         refIndex:
           type: [integer, 'null']
           minimum: 0

@@ -875,6 +875,10 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
             "runId": request_id,
             "startedAt": "stub",
             "durationMs": 0,
+            "timing": {
+                "atMs": "cumulative_from_trace_start",
+                "durationMs": "current_event",
+            },
             "events": [
                 {
                     "type": "request",

@@ -4,7 +4,7 @@ import hashlib
 import os
 from dataclasses import dataclass
 
-from enterprise.gateway.config import config
+from enterprise.gateway.config import config, document_feed_max_size_mb
 
 
 class SourceFetchError(Exception):
@@ -64,9 +64,17 @@ class S3SourceAdapter(SourceAdapter):
         self.access_key = access_key or os.getenv("S3_ACCESS_KEY", "")
         self.secret_key = secret_key or os.getenv("S3_SECRET_KEY", "")
         self.region_name = region_name or os.getenv("S3_REGION", "")
-        self.max_size_bytes = max_size_bytes or int(
-            os.getenv("S3_MAX_SIZE_MB", "512")
-        ) * 1024 * 1024
+        self.max_size_bytes = (
+            max_size_bytes
+            if max_size_bytes is not None
+            else (
+                config.runtime_settings().s3_max_size_mb
+                if config.runtime_settings_override() is not None
+                else document_feed_max_size_mb("S3_MAX_SIZE_MB")
+            )
+            * 1024
+            * 1024
+        )
         self.path_style = (
             path_style
             if path_style is not None

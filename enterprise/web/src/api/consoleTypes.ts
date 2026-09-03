@@ -1,4 +1,4 @@
-import type { DisplayError } from './v2Types';
+import type { Citation, DisplayError } from './v2Types';
 
 export type ConsoleModuleStatus =
   | 'configured'
@@ -28,6 +28,13 @@ export interface ConsoleUserPrincipal {
   mappingStatus: string;
 }
 
+export interface ConsoleAuthSession {
+  authenticated: boolean;
+  username: string;
+  tenantId: string;
+  expiresAt: string;
+}
+
 export interface GatewayHttpLogEvent {
   id: string;
   ts: string;
@@ -37,8 +44,9 @@ export interface GatewayHttpLogEvent {
   path: string;
   query?: string;
   caller?: string | null;
+  caller_username?: string | null;
   http_status: number | null;
-  duration_ms?: number;
+  duration_ms?: number | null;
   body?: unknown;
   response_body?: unknown;
   streamed?: boolean;
@@ -63,10 +71,58 @@ export interface RagflowIntegrationPaths {
   retrieval: string;
 }
 
+export interface RagflowProcessingConfig {
+  maxConcurrentTasks: number;
+  maxConcurrentChunkBuilders: number;
+  executorWorkers: number;
+}
+
+export interface RuntimeWorkerSettings {
+  enabled: boolean;
+  pollSeconds: number;
+}
+
+export interface RuntimeCleanupSettings extends RuntimeWorkerSettings {
+  ttlSeconds: number;
+}
+
+export interface RuntimeQualityReconcilerSettings extends RuntimeWorkerSettings {
+  runningTimeoutSeconds: number;
+}
+
+export interface RuntimeLimitsSettings {
+  fileShareMaxMiB: number;
+  s3MaxMiB: number;
+  transientAttachmentMaxMiB: number;
+}
+
+export interface RuntimeDiagnosticsSettings {
+  enabled: boolean;
+}
+
+export interface GatewayRuntimeSettings {
+  outbox: RuntimeWorkerSettings;
+  statusReconciler: RuntimeWorkerSettings;
+  transientAttachmentCleanup: RuntimeCleanupSettings;
+  qualityEvaluation: RuntimeWorkerSettings;
+  qualityReconciler: RuntimeQualityReconcilerSettings;
+  callbackDelivery: RuntimeWorkerSettings;
+  limits: RuntimeLimitsSettings;
+  diagnostics: RuntimeDiagnosticsSettings;
+}
+
+export interface GatewayRuntimeSettingsState {
+  settings: GatewayRuntimeSettings;
+  source: 'database' | 'environment' | string;
+  updatedAt: string | null;
+  hotReload: boolean;
+}
+
 export interface RagflowIntegration {
   baseUrl: string;
   apiVersion: string;
   paths: RagflowIntegrationPaths;
+  processing?: RagflowProcessingConfig;
 }
 
 export interface CallbackEndpointConfig {
@@ -82,6 +138,19 @@ export interface CallbackEndpointConfig {
 
 export interface SystemIntegrations {
   ragflow: RagflowIntegration;
+  gatewayProcessing?: {
+    outboxInFlight: number;
+    qualityInFlight: number;
+    callbackBatch: number;
+    callbackConcurrent: number;
+  };
+  limits?: {
+    fileShareMaxBytes: number;
+    s3MaxBytes: number;
+    transientAttachmentMaxBytes: number;
+    transientAttachmentMaxFiles: number;
+  };
+  runtime?: GatewayRuntimeSettingsState;
   callbacksEnabled: boolean;
   callbacks: CallbackEndpointConfig[];
 }
@@ -117,6 +186,16 @@ export interface ConversationMetadataPage {
   hasMore: boolean;
 }
 
+/** 管理员会话元数据高级检索条件；空值表示不参与筛选。 */
+export interface ConversationMetadataFilters {
+  conversationId?: string | null;
+  businessUserId?: string | null;
+  equipmentId?: string | null;
+  fixedAssetNo?: string | null;
+  ragflowId?: string | null;
+  contextVersion?: number | null;
+}
+
 /** Server-side sort order; backend defaults to updatedAt/lastMessageAt desc. */
 export type MetadataSortOrder = 'asc' | 'desc';
 
@@ -133,7 +212,12 @@ export type ConversationMetadataOrderBy =
 export interface DocumentMetadataItem {
   externalDocumentId: string;
   sourceVersionId: string;
+  currentVersion?: number | null;
   fileName: string;
+  sourceKind?: string | null;
+  parserProfile?: string | null;
+  parserProfileVersion?: string | null;
+  parserApplicationStatus?: string | null;
   sourceSystem: string;
   documentType: string | null;
   equipmentId: string | null;
@@ -155,6 +239,75 @@ export interface DocumentMetadataItem {
 export interface DocumentMetadataPage {
   items: DocumentMetadataItem[];
   hasMore: boolean;
+}
+
+/** 管理员文件元数据高级检索条件；空值表示不参与筛选。 */
+export interface DocumentMetadataFilters {
+  externalDocumentId?: string | null;
+  sourceVersionId?: string | null;
+  fileName?: string | null;
+  equipmentId?: string | null;
+  fixedAssetNo?: string | null;
+  assetId?: string | null;
+  ragflowDocumentId?: string | null;
+}
+
+export interface AdminChunk {
+  id: string;
+  documentId: string;
+  content: string;
+  imageId: string | null;
+  docType: string | null;
+  available: boolean | number | null;
+  positions: unknown;
+  importantKeywords: unknown;
+}
+
+export interface DocumentMetadataDetail {
+  item: DocumentMetadataItem;
+  metadata: {
+    mediaType: string | null;
+    sourcePageCount: number | null;
+    departmentId: string | null;
+    securityLevel: number | null;
+    documentSubtype: string | null;
+    sourceDocumentType: string | null;
+    ingestState: string | null;
+    sourceState: string | null;
+    sourceStateReason: string | null;
+    attemptCount: number | null;
+    parseRetryCount: number | null;
+    lastErrorCode: string | null;
+    lastErrorRetryable: boolean;
+    lastSyncAt: string | null;
+    sourceUpdatedAt: string | null;
+  };
+  parser: {
+    applicationStatus: string | null;
+    profile: string | null;
+    profileVersion: string | null;
+    expected: unknown;
+    configured: unknown;
+    executed: unknown;
+    ragflow: {
+      run: string | null;
+      chunkMethod: string | null;
+      chunkCount: number | null;
+      tokenCount: number | null;
+      progress: number | null;
+      parserConfig: unknown;
+    } | null;
+    errorCode: string | null;
+  };
+}
+
+export interface ChunkPage {
+  items: AdminChunk[];
+  total: number;
+  page: number;
+  pageSize: number;
+  hasMore: boolean;
+  state: 'ready' | 'not_ready' | string;
 }
 
 export type DocumentMetadataOrderBy =
@@ -191,6 +344,8 @@ export interface AdminConversationMessage {
   content: string;
   /** 持久化的业务状态，原样展示，不按 citations 推导。 */
   status: string;
+  /** 管理员会话查看器使用的安全 citation 摘要；详情仍由 Harness 入口授权查看。 */
+  citations?: Citation[];
   createdAt: string;
 }
 
@@ -202,6 +357,10 @@ export interface AdminConversationMessagesPage {
 export interface RagDiagnosticEvent {
   type: string;
   atMs: number;
+  /** Duration of this event itself; atMs remains cumulative from trace start. */
+  durationMs?: number | null;
+  /** Native source-relative timestamp for events merged from RAGFlow. */
+  sourceAtMs?: number | null;
   data: Record<string, unknown>;
 }
 
@@ -210,6 +369,10 @@ export interface RagDiagnostics {
   runId: string;
   startedAt: string;
   durationMs: number;
+  timing?: {
+    atMs?: string;
+    durationMs?: string;
+  };
   events: RagDiagnosticEvent[];
   truncated: boolean;
 }

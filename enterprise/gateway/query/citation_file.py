@@ -37,6 +37,7 @@ PUBLIC_CITATION_KEYS = (
     "excerpt",
     "recordType",
     "recordId",
+    "fileKind",
     "downloadUrl",
     "downloadExpiresAt",
 )
@@ -164,6 +165,7 @@ def public_citation(
         "recordType": citation.get("recordType"),
         "recordId": citation.get("recordId"),
         "refIndex": citation.get("refIndex"),
+        "fileKind": ticket.kind,
         "downloadUrl": download_url,
         "downloadExpiresAt": ticket.expires_at,
     }

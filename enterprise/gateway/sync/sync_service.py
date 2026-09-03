@@ -396,7 +396,7 @@ class SyncService:
             except SourceHashMismatch as e:
                 raise TerminalDocumentSyncError("DOCUMENT_HASH_MISMATCH", str(e)) from e
             except SourceTooLarge as e:
-                raise TerminalDocumentSyncError("DOCUMENT_SOURCE_NOT_FOUND", str(e)) from e
+                raise TerminalDocumentSyncError("DOCUMENT_TOO_LARGE", str(e)) from e
             except SourceFetchError as e:
                 raise RetryableDocumentSyncError("DOCUMENT_SOURCE_NOT_FOUND", str(e)) from e
 
@@ -779,7 +779,7 @@ class SyncService:
                 ) from exc
             if isinstance(exc, SourceTooLarge):
                 raise TerminalDocumentSyncError(
-                    "DOCUMENT_SOURCE_NOT_FOUND", str(exc),
+                    "DOCUMENT_TOO_LARGE", str(exc),
                 ) from exc
             raise RetryableDocumentSyncError(
                 "DOCUMENT_SOURCE_NOT_FOUND", str(exc),
@@ -1372,6 +1372,8 @@ class SyncService:
                 )
             except SourceHashMismatch as e:
                 raise TerminalDocumentSyncError("DOCUMENT_HASH_MISMATCH", str(e)) from e
+            except SourceTooLarge as e:
+                raise TerminalDocumentSyncError("DOCUMENT_TOO_LARGE", str(e)) from e
             except SourceFetchError as e:
                 raise RetryableDocumentSyncError("DOCUMENT_SOURCE_NOT_FOUND", str(e)) from e
 

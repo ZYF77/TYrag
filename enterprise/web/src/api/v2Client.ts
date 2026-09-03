@@ -25,11 +25,16 @@ import type {
 import type {
   AdminConversationMessagesPage,
   CallbackBinding,
+  ConsoleAuthSession,
   ConsoleUserPrincipal,
+  ConversationMetadataFilters,
   ConversationMetadataOrderBy,
   ConversationMetadataPage,
+  DocumentMetadataDetail,
+  DocumentMetadataFilters,
   DocumentMetadataOrderBy,
   DocumentMetadataPage,
+  ChunkPage,
   EamProbeResult,
   GatewayHealth,
   GatewayHttpLogPage,
@@ -37,6 +42,8 @@ import type {
   MetadataSummary,
   RagDiagnosticTraceDetail,
   RagDiagnosticTracePage,
+  GatewayRuntimeSettings,
+  GatewayRuntimeSettingsState,
   SystemIntegrations,
 } from './consoleTypes';
 
@@ -86,6 +93,9 @@ export function setHarnessToken(token: string): void {
 }
 
 function authHeaders(): Record<string, string> {
+  // Production Gateway mode authenticates the WebUI with its HttpOnly local
+  // session cookie.  Bearer injection remains available to mock/demo harnesses.
+  if (API_MODE === 'gateway') return {};
   const token = getHarnessToken();
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
@@ -109,7 +119,14 @@ function normalizeErrorBody(value: unknown, status: number): ErrorResponse {
   };
 }
 
+function notifyConsoleAuthExpired(response: Response): void {
+  if (API_MODE === 'gateway' && response.status === 401 && typeof window !== 'undefined') {
+    window.dispatchEvent(new Event('enterprise-console-auth-expired'));
+  }
+}
+
 async function errorFromResponse(response: Response): Promise<V2ApiError> {
+  notifyConsoleAuthExpired(response);
   const payload = await response.json().catch(() => undefined);
   return new V2ApiError(response.status, normalizeErrorBody(payload, response.status));
 }
@@ -123,6 +140,7 @@ async function request<T>(
   try {
     response = await fetch(`${base}${path}`, {
       ...init,
+      credentials: 'include',
       headers: {
         Accept: 'application/json',
         ...authHeaders(),
@@ -341,6 +359,7 @@ export function streamMessage(
       method: 'POST',
       headers,
       body: payload,
+      credentials: 'include',
       ...(signal ? { signal } : {}),
     };
     let response: Response;
@@ -407,6 +426,21 @@ export function streamMessage(
 }
 
 export const v2Api = {
+  loginConsole(username: string, password: string): Promise<ConsoleAuthSession> {
+    return request<ConsoleAuthSession>('/console/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ username, password }),
+    }, V1_BASE);
+  },
+
+  getConsoleAuth(): Promise<ConsoleAuthSession> {
+    return request<ConsoleAuthSession>('/console/auth/me', {}, V1_BASE);
+  },
+
+  async logoutConsole(): Promise<void> {
+    await request<void>('/console/auth/logout', { method: 'POST' }, V1_BASE);
+  },
+
   getHealth(): Promise<GatewayHealth> {
     return request<GatewayHealth>('/health', {}, V1_BASE);
   },
@@ -432,6 +466,13 @@ export const v2Api = {
     return request<SystemIntegrations>('/admin/system/integrations', {}, V1_BASE);
   },
 
+  updateRuntimeSettings(settings: GatewayRuntimeSettings): Promise<GatewayRuntimeSettingsState> {
+    return request<GatewayRuntimeSettingsState>('/admin/system/runtime-settings', {
+      method: 'PUT',
+      body: JSON.stringify(settings),
+    }, V1_BASE);
+  },
+
   probeEamCallback(binding: CallbackBinding): Promise<EamProbeResult> {
     return request<EamProbeResult>('/admin/system/eam-probe', {
       method: 'POST',
@@ -444,6 +485,7 @@ export const v2Api = {
       limit?: number;
       offset?: number;
       status?: string | null;
+      filters?: ConversationMetadataFilters;
       orderBy?: ConversationMetadataOrderBy | null;
       order?: MetadataSortOrder | null;
     } = {},
@@ -453,6 +495,12 @@ export const v2Api = {
         limit: params.limit,
         offset: params.offset,
         status: params.status,
+        conversationId: params.filters?.conversationId,
+        businessUserId: params.filters?.businessUserId,
+        equipmentId: params.filters?.equipmentId,
+        fixedAssetNo: params.filters?.fixedAssetNo,
+        ragflowId: params.filters?.ragflowId,
+        contextVersion: params.filters?.contextVersion,
         orderBy: params.orderBy,
         order: params.order,
       }),
@@ -468,6 +516,8 @@ export const v2Api = {
       sourceSystem?: string | null;
       status?: string | null;
       businessStatus?: string | null;
+      parserApplicationStatus?: string | null;
+      filters?: DocumentMetadataFilters;
       orderBy?: DocumentMetadataOrderBy | null;
       order?: MetadataSortOrder | null;
     } = {},
@@ -479,6 +529,14 @@ export const v2Api = {
         sourceSystem: params.sourceSystem,
         status: params.status,
         businessStatus: params.businessStatus,
+        parserApplicationStatus: params.parserApplicationStatus,
+        externalDocumentId: params.filters?.externalDocumentId,
+        sourceVersionId: params.filters?.sourceVersionId,
+        fileName: params.filters?.fileName,
+        equipmentId: params.filters?.equipmentId,
+        fixedAssetNo: params.filters?.fixedAssetNo,
+        assetId: params.filters?.assetId,
+        ragflowDocumentId: params.filters?.ragflowDocumentId,
         orderBy: params.orderBy,
         order: params.order,
       }),
@@ -499,9 +557,37 @@ export const v2Api = {
     );
   },
 
-  listRagDiagnosticTraces(limit = 50): Promise<RagDiagnosticTracePage> {
+  getAdminDocumentMetadataDetail(
+    externalDocumentId: string,
+    sourceVersionId?: string | null,
+  ): Promise<DocumentMetadataDetail> {
+    return request<DocumentMetadataDetail>(
+      queryPath(`/admin/system/metadata/documents/${encodeURIComponent(externalDocumentId)}`, {
+        sourceVersionId,
+      }),
+      {},
+      V1_BASE,
+    );
+  },
+
+  listAdminDocumentChunks(
+    externalDocumentId: string,
+    params: { sourceVersionId?: string | null; page?: number; pageSize?: number } = {},
+  ): Promise<ChunkPage> {
+    return request<ChunkPage>(
+      queryPath(`/admin/system/metadata/documents/${encodeURIComponent(externalDocumentId)}/chunks`, {
+        sourceVersionId: params.sourceVersionId,
+        page: params.page,
+        pageSize: params.pageSize,
+      }),
+      {},
+      V1_BASE,
+    );
+  },
+
+  listRagDiagnosticTraces(limit = 20, offset = 0): Promise<RagDiagnosticTracePage> {
     return request<RagDiagnosticTracePage>(
-      `/admin/system/diagnostics/traces?limit=${limit}`,
+      queryPath('/admin/system/diagnostics/traces', { limit, offset }),
       {},
       V1_BASE,
     );
@@ -633,6 +719,7 @@ export const v2Api = {
     let response: Response;
     try {
       response = await fetch(url.toString(), {
+        credentials: 'include',
         headers: {
           Accept: attachment.mediaType,
           ...authHeaders(),

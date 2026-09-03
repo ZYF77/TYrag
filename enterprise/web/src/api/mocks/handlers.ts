@@ -209,6 +209,7 @@ export const handlers = [
           path: '/enterprise/api/v2/conversations/conv-test/messages',
           query: '',
           caller: 'demo-user',
+          caller_username: 'zkadmin',
           http_status: 422,
           duration_ms: 12,
           body: { clientMessageId: 'msg-invalid', faultCode: 'E-104' },
@@ -224,6 +225,7 @@ export const handlers = [
           path: '/enterprise/api/v2/conversations',
           query: '',
           caller: 'demo-user',
+          caller_username: 'zkadmin',
           http_status: 200,
           duration_ms: 18,
           body: null,
@@ -589,6 +591,7 @@ interface V2MessageRunResult {
   answer: string;
   status: '已完成' | '无可靠依据' | '失败';
   citations: V2Citation[];
+  reasoning?: string;
   replayed: boolean;
 }
 
@@ -625,7 +628,7 @@ function v2Error(code: string, message: string, status: number, retryable = fals
 function v2AuthError(request: Request): Response | null {
   const token = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '') ?? '';
   if (token.toLowerCase().includes('401') || token.toLowerCase().includes('invalid')) {
-    return v2Error('AUTH_TOKEN_INVALID', '登录已过期，请重新注入运行期 Bearer。', 401);
+    return v2Error('AUTH_TOKEN_INVALID', '登录已过期，请重新验证身份。', 401);
   }
   return null;
 }
@@ -690,6 +693,12 @@ function v2Stream(
         controller.close();
         return;
       }
+      if (result.reasoning) {
+        const midpoint = Math.max(1, Math.ceil(result.reasoning.length / 2));
+        send('reasoning.delta', { conversationId: result.conversationId, runId: result.runId, content: result.reasoning.slice(0, midpoint) });
+        await delay(10);
+        send('reasoning.delta', { conversationId: result.conversationId, runId: result.runId, content: result.reasoning.slice(midpoint) });
+      }
       if (result.answer) {
         send('answer.delta', { conversationId: result.conversationId, runId: result.runId, content: result.answer.slice(0, Math.ceil(result.answer.length / 2)) });
         await delay(10);
@@ -705,6 +714,7 @@ function v2Stream(
         messageId: result.messageId,
         status: result.status,
         citations: result.citations,
+        ...(result.reasoning ? { reasoning: result.reasoning } : {}),
       });
       controller.close();
     },
@@ -901,6 +911,9 @@ const v2Handlers = [
       answer,
       status: streamFailure ? '失败' : noEvidence ? '无可靠依据' : '已完成',
       citations,
+      ...(question.toLowerCase().includes('reasoning')
+        ? { reasoning: '已完成范围确认；正在依据授权文档整理回答。' }
+        : {}),
       replayed: false,
     };
     const userMessage: Message = {
@@ -912,7 +925,7 @@ const v2Handlers = [
       createdAt: v2Now(),
       ...(attachments.length > 0 ? { attachments } : {}),
     };
-    const assistantMessage: Message = { messageId: result.messageId, role: 'assistant', content: answer, status: result.status, citations, createdAt: v2Now() };
+    const assistantMessage: Message = { messageId: result.messageId, role: 'assistant', content: answer, status: result.status, citations, createdAt: v2Now(), ...(result.reasoning ? { reasoning: result.reasoning } : {}) };
     const storedMessages = [...record.messages, userMessage, assistantMessage];
     record.messages = storedMessages;
     record.detail = { ...record.detail, lastMessageAt: v2Now(), title: question.slice(0, 40) || record.detail.title };

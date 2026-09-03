@@ -17,6 +17,7 @@ from enterprise.gateway.quality.gate import (
     quality_dimensions,
     required_quality_dimensions,
 )
+from enterprise.gateway.config import config
 from enterprise.gateway.quality.metrics import metrics
 from enterprise.gateway.db import GatewayDatabase
 from enterprise.gateway.quality.models import (
@@ -733,20 +734,27 @@ class QualityEvaluationWorker:
             await self.service.run_job(job)
         return len(jobs)
 
-    async def run_forever(self, interval_seconds: float = 2.0) -> None:
+    async def run_forever(self, interval_seconds: float | None = None) -> None:
         while True:
             try:
-                await self.run_once()
+                settings = config.runtime_settings()
+                if settings.quality_worker_enabled:
+                    await self.run_once()
             except Exception:
                 logger.exception("Quality evaluation worker iteration failed")
-            await asyncio.sleep(interval_seconds)
+            settings = config.runtime_settings()
+            await asyncio.sleep(
+                interval_seconds
+                if interval_seconds is not None
+                else settings.quality_poll_seconds
+            )
 
 
 class QualityReconciler:
     def __init__(
         self,
         service: QualityEvaluationService,
-        running_timeout_seconds: int = 1800,
+        running_timeout_seconds: int | None = None,
     ) -> None:
         self.service = service
         self.running_timeout_seconds = running_timeout_seconds
@@ -769,9 +777,12 @@ class QualityReconciler:
     async def _fail_stuck_running(self) -> None:
         from datetime import datetime, timedelta, timezone
 
+        timeout_seconds = self.running_timeout_seconds
+        if timeout_seconds is None:
+            timeout_seconds = config.runtime_settings().quality_running_timeout_seconds
         threshold = (
             datetime.now(timezone.utc)
-            - timedelta(seconds=self.running_timeout_seconds)
+            - timedelta(seconds=timeout_seconds)
         ).isoformat()
         from enterprise.gateway.db.dialect import fetchall
 
@@ -797,10 +808,17 @@ class QualityReconciler:
                 "Quality evaluation exceeded running timeout",
             )
 
-    async def run_forever(self, interval_seconds: float = 10.0) -> None:
+    async def run_forever(self, interval_seconds: float | None = None) -> None:
         while True:
             try:
-                await self.run_once()
+                settings = config.runtime_settings()
+                if settings.quality_reconciler_enabled:
+                    await self.run_once()
             except Exception:
                 logger.exception("Quality reconciler iteration failed")
-            await asyncio.sleep(interval_seconds)
+            settings = config.runtime_settings()
+            await asyncio.sleep(
+                interval_seconds
+                if interval_seconds is not None
+                else settings.quality_reconcile_seconds
+            )

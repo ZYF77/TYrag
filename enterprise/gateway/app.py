@@ -26,7 +26,11 @@ from enterprise.gateway.sync.models import (
 )
 from enterprise.gateway.auth.service_auth import require_service_principal
 from enterprise.gateway.auth.service_principal import ServicePrincipal
-from enterprise.gateway.auth.middleware import UserAuthError, require_user_principal
+from enterprise.gateway.auth.console_router import router as console_auth_router
+from enterprise.gateway.auth.middleware import (
+    UserAuthError,
+    require_console_or_user_principal,
+)
 from enterprise.gateway.auth.user_principal import UserPrincipal
 from enterprise.gateway.models.ext_user_map import ExtUserMapRepo
 from enterprise.gateway.sync.status_mapping import enterprise_stage
@@ -41,7 +45,6 @@ from enterprise.gateway.sync.transient_attachment import (
     TransientAttachmentBodyLimitMiddleware,
     TransientAttachmentCleanupWorker,
     TransientAttachmentService,
-    attachment_cleanup_interval_seconds,
     router as transient_attachment_router,
 )
 from enterprise.gateway.sync.sync_service import (
@@ -57,6 +60,7 @@ from enterprise.gateway.audit_log import configure_gateway_file_logging, list_ht
 from enterprise.gateway.callback_delivery import CallbackDeliveryWorker
 from enterprise.gateway.config import config, require_ragflow_api_key
 from enterprise.gateway.feed_audit_middleware import FeedRegisterAuditMiddleware
+from enterprise.gateway.runtime_settings import RuntimeSettingsManager
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +71,7 @@ with open(_SCHEMA_PATH) as f:
     METADATA_SCHEMA = json.load(f)
 
 _gateway_db: GatewayDatabase | None = None
+_runtime_manager: RuntimeSettingsManager | None = None
 _background_tasks: list[asyncio.Task] = []
 
 
@@ -130,10 +135,20 @@ async def get_db() -> GatewayDatabase:
     return await get_gateway_db()
 
 
+def runtime_settings_manager_for(gateway: GatewayDatabase) -> RuntimeSettingsManager:
+    global _runtime_manager
+    if _runtime_manager is None or _runtime_manager.gateway is not gateway:
+        config.clear_runtime_settings()
+        _runtime_manager = RuntimeSettingsManager(gateway)
+    return _runtime_manager
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _gateway_db
+    global _gateway_db, _runtime_manager
     _gateway_db = await get_gateway_db()
+    _runtime_manager = RuntimeSettingsManager(_gateway_db)
+    await _runtime_manager.ensure_loaded()
     configure_gateway_file_logging()
     if not _test_mode():
         require_ragflow_api_key()
@@ -145,46 +160,38 @@ async def lifespan(app: FastAPI):
 
     set_citation_image_fetcher(_fetch_citation_image)
     started_tasks: list[asyncio.Task] = []
-    if config.worker_enabled and not _test_mode():
+    if not _test_mode():
         service = _sync_service(_gateway_db)
-        worker_task = asyncio.create_task(
-            OutboxWorker(service).run_forever(config.outbox_poll_seconds)
+        started_tasks.extend(
+            [
+                asyncio.create_task(OutboxWorker(service).run_forever()),
+                asyncio.create_task(StatusReconciler(service).run_forever()),
+                asyncio.create_task(
+                    TransientAttachmentCleanupWorker(
+                        TransientAttachmentService(_gateway_db)
+                    ).run_forever()
+                ),
+            ]
         )
-        reconciler_task = asyncio.create_task(
-            StatusReconciler(service).run_forever(config.reconcile_seconds)
-        )
-        attachment_cleanup_task = asyncio.create_task(
-            TransientAttachmentCleanupWorker(
-                TransientAttachmentService(_gateway_db)
-            ).run_forever(attachment_cleanup_interval_seconds())
-        )
-        started_tasks.extend([worker_task, reconciler_task, attachment_cleanup_task])
-        _background_tasks.extend(started_tasks)
-    if config.quality_worker_enabled and not _test_mode():
         quality_service = QualityEvaluationService(
             _gateway_db,
             _ragflow_client(),
             max_attempts=config.quality_max_attempts,
         )
-        quality_worker_task = asyncio.create_task(
-            QualityEvaluationWorker(quality_service).run_forever(
-                config.quality_poll_seconds
-            )
+        started_tasks.extend(
+            [
+                asyncio.create_task(
+                    QualityEvaluationWorker(quality_service).run_forever()
+                ),
+                asyncio.create_task(
+                    QualityReconciler(quality_service).run_forever()
+                ),
+            ]
         )
-        quality_reconciler_task = asyncio.create_task(
-            QualityReconciler(
-                quality_service,
-                running_timeout_seconds=config.quality_running_timeout_seconds,
-            ).run_forever(config.quality_reconcile_seconds)
+        started_tasks.append(
+            asyncio.create_task(CallbackDeliveryWorker(_gateway_db).run_forever())
         )
-        started_tasks.extend([quality_worker_task, quality_reconciler_task])
-        _background_tasks.extend([quality_worker_task, quality_reconciler_task])
-    if config.callback_enabled and not _test_mode():
-        callback_worker_task = asyncio.create_task(
-            CallbackDeliveryWorker(_gateway_db).run_forever(config.callback_poll_seconds)
-        )
-        started_tasks.append(callback_worker_task)
-        _background_tasks.append(callback_worker_task)
+        _background_tasks.extend(started_tasks)
     try:
         yield
     finally:
@@ -201,11 +208,14 @@ async def lifespan(app: FastAPI):
         if _gateway_db:
             await _gateway_db.dispose()
             _gateway_db = None
+        _runtime_manager = None
+        config.clear_runtime_settings()
 
 
 app = FastAPI(title="Enterprise RAGFlow Gateway", version="1.0.0", lifespan=lifespan)
 app.add_middleware(FeedRegisterAuditMiddleware)
 app.add_middleware(TransientAttachmentBodyLimitMiddleware)
+app.include_router(console_auth_router)
 
 
 @app.exception_handler(UserAuthError)
@@ -329,6 +339,7 @@ ERROR_CODES = {
     "DOCUMENT_VERSION_CONFLICT": (409, False),
     "DOCUMENT_METADATA_INVALID": (422, False),
     "DOCUMENT_HASH_MISMATCH": (422, False),
+    "DOCUMENT_TOO_LARGE": (413, False),
     "DOCUMENT_SOURCE_NOT_FOUND": (422, True),
     "DOCUMENT_NOT_FOUND": (404, False),
     "DOCUMENT_SYNC_FAILED": (502, True),
@@ -375,6 +386,7 @@ SAFE_ERROR_MESSAGES = {
     "DOCUMENT_VERSION_CONFLICT": "文档版本内容与已接受版本冲突。",
     "DOCUMENT_METADATA_INVALID": "文档信息不完整，请检查后重试。",
     "DOCUMENT_HASH_MISMATCH": "文件校验值格式不正确。",
+    "DOCUMENT_TOO_LARGE": "文档单文件不能超过 128 MiB，请压缩后重试。",
     "DOCUMENT_SOURCE_NOT_FOUND": "找不到源文件。",
     "DOCUMENT_NOT_FOUND": "找不到该文档。",
     "DOCUMENT_SYNC_FAILED": "文档同步失败，请稍后重试。",
@@ -794,7 +806,7 @@ async def health():
 @app.get("/enterprise/api/v1/diagnostics/http-log", include_in_schema=False)
 async def http_log(
     limit: int = Query(100, ge=1, le=200),
-    principal: UserPrincipal = Depends(require_user_principal),
+    principal: UserPrincipal = Depends(require_console_or_user_principal),
 ):
     _ = principal
     return {"items": list_http_events(limit)}
@@ -814,13 +826,16 @@ async def root():
 
 @app.get("/enterprise/api/v1/auth/me")
 async def auth_me(
-    principal: UserPrincipal = Depends(require_user_principal),
+    principal: UserPrincipal = Depends(require_console_or_user_principal),
 ):
     """Return authenticated end-user principal.
 
     Never returns raw token, RAGFlow API key, internal PKs, or credential material.
     """
-    return JSONResponse(content=principal.to_safe_dict())
+    return JSONResponse(
+        content=principal.to_safe_dict(),
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 # Temporary query demo router, owned by the WP-04 retrieval scope

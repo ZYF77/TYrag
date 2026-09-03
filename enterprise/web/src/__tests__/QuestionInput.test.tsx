@@ -128,4 +128,29 @@ describe('QuestionInput', () => {
 
     expect(screen.getByText(/请先选择一个会话/)).toBeTruthy();
   });
+
+  it('clears a draft when resetKey changes', async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <QuestionInput
+        onSend={() => {}}
+        onCancel={() => {}}
+        isStreaming={false}
+        disabled={false}
+        resetKey="conversation-a"
+      />,
+    );
+    const input = screen.getByLabelText('问题输入') as HTMLTextAreaElement;
+    await user.type(input, '旧会话草稿');
+    rerender(
+      <QuestionInput
+        onSend={() => {}}
+        onCancel={() => {}}
+        isStreaming={false}
+        disabled={false}
+        resetKey="conversation-b"
+      />,
+    );
+    expect(input.value).toBe('');
+  });
 });

@@ -57,6 +57,35 @@ To run the diagnostics UI as an internal-only service:
 The installer loads the archive, validates Compose without pulling, and starts
 the selected profile with `--pull never`.
 
+## Local WebUI operator login
+
+The Console and Harness share one Gateway session; the only local username is
+`zkadmin`. Before enabling the
+diagnostics profile, generate a password hash on an offline administration
+machine and place only that hash, a random session secret, and the single EAM
+tenant id in the protected production environment file:
+
+```bash
+python -m enterprise.scripts.generate_console_password_hash
+```
+
+Set the resulting value as `ENTERPRISE_CONSOLE_PASSWORD_HASH` and keep the
+plaintext password out of the repository, image, logs, and environment file.
+Set `ENTERPRISE_CONSOLE_COOKIE_SECURE=true` when HTTPS terminates in front of
+the WebUI; it remains false for the current HTTP-only local pilot. Changing
+the hash, session secret, or tenant id requires recreating only the Gateway
+(rotate the session secret with the password hash to invalidate existing
+sessions);
+the WebUI image changes only when its frontend code changes. RAGFlow is not
+changed by this login.
+
+The Console system-settings page persists Gateway worker switches, polling
+intervals, attachment TTL, quality timeout, file limits, and RAG diagnostics
+in the `gateway_runtime_settings` row. These Gateway-owned values are editable
+and hot-reload on save. RAGFlow processing values (`MAX_CONCURRENT_TASKS`,
+`MAX_CONCURRENT_CHUNK_BUILDERS`, and `WORKERS`) remain read-only projections;
+changing them requires restarting `ragflow-cpu`.
+
 ## HMAC Credential Handoff
 
 `ENTERPRISE_SYNC_HMAC_CREDENTIALS` is a server-side JSON configuration value.

@@ -503,6 +503,7 @@ def test_v27_message_level_internet_and_web_citations_are_declared():
     assert citation["properties"]["url"]["type"] == ["string", "null"]
     assert citation["properties"]["downloadUrl"]["type"] == ["string", "null"]
     assert citation["properties"]["downloadExpiresAt"]["type"] == ["string", "null"]
+    assert citation["properties"]["fileKind"]["enum"] == ["original", "crop", None]
 
 
 def test_v29_reasoning_mode_and_replaced_event_are_declared():

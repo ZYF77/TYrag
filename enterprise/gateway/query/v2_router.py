@@ -7,6 +7,7 @@ import asyncio
 import logging
 import re
 import uuid
+from time import perf_counter
 from typing import Any, AsyncIterator, Literal
 from urllib.parse import urlsplit
 
@@ -53,7 +54,7 @@ from enterprise.gateway.query.citation_select import (
 from enterprise.gateway.query.diagnostics import (
     finish_trace,
     merge_upstream,
-    record_event as record_diagnostics_event,
+    record_timed_event,
     start_trace,
 )
 from enterprise.gateway.query.formal_router import (
@@ -1360,15 +1361,18 @@ async def _execute_json_run(
             run["_diagnostics"] = None
     try:
         try:
+            scope_started = perf_counter()
             question, client, observations = await _retrieval_question(
                 db, principal, conversation, question, pending
             )
             scope, docs_by_internal_id = await _context_scope(db, principal, conversation)
-            record_diagnostics_event(
+            record_timed_event(
                 run.get("_diagnostics"),
                 "scope",
+                scope_started,
                 {
                     "source": "gateway",
+                    "stage": "gateway_scope",
                     "entityIds": conversation.get("_turn_entity_ids") or [],
                     "requestedDocumentIds": conversation.get("_turn_document_ids") or [],
                     "allowedDocumentIds": list(scope.document_ids),
@@ -1402,13 +1406,30 @@ async def _execute_json_run(
                     session_id=session_id,
                     reasoning_mode=req.reasoningMode,
                 )
-                completion = await client.chat_completion(
-                    chat_id,
-                    _ragflow_question(conversation, question),
-                    doc_ids=list(scope.document_ids),
-                    request_id=run["run_id"],
-                    **completion_kwargs,
-                )
+                upstream_started = perf_counter()
+                upstream_status = "success"
+                try:
+                    completion = await client.chat_completion(
+                        chat_id,
+                        _ragflow_question(conversation, question),
+                        doc_ids=list(scope.document_ids),
+                        request_id=run["run_id"],
+                        **completion_kwargs,
+                    )
+                except Exception:
+                    upstream_status = "failed"
+                    raise
+                finally:
+                    record_timed_event(
+                        run.get("_diagnostics"),
+                        "upstream_request",
+                        upstream_started,
+                        {
+                            "source": "gateway",
+                            "stage": "ragflow_request",
+                            "status": upstream_status,
+                        },
+                    )
                 data = completion.get("data", {}) if isinstance(completion, dict) else {}
                 if isinstance(data, dict):
                     merge_upstream(run.get("_diagnostics"), data.get("_diagnostics"))
@@ -1572,16 +1593,20 @@ async def _stream_run_events(
     client = None
     live_streamed = False
     emitted_answer = ""
+    first_stream_output_recorded = False
     try:
+        scope_started = perf_counter()
         question, client, observations = await _retrieval_question(
             db, principal, conversation, question, pending
         )
         scope, docs_by_internal_id = await _context_scope(db, principal, conversation)
-        record_diagnostics_event(
+        record_timed_event(
             run.get("_diagnostics"),
             "scope",
+            scope_started,
             {
                 "source": "gateway",
+                "stage": "gateway_scope",
                 "entityIds": conversation.get("_turn_entity_ids") or [],
                 "requestedDocumentIds": conversation.get("_turn_document_ids") or [],
                 "allowedDocumentIds": list(scope.document_ids),
@@ -1611,13 +1636,34 @@ async def _stream_run_events(
                 session_id=session_id,
                 reasoning_mode=req.reasoningMode,
             )
-            async for payload in client.chat_completion_stream(
-                chat_id,
-                _ragflow_question(conversation, question),
-                doc_ids=list(scope.document_ids),
-                request_id=run["run_id"],
-                **stream_kwargs,
-            ):
+            upstream_started = perf_counter()
+            async def iter_upstream():
+                upstream_status = "success"
+                try:
+                    async for payload in client.chat_completion_stream(
+                        chat_id,
+                        _ragflow_question(conversation, question),
+                        doc_ids=list(scope.document_ids),
+                        request_id=run["run_id"],
+                        **stream_kwargs,
+                    ):
+                        yield payload
+                except Exception:
+                    upstream_status = "failed"
+                    raise
+                finally:
+                    record_timed_event(
+                        run.get("_diagnostics"),
+                        "upstream_request",
+                        upstream_started,
+                        {
+                            "source": "gateway",
+                            "stage": "ragflow_request",
+                            "status": upstream_status,
+                        },
+                    )
+
+            async for payload in iter_upstream():
                 data = payload.get("data") if isinstance(payload, dict) else None
                 if data is True:
                     break
@@ -1635,6 +1681,22 @@ async def _stream_run_events(
                 )
                 chunks.extend(item for item in raw_chunks if isinstance(item, dict))
                 delta = data.get("answer")
+                if (
+                    not first_stream_output_recorded
+                    and not data.get("final")
+                    and (delta or data.get("start_to_think") or data.get("end_to_think"))
+                ):
+                    record_timed_event(
+                        run.get("_diagnostics"),
+                        "stream_first_token",
+                        upstream_started,
+                        {
+                            "source": "gateway",
+                            "stage": "stream_first_token",
+                            "status": "success",
+                        },
+                    )
+                    first_stream_output_recorded = True
                 if not data.get("final"):
                     for kind, chunk in splitter.feed(
                         str(delta or ""),

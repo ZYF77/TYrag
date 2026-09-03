@@ -71,6 +71,7 @@ async def test_public_citation_hides_internal_fields_and_adds_download(isolated_
     assert public["externalDocumentId"] == "EXT-DOC-1"
     assert public["sourceVersionId"] == "v1"
     assert public["refIndex"] == 2
+    assert public["fileKind"] == "crop"
     assert "imageId" not in public
     assert "chunkId" not in public
     assert "documentId" not in public

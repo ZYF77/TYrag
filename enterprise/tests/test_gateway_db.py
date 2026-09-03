@@ -75,7 +75,7 @@ async def test_gateway_schema_upgrade_is_idempotent_for_v1_marker():
                       AND table_name IN ('ext_document_map', 'sync_outbox', 'callback_delivery')
                       AND column_name='processing_round'""",
             )
-        assert version == {"version": 2}
+        assert version == {"version": 3}
         assert {(row["table_name"], row["column_name"]) for row in columns} == {
             ("ext_document_map", "processing_round"),
             ("sync_outbox", "processing_round"),

@@ -141,3 +141,11 @@ docker compose -f ragflow/docker/docker-compose.yml up -d --no-deps ragflow-cpu
 `docs/integration/update-30-server-agent.md`
 
 硬门禁：recreate 后必须从**开发机**验证局域网端口仍为 `0.0.0.0`。只在 30 本机 `curl 127.0.0.1` 或 health=healthy **不算成功**。仓库 compose 默认 bind 是 `127.0.0.1`，用 `production.env.example` recreate 会再次把 8080/5188/3000 打成仅本机可访问。
+
+## 11. 前端统一交互与数据表格规范
+
+- Console 与 Harness 的弹窗、筛选和分页优先复用 `enterprise/web/src/components/console/ConsoleOverlay.tsx`、`ConsoleTableControls.tsx`；不为单页重复实现遮罩、焦点或分页逻辑。
+- 小内容使用锚点 Popover，大内容使用居中 Dialog；遮罩保持浅色，不压黑整页。鼠标左键点弹窗外或按 Escape 关闭，关闭后焦点回到触发按钮；弹窗内部内容独立滚动。
+- 表格默认每页 20 行，可选 50/100；分页栏固定在表格面板底部，表格主体独立滚动。操作列固定在最右侧；有查看能力的行支持整行点击、Enter/Space 键盘查看。
+- 日期筛选使用原生 `datetime-local` 控件；按钮、筛选栏、分页栏和 Dialog 保持圆角、键盘焦点、窄屏、减少动效/透明度和高对比度支持。
+- 继续遵守安全规则：诊断和详情只展示脱敏投影，不在浏览器或日志回显凭证、原始 Prompt、知识正文、模型 Chain-of-Thought、对象路径或哈希。

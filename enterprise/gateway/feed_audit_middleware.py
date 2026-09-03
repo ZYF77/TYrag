@@ -106,6 +106,15 @@ def _request_caller(headers: dict[str, str], body: object, client: object) -> st
     return ""
 
 
+def _request_username(state: object) -> str:
+    """Return the authenticated username captured by auth middleware."""
+    if isinstance(state, dict):
+        value = state.get("audit_username")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
 class FeedRegisterAuditMiddleware:
     """Kept name for existing imports; audits register + inquiry + live HTTP log."""
 
@@ -227,6 +236,7 @@ class FeedRegisterAuditMiddleware:
                     "http_status": status_code,
                     "duration_ms": duration_ms,
                     "caller": _request_caller(headers, parsed_request_body, scope.get("client")),
+                    "caller_username": _request_username(scope.get("state")),
                     "body": parsed_request_body,
                     "response_body": response_body,
                     "streamed": streamed,

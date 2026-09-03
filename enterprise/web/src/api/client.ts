@@ -8,6 +8,7 @@ import type {
   ErrorResponse,
   SseEvent,
 } from './types';
+import { API_MODE } from './mode';
 
 const BASE = '/enterprise/api/v1';
 
@@ -23,6 +24,9 @@ export class ApiError extends Error {
 
 async function handleResponse<T>(res: Response): Promise<T> {
   if (!res.ok) {
+    if (API_MODE === 'gateway' && res.status === 401 && typeof window !== 'undefined') {
+      window.dispatchEvent(new Event('enterprise-console-auth-expired'));
+    }
     const body = (await res.json().catch(() => ({
       code: 'UNKNOWN',
       message: `HTTP ${res.status}`,
@@ -41,6 +45,7 @@ export const api = {
   ): Promise<Conversation> {
     const res = await fetch(`${BASE}/conversations`, {
       method: 'POST',
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(req),
     });
@@ -48,7 +53,7 @@ export const api = {
   },
 
   async listConversations(): Promise<Conversation[]> {
-    const res = await fetch(`${BASE}/conversations`);
+    const res = await fetch(`${BASE}/conversations`, { credentials: 'include' });
     return handleResponse<Conversation[]>(res);
   },
 
@@ -69,6 +74,7 @@ export const api = {
           `${BASE}/conversations/${conversationId}/messages:stream`,
           {
             method: 'POST',
+            credentials: 'include',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(req),
             signal: controller.signal,
@@ -76,6 +82,9 @@ export const api = {
         );
 
         if (!response.ok) {
+          if (API_MODE === 'gateway' && response.status === 401 && typeof window !== 'undefined') {
+            window.dispatchEvent(new Event('enterprise-console-auth-expired'));
+          }
           try {
             const body = (await response.json()) as ErrorResponse;
             onError(body);
@@ -158,7 +167,7 @@ export const api = {
   // ---- Citations ----
 
   async getCitation(citationId: string): Promise<Citation> {
-    const res = await fetch(`${BASE}/citations/${citationId}`);
+    const res = await fetch(`${BASE}/citations/${citationId}`, { credentials: 'include' });
     return handleResponse<Citation>(res);
   },
 
@@ -169,13 +178,14 @@ export const api = {
   ): Promise<DocumentSyncResponse> {
     const res = await fetch(
       `${BASE}/documents/${externalDocumentId}/status`,
+      { credentials: 'include' },
     );
     return handleResponse<DocumentSyncResponse>(res);
   },
 
   async listSyncStatus(): Promise<FileSyncItem[]> {
     // Planned endpoint in contracts/integration-openapi.yaml; not implemented by the gateway yet.
-    const res = await fetch(`${BASE}/documents/sync-status`);
+    const res = await fetch(`${BASE}/documents/sync-status`, { credentials: 'include' });
     return handleResponse<FileSyncItem[]>(res);
   },
 };

@@ -141,7 +141,7 @@ export interface MessageAttachmentMeta {
 
 export interface Citation {
   citationId: string;
-  sourceType: 'document' | 'business_record' | 'timeseries';
+  sourceType: 'document' | 'business_record' | 'timeseries' | 'web';
   title: string;
   externalDocumentId: string | null;
   sourceVersionId: string | null;
@@ -151,6 +151,13 @@ export interface Citation {
   excerpt?: string | null;
   recordType?: string | null;
   recordId?: string | null;
+  refIndex?: number | null;
+  fileKind?: 'original' | 'crop' | null;
+  /** Short-lived, Gateway-authorized source/crop URL returned for a citation. */
+  downloadUrl?: string | null;
+  downloadExpiresAt?: string | null;
+  /** Present for web citations; never used as an image source. */
+  url?: string | null;
 }
 
 export interface Message {
@@ -159,6 +166,7 @@ export interface Message {
   content: string;
   status: MessageStatus;
   citations: Citation[];
+  reasoning?: string | null;
   attachments?: MessageAttachmentMeta[];
   createdAt: string;
 }
@@ -172,7 +180,12 @@ export interface MessagePage {
 export interface QuestionMessageRequest {
   clientMessageId: string;
   question: string;
+  internetEnabled?: boolean;
+  reasoningMode?: ReasoningMode;
 }
+
+/** Gateway reasoning levels: 0/simple through 4/ultra. */
+export type ReasoningMode = 'simple' | 'low' | 'medium' | 'high' | 'ultra';
 
 export interface SuggestionMessageRequest {
   clientMessageId: string;
@@ -192,6 +205,7 @@ export interface MessageRunResult {
   answer: string;
   status: MessageStatus;
   citations: Citation[];
+  reasoning?: string | null;
   replayed: boolean;
 }
 
@@ -220,6 +234,7 @@ export type SseEventType =
   | 'run.started'
   | 'retrieval.completed'
   | 'citation'
+  | 'reasoning.delta'
   | 'answer.delta'
   | 'answer.completed'
   | 'run.failed'
@@ -247,6 +262,10 @@ export interface HarnessAssistantMessage {
   content: string;
   status: 'streaming' | MessageStatus;
   citations: Citation[];
+  /** Gateway/RAGFlow's bounded, already-sanitized reasoning summary. */
+  reasoning?: string;
+  /** True while Gateway is emitting the reasoning phase. */
+  thinking?: boolean;
   createdAt: string;
   clientMessageId: string;
   runId?: string;

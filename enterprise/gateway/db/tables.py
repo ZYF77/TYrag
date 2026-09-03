@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from sqlalchemy import (
     BigInteger,
+    CheckConstraint,
     Column,
     Index,
     Integer,
@@ -659,6 +660,16 @@ gateway_schema_version = Table(
     Column("applied_at", Text, nullable=False),
 )
 
+gateway_runtime_settings = Table(
+    "gateway_runtime_settings",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("settings_json", Text, nullable=False),
+    Column("updated_at", Text, nullable=False),
+    Column("updated_by", Text),
+    CheckConstraint("id = 1", name="ck_gateway_runtime_settings_singleton"),
+)
+
 ALL_TABLES = (
     ext_asset_registry,
     ext_document_map,
@@ -686,4 +697,5 @@ ALL_TABLES = (
     parsing_import_item,
     parsing_review,
     parsing_audit_event,
+    gateway_runtime_settings,
 )

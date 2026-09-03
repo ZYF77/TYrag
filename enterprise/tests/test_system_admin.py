@@ -41,6 +41,7 @@ from enterprise.gateway.sync.models import (
     insert_mapping,
     update_mapping_status,
 )
+from enterprise.gateway.sync.ragflow_document_client import RAGFlowDocumentStub
 
 BASE = "/enterprise/api/v1/admin/system"
 SHARED_SECRET = "test-secret-must-be-at-least-32-bytes!!"
@@ -71,6 +72,9 @@ _DOCUMENT_ITEM_KEYS = {
     "currentVersion",
     "fileName",
     "sourceKind",
+    "parserProfile",
+    "parserProfileVersion",
+    "parserApplicationStatus",
     "sourceSystem",
     "documentType",
     "equipmentId",
@@ -189,14 +193,15 @@ async def _seed_message(
     tenant_id: str = "customer-a",
     business_user_id: str = "admin-user-001",
     status: str = "completed",
+    citations: list[dict] | None = None,
 ) -> None:
     async with gateway.transaction(write=True) as conn:
         await exec_sql(
             conn,
             """INSERT INTO ext_v2_message
                (message_id, conversation_id, tenant_id, business_user_id,
-                role, content, status, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                role, content, status, citations_json, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 f"MSG-{uuid.uuid4().hex}",
                 conversation_id,
@@ -205,6 +210,7 @@ async def _seed_message(
                 role,
                 content,
                 status,
+                json.dumps(citations or [], ensure_ascii=False),
                 created_at,
             ),
         )
@@ -559,6 +565,66 @@ class TestIntegrations:
             "completions": f"{prefix}/chat/completions",
             "retrieval": f"{prefix}/retrieval",
         }
+        assert data["ragflow"]["processing"] == {
+            "maxConcurrentTasks": config.ragflow_max_concurrent_tasks,
+            "maxConcurrentChunkBuilders": config.ragflow_max_concurrent_chunk_builders,
+            "executorWorkers": config.ragflow_executor_workers,
+        }
+        assert data["limits"] == {
+            "fileShareMaxBytes": config.file_share_max_size_mb * 1024 * 1024,
+            "s3MaxBytes": config.s3_max_size_mb * 1024 * 1024,
+            "transientAttachmentMaxBytes": 10 * 1024 * 1024,
+            "transientAttachmentMaxFiles": 5,
+        }
+        assert data["runtime"]["settings"]["diagnostics"]["enabled"] is False
+        assert data["runtime"]["hotReload"] is True
+
+    async def test_runtime_settings_can_be_saved_and_reloaded(
+        self, isolated_gateway_db, jwt_env
+    ):
+        token = _make_token()
+        async with _client() as client:
+            current = await client.get(f"{BASE}/integrations", headers=_auth(token))
+            assert current.status_code == 200
+            payload = current.json()["runtime"]["settings"]
+            payload["outbox"]["pollSeconds"] = 5
+            payload["statusReconciler"]["enabled"] = False
+            payload["limits"]["fileShareMaxMiB"] = 96
+            payload["diagnostics"]["enabled"] = True
+            saved = await client.put(
+                f"{BASE}/runtime-settings",
+                headers=_auth(token),
+                json=payload,
+            )
+            reread = await client.get(f"{BASE}/integrations", headers=_auth(token))
+        assert saved.status_code == 200, saved.text
+        assert saved.json()["settings"]["outbox"]["pollSeconds"] == 5
+        assert saved.json()["settings"]["statusReconciler"]["enabled"] is False
+        assert saved.json()["settings"]["diagnostics"]["enabled"] is True
+        assert config.rag_diagnostics_enabled is True
+        assert reread.status_code == 200
+        assert reread.json()["runtime"]["settings"]["limits"]["fileShareMaxMiB"] == 96
+
+    async def test_runtime_settings_reject_unsafe_values_and_non_admin(
+        self, isolated_gateway_db, jwt_env
+    ):
+        token = _make_token()
+        async with _client() as client:
+            current = await client.get(f"{BASE}/integrations", headers=_auth(token))
+            payload = current.json()["runtime"]["settings"]
+            payload["limits"]["s3MaxMiB"] = 129
+            unsafe = await client.put(
+                f"{BASE}/runtime-settings",
+                headers=_auth(token),
+                json=payload,
+            )
+            forbidden = await client.put(
+                f"{BASE}/runtime-settings",
+                headers=_auth(_make_token({"roles": ["end_user"]})),
+                json=current.json()["runtime"]["settings"],
+            )
+        assert unsafe.status_code == 422
+        assert forbidden.status_code == 403
 
     async def test_disabled_callback_flag_and_empty_config(
         self, isolated_gateway_db, jwt_env, monkeypatch
@@ -846,6 +912,55 @@ class TestConversationMetadata:
         assert [i["conversationId"] for i in archived.json()["items"]] == ["conv-archived"]
         assert active.status_code == 200
         assert [i["conversationId"] for i in active.json()["items"]] == ["conv-active"]
+
+    async def test_advanced_filters_are_combined(self, isolated_gateway_db, jwt_env):
+        gateway, _ = isolated_gateway_db
+        await _seed_conversation(
+            gateway,
+            conversation_id="conv-advanced-match",
+            business_user_id="user-advanced",
+            equipment_id="EQ-ADV-1",
+            fixed_asset_no="FA-ADV-1",
+        )
+        await _seed_conversation(
+            gateway,
+            conversation_id="conv-advanced-other",
+            business_user_id="user-advanced",
+            equipment_id="EQ-ADV-2",
+            fixed_asset_no="FA-ADV-1",
+        )
+        async with gateway.transaction(write=True) as conn:
+            await exec_sql(
+                conn,
+                """UPDATE ext_v2_conversation
+                   SET ragflow_chat_id=?, ragflow_session_id=?, context_version=?
+                   WHERE conversation_id=?""",
+                ("chat-advanced", "session-advanced", 4, "conv-advanced-match"),
+            )
+            await exec_sql(
+                conn,
+                """UPDATE ext_v2_conversation
+                   SET ragflow_chat_id=?, ragflow_session_id=?, context_version=?
+                   WHERE conversation_id=?""",
+                ("chat-other", "session-other", 4, "conv-advanced-other"),
+            )
+        token = _make_token()
+        async with _client() as client:
+            response = await client.get(
+                f"{BASE}/metadata/conversations",
+                headers=_auth(token),
+                params={
+                    "businessUserId": "user-advanced",
+                    "equipmentId": "EQ-ADV-1",
+                    "fixedAssetNo": "FA-ADV-1",
+                    "ragflowId": "session-advanced",
+                    "contextVersion": "4",
+                },
+            )
+        assert response.status_code == 200, response.text
+        assert [item["conversationId"] for item in response.json()["items"]] == [
+            "conv-advanced-match"
+        ]
 
     async def test_pagination_and_has_more(self, isolated_gateway_db, jwt_env):
         gateway, _ = isolated_gateway_db
@@ -1322,6 +1437,86 @@ class TestDocumentMetadata:
         assert resp.status_code == 200
         assert resp.json()["items"][0]["eamNotifiedAt"] is None
 
+    async def test_document_detail_and_chunks_are_safe_and_tenant_isolated(
+        self, isolated_gateway_db, jwt_env, monkeypatch
+    ):
+        gateway, _ = isolated_gateway_db
+        ragflow = RAGFlowDocumentStub()
+        dataset = await ragflow.create_dataset("admin-detail-fixture")
+        dataset_id = dataset["data"]["id"]
+        uploaded = await ragflow.upload_document(
+            dataset_id, "detail-fixture.pdf", b"safe fixture"
+        )
+        document_id = uploaded["data"][0]["id"]
+        ragflow.run_status = "DONE"
+        await ragflow.start_parsing(dataset_id, [document_id])
+        monkeypatch.setattr(admin_router, "_document_ragflow_client", lambda: ragflow)
+        await _seed_document(
+            gateway,
+            external_id="DOC-DETAIL",
+            parser_application_status="executed",
+            parser_profile="enterprise-pdf",
+            parser_profile_version="v1",
+            parser_expected_json=json.dumps({"safeField": "visible", "apiKey": "must-hide"}),
+            ragflow_dataset_id=dataset_id,
+            ragflow_document_id=document_id,
+        )
+        await _seed_document(
+            gateway,
+            external_id="DOC-DETAIL-HIDDEN",
+            tenant_id="customer-b",
+            ragflow_dataset_id=dataset_id,
+            ragflow_document_id=document_id,
+        )
+        token = _make_token()
+        async with _client() as client:
+            detail = await client.get(
+                f"{BASE}/metadata/documents/DOC-DETAIL",
+                headers=_auth(token),
+            )
+            chunks = await client.get(
+                f"{BASE}/metadata/documents/DOC-DETAIL/chunks",
+                headers=_auth(token),
+                params={"page": 1, "pageSize": 20},
+            )
+            hidden = await client.get(
+                f"{BASE}/metadata/documents/DOC-DETAIL-HIDDEN",
+                headers=_auth(token),
+            )
+        assert detail.status_code == 200, detail.text
+        detail_body = detail.json()
+        assert detail_body["item"]["parserApplicationStatus"] == "executed"
+        assert detail_body["parser"]["profile"] == "enterprise-pdf"
+        assert detail_body["parser"]["ragflow"]["chunkMethod"] == "naive"
+        assert "apiKey" not in detail.text
+        assert chunks.status_code == 200, chunks.text
+        chunk_body = chunks.json()
+        assert chunk_body["state"] == "ready"
+        assert chunk_body["items"][0]["content"] == "usable stub chunk"
+        assert "apiKey" not in chunks.text
+        assert hidden.status_code == 404
+
+    async def test_document_chunks_without_ragflow_mapping_are_not_ready(
+        self, isolated_gateway_db, jwt_env
+    ):
+        gateway, _ = isolated_gateway_db
+        await _seed_document(gateway, external_id="DOC-NOT-READY")
+        token = _make_token()
+        async with _client() as client:
+            resp = await client.get(
+                f"{BASE}/metadata/documents/DOC-NOT-READY/chunks",
+                headers=_auth(token),
+            )
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "items": [],
+            "total": 0,
+            "page": 1,
+            "pageSize": 20,
+            "hasMore": False,
+            "state": "not_ready",
+        }
+
 
 # ---------- Metadata summary ----------
 
@@ -1448,6 +1643,18 @@ class TestConversationMessages:
             content="ADMIN-ANSWER-TEXT",
             status="completed",
             created_at="2026-08-12T10:05:00+00:00",
+            citations=[
+                {
+                    "citationId": "admin-citation-1",
+                    "sourceType": "document",
+                    "title": "Admin fixture manual",
+                    "externalDocumentId": "DOC-ADMIN-1",
+                    "sourceVersionId": "v1",
+                    "pageNo": 2,
+                    "refIndex": 1,
+                    "downloadUrl": "https://should-not-be-returned.invalid/ticket",
+                },
+            ],
         )
         token = _make_token()
         async with _client() as client:
@@ -1465,14 +1672,27 @@ class TestConversationMessages:
             "role",
             "content",
             "status",
+            "citations",
             "createdAt",
         }
         assert first["role"] == "user"
         assert first["content"] == "ADMIN-QUESTION-TEXT"
         assert first["status"] == "completed"
         assert first["createdAt"] == "2026-08-12T10:00:00+00:00"
+        assert first["citations"] == []
         assert second["role"] == "assistant"
         assert second["content"] == "ADMIN-ANSWER-TEXT"
+        assert second["citations"] == [
+            {
+                "citationId": "admin-citation-1",
+                "sourceType": "document",
+                "title": "Admin fixture manual",
+                "externalDocumentId": "DOC-ADMIN-1",
+                "sourceVersionId": "v1",
+                "pageNo": 2,
+                "refIndex": 1,
+            },
+        ]
         assert first["messageId"] != second["messageId"]
 
     async def test_message_bodies_absent_from_metadata_list_endpoints(
@@ -1497,13 +1717,14 @@ class TestConversationMessages:
         # 元数据列表端点绝不回显消息正文。
         assert listed.status_code == 200
         assert "SECRET-MESSAGE-BODY-META" not in listed.text
-        # 会话管理端点按管理员要求回显正文，但不含 citations/reasoning/附件。
+        # 会话管理端点按管理员要求回显正文和安全 citation 摘要，但不含
+        # reasoning 原文、附件或临时下载票据。
         assert messages.status_code == 200
         assert "SECRET-MESSAGE-BODY-META" in messages.text
         body = messages.text.lower()
-        assert "citations" not in body
         assert "reasoning" not in body
         assert "attachments" not in body
+        assert "downloadurl" not in body
         assert "businessuserid" not in body
         assert "business_user_id" not in body
 

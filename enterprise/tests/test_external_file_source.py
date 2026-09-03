@@ -97,6 +97,12 @@ def test_file_share_opens_verified_handle_at_start_without_ticket_table(
         provider.open_verified("test-root", "missing.pdf", "0" * 64)
 
 
+def test_default_file_share_limit_is_capped_at_128_mib(monkeypatch):
+    monkeypatch.setenv("ENTERPRISE_FILE_SHARE_MAX_SIZE_MB", "512")
+    provider = FileShareSourceAdapter()
+    assert provider.max_size_bytes == 128 * 1024 * 1024
+
+
 def test_file_share_rejects_resolved_symlink_escape(tmp_path, monkeypatch):
     root = tmp_path / "root"
     root.mkdir()
@@ -214,6 +220,36 @@ async def test_v3_file_share_worker_uploads_same_verified_handle(
         "WHERE table_schema=current_schema() AND table_name='ext_source_ticket'",
     )
     assert row is None
+
+
+@pytest.mark.asyncio
+async def test_v3_file_share_rejects_declared_size_above_ragflow_limit(
+    isolated_gateway_db, tmp_path
+):
+    source_path = tmp_path / "oversized.pdf"
+    source_path.write_bytes(b"small fixture")
+    payload = _payload(
+        source_path, event_id="evt-too-large", document_id="DOC-TOO-LARGE"
+    )
+    payload["source"]["size"] = 128 * 1024 * 1024 + 1
+
+    import enterprise.gateway.app as app_module
+
+    app_module.app.dependency_overrides[require_service_principal] = lambda: ServicePrincipal(
+        source_system="service"
+    )
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app_module.app), base_url="http://test"
+        ) as client:
+            response = await client.post(
+                "/enterprise/api/v3/documents", json=payload
+            )
+    finally:
+        app_module.app.dependency_overrides.pop(require_service_principal, None)
+
+    assert response.status_code == 413
+    assert response.json()["code"] == "DOCUMENT_TOO_LARGE"
 
 
 @pytest.mark.asyncio

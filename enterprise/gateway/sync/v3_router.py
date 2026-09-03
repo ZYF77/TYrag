@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from enterprise.gateway.auth.service_principal import ServicePrincipal
+from enterprise.gateway.config import config, document_feed_max_size_mb
 from enterprise.gateway.db import GatewayDatabase, PersistenceConflictError
 from enterprise.gateway.db.dialect import fetchall
 from enterprise.gateway.sync.document_catalog import validate_document_classification
@@ -42,6 +43,17 @@ from enterprise.gateway.sync import v2_router as v2
 
 router = APIRouter(prefix="/enterprise/api/v3/documents", tags=["documents-v3"])
 MAX_DOCUMENT_FEED_BODY_BYTES = 2 * 1024 * 1024
+
+
+def document_feed_max_size_bytes() -> int:
+    runtime = config.runtime_settings_override()
+    if runtime is not None:
+        return runtime.file_share_max_size_mb * 1024 * 1024
+    return (
+        document_feed_max_size_mb("ENTERPRISE_FILE_SHARE_MAX_SIZE_MB")
+        * 1024
+        * 1024
+    )
 MAX_INLINE_JSON_DEPTH = 20
 _FORBIDDEN_INLINE_KEYS = {
     "password", "passwd", "pwd", "token", "apitoken", "accesstoken",
@@ -180,6 +192,7 @@ def _error(
 
 _STATUS_ERROR_MESSAGES = {
     "DOCUMENT_SOURCE_NOT_FOUND": "找不到源文件。",
+    "DOCUMENT_TOO_LARGE": "文档单文件不能超过 128 MiB。",
     "DOCUMENT_HASH_MISMATCH": "文件校验值与登记内容不一致。",
     "DOCUMENT_PARSE_FAILED": "文档解析失败。",
     "PARSER_APPLICATION_MISMATCH": "文档解析配置校验未通过。",
@@ -432,6 +445,12 @@ async def upsert_document(
     request_id = str(uuid.uuid4())
     if len(await request.body()) > MAX_DOCUMENT_FEED_BODY_BYTES:
         return _error(422, "VALIDATION_ERROR", request_id)
+    if (
+        isinstance(req.source, FileShareSource)
+        and req.source.size is not None
+        and req.source.size > document_feed_max_size_bytes()
+    ):
+        return _error(413, "DOCUMENT_TOO_LARGE", request_id)
     if not _file_name_is_safe(req.fileName):
         return _error(422, "VALIDATION_ERROR", request_id)
     if not _scope_allowed(principal, req.tenantId, req.sourceSystem):
@@ -634,6 +653,7 @@ def _sync_error(exc: DocumentSyncError, request_id: str) -> JSONResponse:
         "DOCUMENT_NOT_READY": 409,
         "DOCUMENT_SOURCE_NOT_FOUND": 422,
         "DOCUMENT_HASH_MISMATCH": 422,
+        "DOCUMENT_TOO_LARGE": 413,
         "DOCUMENT_PARSE_FAILED": 422,
         "DOCUMENT_SYNC_FAILED": 502,
         "RAGFLOW_UNAVAILABLE": 503,

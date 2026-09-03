@@ -29,7 +29,7 @@ from api.db.db_models import LLM
 from api.db.services.common_service import CommonService
 from api.db.services.tenant_llm_service import LLM4Tenant
 from common.token_utils import langfuse_run_attrs, num_tokens_from_string, record_run_token_usage, truncate
-from rag.diagnostics import record_rag_diagnostics
+from rag.diagnostics import current_rag_diagnostics_stage, record_rag_diagnostics
 
 
 class LLMService(CommonService):
@@ -113,6 +113,9 @@ class LLMBundle(LLM4Tenant):
                 )
             if error_type:
                 payload["errorType"] = error_type
+            stage = current_rag_diagnostics_stage()
+            if stage:
+                payload["stage"] = stage
             record_rag_diagnostics("llm", payload)
         except Exception:
             pass

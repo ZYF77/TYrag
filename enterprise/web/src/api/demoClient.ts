@@ -52,6 +52,7 @@ async function request<T>(
   try {
     const res = await fetch(`${BASE}${path}`, {
       ...init,
+      credentials: 'include',
       headers: {
         'Content-Type': 'application/json',
         ...authHeaders(),

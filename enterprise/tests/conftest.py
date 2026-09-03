@@ -84,6 +84,9 @@ async def isolated_gateway_db():
     finally:
         app_module.app.dependency_overrides.pop(app_module.get_gateway_db, None)
         await gateway.dispose()
+        if app_module._runtime_manager is not None:
+            app_module._runtime_manager = None
+            app_module.config.clear_runtime_settings()
         if app_module._gateway_db is not None:
             await app_module._gateway_db.dispose()
             app_module._gateway_db = None

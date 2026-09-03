@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from datetime import datetime, timezone
 from typing import Any, Protocol
@@ -122,6 +123,9 @@ class InMemoryDiagnosticsSink:
             "atMs": round((time.perf_counter() - self._started) * 1000, 3),
             "data": clean if isinstance(clean, dict) else {},
         }
+        duration = event["data"].get("durationMs") if isinstance(event["data"], dict) else None
+        if isinstance(duration, (int, float)) and duration >= 0:
+            event["durationMs"] = round(float(duration), 3)
         encoded_size = len(
             json.dumps(event, ensure_ascii=False, separators=(",", ":")).encode(
                 "utf-8"
@@ -144,6 +148,10 @@ class InMemoryDiagnosticsSink:
             "runId": self._run_id,
             "startedAt": self._started_at,
             "durationMs": round((time.perf_counter() - self._started) * 1000, 3),
+            "timing": {
+                "atMs": "cumulative_from_trace_start",
+                "durationMs": "current_event",
+            },
             "events": events,
             "truncated": truncated,
         }
@@ -152,6 +160,9 @@ class InMemoryDiagnosticsSink:
 _NOOP = NoopDiagnosticsSink()
 _CURRENT_SINK: ContextVar[RagDiagnosticsSink] = ContextVar(
     "rag_diagnostics_sink", default=_NOOP
+)
+_CURRENT_STAGE: ContextVar[str | None] = ContextVar(
+    "rag_diagnostics_stage", default=None
 )
 
 
@@ -167,6 +178,23 @@ def begin_rag_diagnostics(enabled: bool, run_id: str) -> Token:
     return _CURRENT_SINK.set(sink)
 
 
+@contextmanager
+def rag_diagnostics_stage(stage: str):
+    """Attach a safe logical stage name to LLM diagnostics in this context."""
+    token = _CURRENT_STAGE.set(str(stage)[:64] if stage else None)
+    try:
+        yield
+    finally:
+        _CURRENT_STAGE.reset(token)
+
+
+def current_rag_diagnostics_stage() -> str | None:
+    try:
+        return _CURRENT_STAGE.get()
+    except Exception:
+        return None
+
+
 def reset_rag_diagnostics(token: Token) -> None:
     try:
         _CURRENT_SINK.reset(token)
@@ -176,7 +204,25 @@ def reset_rag_diagnostics(token: Token) -> None:
 
 def record_rag_diagnostics(event_type: str, payload: dict[str, Any]) -> None:
     try:
+        if event_type == "llm" and isinstance(payload, dict) and "stage" not in payload:
+            stage = current_rag_diagnostics_stage()
+            if stage:
+                payload = {**payload, "stage": stage}
         _CURRENT_SINK.get().record(event_type, payload)
+    except Exception:
+        pass
+
+
+def record_timed_rag_stage(stage: str, started: float, **payload: Any) -> None:
+    """Record a bounded stage span with duration in milliseconds."""
+    try:
+        data = {
+            "source": "ragflow",
+            "stage": str(stage)[:64],
+            **payload,
+            "durationMs": round(max(0.0, (time.perf_counter() - started) * 1000), 3),
+        }
+        record_rag_diagnostics("stage", data)
     except Exception:
         pass
 

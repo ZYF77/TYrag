@@ -306,6 +306,7 @@ EAM 实现要求：
 | 404 | `DOCUMENT_NOT_FOUND` | `reindex` 时文档版本不存在 | 先 upsert |
 | 409 | `EVENT_ID_CONFLICT` | 同一 `eventId` 对应不同业务内容 | 换新 eventId 或恢复原 payload |
 | 409 | `DOCUMENT_VERSION_CONFLICT` | 同版本但 sha256/路径/类型/size 等不一致 | 内容变则换 `sourceVersionId` 和新路径 |
+| 413 | `DOCUMENT_TOO_LARGE` | `source.size` 超过 128 MiB，或源文件实际超过上限 | 压缩文件后重新登记 |
 | 422 | `VALIDATION_ERROR` | 顶层字段/文件名/JSON 结构非法 | 按契约修正 |
 | 422 | `DOCUMENT_METADATA_INVALID` | metadata 缺字段、类型错、身份不一致、未知字段 | 按 metadata schema 修正 |
 | 503 | `RAGFLOW_UNAVAILABLE` 等 | 依赖暂不可用（少见于登记瞬间） | 退避重试 |
@@ -320,6 +321,7 @@ EAM 实现要求：
 | code | 常见原因 | 建议处理 |
 |---|---|---|
 | `DOCUMENT_SOURCE_NOT_FOUND` | 共享盘无文件、未挂载、relativePath 错、size 不匹配 | 确认 30 能读到 31 文件后再重投（新 event 或确认路径） |
+| `DOCUMENT_TOO_LARGE` | 源文件超过 128 MiB | 压缩文件后以新事件重新登记 |
 | `DOCUMENT_HASH_MISMATCH` | 盘上 PDF 与提交 `sha256` 不一致 | 重算哈希；勿中途改文件 |
 | `DOCUMENT_PARSE_FAILED` | RAGFlow 解析失败 | 查 PDF 是否损坏/加密/异常格式；必要时换版本重投 |
 | `DOCUMENT_QUALITY_FAILED` / 质量失败 | 质量门未通过 | 按复核流程或优化文档后重投新版本 |

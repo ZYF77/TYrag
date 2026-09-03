@@ -9,7 +9,7 @@ import uuid
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
-from enterprise.gateway.auth.middleware import require_user_principal
+from enterprise.gateway.auth.middleware import require_console_or_user_principal
 from enterprise.gateway.auth.service_auth import require_service_principal
 from enterprise.gateway.auth.user_principal import UserPrincipal
 from enterprise.gateway.acl.policy import evaluate_document_acl
@@ -169,7 +169,7 @@ async def get_document_quality(
     external_document_id: str,
     request: Request,
     db=Depends(get_db),
-    principal: UserPrincipal = Depends(require_user_principal),
+    principal: UserPrincipal = Depends(require_console_or_user_principal),
 ):
     request_id = str(uuid.uuid4())
     source_system = request.query_params.get("source_system", "DEMO")

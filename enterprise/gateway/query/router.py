@@ -22,7 +22,11 @@ from enterprise.gateway.auth.middleware import (
     require_capability,
 )
 from enterprise.gateway.auth.user_principal import UserPrincipal
-from enterprise.gateway.config import config, require_ragflow_api_key
+from enterprise.gateway.config import (
+    DEFAULT_DOCUMENT_FEED_MAX_SIZE_MB,
+    config,
+    require_ragflow_api_key,
+)
 from enterprise.gateway.quality.gate import enforce_quality_gate
 from enterprise.gateway.quality.models import get_latest_evaluation
 from enterprise.gateway.query import acl_store
@@ -47,9 +51,25 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/enterprise/api/v1/demo", tags=["query-demo"])
 
-_MAX_DEMO_PDF_BYTES = int(
-    os.environ.get("ENTERPRISE_DEMO_MAX_PDF_BYTES", str(128 * 1024 * 1024))
-)
+try:
+    _configured_demo_limit = int(
+        os.environ.get(
+            "ENTERPRISE_DEMO_MAX_PDF_BYTES",
+            str(DEFAULT_DOCUMENT_FEED_MAX_SIZE_MB * 1024 * 1024),
+        )
+    )
+except (TypeError, ValueError):
+    _configured_demo_limit = DEFAULT_DOCUMENT_FEED_MAX_SIZE_MB * 1024 * 1024
+
+
+def _demo_pdf_max_bytes() -> int:
+    runtime = config.runtime_settings_override()
+    if runtime is not None:
+        return runtime.file_share_max_size_mb * 1024 * 1024
+    return max(
+        1,
+        min(_configured_demo_limit, DEFAULT_DOCUMENT_FEED_MAX_SIZE_MB * 1024 * 1024),
+    )
 _query_stub: RAGFlowQueryStub | None = None
 NO_RELIABLE_EVIDENCE_ANSWER = "未找到可靠依据，无法回答。"
 
@@ -380,7 +400,7 @@ async def upload_document(
         return _error(
             422, "VALIDATION_ERROR", "PDF body is empty", request_id
         )
-    if len(content) > _MAX_DEMO_PDF_BYTES:
+    if len(content) > _demo_pdf_max_bytes():
         return _error(
             413,
             "VALIDATION_ERROR",

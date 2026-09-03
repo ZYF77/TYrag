@@ -8,6 +8,7 @@ import type {
   HarnessUserMessage,
   Message,
   MessageStatus,
+  ReasoningMode,
   SseEvent,
 } from '../api/v2Types';
 
@@ -16,7 +17,11 @@ interface RetryRequest {
   clientMessageId: string;
   question: string;
   files?: File[];
+  internetEnabled: boolean;
+  reasoningMode: ReasoningMode;
 }
+
+const MAX_REASONING_CHARS = 12_000;
 
 function newClientMessageId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -83,6 +88,8 @@ function historyMessage(message: Message, index: number): HarnessMessage {
     content: message.content,
     status: message.status,
     citations: message.citations,
+    ...(message.reasoning ? { reasoning: message.reasoning.slice(0, MAX_REASONING_CHARS) } : {}),
+    thinking: false,
     createdAt: message.createdAt,
     clientMessageId,
   };
@@ -101,7 +108,17 @@ function eventError(data: Record<string, unknown>): DisplayError {
   };
 }
 
-export function useV2Chat(conversationId: string | null) {
+export interface V2ChatOptions {
+  internetEnabled?: boolean;
+  reasoningMode?: ReasoningMode;
+}
+
+export function useV2Chat(
+  conversationId: string | null,
+  options: V2ChatOptions = {},
+) {
+  const internetEnabled = options.internetEnabled ?? false;
+  const reasoningMode = options.reasoningMode ?? 'simple';
   const [messages, setMessages] = useState<HarnessMessage[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState<DisplayError | null>(null);
@@ -143,9 +160,32 @@ export function useV2Chat(conversationId: string | null) {
           if (content) {
             updateReply(request.replyId, (message) => ({
               ...message,
+              thinking: false,
               content: message.content + content,
             }));
           }
+          return;
+        }
+
+        if (event.event === 'answer.replaced') {
+          const content = typeof data.content === 'string' ? data.content : '';
+          updateReply(request.replyId, (message) => ({
+            ...message,
+            thinking: false,
+            content,
+          }));
+          return;
+        }
+
+        if (event.event === 'reasoning.delta') {
+          const content = typeof data.content === 'string' ? data.content : '';
+          updateReply(request.replyId, (message) => ({
+            ...message,
+            thinking: true,
+            ...(content
+              ? { reasoning: `${message.reasoning ?? ''}${content}`.slice(0, MAX_REASONING_CHARS) }
+              : {}),
+          }));
           return;
         }
 
@@ -176,6 +216,10 @@ export function useV2Chat(conversationId: string | null) {
             : [];
           updateReply(request.replyId, (message) => ({
             ...message,
+            thinking: false,
+            ...(typeof data.reasoning === 'string'
+              ? { reasoning: data.reasoning.slice(0, MAX_REASONING_CHARS) }
+              : {}),
             status,
             // An explicit empty citation array is meaningful and must not be
             // replaced with evidence from an earlier stream event.
@@ -192,6 +236,7 @@ export function useV2Chat(conversationId: string | null) {
           retryRef.current = request;
           updateReply(request.replyId, (message) => ({
             ...message,
+            thinking: false,
             status: '失败',
             error: displayError,
             runId: typeof data.runId === 'string' ? data.runId : message.runId,
@@ -201,7 +246,12 @@ export function useV2Chat(conversationId: string | null) {
 
       const stream = v2Api.streamMessage(
         conversationId,
-        { clientMessageId: request.clientMessageId, question: request.question },
+        {
+          clientMessageId: request.clientMessageId,
+          question: request.question,
+          internetEnabled: request.internetEnabled,
+          reasoningMode: request.reasoningMode,
+        },
         handleEvent,
         request.files ?? [],
       );
@@ -289,14 +339,22 @@ export function useV2Chat(conversationId: string | null) {
         content: '',
         status: 'streaming',
         citations: [],
+        thinking: true,
         createdAt: now,
         clientMessageId,
       };
       setMessages((previous) => [...previous, user, reply]);
-      startStream({ replyId, clientMessageId, question, ...(files.length > 0 ? { files } : {}) });
+      startStream({
+        replyId,
+        clientMessageId,
+        question,
+        internetEnabled,
+        reasoningMode,
+        ...(files.length > 0 ? { files } : {}),
+      });
       return true;
     },
-    [conversationId, isStreaming, startStream],
+    [conversationId, internetEnabled, isStreaming, reasoningMode, startStream],
   );
 
   const retry = useCallback(() => {
@@ -305,10 +363,12 @@ export function useV2Chat(conversationId: string | null) {
       updateReply(request.replyId, (message) => ({
         ...message,
         content: '',
+        reasoning: undefined,
         citations: [],
         citationError: undefined,
         error: undefined,
         status: 'streaming',
+        thinking: true,
       }));
       startStream(request);
     }

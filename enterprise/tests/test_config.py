@@ -2,7 +2,11 @@
 
 import os
 import pytest
-from enterprise.gateway.config import GatewayConfig, require_ragflow_api_key
+from enterprise.gateway.config import (
+    DEFAULT_DOCUMENT_FEED_MAX_SIZE_MB,
+    GatewayConfig,
+    require_ragflow_api_key,
+)
 
 
 class TestGatewayConfig:
@@ -27,6 +31,34 @@ class TestGatewayConfig:
         assert cfg.ragflow_base_url == "http://ragflow:9380"
         assert cfg.ragflow_timeout == 60.0
         assert cfg.auth_enabled is False
+
+    def test_document_feed_limit_never_exceeds_ragflow_ceiling(self, monkeypatch):
+        monkeypatch.setenv("S3_MAX_SIZE_MB", "512")
+        monkeypatch.setenv("ENTERPRISE_FILE_SHARE_MAX_SIZE_MB", "512")
+        cfg = GatewayConfig()
+        assert cfg.s3_max_size_mb == DEFAULT_DOCUMENT_FEED_MAX_SIZE_MB
+        assert cfg.file_share_max_size_mb == DEFAULT_DOCUMENT_FEED_MAX_SIZE_MB
+
+    def test_ragflow_processing_mirrors_are_read_from_environment(self, monkeypatch):
+        monkeypatch.setenv("RAGFLOW_MAX_CONCURRENT_TASKS", "3")
+        monkeypatch.setenv("RAGFLOW_MAX_CONCURRENT_CHUNK_BUILDERS", "2")
+        monkeypatch.setenv("RAGFLOW_EXECUTOR_WORKERS", "1")
+        cfg = GatewayConfig()
+        assert cfg.ragflow_max_concurrent_tasks == 3
+        assert cfg.ragflow_max_concurrent_chunk_builders == 2
+        assert cfg.ragflow_executor_workers == 1
+
+    def test_ragflow_processing_mirrors_accept_ragflow_source_names(self, monkeypatch):
+        monkeypatch.delenv("RAGFLOW_MAX_CONCURRENT_TASKS", raising=False)
+        monkeypatch.delenv("RAGFLOW_MAX_CONCURRENT_CHUNK_BUILDERS", raising=False)
+        monkeypatch.delenv("RAGFLOW_EXECUTOR_WORKERS", raising=False)
+        monkeypatch.setenv("MAX_CONCURRENT_TASKS", "3")
+        monkeypatch.setenv("MAX_CONCURRENT_CHUNK_BUILDERS", "2")
+        monkeypatch.setenv("WORKERS", "1")
+        cfg = GatewayConfig()
+        assert cfg.ragflow_max_concurrent_tasks == 3
+        assert cfg.ragflow_max_concurrent_chunk_builders == 2
+        assert cfg.ragflow_executor_workers == 1
 
     def test_transient_attachments_are_enabled_by_default(self, monkeypatch):
         monkeypatch.delenv("ENTERPRISE_TRANSIENT_ATTACHMENTS_ENABLED", raising=False)

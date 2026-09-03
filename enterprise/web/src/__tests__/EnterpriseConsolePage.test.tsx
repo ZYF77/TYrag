@@ -20,14 +20,18 @@ beforeEach(() => {
 });
 
 describe('EnterpriseConsolePage', () => {
-  it('is independently reachable at /console and labels the MSW boundary', async () => {
+  it('is independently reachable at /console without a mode badge in the header', async () => {
     sessionStorage.setItem('enterprise.harness.jwt', 'console-test-token');
     window.history.replaceState({}, '', '/console');
 
     render(<App />);
 
     expect(screen.getByTestId('console-page')).toBeTruthy();
-    expect(screen.getByText('TEST · MSW')).toBeTruthy();
+    expect(screen.queryByText('TEST · MSW')).toBeNull();
+    expect(screen.queryByText('GATEWAY · PUBLIC API')).toBeNull();
+    expect(screen.getByRole('link', { name: 'Console' }).getAttribute('aria-current')).toBe('page');
+    expect(screen.getByRole('link', { name: 'Harness' }).getAttribute('href')).toBe('/');
+    expect(screen.queryByRole('link', { name: '返回 Harness' })).toBeNull();
     const serviceCard = screen.getByTestId('console-service-card');
     expect(serviceCard.textContent).toContain('HMAC secret 不进入浏览器');
     expect(serviceCard.textContent).toContain('sessionStorage 生命周期');
@@ -35,6 +39,8 @@ describe('EnterpriseConsolePage', () => {
     await screen.findByText(/用户映射：active/);
     // 文档状态面板已移除（用途由系统设置 → 文件元数据覆盖），导航不再提供该入口。
     expect(screen.queryByRole('button', { name: '文档状态' })).toBeNull();
+    // 诊断下不再重复提供不可交互的会话历史；Harness 和系统设置分别承载问答与管理。
+    expect(screen.queryByRole('button', { name: '会话历史' })).toBeNull();
   });
 
   it('shows unauthorized modules without exposing credentials', async () => {
@@ -43,48 +49,22 @@ describe('EnterpriseConsolePage', () => {
       http.get('/enterprise/api/v2/conversations', () => errorResponse('AUTH_TOKEN_INVALID', 'Authentication token is invalid')),
     );
 
-    const user = userEvent.setup();
     render(<EnterpriseConsolePage />);
 
     await waitFor(() => {
       expect(screen.getByTestId('console-service-card').textContent).toContain('unauthorized');
     });
-    await user.click(screen.getByRole('button', { name: '会话历史' }));
-    await waitFor(() => {
-      expect(screen.getByTestId('console-conversation-card').textContent).toContain('unauthorized');
-    });
+    expect(screen.queryByRole('button', { name: '会话历史' })).toBeNull();
+    expect(screen.queryByTestId('console-conversation-card')).toBeNull();
     expect(screen.queryByText(/console-test-token|mock-ticket|cookie\s*[:=]|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/i)).toBeNull();
-  });
-
-  it('loads persisted history and re-authorizes a citation snapshot independently', async () => {
-    sessionStorage.setItem('enterprise.harness.jwt', 'console-test-token');
-    const conversation = await v2Api.createConversation({ equipmentId: 'EQ-CONSOLE' });
-    const stream = v2Api.streamMessage(
-      conversation.conversationId,
-      { clientMessageId: 'console-history-message', question: 'console citation trace' },
-      () => undefined,
-    );
-    await stream.promise;
-
-    const user = userEvent.setup();
-    render(<EnterpriseConsolePage />);
-    await user.click(screen.getByRole('button', { name: '会话历史' }));
-    await user.click(screen.getByRole('button', { name: '刷新会话列表' }));
-    const session = await screen.findByRole('button', { name: /console citation trace/ });
-    await user.click(session);
-    await screen.findByText(/citations 1/);
-    await user.click(screen.getByRole('button', { name: /citation 1/ }));
-    await screen.findByText('Harness maintenance manual');
-    expect(screen.queryByText(/Harness answer: console citation trace/)).toBeNull();
   });
 
   it('runs attachment create, ticket and download without rendering ticket or bytes', async () => {
     sessionStorage.setItem('enterprise.harness.jwt', 'console-test-token');
+    await v2Api.createConversation({ equipmentId: 'EQ-CONSOLE' });
     const user = userEvent.setup();
     render(<EnterpriseConsolePage />);
 
-    await user.click(screen.getByRole('button', { name: '会话历史' }));
-    await user.click(screen.getByRole('button', { name: '新建诊断会话' }));
     await user.click(screen.getByRole('button', { name: '临时附件' }));
     const input = await screen.findByLabelText('transient attachment file');
     await waitFor(() => expect((input as HTMLInputElement).disabled).toBe(false));
@@ -98,22 +78,12 @@ describe('EnterpriseConsolePage', () => {
     expect(screen.getAllByText('retrievable').length).toBeGreaterThan(0);
   });
 
-  it('injects runtime Bearer without displaying the token and refreshes identity', async () => {
-    const user = userEvent.setup();
+  it('keeps runtime credentials out of the Console surface', async () => {
     render(<EnterpriseConsolePage />);
 
-    expect(screen.getByText('无 Bearer（可测试 401）')).toBeTruthy();
-    const input = screen.getByLabelText('运行期 Bearer（不写入源码）');
-    expect((input as HTMLInputElement).type).toBe('password');
-    expect(screen.getByRole('link', { name: '返回 Harness' }).getAttribute('href')).toBe('/');
-
-    await user.type(input, 'console-test-token');
-    await user.click(screen.getByRole('button', { name: '保存运行期凭据' }));
-
-    expect(sessionStorage.getItem('enterprise.harness.jwt')).toBe('console-test-token');
-    expect((input as HTMLInputElement).value).toBe('');
-    expect(screen.getByText('Bearer 已注入')).toBeTruthy();
-    expect(screen.queryByText('console-test-token')).toBeNull();
-    await screen.findByText(/用户映射：active/);
+    expect(screen.queryByText('无 Bearer（可测试 401）')).toBeNull();
+    expect(screen.queryByLabelText('运行期 Bearer（不写入源码）')).toBeNull();
+    expect(screen.queryByRole('button', { name: '保存运行期凭据' })).toBeNull();
+    expect(screen.getByRole('link', { name: 'Harness' }).getAttribute('href')).toBe('/');
   });
 });

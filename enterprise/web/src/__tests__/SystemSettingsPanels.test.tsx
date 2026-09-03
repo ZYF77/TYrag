@@ -4,10 +4,17 @@ import { delay, http, HttpResponse } from 'msw';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { EnterpriseConsolePage } from '../pages/EnterpriseConsolePage';
 import { server } from '../test-setup';
+import type { AdminConversationMessage } from '../api/consoleTypes';
 
 const V1 = '/enterprise/api/v1';
 const DOC_HIDDEN_COLUMNS_KEY = 'console.docMeta.hiddenColumns';
 const CONVERSATION_HIDDEN_COLUMNS_KEY = 'console.convMeta.hiddenColumns';
+type User = ReturnType<typeof userEvent.setup>;
+
+async function openSystemSettings(user: User) {
+  const group = await screen.findByRole('button', { name: '系统设置' });
+  if (group.getAttribute('aria-expanded') !== 'true') await user.click(group);
+}
 
 const adminPrincipal = {
   businessUserId: 'admin-user',
@@ -31,6 +38,38 @@ const integrationsBody = {
       completions: '/api/v1/chat/completions',
       retrieval: '/api/v1/retrieval',
     },
+    processing: {
+      maxConcurrentTasks: 3,
+      maxConcurrentChunkBuilders: 2,
+      executorWorkers: 1,
+    },
+  },
+  limits: {
+    fileShareMaxBytes: 128 * 1024 * 1024,
+    s3MaxBytes: 128 * 1024 * 1024,
+    transientAttachmentMaxBytes: 10 * 1024 * 1024,
+    transientAttachmentMaxFiles: 5,
+  },
+  gatewayProcessing: {
+    outboxInFlight: 1,
+    qualityInFlight: 1,
+    callbackBatch: 10,
+    callbackConcurrent: 1,
+  },
+  runtime: {
+    settings: {
+      outbox: { enabled: true, pollSeconds: 2 },
+      statusReconciler: { enabled: true, pollSeconds: 10 },
+      transientAttachmentCleanup: { enabled: true, pollSeconds: 60, ttlSeconds: 86400 },
+      qualityEvaluation: { enabled: true, pollSeconds: 2 },
+      qualityReconciler: { enabled: true, pollSeconds: 10, runningTimeoutSeconds: 1800 },
+      callbackDelivery: { enabled: true, pollSeconds: 2 },
+      limits: { fileShareMaxMiB: 128, s3MaxMiB: 128, transientAttachmentMaxMiB: 10 },
+      diagnostics: { enabled: false },
+    },
+    source: 'environment',
+    updatedAt: null,
+    hotReload: true,
   },
   callbacksEnabled: true,
   callbacks: [
@@ -146,7 +185,12 @@ const summaryBody = {
   },
 };
 
-const adminConversationMessages = {
+type AdminConversationMessagesFixture = {
+  conversationId: string;
+  items: AdminConversationMessage[];
+};
+
+const adminConversationMessages: AdminConversationMessagesFixture = {
   conversationId: 'conv-meta-1',
   items: [
     {
@@ -159,8 +203,18 @@ const adminConversationMessages = {
     {
       messageId: 'msg-a1',
       role: 'assistant',
-      content: '请先检查**液压油位**，再复位告警。',
+      content: '请先检查**液压油位**[ID:1]，再复位告警。',
       status: 'completed',
+      citations: [{
+        citationId: 'admin-citation-1',
+        sourceType: 'document',
+        title: 'AX-200 维修手册.pdf',
+        externalDocumentId: 'doc-ax-200',
+        sourceVersionId: 'v1',
+        pageNo: 6,
+        refIndex: 1,
+        fileKind: 'original',
+      }],
       createdAt: '2026-08-29T10:00:05.000Z',
     },
     {
@@ -169,6 +223,20 @@ const adminConversationMessages = {
       content: '没有找到可靠依据，无法回答该问题。',
       status: 'no_reliable_evidence',
       createdAt: '2026-08-29T10:01:00.000Z',
+    },
+  ],
+};
+
+const thinkingConversationMessages: AdminConversationMessagesFixture = {
+  conversationId: adminConversationMessages.conversationId,
+  items: [
+    ...adminConversationMessages.items,
+    {
+      messageId: 'msg-a-thinking',
+      role: 'assistant',
+      content: '',
+      status: 'running',
+      createdAt: '2026-08-29T10:01:05.000Z',
     },
   ],
 };
@@ -238,6 +306,56 @@ function documentsMetadataHandler(
   });
 }
 
+function documentDetailHandlers() {
+  return [
+    http.get(`${V1}/admin/system/metadata/documents/:externalDocumentId`, () => HttpResponse.json({
+      item: {
+        ...documentItems[0],
+        currentVersion: 3,
+        sourceKind: 'S3',
+        parserProfile: 'manual-v2',
+        parserProfileVersion: '2',
+        parserApplicationStatus: 'executed',
+      },
+      metadata: {
+        mediaType: 'application/pdf',
+        sourcePageCount: 8,
+        departmentId: 'd10',
+        securityLevel: 2,
+        documentSubtype: 'manual',
+        sourceDocumentType: 'OP_MAINT_MANUAL',
+        ingestState: 'READY',
+        sourceState: 'AVAILABLE',
+        sourceStateReason: null,
+        attemptCount: 1,
+        parseRetryCount: 0,
+        lastErrorCode: null,
+        lastErrorRetryable: false,
+        lastSyncAt: '2026-08-29T09:30:00.000Z',
+        sourceUpdatedAt: '2026-08-29T09:00:00.000Z',
+      },
+      parser: {
+        applicationStatus: 'executed',
+        profile: 'manual-v2',
+        profileVersion: '2',
+        expected: { method: 'naive' },
+        configured: { chunk_token_num: 512 },
+        executed: { chunkCount: 1 },
+        ragflow: { run: 'DONE', chunkMethod: 'naive', chunkCount: 1, tokenCount: 24, progress: 1, parserConfig: {} },
+        errorCode: null,
+      },
+    })),
+    http.get(`${V1}/admin/system/metadata/documents/:externalDocumentId/chunks`, () => HttpResponse.json({
+      items: [{ id: 'chunk-1', documentId: 'rag-doc-1', content: '解析后的维护步骤', imageId: 'crop-1', docType: 'text', available: true, positions: [[1, 2]], importantKeywords: ['维护'] }],
+      total: 1,
+      page: 1,
+      pageSize: 20,
+      hasMore: false,
+      state: 'ready',
+    })),
+  ];
+}
+
 function metadataSummaryHandler(urls?: string[], body = summaryBody) {
   return http.get(`${V1}/admin/system/metadata/summary`, ({ request }) => {
     urls?.push(new URL(request.url).search);
@@ -246,7 +364,7 @@ function metadataSummaryHandler(urls?: string[], body = summaryBody) {
 }
 
 function conversationMessagesHandler(
-  options: { body?: typeof adminConversationMessages; status?: number; urls?: string[] } = {},
+  options: { body?: AdminConversationMessagesFixture; status?: number; urls?: string[] } = {},
 ) {
   return http.get(
     `${V1}/admin/system/metadata/conversations/:conversationId/messages`,
@@ -276,7 +394,8 @@ function ragDiagnosticsHandlers() {
     durationMs: 120,
     truncated: false,
     events: [
-      { type: 'retrieval', atMs: 20, data: { candidateCount: 2, selectedCount: 1 } },
+      { type: 'stage', atMs: 15, durationMs: 8, data: { stage: 'rerank', status: 'success' } },
+      { type: 'retrieval', atMs: 20, durationMs: 12, data: { candidateCount: 2, selectedCount: 1 } },
       { type: 'context', atMs: 40, data: { includedChunkIds: ['chunk-1'] } },
       { type: 'llm', atMs: 100, data: { modelId: 'qwen', ttftMs: 30 } },
       { type: 'outcome', atMs: 120, data: { outcome: 'completed' } },
@@ -318,7 +437,9 @@ beforeEach(() => {
 describe('SystemSettingsPanels (admin system settings)', () => {
   it('shows the system settings group only for admin capability', async () => {
     server.use(...adminScenario());
+    const user = userEvent.setup();
     const adminView = render(<EnterpriseConsolePage />);
+    await openSystemSettings(user);
     expect(await adminView.findByRole('button', { name: '接口配置' })).toBeTruthy();
     expect(adminView.getByRole('button', { name: '会话元数据' })).toBeTruthy();
     expect(adminView.getByRole('button', { name: '会话管理' })).toBeTruthy();
@@ -347,23 +468,39 @@ describe('SystemSettingsPanels (admin system settings)', () => {
     window.location.hash = '';
   });
 
-  it('queries one private RAG trace by runId and renders its stages', async () => {
+  it('queries one private RAG trace in a modal with expandable diagnostic JSON', async () => {
     server.use(...adminScenario(), ...ragDiagnosticsHandlers());
     const user = userEvent.setup();
     render(<EnterpriseConsolePage />);
 
+    await openSystemSettings(user);
     await user.click(await screen.findByRole('button', { name: 'RAG 诊断' }));
     const panel = await screen.findByTestId('rag-diagnostics-panel');
     expect(await within(panel).findByText('run-diagnostics-1')).toBeTruthy();
     await user.click(within(panel).getByRole('button', { name: '查看' }));
 
+    const dialog = await screen.findByRole('dialog', { name: '诊断运行详情' });
+    const eventRoots = within(dialog).getAllByRole('button', { name: /数据/ });
+    expect(eventRoots[0].getAttribute('aria-expanded')).toBe('false');
+    for (const eventRoot of eventRoots) await user.click(eventRoot);
     await waitFor(() => {
-      expect(within(panel).getByText('retrieval')).toBeTruthy();
-      expect(within(panel).getByText('context')).toBeTruthy();
-      expect(within(panel).getByText('llm')).toBeTruthy();
-      expect(panel.textContent).toContain('chunk-1');
-      expect(panel.textContent).toContain('ttftMs');
+      expect(within(dialog).getByText('检索汇总')).toBeTruthy();
+      expect(within(dialog).getByText('Rerank 重排序')).toBeTruthy();
+      expect(within(dialog).getByText('Context')).toBeTruthy();
+      expect(within(dialog).getByText('LLM')).toBeTruthy();
+      expect(within(dialog).getAllByText('本步骤').length).toBeGreaterThan(0);
+      expect(within(dialog).getAllByText('累计').length).toBeGreaterThan(0);
+      expect(within(dialog).getByText('8ms')).toBeTruthy();
+      expect(within(dialog).getByText('ttftMs')).toBeTruthy();
     });
+    expect(within(panel).queryByText('本步骤耗时')).toBeNull();
+    expect(dialog.textContent).not.toContain('chunk-1');
+
+    await user.click(within(dialog).getByRole('button', { name: /includedChunkIds/ }));
+    expect(await within(dialog).findByText(/chunk-1/)).toBeTruthy();
+
+    await user.click(within(dialog).getByRole('button', { name: '关闭诊断详情' }));
+    expect(screen.queryByRole('dialog', { name: '诊断运行详情' })).toBeNull();
   });
 
   it('renders integration config fields and probes rows independently', async () => {
@@ -371,13 +508,29 @@ describe('SystemSettingsPanels (admin system settings)', () => {
     const user = userEvent.setup();
     render(<EnterpriseConsolePage />);
 
+    await openSystemSettings(user);
     await user.click(await screen.findByRole('button', { name: '接口配置' }));
 
     const ragflowCard = await screen.findByTestId('console-integrations-card');
     expect(ragflowCard.textContent).toContain('http://ragflow.internal:9380');
     expect(ragflowCard.textContent).toContain('/api/v1/system/ping');
     expect(ragflowCard.textContent).toContain('/api/v1/chat/completions');
+    expect(screen.queryByTestId('console-processing-card')).toBeNull();
 
+    await user.click(screen.getByRole('tab', { name: /Gateway 运行/ }));
+    const processingCard = await screen.findByTestId('console-processing-card');
+    expect(processingCard.textContent).toContain('文件共享投喂上限');
+    expect(processingCard.textContent).toContain('128 MiB');
+    expect(processingCard.textContent).toContain('10 MiB · 5 个');
+    expect(processingCard.textContent).toContain('MAX_CONCURRENT_TASKS');
+    expect(processingCard.textContent).toContain('3 个');
+    expect(processingCard.textContent).toContain('MAX_CONCURRENT_CHUNK_BUILDERS');
+    expect(processingCard.textContent).toContain('2 个');
+    expect(processingCard.textContent).toContain('WORKERS');
+    expect(processingCard.textContent).toContain('1 个');
+    expect(screen.queryByTestId('console-integrations-card')).toBeNull();
+
+    await user.click(screen.getByRole('tab', { name: /回调接口/ }));
     const table = await screen.findByTestId('console-callbacks-table');
     const rows = within(table).getAllByRole('row');
     expect(rows.length).toBe(4); // header + 3 callbacks
@@ -387,6 +540,7 @@ describe('SystemSettingsPanels (admin system settings)', () => {
     expect(eamRow.textContent).toContain('https://eam.example');
     expect(eamRow.textContent).toContain('/callback');
     expect(eamRow.textContent).toContain('POST');
+    expect(eamRow.textContent).toContain('通知 EAM 文档解析完成与同步状态');
     expect(eamRow.textContent).toContain('启用');
     expect(eamRow.textContent).toContain('已配置');
     const cmmsRow = rows[2];
@@ -415,12 +569,58 @@ describe('SystemSettingsPanels (admin system settings)', () => {
     await screen.findByTestId('console-meta-conversations-table');
   });
 
+  it('edits Gateway runtime settings and reports hot reload', async () => {
+    let saved: Record<string, unknown> | undefined;
+    server.use(
+      ...adminScenario(),
+      integrationsHandler(),
+      http.put(`${V1}/admin/system/runtime-settings`, async ({ request }) => {
+        saved = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({
+          settings: saved,
+          source: 'database',
+          updatedAt: '2026-09-01T08:00:00.000Z',
+          hotReload: true,
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    render(<EnterpriseConsolePage />);
+
+    await openSystemSettings(user);
+    await user.click(await screen.findByRole('button', { name: '接口配置' }));
+    await user.click(screen.getByRole('tab', { name: /Gateway 运行/ }));
+    const card = await screen.findByTestId('console-processing-card');
+    expect(card.textContent).toContain('任务接收并发');
+    expect(card.textContent).not.toContain('任务接手并发');
+    expect(card.textContent).not.toContain('重启 RAGFlow');
+    const saveButton = within(card).getByRole('button', { name: '保存并热生效' }) as HTMLButtonElement;
+    expect(saveButton.disabled).toBe(true);
+    const outboxPoll = within(card).getByRole('spinbutton', { name: 'OutboxWorker 轮询间隔（秒）' });
+    await user.clear(outboxPoll);
+    await user.type(outboxPoll, '5');
+    const fileLimit = within(card).getByRole('spinbutton', { name: 'FILE_SHARE 单文件上限' });
+    await user.clear(fileLimit);
+    await user.type(fileLimit, '96');
+    await user.click(within(card).getByRole('checkbox', { name: 'RAG 诊断采集' }));
+    expect(saveButton.disabled).toBe(false);
+    await user.click(within(card).getByRole('button', { name: '保存并热生效' }));
+
+    await screen.findByText('已保存，下一轮循环生效。');
+    expect(saveButton.disabled).toBe(true);
+    expect((saved?.outbox as { pollSeconds: number }).pollSeconds).toBe(5);
+    expect((saved?.diagnostics as { enabled: boolean }).enabled).toBe(true);
+    expect(card.textContent).toContain('96 MiB');
+  });
+
   it('surfaces probe HTTP errors like unknown binding per row', async () => {
     server.use(...adminScenario(), integrationsHandler());
     const user = userEvent.setup();
     render(<EnterpriseConsolePage />);
 
+    await openSystemSettings(user);
     await user.click(await screen.findByRole('button', { name: '接口配置' }));
+    await user.click(screen.getByRole('tab', { name: /回调接口/ }));
     const table = await screen.findByTestId('console-callbacks-table');
     const rows = within(table).getAllByRole('row');
 
@@ -438,6 +638,7 @@ describe('SystemSettingsPanels (admin system settings)', () => {
     const user = userEvent.setup();
     render(<EnterpriseConsolePage />);
 
+    await openSystemSettings(user);
     await user.click(await screen.findByRole('button', { name: '会话元数据' }));
     const table = await screen.findByTestId('console-meta-conversations-table');
     expect(within(table).getAllByRole('row').length).toBe(3); // header + 2 items
@@ -447,18 +648,22 @@ describe('SystemSettingsPanels (admin system settings)', () => {
     expect(table.textContent).toContain('FA-2001');
     expect(table.textContent).toContain('chat-1');
     expect(table.textContent).toContain('v3');
+    expect(screen.getByRole('note').textContent).toContain('一行对应一个 Gateway v2 会话');
+    expect(screen.getByRole('note').textContent).toContain('会话管理');
 
     await waitFor(() => expect(urls.length).toBe(1));
-    expect(urls[0]).toContain('limit=50');
+    expect(urls[0]).toContain('limit=20');
     expect(urls[0]).toContain('offset=0');
     expect(urls[0]).not.toContain('status=');
     expect(urls[0]).not.toContain('orderBy=');
+    expect(screen.getByText('第 1 页 · 本页 2 条')).toBeTruthy();
+    expect(screen.queryByText(/offset/)).toBeNull();
 
     const next = screen.getByRole('button', { name: '下一页' });
     expect((next as HTMLButtonElement).disabled).toBe(false);
     await user.click(next);
     await waitFor(() => expect(urls.length).toBe(2));
-    expect(urls[1]).toContain('offset=50');
+    expect(urls[1]).toContain('offset=20');
 
     // 状态下拉 onChange 立即生效，并回到第一页
     await user.selectOptions(screen.getByLabelText('状态'), 'active');
@@ -491,12 +696,43 @@ describe('SystemSettingsPanels (admin system settings)', () => {
     expect(urls[6]).not.toContain('orderBy=');
   });
 
+  it('combines conversation advanced filters and applies them server-side', async () => {
+    const urls: string[] = [];
+    server.use(...adminScenario(), metadataSummaryHandler(), conversationsMetadataHandler(urls));
+    const user = userEvent.setup();
+    render(<EnterpriseConsolePage />);
+
+    await openSystemSettings(user);
+    await user.click(await screen.findByRole('button', { name: '会话元数据' }));
+    await screen.findByTestId('console-meta-conversations-table');
+    await user.click(screen.getByRole('button', { name: '高级检索' }));
+    const advanced = await screen.findByTestId('console-conversation-advanced-search');
+    expect(advanced.textContent).toContain('多个条件同时满足');
+
+    await user.type(screen.getByLabelText('业务用户'), 'user-advanced');
+    await user.type(screen.getByLabelText('设备编号'), 'EQ-ADV-1');
+    await user.type(screen.getByLabelText('固定资产编号'), 'FA-ADV-1');
+    await user.type(screen.getByLabelText('RAGFlow 会话 ID'), 'session-advanced');
+    await user.type(screen.getByLabelText('Context 版本'), '4');
+    await user.click(screen.getByRole('button', { name: '筛选' }));
+
+    await waitFor(() => expect(urls.length).toBe(2));
+    expect(urls[1]).toContain('businessUserId=user-advanced');
+    expect(urls[1]).toContain('equipmentId=EQ-ADV-1');
+    expect(urls[1]).toContain('fixedAssetNo=FA-ADV-1');
+    expect(urls[1]).toContain('ragflowId=session-advanced');
+    expect(urls[1]).toContain('contextVersion=4');
+    expect(urls[1]).toContain('offset=0');
+    expect(screen.getByText(/业务用户 user-advanced/)).toBeTruthy();
+  });
+
   it('renders document metadata with filters, sorting and new columns', async () => {
     const urls: string[] = [];
     server.use(...adminScenario(), metadataSummaryHandler(), documentsMetadataHandler(urls));
     const user = userEvent.setup();
     render(<EnterpriseConsolePage />);
 
+    await openSystemSettings(user);
     await user.click(await screen.findByRole('button', { name: '文件元数据' }));
     const table = await screen.findByTestId('console-meta-documents-table');
     expect(within(table).getAllByRole('row').length).toBe(3); // header + 2 items
@@ -529,7 +765,7 @@ describe('SystemSettingsPanels (admin system settings)', () => {
     expect(secondCells[12].textContent).toBe('未提供');
 
     await waitFor(() => expect(urls.length).toBe(1));
-    expect(urls[0]).toContain('limit=50');
+    expect(urls[0]).toContain('limit=20');
     expect(urls[0]).toContain('offset=0');
 
     // hasMore=false -> 下一页禁用
@@ -570,6 +806,53 @@ describe('SystemSettingsPanels (admin system settings)', () => {
     expect(urls[5]).not.toContain('orderBy=');
   });
 
+  it('opens document details and parsed chunks from a table row', async () => {
+    server.use(...adminScenario(), metadataSummaryHandler(), documentsMetadataHandler(), ...documentDetailHandlers());
+    const user = userEvent.setup();
+    render(<EnterpriseConsolePage />);
+
+    await openSystemSettings(user);
+    await user.click(await screen.findByRole('button', { name: '文件元数据' }));
+    const table = await screen.findByTestId('console-meta-documents-table');
+    await user.click(within(table).getAllByRole('row')[1]);
+
+    const dialog = await screen.findByRole('dialog', { name: '文件详情' });
+    expect(dialog.textContent).toContain('manual-v2');
+    expect(dialog.textContent).toContain('DeepDOC / PDF 文档');
+    expect(dialog.textContent).toContain('解析后的维护步骤');
+    await user.click(within(dialog).getByRole('button', { name: /chunk-1/ }));
+    expect(await screen.findByRole('dialog', { name: 'Chunk 详情' })).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: '关闭 Chunk 详情' }));
+    await user.click(screen.getByRole('button', { name: '关闭文件详情' }));
+  });
+
+  it('shows an explicit parser unavailable state instead of an endless loader', async () => {
+    server.use(
+      ...adminScenario(),
+      metadataSummaryHandler(),
+      documentsMetadataHandler(),
+      http.get(`${V1}/admin/system/metadata/documents/:externalDocumentId`, () => HttpResponse.json(
+        { code: 'INTERNAL_ERROR', message: '服务开小差了，请稍后重试。', requestId: 'doc-detail-error', retryable: true },
+        { status: 500 },
+      )),
+      http.get(`${V1}/admin/system/metadata/documents/:externalDocumentId/chunks`, () => HttpResponse.json(
+        { code: 'RAGFLOW_UNAVAILABLE', message: '解析服务暂时不可用。', requestId: 'chunk-error', retryable: true },
+        { status: 503 },
+      )),
+    );
+    const user = userEvent.setup();
+    render(<EnterpriseConsolePage />);
+
+    await openSystemSettings(user);
+    await user.click(await screen.findByRole('button', { name: '文件元数据' }));
+    await user.click(within(await screen.findByTestId('console-meta-documents-table')).getAllByRole('row')[1]);
+
+    const dialog = await screen.findByRole('dialog', { name: '文件详情' });
+    await waitFor(() => expect(dialog.textContent).toContain('解析方式暂不可用'));
+    expect(dialog.textContent).not.toContain('解析信息加载中…');
+    expect(dialog.textContent).toContain('不可用');
+  });
+
   it('renders summary strip chips with quick filters', async () => {
     const convUrls: string[] = [];
     const docUrls: string[] = [];
@@ -582,6 +865,7 @@ describe('SystemSettingsPanels (admin system settings)', () => {
     const user = userEvent.setup();
     render(<EnterpriseConsolePage />);
 
+    await openSystemSettings(user);
     await user.click(await screen.findByRole('button', { name: '文件元数据' }));
     const strip = await screen.findByTestId('console-documents-summary');
     expect(strip.textContent).toContain('文档 13');
@@ -617,6 +901,7 @@ describe('SystemSettingsPanels (admin system settings)', () => {
     const user = userEvent.setup();
     render(<EnterpriseConsolePage />);
 
+    await openSystemSettings(user);
     await user.click(await screen.findByRole('button', { name: '文件元数据' }));
     const table = await screen.findByTestId('console-meta-documents-table');
     expect(
@@ -655,6 +940,7 @@ describe('SystemSettingsPanels (admin system settings)', () => {
     const user = userEvent.setup();
     render(<EnterpriseConsolePage />);
 
+    await openSystemSettings(user);
     await user.click(await screen.findByRole('button', { name: '会话元数据' }));
     const table = await screen.findByTestId('console-meta-conversations-table');
     expect(
@@ -688,6 +974,7 @@ describe('SystemSettingsPanels (admin system settings)', () => {
     const user = userEvent.setup();
     render(<EnterpriseConsolePage />);
 
+    await openSystemSettings(user);
     await user.click(await screen.findByRole('button', { name: '会话管理' }));
     const table = await screen.findByTestId('console-admin-conversations-table');
     expect(within(table).getAllByRole('row').length).toBe(3); // header + 2 items
@@ -704,8 +991,10 @@ describe('SystemSettingsPanels (admin system settings)', () => {
     const userBubble = chat.querySelector('.console-chat-bubble--user');
     expect(userBubble?.textContent).toContain('AX-200 报警 E-104');
     expect(userBubble?.querySelector('.console-chat-text')).toBeTruthy();
-    // 助手消息走 markdown 渲染
-    expect(chat.querySelector('.console-chat-bubble--assistant strong')?.textContent).toBe('液压油位');
+     // 助手消息走 markdown 渲染
+     expect(chat.querySelector('.console-chat-bubble--assistant strong')?.textContent).toBe('液压油位');
+     expect(chat.querySelector('.console-citation-marker a')?.textContent).toBe('1');
+     expect(chat.textContent).toContain('引用来源');
     // 持久化业务状态原样映射为中文标签
     expect(chat.textContent).toContain('用户');
     expect(chat.textContent).toContain('EAM 回复');
@@ -713,14 +1002,37 @@ describe('SystemSettingsPanels (admin system settings)', () => {
     expect(chat.textContent).toContain('无可靠依据');
 
     // 会话元信息 chips
-    const card = screen.getByTestId('console-admin-conversations-card');
-    expect(card.textContent).toContain('业务用户 · user-a');
-    expect(card.textContent).toContain('设备 · EQ-1001');
-    expect(card.textContent).toContain('固定资产 · FA-2001');
-    expect(card.textContent).toContain('context v3');
+    const dialog = screen.getByRole('dialog', { name: '会话详情' });
+    expect(dialog.textContent).toContain('业务用户 · user-a');
+    expect(dialog.textContent).toContain('设备 · EQ-1001');
+    expect(dialog.textContent).toContain('固定资产 · FA-2001');
+    expect(dialog.textContent).toContain('context v3');
 
-    await user.click(screen.getByRole('button', { name: '返回列表' }));
+    await user.click(within(dialog).getByRole('button', { name: '返回列表' }));
     expect(screen.getByTestId('console-admin-conversations-table')).toBeTruthy();
+  });
+
+  it('shows thinking status and citation superscripts in the admin chat', async () => {
+    server.use(
+      ...adminScenario(),
+      metadataSummaryHandler(),
+      conversationsMetadataHandler(),
+      conversationMessagesHandler({ body: thinkingConversationMessages }),
+    );
+    const user = userEvent.setup();
+    render(<EnterpriseConsolePage />);
+
+    await openSystemSettings(user);
+    await user.click(await screen.findByRole('button', { name: '会话管理' }));
+    const table = await screen.findByTestId('console-admin-conversations-table');
+    await user.click(within(table).getAllByRole('button', { name: '查看对话' })[0]);
+
+    const chat = await screen.findByTestId('console-admin-chat');
+    expect(chat.className).toContain('console-admin-chat');
+    expect(chat.textContent).toContain('思考中');
+    expect(chat.textContent).toContain('思考中，正在生成回答…');
+    expect(chat.querySelector('.console-citation-marker a')?.textContent).toBe('1');
+    expect(chat.textContent).toContain('AX-200 维修手册.pdf');
   });
 
   it('shows conversation admin error and empty message states', async () => {
@@ -733,6 +1045,7 @@ describe('SystemSettingsPanels (admin system settings)', () => {
     const user = userEvent.setup();
     render(<EnterpriseConsolePage />);
 
+    await openSystemSettings(user);
     await user.click(await screen.findByRole('button', { name: '会话管理' }));
     const table = await screen.findByTestId('console-admin-conversations-table');
     await user.click(within(table).getAllByRole('button', { name: '查看对话' })[0]);
@@ -777,6 +1090,7 @@ describe('SystemSettingsPanels (admin system settings)', () => {
     const user = userEvent.setup();
     render(<EnterpriseConsolePage />);
 
+    await openSystemSettings(user);
     await user.click(await screen.findByRole('button', { name: '会话元数据' }));
     expect(await screen.findByTestId('console-meta-conversations-table')).toBeTruthy();
     expect(screen.queryByTestId('console-conversations-summary')).toBeNull();
@@ -796,6 +1110,7 @@ describe('SystemSettingsPanels (admin system settings)', () => {
     const user = userEvent.setup();
     render(<EnterpriseConsolePage />);
 
+    await openSystemSettings(user);
     await user.click(await screen.findByRole('button', { name: '会话元数据' }));
     expect(await screen.findByText('暂无会话元数据。')).toBeTruthy();
     await user.click(screen.getByRole('button', { name: '文件元数据' }));
@@ -824,6 +1139,7 @@ describe('SystemSettingsPanels (admin system settings)', () => {
     const user = userEvent.setup();
     render(<EnterpriseConsolePage />);
 
+    await openSystemSettings(user);
     await user.click(await screen.findByRole('button', { name: '接口配置' }));
     const alert = await screen.findByRole('alert');
     expect(alert.textContent).toContain('INTEGRATIONS_UNAVAILABLE');
@@ -846,7 +1162,9 @@ describe('SystemSettingsPanels (admin system settings)', () => {
     const user = userEvent.setup();
     const view = render(<EnterpriseConsolePage />);
 
+    await openSystemSettings(user);
     await user.click(await screen.findByRole('button', { name: '接口配置' }));
+    await user.click(screen.getByRole('tab', { name: /回调接口/ }));
     await screen.findByText('https://eam.example');
     const eamProbe = within(within(screen.getByTestId('console-callbacks-table')).getAllByRole('row')[1])
       .getByRole('button', { name: '检测联通' });

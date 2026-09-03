@@ -226,15 +226,20 @@ def _env_int(
 
 
 def attachment_max_size_bytes() -> int:
+    runtime = config.runtime_settings_override()
+    if runtime is not None:
+        return runtime.transient_attachment_max_size_mb * 1024 * 1024
     if os.getenv("ENTERPRISE_ATTACHMENT_MAX_SIZE_BYTES") is not None:
         return _env_int(
             "ENTERPRISE_ATTACHMENT_MAX_SIZE_BYTES",
             DEFAULT_MAX_SIZE_BYTES,
+            maximum=DEFAULT_MAX_SIZE_BYTES,
         )
     if os.getenv("ENTERPRISE_ATTACHMENT_MAX_SIZE_MB") is not None:
         return _env_int(
             "ENTERPRISE_ATTACHMENT_MAX_SIZE_MB",
             DEFAULT_MAX_SIZE_BYTES // (1024 * 1024),
+            maximum=DEFAULT_MAX_SIZE_BYTES // (1024 * 1024),
         ) * 1024 * 1024
     return DEFAULT_MAX_SIZE_BYTES
 
@@ -250,6 +255,9 @@ def attachment_max_request_body_bytes() -> int:
 
 
 def attachment_ttl_seconds() -> int:
+    runtime = config.runtime_settings_override()
+    if runtime is not None:
+        return runtime.attachment_ttl_seconds
     return _env_int("ENTERPRISE_ATTACHMENT_TTL_SECONDS", DEFAULT_TTL_SECONDS)
 
 
@@ -269,7 +277,10 @@ def attachment_retry_attempts() -> int:
     )
 
 
-def attachment_cleanup_interval_seconds() -> int:
+def attachment_cleanup_interval_seconds() -> float:
+    runtime = config.runtime_settings_override()
+    if runtime is not None:
+        return runtime.attachment_cleanup_interval_seconds
     return _env_int(
         "ENTERPRISE_ATTACHMENT_CLEANUP_INTERVAL_SECONDS",
         DEFAULT_CLEANUP_INTERVAL_SECONDS,
@@ -1442,15 +1453,22 @@ class TransientAttachmentCleanupWorker:
     async def run_once(self) -> dict[str, int]:
         return await self.service.cleanup_expired()
 
-    async def run_forever(self, interval_seconds: int) -> None:
+    async def run_forever(self, interval_seconds: float | None = None) -> None:
         while True:
             try:
-                await self.run_once()
+                settings = config.runtime_settings()
+                if settings.transient_cleanup_enabled:
+                    await self.run_once()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.warning("Transient attachment cleanup failed")
-            await asyncio.sleep(interval_seconds)
+            settings = config.runtime_settings()
+            await asyncio.sleep(
+                interval_seconds
+                if interval_seconds is not None
+                else settings.attachment_cleanup_interval_seconds
+            )
 
 
 async def get_db() -> GatewayDatabase:
