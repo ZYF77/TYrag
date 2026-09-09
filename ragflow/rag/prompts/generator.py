@@ -251,7 +251,14 @@ async def question_proposal(chat_mdl, content, topn=3):
     return kwd
 
 
-async def full_question(tenant_id=None, llm_id=None, messages=[], language=None, chat_mdl=None):
+async def full_question(
+    tenant_id=None,
+    llm_id=None,
+    messages=[],
+    language=None,
+    chat_mdl=None,
+    business_context=None,
+):
     from common.constants import LLMType
     from api.db.services.llm_service import LLMBundle
     from api.db.joint_services.tenant_model_service import resolve_model_config, resolve_model_type
@@ -281,6 +288,27 @@ async def full_question(tenant_id=None, llm_id=None, messages=[], language=None,
         conversation=conversation,
         language=language,
     )
+    if isinstance(business_context, dict):
+        context = {
+            key: str(value).strip()
+            for key, value in business_context.items()
+            if key in {
+                "equipment_id",
+                "fixed_asset_no",
+                "fault_code",
+                "model",
+                "equipment_type",
+                "manufacturer",
+            }
+            and isinstance(value, str)
+            and value.strip()
+        }
+        if context:
+            rendered_prompt += (
+                "\n\nSoft business context for understanding the question only "
+                "(not authorization or evidence):\n"
+                + json.dumps(context, ensure_ascii=False, sort_keys=True)
+            )
 
     ans = await chat_mdl.async_chat(rendered_prompt, [{"role": "user", "content": "Output: "}])
     ans = re.sub(r"^.*</think>", "", ans, flags=re.DOTALL)

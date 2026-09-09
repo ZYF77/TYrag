@@ -59,6 +59,7 @@ patches:
       - ragflow/rag/advanced_rag/harness/tools/exploration.py
       - ragflow/rag/advanced_rag/harness/tools/search.py
       - ragflow/rag/advanced_rag/harness/tools/navigation.py
+      - ragflow/rag/advanced_rag/harness/tools/registry.py
     adr: "decisions/ADR-012-WebSearch故障回退内部知识.md"
     introduced_in: "RF26-WP05"
     tests:
@@ -133,3 +134,28 @@ patches:
     tests:
       - "enterprise/tests/test_ragflow_status_webhook.py"
     upgrade_notes: "Replay enterprise_status_webhook helpers plus emit-on-run-change hooks in DocumentService._sync_progress/update_by_id and TaskService.update_progress FAIL. Keep StatusReconciler; do not productize RF outbound outbox. Rollback removes hooks and disables ENTERPRISE_STATUS_WEBHOOK_ENABLED / ENTERPRISE_RAGFLOW_STATUS_WEBHOOK_ENABLED."
+
+  - id: RF-PATCH-011
+    reason: "opt-in Gateway-authorized document scope for metadata filtering, with rewrite-before-filter ordering and fail-closed empty scope semantics"
+    upstream_files:
+      - ragflow/common/metadata_utils.py
+      - ragflow/common/metadata_es_filter.py
+      - ragflow/api/db/services/doc_metadata_service.py
+      - ragflow/api/db/services/dialog_service.py
+      - ragflow/api/utils/scope_identity_prompt.py
+      - ragflow/rag/prompts/generator.py
+      - ragflow/rag/advanced_rag/agentic_rag.py
+      - ragflow/rag/advanced_rag/agentic_rag_graph.py
+      - ragflow/rag/advanced_rag/harness/pipeline.py
+      - ragflow/rag/advanced_rag/harness/tools/search.py
+      - ragflow/rag/advanced_rag/harness/tools/navigation.py
+    adr: "decisions/ADR-018-Gateway-A授权与Metadata-Restrict.md"
+    change_request: "patches/CHANGE-REQUEST-RF-PATCH-011-RESTRICTED-METADATA-SCOPE.md"
+    introduced_in: "RF-PATCH-011-restricted-metadata-scope"
+    tests:
+      - "ragflow/test/unit_test/common/test_restricted_metadata_scope.py"
+      - "ragflow/test/unit_test/api/utils/test_scope_identity_prompt.py"
+      - "ragflow/test/unit_test/rag/advanced_rag/test_gating_and_doc_scope.py"
+      - "enterprise/tests/test_ragflow_client.py"
+      - "enterprise/tests/test_v2_conversation_contract.py"
+    upgrade_notes: "Build a new RAGFlow image. Keep the official metadata helper's default extend behavior; only Gateway requests carrying doc_scope_mode=restrict use the bounded G intersection. Upgrade Gateway schema to v7, keep ENTERPRISE_RETRIEVAL_SCOPE_POLICY=legacy_device by default, and verify empty-set and cross-tenant negatives before enabling authorized_context. Rollback uses the previous image and legacy_device; do not treat this change as a server-30 deployment."

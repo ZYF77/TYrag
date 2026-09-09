@@ -192,6 +192,15 @@ def conversation_device_limit_from_env() -> int:
         value = 2
     return max(1, value)
 
+
+RETRIEVAL_SCOPE_POLICIES = {"legacy_device", "authorized_context"}
+
+
+def retrieval_scope_policy_from_env() -> str:
+    """Return the safe default when the rollout flag is missing or invalid."""
+    value = os.getenv("ENTERPRISE_RETRIEVAL_SCOPE_POLICY", "legacy_device").strip().lower()
+    return value if value in RETRIEVAL_SCOPE_POLICIES else "legacy_device"
+
 def attachment_vision_enabled_from_env() -> bool:
     """Image pre-understand switch; default on to preserve current behavior."""
     return _env_flag("ENTERPRISE_ATTACHMENT_VISION_ENABLED", "true")
@@ -543,6 +552,9 @@ class GatewayConfig:
             1,
             int(os.getenv("ENTERPRISE_CONVERSATION_DEVICE_LIMIT", "2")),
         )
+    )
+    retrieval_scope_policy: str = field(
+        default_factory=retrieval_scope_policy_from_env
     )
     rag_diagnostics_enabled: bool = field(
         default_factory=lambda: os.getenv(

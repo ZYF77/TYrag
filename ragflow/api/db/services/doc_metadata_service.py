@@ -718,7 +718,9 @@ class DocMetadataService:
 
     @classmethod
     @DB.connection_context()
-    def get_flatted_meta_by_kbs(cls, kb_ids: List[str]) -> Dict:
+    def get_flatted_meta_by_kbs(
+        cls, kb_ids: List[str], doc_ids: Optional[List[str]] = None
+    ) -> Dict:
         """
         Get flattened metadata for documents in knowledge bases.
 
@@ -743,7 +745,11 @@ class DocMetadataService:
             tenant_id = kb.tenant_id
             index_name = cls._get_doc_meta_index_name(tenant_id)
 
+            if doc_ids is not None and not doc_ids:
+                return {}
             condition = {"kb_id": kb_ids}
+            if doc_ids is not None:
+                condition["id"] = list(doc_ids)
             order_by = OrderByExpr()
             if not settings.DOC_ENGINE_INFINITY:
                 order_by.asc("id")
@@ -819,6 +825,7 @@ class DocMetadataService:
         filters: List[Dict],
         logic: str = "and",
         limit: int = 10000,
+        doc_ids: Optional[List[str]] = None,
     ) -> Optional[List[str]]:
         """Run a metadata filter directly against ES or Infinity, returning matching doc IDs.
 
@@ -833,6 +840,10 @@ class DocMetadataService:
         query matched. Callers can union or intersect this with their own
         base ``doc_ids`` rather than fetching the entire metadata table.
         """
+        if doc_ids is not None:
+            doc_ids = list(dict.fromkeys(str(doc_id) for doc_id in doc_ids if str(doc_id).strip()))
+            if not doc_ids:
+                return []
         if not kb_ids or not filters:
             logging.debug("Metadata filter skipped: empty kb_ids or filters")
             return None
@@ -852,9 +863,13 @@ class DocMetadataService:
             return []
 
         if settings.DOC_ENGINE_INFINITY:
-            return cls._filter_doc_ids_by_metadata_infinity(index_name, kb_ids, filters, logic)
+            return cls._filter_doc_ids_by_metadata_infinity(
+                index_name, kb_ids, filters, logic, doc_ids=doc_ids
+            )
         else:
-            return cls._filter_doc_ids_by_metadata_es(index_name, kb_ids, filters, logic, limit)
+            return cls._filter_doc_ids_by_metadata_es(
+                index_name, kb_ids, filters, logic, limit, doc_ids=doc_ids
+            )
 
     @classmethod
     def _filter_doc_ids_by_metadata_es(
@@ -864,6 +879,7 @@ class DocMetadataService:
         filters: List[Dict],
         logic: str,
         limit: int,
+        doc_ids: Optional[List[str]] = None,
     ) -> Optional[List[str]]:
         """ES push-down path for metadata filtering."""
         from common.metadata_es_filter import (
@@ -881,7 +897,9 @@ class DocMetadataService:
             return None
 
         try:
-            query_body = build_meta_filter_query(filters, logic, kb_ids)
+            query_body = build_meta_filter_query(
+                filters, logic, kb_ids, doc_ids=doc_ids
+            )
         except UnsupportedMetaFilter as e:
             logging.error(f"ES build query failed: {e.reason}, filters={filters}")
             return None
@@ -937,6 +955,7 @@ class DocMetadataService:
         kb_ids: List[str],
         filters: List[Dict],
         logic: str,
+        doc_ids: Optional[List[str]] = None,
     ) -> Optional[List[str]]:
         """Infinity push-down path for metadata filtering."""
         from common.metadata_infinity_filter import (
@@ -953,6 +972,11 @@ class DocMetadataService:
             escaped_kb_ids = [k.replace("'", "''") for k in kb_ids]
             kb_filter = "kb_id IN (" + ", ".join([f"'{k}'" for k in escaped_kb_ids]) + ")"
             where_clause = f"{kb_filter} AND {sql_filter}"
+            if doc_ids is not None:
+                escaped_doc_ids = [doc_id.replace("'", "''") for doc_id in doc_ids]
+                where_clause += " AND id IN (" + ", ".join(
+                    f"'{doc_id}'" for doc_id in escaped_doc_ids
+                ) + ")"
             logging.debug(f"Infinity metadata filter: {where_clause}")
 
             inf_conn = settings.docStoreConn.acquire_conn()

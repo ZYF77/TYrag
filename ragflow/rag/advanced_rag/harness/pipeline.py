@@ -45,7 +45,7 @@ class Pipeline:
         # Downstream scoping: a within-document tool inherits the doc IDs a prior
         # router (dataset_navigation_by_tree) produced, unless the caller passed
         # an explicit doc_scope.
-        if tool_name in _DOC_SCOPE_CONSUMERS and self._routed_docs and not kwargs.get("doc_scope"):
+        if tool_name in _DOC_SCOPE_CONSUMERS and self._routed_docs and kwargs.get("doc_scope") is None:
             kwargs["doc_scope"] = list(self._routed_docs)
 
         start = time.time()

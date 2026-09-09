@@ -47,6 +47,36 @@ def test_message_one_of_rejects_explicit_null_opposite_fields():
         )
 
 
+def test_restrict_completion_context_uses_only_the_confirmed_business_fields():
+    kwargs = v2_router._v2_completion_kwargs(
+        {"_turn_entity_ids": []},
+        "question",
+        [],
+        retrieval_context={
+            "doc_scope_mode": "restrict",
+            "business_context": {
+                "equipment_id": "EQ-1",
+                "fixed_asset_no": "FA-1",
+                "fault_code": "F-1",
+                "model": "M-1",
+                "equipment_type": "PUMP",
+                "manufacturer": "ACME",
+                "schema_version": 1,
+                "unexpected": "drop",
+            },
+        },
+    )
+
+    assert kwargs["business_context"] == {
+        "equipment_id": "EQ-1",
+        "fixed_asset_no": "FA-1",
+        "fault_code": "F-1",
+        "model": "M-1",
+        "equipment_type": "PUMP",
+        "manufacturer": "ACME",
+    }
+
+
 def _principal() -> UserPrincipal:
     return UserPrincipal(
         tenant_id="customer-a",
@@ -563,6 +593,66 @@ async def test_context_version_and_eam_fields_are_persisted_as_submitted(runtime
     assert accepted.json()["equipmentId"] == "EQ-A"
     assert accepted.json()["fixedAssetNo"] == "FA-B"
     assert accepted.json()["context"]["registryVersion"] is None
+
+
+@pytest.mark.asyncio
+async def test_authorized_context_policy_uses_acl_scope_and_forwards_soft_context(
+    runtime, monkeypatch
+):
+    monkeypatch.setattr(
+        v2_router.config, "retrieval_scope_policy", "authorized_context"
+    )
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-AUTH-A",
+        ragflow_id="doc-auth-a",
+        equipment_id="EQ-AUTH-A",
+        fixed_asset_no="FA-AUTH-A",
+    )
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-AUTH-B",
+        ragflow_id="doc-auth-b",
+        equipment_id="EQ-AUTH-B",
+        fixed_asset_no="FA-AUTH-B",
+    )
+
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(
+            client,
+            equipmentId="EQ-AUTH-A",
+            model="MODEL-A",
+            equipmentType="PUMP",
+            manufacturer="ACME",
+        )
+        response = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={
+                "clientMessageId": "authorized-context-1",
+                "question": "这个设备的维护要求是什么？",
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    assert _stub_doc_ids(runtime) == {"doc-auth-a", "doc-auth-b"}
+    assert runtime.stub._last_completion_body["doc_scope_mode"] == "restrict"
+    assert runtime.stub._last_completion_body["business_context"] == {
+        "equipment_id": "EQ-AUTH-A",
+        "model": "MODEL-A",
+        "equipment_type": "PUMP",
+        "manufacturer": "ACME",
+    }
+    snapshot = await gw_read(
+        runtime.db,
+        fetchone,
+        "SELECT retrieval_context_json FROM ext_v2_message_run "
+        "WHERE client_message_id=?",
+        ("authorized-context-1",),
+    )
+    retrieval_context = json.loads(snapshot["retrieval_context_json"])
+    assert retrieval_context["policy"] == "authorized_context"
+    assert retrieval_context["doc_scope_mode"] == "restrict"
+    assert retrieval_context["business_context"]["model"] == "MODEL-A"
 
 
 @pytest.mark.asyncio

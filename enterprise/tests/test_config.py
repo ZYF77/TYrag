@@ -92,6 +92,16 @@ class TestGatewayConfig:
         monkeypatch.setenv("ENTERPRISE_RAG_DIAGNOSTICS_ENABLED", "true")
         assert GatewayConfig().rag_diagnostics_enabled is True
 
+    def test_retrieval_scope_policy_defaults_safe_and_rejects_unknown(self, monkeypatch):
+        monkeypatch.delenv("ENTERPRISE_RETRIEVAL_SCOPE_POLICY", raising=False)
+        assert GatewayConfig().retrieval_scope_policy == "legacy_device"
+
+        monkeypatch.setenv("ENTERPRISE_RETRIEVAL_SCOPE_POLICY", "authorized_context")
+        assert GatewayConfig().retrieval_scope_policy == "authorized_context"
+
+        monkeypatch.setenv("ENTERPRISE_RETRIEVAL_SCOPE_POLICY", "unknown")
+        assert GatewayConfig().retrieval_scope_policy == "legacy_device"
+
     def test_pg_defaults(self):
         cfg = GatewayConfig()
         assert cfg.pg_host == "localhost"

@@ -6,6 +6,12 @@ from rag.advanced_rag.agentic_rag import RAGTools
 from rag.advanced_rag.harness.config import THINKING_MODES
 from rag.advanced_rag.harness.planner import planner_node
 from rag.advanced_rag.harness.tools.gating import get_gated_tools
+from rag.advanced_rag.harness.tools.navigation import (
+    _restricted_empty_scope as navigation_restricted_empty_scope,
+)
+from rag.advanced_rag.harness.tools.search import (
+    _restricted_empty_scope as search_restricted_empty_scope,
+)
 from rag.advanced_rag.harness.types import OrchestratorContext, RouteDecision
 
 
@@ -47,9 +53,60 @@ def test_high_explore_keeps_web_search_when_enabled():
 def test_scoped_doc_ids_intersects_hard_filter():
     tools = SimpleNamespace(doc_scope=["doc-keep"])
     assert RAGTools.scoped_doc_ids(tools, ["doc-keep", "doc-drop"]) == ["doc-keep"]
+    assert RAGTools.scoped_doc_ids(tools, []) == []
     assert RAGTools.scoped_doc_ids(tools, None) == ["doc-keep"]
     open_tools = SimpleNamespace(doc_scope=None)
     assert RAGTools.scoped_doc_ids(open_tools, ["doc-a"]) == ["doc-a"]
+
+
+def test_harness_retrieval_tools_distinguish_restricted_empty_scope():
+    restricted = SimpleNamespace(doc_scope=[], doc_scope_mode="restrict")
+    open_tools = SimpleNamespace(doc_scope=None, doc_scope_mode=None)
+
+    assert search_restricted_empty_scope(restricted, []) is True
+    assert navigation_restricted_empty_scope(restricted, []) is True
+    assert search_restricted_empty_scope(open_tools, []) is False
+    assert navigation_restricted_empty_scope(open_tools, []) is False
+
+
+@pytest.mark.asyncio
+async def test_agentic_metadata_filter_receives_rewritten_question(monkeypatch):
+    class Chat:
+        max_length = 4096
+
+        async def async_chat(self, *_args, **_kwargs):
+            return '{"question": "rewritten question", "keywords": "rewritten"}'
+
+    tools = RAGTools.__new__(RAGTools)
+    tools.chat_mdl = Chat()
+    tools.business_context = {}
+    tools.meta_data_filter = {
+        "method": "manual",
+        "manual": [{"key": "type", "op": "=", "value": "pump"}],
+    }
+    tools.doc_scope = ["doc-g"]
+    tools.doc_scope_mode = "restrict"
+    tools.metadata_kb_ids = ["kb-1"]
+    calls = []
+
+    async def _apply(_filter, _metas, question, _chat, scope, **_kwargs):
+        calls.append((question, scope))
+        return ["doc-g"]
+
+    monkeypatch.setattr(
+        "rag.advanced_rag.agentic_rag.message_fit_in",
+        lambda messages, _max_length: (0, messages),
+    )
+    monkeypatch.setattr(
+        "rag.advanced_rag.agentic_rag.apply_meta_data_filter", _apply
+    )
+
+    question, _keywords = await tools.formalize(
+        [{"role": "user", "content": "raw follow-up"}]
+    )
+
+    assert question == "rewritten question"
+    assert calls == [("rewritten question", ["doc-g"])]
 
 
 def test_scope_filter_drops_outside_missing_and_ambiguous_compiled_chunks():

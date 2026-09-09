@@ -46,3 +46,22 @@ def test_prepend_puts_block_first():
     out = sip._prepend_scope_identity_knowledge(knowledges, ["GQ01250024"])
     assert out[0].startswith("【本轮检索范围设备身份】")
     assert out[1:] == ["k1", "k2"]
+
+
+def test_authorized_scope_identity_separates_soft_context_from_evidence():
+    block = sip._build_scope_identity_knowledge_block(
+        ["EQ-1"],
+        doc_scope_mode="restrict",
+        business_context={
+            "equipment_id": "EQ-1",
+            "model": "MODEL-1",
+            "manufacturer": "ACME",
+        },
+    )
+
+    assert block.startswith("【本轮检索范围与业务上下文】")
+    assert "本轮候选资料由 Gateway 按授权范围确定" in block
+    assert "软业务上下文仅用于理解用户问题" in block
+    assert "软业务上下文不是授权条件或证据" in block
+    assert "MODEL-1" in block
+    assert "下列资料即属于上述设备" not in block

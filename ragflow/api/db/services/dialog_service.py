@@ -805,7 +805,7 @@ def filter_kbinfos_to_doc_ids(
     allow_web: bool = False,
 ) -> dict:
     """Hard-drop chunks/doc_aggs outside Gateway doc_ids (simple-chat path)."""
-    if not isinstance(kbinfos, dict) or not allowed:
+    if not isinstance(kbinfos, dict) or allowed is None:
         return kbinfos or {"chunks": [], "doc_aggs": []}
     allowed_set = set(allowed)
 
@@ -978,6 +978,8 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
     allowed_identifiers = list(kwargs.pop("allowed_identifiers", None) or [])
     scope_id_sources = list(scope_identifiers) if scope_identifiers else list(allowed_identifiers)
     attachment_observations = kwargs.pop("attachment_observations", None)
+    doc_scope_mode = kwargs.pop("doc_scope_mode", None)
+    business_context = kwargs.pop("business_context", None)
     last_user = str(messages[-1].get("content") or "")
     if last_user:
         allowed_identifiers.append(last_user)
@@ -1045,7 +1047,13 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
     questions = [m["content"] for m in messages if m["role"] == "user"][-3:]
     attachments = None
     if "doc_ids" in kwargs:
-        attachments = [doc_id for doc_id in kwargs["doc_ids"].split(",") if doc_id]
+        raw_doc_ids = kwargs["doc_ids"]
+        if isinstance(raw_doc_ids, str):
+            attachments = [doc_id for doc_id in raw_doc_ids.split(",") if doc_id]
+        elif isinstance(raw_doc_ids, list):
+            attachments = [doc_id for doc_id in raw_doc_ids if doc_id]
+        else:
+            attachments = []
     attachments_ = ""
     image_attachments = []
     image_files = []
@@ -1059,87 +1067,20 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
         attachments_ = "\n\n".join(text_attachments)
 
     # Gateway-provided doc_ids hard ceiling — meta filter must not UNION-expand it.
-    gateway_doc_ids = list(attachments) if attachments else None
+    gateway_doc_ids = list(attachments) if attachments is not None else None
+    if doc_scope_mode == "restrict" and gateway_doc_ids is None:
+        gateway_doc_ids = []
+        attachments = []
+    if doc_scope_mode == "restrict":
+        gateway_doc_ids = [
+            doc_id for doc_id in gateway_doc_ids or [] if str(doc_id) != "-999"
+        ]
+        attachments = list(gateway_doc_ids)
 
     prompt_config = dialog.prompt_config
-    metadata_filter = dialog.meta_data_filter if isinstance(dialog.meta_data_filter, dict) else {}
-    metadata_method = str(metadata_filter.get("method") or "disabled")
-    metadata_started = timer()
-    metadata_executed = metadata_method in {"auto", "semi_auto", "manual"}
-    metadata_status = "success"
-    try:
-        if dialog.meta_data_filter:
-            with rag_diagnostics_stage("metadata_filter"):
-                attachments = await apply_meta_data_filter(
-                    dialog.meta_data_filter,
-                    None,
-                    questions[-1],
-                    chat_mdl,
-                    attachments,
-                    kb_ids=dialog.kb_ids,
-                    metas_loader=lambda: DocMetadataService.get_flatted_meta_by_kbs(dialog.kb_ids),
-                )
-            if gateway_doc_ids is not None:
-                allowed = set(gateway_doc_ids)
-                attachments = [doc_id for doc_id in attachments or [] if doc_id in allowed]
-    except Exception:
-        metadata_status = "failed"
-        raise
-    finally:
-        record_timed_rag_stage(
-            "metadata_filter",
-            metadata_started,
-            enabled=bool(dialog.meta_data_filter),
-            executed=metadata_executed,
-            method=metadata_method,
-            status=metadata_status,
-        )
-
-    record_rag_diagnostics(
-        "scope",
-        {
-            "inferenceMode": "simple",
-            "requestedDocumentIds": gateway_doc_ids or [],
-            "actualDocumentIds": attachments or [],
-        },
-    )
-
     include_reference_metadata, metadata_fields = _resolve_reference_metadata(prompt_config, request_payload=kwargs)
     field_map = KnowledgebaseService.get_field_map(dialog.kb_ids)
     logging.debug(f"field_map retrieved: {field_map}")
-    # try to use sql if field mapping is good to go
-    if field_map and not grounding_enabled:
-        logging.debug("Use SQL to retrieval:{}".format(questions[-1]))
-        sql_started = timer()
-        sql_status = "success"
-        try:
-            with rag_diagnostics_stage("sql_generation"):
-                ans = await use_sql(questions[-1], field_map, dialog.tenant_id, chat_mdl, prompt_config.get("quote", True), dialog.kb_ids, doc_ids=attachments)
-        except Exception:
-            sql_status = "failed"
-            raise
-        finally:
-            record_timed_rag_stage(
-                "sql_generation",
-                sql_started,
-                executed=True,
-                status=sql_status,
-            )
-        # For aggregate queries (COUNT, SUM, etc.), chunks may be empty but answer is still valid
-        if ans and (ans.get("reference", {}).get("chunks") or ans.get("answer")):
-            if gateway_doc_ids is not None and isinstance(ans.get("reference"), dict):
-                ans["reference"] = filter_kbinfos_to_doc_ids(ans["reference"], gateway_doc_ids)
-            if include_reference_metadata and ans.get("reference", {}).get("chunks"):
-                if len(dialog.kb_ids) != 1 and any(not c.get("kb_id") for c in ans["reference"]["chunks"]):
-                    logging.warning(
-                        "Skipping some _enrich_chunks_with_document_metadata results because dialog.kb_ids has %d entries and use_sql returned chunks without kb_id.",
-                        len(dialog.kb_ids),
-                    )
-                _enrich_chunks_with_document_metadata(ans["reference"]["chunks"], metadata_fields)
-            yield ans
-            return
-        else:
-            logging.debug("SQL failed or returned no results, falling back to vector search")
 
     param_keys = [p["key"] for p in prompt_config.get("parameters", [])]
     if dialog.kb_ids and "knowledge" not in param_keys and "{knowledge}" in prompt_config.get("system", ""):
@@ -1172,6 +1113,9 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
                         dialog.llm_id,
                         messages,
                         chat_mdl=chat_mdl if grounding_enabled else None,
+                        business_context=business_context
+                        if doc_scope_mode == "restrict"
+                        else None,
                     )
                 ]
             refine_executed = True
@@ -1220,6 +1164,110 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
             languageCount=len(cross_languages_config) if isinstance(cross_languages_config, list) else 0,
             status=cross_status,
         )
+
+    metadata_filter = dialog.meta_data_filter if isinstance(dialog.meta_data_filter, dict) else {}
+    metadata_method = str(metadata_filter.get("method") or "disabled")
+    metadata_started = timer()
+    metadata_executed = metadata_method in {"auto", "semi_auto", "manual"}
+    metadata_status = "success"
+    try:
+        if dialog.meta_data_filter:
+            metadata_scope = gateway_doc_ids if gateway_doc_ids is not None else attachments
+            if doc_scope_mode == "restrict":
+                metadata_loader = lambda: DocMetadataService.get_flatted_meta_by_kbs(
+                    dialog.kb_ids, doc_ids=metadata_scope
+                )
+            else:
+                metadata_loader = lambda: DocMetadataService.get_flatted_meta_by_kbs(
+                    dialog.kb_ids
+                )
+            with rag_diagnostics_stage("metadata_filter"):
+                attachments = await apply_meta_data_filter(
+                    dialog.meta_data_filter,
+                    None,
+                    questions[-1],
+                    chat_mdl,
+                    metadata_scope,
+                    kb_ids=dialog.kb_ids,
+                    metas_loader=metadata_loader,
+                    doc_scope_mode=doc_scope_mode,
+                )
+            if gateway_doc_ids is not None:
+                allowed = set(gateway_doc_ids)
+                attachments = [
+                    doc_id for doc_id in attachments or [] if doc_id in allowed
+                ]
+    except Exception:
+        metadata_status = "failed"
+        raise
+    finally:
+        record_timed_rag_stage(
+            "metadata_filter",
+            metadata_started,
+            enabled=bool(dialog.meta_data_filter),
+            executed=metadata_executed,
+            method=metadata_method,
+            status=metadata_status,
+        )
+
+    strict_empty_scope = doc_scope_mode == "restrict" and not attachments
+    record_rag_diagnostics(
+        "scope",
+        {
+            "inferenceMode": "simple",
+            "requestedDocumentIds": gateway_doc_ids or [],
+            "actualDocumentIds": attachments or [],
+            "docScopeMode": doc_scope_mode,
+        },
+    )
+
+    # Use the rewritten question for SQL as well as vector retrieval.
+    if field_map and not grounding_enabled and not strict_empty_scope:
+        logging.debug("Use SQL to retrieval:{}".format(questions[-1]))
+        sql_started = timer()
+        sql_status = "success"
+        try:
+            with rag_diagnostics_stage("sql_generation"):
+                ans = await use_sql(
+                    questions[-1],
+                    field_map,
+                    dialog.tenant_id,
+                    chat_mdl,
+                    prompt_config.get("quote", True),
+                    dialog.kb_ids,
+                    doc_ids=attachments,
+                )
+        except Exception:
+            sql_status = "failed"
+            raise
+        finally:
+            record_timed_rag_stage(
+                "sql_generation",
+                sql_started,
+                executed=True,
+                status=sql_status,
+            )
+        # For aggregate queries (COUNT, SUM, etc.), chunks may be empty but answer is still valid
+        if ans and (ans.get("reference", {}).get("chunks") or ans.get("answer")):
+            if gateway_doc_ids is not None and isinstance(ans.get("reference"), dict):
+                ans["reference"] = filter_kbinfos_to_doc_ids(
+                    ans["reference"], gateway_doc_ids
+                )
+            if include_reference_metadata and ans.get("reference", {}).get("chunks"):
+                if len(dialog.kb_ids) != 1 and any(
+                    not c.get("kb_id") for c in ans["reference"]["chunks"]
+                ):
+                    logging.warning(
+                        "Skipping some _enrich_chunks_with_document_metadata results because dialog.kb_ids has %d entries and use_sql returned chunks without kb_id.",
+                        len(dialog.kb_ids),
+                    )
+                _enrich_chunks_with_document_metadata(
+                    ans["reference"]["chunks"], metadata_fields
+                )
+            yield ans
+            return
+        else:
+            logging.debug("SQL failed or returned no results, falling back to vector search")
 
     keyword_enabled = bool(prompt_config.get("keyword", False))
     keyword_started = timer()
@@ -1290,7 +1338,7 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
             await task
 
         else:
-            if embd_mdl:
+            if embd_mdl and not strict_empty_scope:
                 retrieval_started = timer()
                 retrieval_status = "success"
                 try:
@@ -1349,7 +1397,7 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
                     if cks:
                         kbinfos["chunks"] = cks
                 kbinfos["chunks"] = retriever.retrieval_by_children(kbinfos["chunks"], tenant_ids)
-            if use_web_search:
+            if use_web_search and not strict_empty_scope:
                 web_started = timer()
                 web_status = "success"
                 try:
@@ -1372,7 +1420,7 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
                         executed=True,
                         status=web_status,
                     )
-            if prompt_config.get("use_kg"):
+            if prompt_config.get("use_kg") and not strict_empty_scope:
                 default_chat_model = get_tenant_default_model_by_type(dialog.tenant_id, LLMType.CHAT)
                 kg_bundle_kwargs = {"trace_context": trace_context, "langfuse_session_id": session_id}
                 if grounding_enabled:
@@ -1428,11 +1476,14 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
 
     context_started = timer()
     knowledges = kb_prompt(kbinfos, max_tokens)
-    knowledges = _prepend_scope_identity_knowledge(
-        knowledges,
-        scope_id_sources,
-        reject_values=(last_user,),
-    )
+    if kbinfos.get("chunks") or doc_scope_mode != "restrict":
+        knowledges = _prepend_scope_identity_knowledge(
+            knowledges,
+            scope_id_sources,
+            reject_values=(last_user,),
+            doc_scope_mode=doc_scope_mode,
+            business_context=business_context,
+        )
     retrieved_knowledge_count = len(kbinfos.get("chunks", []))
     if grounding_enabled:
         logging.debug("retrieval completed: grounding_version=%s knowledge_count=%d", 1, len(knowledges))
@@ -1440,6 +1491,19 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
         logging.debug("{}->{}".format(" ".join(questions), "\n->".join(knowledges)))
 
     retrieval_ts = timer()
+    if strict_empty_scope:
+        if grounding_enabled:
+            yield _grounding_abstain_event()
+        else:
+            yield {
+                "answer": STANDARD_ABSTAIN_ANSWER,
+                "reference": empty_reference(),
+                "prompt": "",
+                "audio_binary": None,
+                "status": _COMPLETION_STATUS_NO_RELIABLE_EVIDENCE,
+                "final": True,
+            }
+        return
     if not knowledges and prompt_config.get("empty_response") and not messages[-1].get("files"):
         empty_res = prompt_config["empty_response"]
         _record_context_diagnostics(kbinfos.get("chunks", []), "")
@@ -2708,6 +2772,8 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
         async for ans in async_chat(dialog, messages, stream, **kwargs):
             yield ans
         return
+    doc_scope_mode = kwargs.pop("doc_scope_mode", None)
+    business_context = kwargs.pop("business_context", None)
     model_kwargs = {"langfuse_session_id": kwargs.get("session_id")}
     if grounding_enabled:
         model_kwargs["disable_langfuse"] = True
@@ -2743,58 +2809,21 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
     gen_conf = dialog.llm_setting or {}
     doc_scope = None
     if "doc_ids" in kwargs:
-        if isinstance(kwargs["doc_ids"], str):
-            doc_scope = [doc_id for doc_id in kwargs["doc_ids"].split(",") if doc_id]
-        elif isinstance(kwargs["doc_ids"], list):
-            doc_scope = [doc_id for doc_id in kwargs["doc_ids"] if doc_id]
+        raw_doc_ids = kwargs["doc_ids"]
+        if isinstance(raw_doc_ids, str):
+            doc_scope = [doc_id for doc_id in raw_doc_ids.split(",") if doc_id]
+        elif isinstance(raw_doc_ids, list):
+            doc_scope = [doc_id for doc_id in raw_doc_ids if doc_id]
+        else:
+            doc_scope = []
     if "doc_ids" in messages[-1]:
         doc_scope = [doc_id for doc_id in messages[-1]["doc_ids"] if doc_id]
-    metadata_filter = dialog.meta_data_filter if isinstance(dialog.meta_data_filter, dict) else {}
-    metadata_method = str(metadata_filter.get("method") or "disabled")
-    metadata_started = timer()
-    metadata_executed = metadata_method in {"auto", "semi_auto", "manual"}
-    metadata_status = "success"
-    try:
-        if dialog.meta_data_filter:
-            initial_doc_scope = None if doc_scope is None else list(doc_scope)
-            with rag_diagnostics_stage("metadata_filter"):
-                filtered_doc_scope = await apply_meta_data_filter(
-                    dialog.meta_data_filter,
-                    None,
-                    messages[-1].get("content", ""),
-                    chat_mdl,
-                    doc_scope,
-                    kb_ids=dialog.kb_ids,
-                    metas_loader=lambda: DocMetadataService.get_flatted_meta_by_kbs(dialog.kb_ids),
-                )
-            if initial_doc_scope is None:
-                doc_scope = filtered_doc_scope
-            else:
-                allowed = set(initial_doc_scope)
-                doc_scope = [
-                    doc_id for doc_id in filtered_doc_scope or [] if doc_id in allowed
-                ]
-    except Exception:
-        metadata_status = "failed"
-        raise
-    finally:
-        record_timed_rag_stage(
-            "metadata_filter",
-            metadata_started,
-            enabled=bool(dialog.meta_data_filter),
-            executed=metadata_executed,
-            method=metadata_method,
-            status=metadata_status,
-        )
-
-    record_rag_diagnostics(
-        "scope",
-        {
-            "inferenceMode": thinking_mode,
-            "requestedDocumentIds": initial_doc_scope if dialog.meta_data_filter else (doc_scope or []),
-            "actualDocumentIds": doc_scope or [],
-        },
-    )
+    if doc_scope_mode == "restrict" and doc_scope is None:
+        doc_scope = []
+    if doc_scope_mode == "restrict":
+        doc_scope = [
+            doc_id for doc_id in doc_scope or [] if str(doc_id) != "-999"
+        ]
 
     scope_identifiers = list(kwargs.get("scope_identifiers") or []) or list(
         kwargs.get("allowed_identifiers") or []
@@ -2810,6 +2839,8 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
         do_refer=False,
         thinking_mode=thinking_mode,
         scope_identifiers=scope_identifiers,
+        doc_scope_mode=doc_scope_mode,
+        business_context=business_context,
     )
 
     async def decorate_answer(answer):

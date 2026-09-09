@@ -342,6 +342,8 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
         attachment_observations: list[str] | None = None,
         reasoning: int | None = None,
         enterprise_diagnostics: bool = False,
+        doc_scope_mode: str | None = None,
+        business_context: dict[str, Any] | None = None,
         llm_id: str | None = None,
         timeout: float | None = None,
     ) -> dict:
@@ -362,10 +364,10 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
             body["chat_id"] = chat_id
         if session_id:
             body["session_id"] = session_id
-        if doc_ids:
+        if doc_ids or doc_scope_mode == "restrict":
             # RAGFlow v0.26.4 /chat/completions expects a comma-separated
             # string for doc_ids; a JSON list breaks its attachment parser.
-            body["doc_ids"] = ",".join(doc_ids)
+            body["doc_ids"] = ",".join(doc_ids or [])
         if files and messages is None:
             # RAGFlow expects attachment descriptors
             # ({id, name, mime_type, created_by}), not bare file ids.
@@ -390,6 +392,10 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
             body["reasoning"] = int(reasoning)
         if enterprise_diagnostics:
             body["enterprise_diagnostics"] = True
+        if doc_scope_mode is not None:
+            body["doc_scope_mode"] = str(doc_scope_mode)
+        if business_context is not None:
+            body["business_context"] = dict(business_context)
         if llm_id:
             body["llm_id"] = str(llm_id)
         _trace_doc_ids(rid, doc_ids)
@@ -560,6 +566,8 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
         attachment_observations: list[str] | None = None,
         reasoning: int | None = None,
         enterprise_diagnostics: bool = False,
+        doc_scope_mode: str | None = None,
+        business_context: dict[str, Any] | None = None,
     ):
         """Stream RAGFlow chat completion over the public SSE API.
 
@@ -584,8 +592,8 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
             body["question"] = question
         if session_id:
             body["session_id"] = session_id
-        if doc_ids:
-            body["doc_ids"] = ",".join(doc_ids)
+        if doc_ids or doc_scope_mode == "restrict":
+            body["doc_ids"] = ",".join(doc_ids or [])
         if files and messages is None:
             body["files"] = list(files)
         if internet:
@@ -608,6 +616,10 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
             body["reasoning"] = int(reasoning)
         if enterprise_diagnostics:
             body["enterprise_diagnostics"] = True
+        if doc_scope_mode is not None:
+            body["doc_scope_mode"] = str(doc_scope_mode)
+        if business_context is not None:
+            body["business_context"] = dict(business_context)
         _trace_doc_ids(rid, doc_ids)
         timeout = httpx.Timeout(self.timeout, connect=self.timeout)
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -979,6 +991,8 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         attachment_observations: list[str] | None = None,
         reasoning: int | None = None,
         enterprise_diagnostics: bool = False,
+        doc_scope_mode: str | None = None,
+        business_context: dict[str, Any] | None = None,
         llm_id: str | None = None,
         timeout: float | None = None,
     ) -> dict:
@@ -994,7 +1008,11 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
             "chat_id": chat_id,
             "question": question,
             "session_id": session_id,
-            "doc_ids": ",".join(doc_ids) if doc_ids else None,
+            "doc_ids": (
+                ",".join(doc_ids or [])
+                if doc_ids or doc_scope_mode == "restrict"
+                else None
+            ),
             "files": list(files) if files else [],
             "internet": internet,
             "messages": body_messages,
@@ -1005,6 +1023,10 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
             "scope_identifiers": list(scope_identifiers or []),
             "attachment_observations": list(attachment_observations or []),
         }
+        if doc_scope_mode is not None:
+            self._last_completion_body["doc_scope_mode"] = str(doc_scope_mode)
+        if business_context is not None:
+            self._last_completion_body["business_context"] = dict(business_context)
         if reasoning is not None:
             self._last_completion_body["reasoning"] = int(reasoning)
         if enterprise_diagnostics:
@@ -1182,6 +1204,8 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         attachment_observations: list[str] | None = None,
         reasoning: int | None = None,
         enterprise_diagnostics: bool = False,
+        doc_scope_mode: str | None = None,
+        business_context: dict[str, Any] | None = None,
     ):
         if self._stream_fail_after == 0:
             completion = await self.chat_completion(
@@ -1201,6 +1225,8 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
                 attachment_observations=attachment_observations,
                 reasoning=reasoning,
                 enterprise_diagnostics=enterprise_diagnostics,
+                doc_scope_mode=doc_scope_mode,
+                business_context=business_context,
             )
             data = completion.get("data", {})
             stream_id = None if self._omit_stream_id else (

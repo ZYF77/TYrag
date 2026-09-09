@@ -215,6 +215,18 @@ def test_simple_path_filter_keeps_web_when_allowed():
     )["chunks"] == [chunk]
 
 
+def test_simple_path_filter_explicit_empty_scope_drops_internal_chunks():
+    kbinfos = {
+        "chunks": [{"document_id": "doc-1", "content": "private"}],
+        "doc_aggs": [{"doc_id": "doc-1"}],
+    }
+
+    assert filter_kbinfos_to_doc_ids(kbinfos, []) == {
+        "chunks": [],
+        "doc_aggs": [],
+    }
+
+
 def test_simple_path_meta_intersection_does_not_union_expand():
     """Mirrors async_chat: Gateway doc_ids ∩ meta result, never UNION expand."""
     gateway_doc_ids = ["doc-keep"]

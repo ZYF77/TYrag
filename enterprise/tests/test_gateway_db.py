@@ -72,14 +72,22 @@ async def test_gateway_schema_upgrade_is_idempotent_for_v1_marker():
                 """SELECT table_name, column_name
                      FROM information_schema.columns
                     WHERE table_schema=current_schema()
-                      AND table_name IN ('ext_document_map', 'sync_outbox', 'callback_delivery')
-                      AND column_name='processing_round'""",
+                      AND (
+                        (table_name IN ('ext_document_map', 'sync_outbox', 'callback_delivery')
+                         AND column_name='processing_round')
+                        OR (table_name='ext_v2_conversation'
+                            AND column_name='business_context_json')
+                        OR (table_name='ext_v2_message_run'
+                            AND column_name='retrieval_context_json')
+                      )""",
             )
-        assert version == {"version": 6}
+        assert version == {"version": 7}
         assert {(row["table_name"], row["column_name"]) for row in columns} == {
             ("ext_document_map", "processing_round"),
             ("sync_outbox", "processing_round"),
             ("callback_delivery", "processing_round"),
+            ("ext_v2_conversation", "business_context_json"),
+            ("ext_v2_message_run", "retrieval_context_json"),
         }
     finally:
         await gateway.dispose()

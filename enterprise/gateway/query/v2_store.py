@@ -52,6 +52,57 @@ def devices_from_row(row) -> list[str]:
     return [equipment_id] if equipment_id else []
 
 
+_BUSINESS_CONTEXT_KEYS = (
+    "equipment_id",
+    "fixed_asset_no",
+    "fault_code",
+    "model",
+    "equipment_type",
+    "manufacturer",
+)
+
+
+def normalize_business_context(context: dict | None) -> dict:
+    """Keep only the bounded, user-visible soft context fields."""
+    if not isinstance(context, dict):
+        return {}
+    normalized = {"schema_version": 1}
+    for key in _BUSINESS_CONTEXT_KEYS:
+        value = context.get(key)
+        if isinstance(value, str) and value.strip():
+            normalized[key] = value.strip()
+    return normalized if len(normalized) > 1 else {}
+
+
+def encode_business_context(context: dict | None) -> str:
+    return json.dumps(
+        normalize_business_context(context),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def decode_business_context(raw) -> dict:
+    if isinstance(raw, dict):
+        return normalize_business_context(raw)
+    if not isinstance(raw, str) or not raw.strip():
+        return {}
+    try:
+        value = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return normalize_business_context(value)
+
+
+def business_context_from_row(row) -> dict:
+    raw = row.get("business_context_json") if hasattr(row, "get") else None
+    return decode_business_context(raw)
+
+
+_UNSET = object()
+
+
 def encode_cursor(timestamp: str, item_id: str) -> str:
     raw = json.dumps([timestamp, item_id], separators=(",", ":")).encode()
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
@@ -94,6 +145,7 @@ def public_status(status: str | None) -> str:
 
 def conversation_payload(row) -> dict:
     devices = devices_from_row(row)
+    business_context = business_context_from_row(row)
     anchor = None
     if "anchor_equipment_id" in row.keys():
         anchor = row["anchor_equipment_id"]
@@ -104,6 +156,9 @@ def conversation_payload(row) -> dict:
         "equipmentId": row["equipment_id"],
         "fixedAssetNo": row["fixed_asset_no"],
         "faultCode": row["fault_code"],
+        "model": business_context.get("model"),
+        "equipmentType": business_context.get("equipment_type"),
+        "manufacturer": business_context.get("manufacturer"),
         "conversationDevices": devices,
         "anchorEquipmentId": anchor,
         "contextVersion": row["context_version"],
@@ -126,10 +181,12 @@ async def create_conversation(
     context_resolved_at: str | None = None,
     conversation_devices: list[str] | tuple[str, ...] | None = None,
     anchor_equipment_id: str | None = None,
+    business_context: dict | None = None,
 ) -> dict:
     now = utc_now()
     context_version = int(
         any(value is not None for value in (equipment_id, fixed_asset_no, fault_code))
+        or bool(normalize_business_context(business_context))
     )
     if conversation_devices is None:
         devices = [equipment_id] if equipment_id else []
@@ -143,10 +200,10 @@ async def create_conversation(
         """INSERT INTO ext_v2_conversation
            (conversation_id, tenant_id, business_user_id, title,
             equipment_id, fixed_asset_no, asset_id, fault_code,
-            conversation_devices, anchor_equipment_id, context_version,
+            business_context_json, conversation_devices, anchor_equipment_id, context_version,
             status, ragflow_chat_id, ragflow_session_id, registry_version,
             context_resolved_at, first_message_at, created_at, last_message_at)
-           VALUES (?, ?, ?, 'New conversation', ?, ?, ?, ?, ?, ?, ?, 'active',
+           VALUES (?, ?, ?, 'New conversation', ?, ?, ?, ?, ?, ?, ?, ?, 'active',
                    NULL, NULL, ?, ?, NULL, ?, ?)""",
         (
             conversation_id,
@@ -156,6 +213,7 @@ async def create_conversation(
             fixed_asset_no,
             asset_id,
             fault_code,
+            encode_business_context(business_context),
             devices_json,
             anchor_equipment_id,
             context_version,
@@ -256,6 +314,7 @@ async def update_context(
     update_devices: bool = False,
     anchor_equipment_id: str | None = None,
     update_anchor: bool = False,
+    business_context: dict | None | object = _UNSET,
 ) -> dict | None:
     query = """UPDATE ext_v2_conversation
                SET equipment_id=?, fixed_asset_no=?, asset_id=?, fault_code=?,
@@ -275,6 +334,9 @@ async def update_context(
     if update_anchor:
         query += ", anchor_equipment_id=?"
         params.append(anchor_equipment_id)
+    if business_context is not _UNSET:
+        query += ", business_context_json=?"
+        params.append(encode_business_context(business_context if isinstance(business_context, dict) else None))
     query += " WHERE conversation_id=? AND tenant_id=? AND business_user_id=?"
     params.extend(
         [
@@ -398,6 +460,7 @@ async def reserve_message_run(
     title: str | None = None,
     entity_scope: list[str] | tuple[str, ...] = (),
     allowed_doc_ids: list[str] | tuple[str, ...] = (),
+    retrieval_context: dict | None = None,
     lease_seconds: int = 1800,
 ) -> dict | None:
     run_id = run_id or __import__("uuid").uuid4().hex
@@ -411,8 +474,8 @@ async def reserve_message_run(
            (conversation_id, tenant_id, business_user_id, client_message_id,
              request_hash, run_id, status, lease_expires_at, user_message_id,
              assistant_message_id, result_json, entity_scope_json,
-             allowed_doc_ids_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, NULL, ?, ?, ?)
+             allowed_doc_ids_json, retrieval_context_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, NULL, ?, ?, ?, ?)
            ON CONFLICT DO NOTHING""",
         (
             conversation_id,
@@ -426,6 +489,7 @@ async def reserve_message_run(
             assistant_message_id,
             json.dumps(list(entity_scope), ensure_ascii=False, separators=(",", ":")),
             json.dumps(list(allowed_doc_ids), ensure_ascii=False, separators=(",", ":")),
+            json.dumps(retrieval_context or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
             utc_now(),
         ),
     )

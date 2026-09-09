@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from enterprise.gateway.db.dialect import add_column_if_missing, exec_sql
 from enterprise.gateway.db.tables import metadata
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 def _quote_identifier(value: str) -> str:
@@ -194,6 +194,16 @@ async def _upgrade_v5_to_v6(conn) -> None:
     )
 
 
+async def _upgrade_v6_to_v7(conn) -> None:
+    """Persist soft business context and the immutable per-run retrieval snapshot."""
+    await add_column_if_missing(
+        conn, "ext_v2_conversation", "business_context_json", "TEXT"
+    )
+    await add_column_if_missing(
+        conn, "ext_v2_message_run", "retrieval_context_json", "TEXT"
+    )
+
+
 async def initialize_schema(engine: AsyncEngine, *, schema: str = "public") -> None:
     """Create or upgrade the Gateway schema and reject unknown versions."""
     if not schema.replace("_", "").isalnum() or not schema[0].isalpha():
@@ -245,6 +255,18 @@ async def initialize_schema(engine: AsyncEngine, *, schema: str = "public") -> N
             "anchor_equipment_id",
             "TEXT",
         )
+        await add_column_if_missing(
+            conn,
+            "ext_v2_conversation",
+            "business_context_json",
+            "TEXT",
+        )
+        await add_column_if_missing(
+            conn,
+            "ext_v2_message_run",
+            "retrieval_context_json",
+            "TEXT",
+        )
         result = await conn.execute(
             text("SELECT version FROM gateway_schema_version ORDER BY version")
         )
@@ -263,10 +285,14 @@ async def initialize_schema(engine: AsyncEngine, *, schema: str = "public") -> N
             values = [5]
         if values == [5]:
             await _upgrade_v5_to_v6(conn)
+            values = [6]
+        if values == [6]:
+            await _upgrade_v6_to_v7(conn)
+            values = [7]
         elif values not in ([], [SCHEMA_VERSION]):
             raise RuntimeError(
                 f"unsupported Gateway schema version: {values!r}; "
-                f"expected [1], [2], [3], [4], [5], or [{SCHEMA_VERSION}]"
+                f"expected [1], [2], [3], [4], [5], [6], or [{SCHEMA_VERSION}]"
             )
         await conn.execute(text("DELETE FROM gateway_schema_version"))
         await conn.execute(

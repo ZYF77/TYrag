@@ -805,6 +805,9 @@ components:
         equipmentId: { type: [string, 'null'], maxLength: 128 }
         fixedAssetNo: { type: [string, 'null'], maxLength: 128 }
         faultCode: { type: [string, 'null'], maxLength: 128 }
+        model: { type: [string, 'null'], maxLength: 128 }
+        equipmentType: { type: [string, 'null'], maxLength: 128 }
+        manufacturer: { type: [string, 'null'], maxLength: 128 }
         contextVersion: { type: integer, minimum: 0 }
         registryVersion: { type: [string, 'null'] }
     CreateConversationRequest:
@@ -814,6 +817,9 @@ components:
         equipmentId: { type: [string, 'null'], maxLength: 128 }
         fixedAssetNo: { type: [string, 'null'], maxLength: 128 }
         faultCode: { type: [string, 'null'], maxLength: 128 }
+        model: { type: [string, 'null'], maxLength: 128 }
+        equipmentType: { type: [string, 'null'], maxLength: 128 }
+        manufacturer: { type: [string, 'null'], maxLength: 128 }
     PatchConversationContextRequest:
       type: object
       additionalProperties: false
@@ -826,6 +832,9 @@ components:
         equipmentId: { type: [string, 'null'], maxLength: 128 }
         fixedAssetNo: { type: [string, 'null'], maxLength: 128 }
         faultCode: { type: [string, 'null'], maxLength: 128 }
+        model: { type: [string, 'null'], maxLength: 128 }
+        equipmentType: { type: [string, 'null'], maxLength: 128 }
+        manufacturer: { type: [string, 'null'], maxLength: 128 }
     ConversationSummary:
       type: object
       additionalProperties: false
@@ -846,6 +855,9 @@ components:
         equipmentId: { type: [string, 'null'] }
         fixedAssetNo: { type: [string, 'null'] }
         faultCode: { type: [string, 'null'] }
+        model: { type: [string, 'null'] }
+        equipmentType: { type: [string, 'null'] }
+        manufacturer: { type: [string, 'null'] }
         contextVersion: { type: integer, minimum: 0 }
         lastMessageAt: { type: string, format: date-time }
         createdAt: { type: string, format: date-time }
@@ -872,6 +884,9 @@ components:
         equipmentId: { type: [string, 'null'] }
         fixedAssetNo: { type: [string, 'null'] }
         faultCode: { type: [string, 'null'] }
+        model: { type: [string, 'null'] }
+        equipmentType: { type: [string, 'null'] }
+        manufacturer: { type: [string, 'null'] }
         contextVersion: { type: integer, minimum: 0 }
         lastMessageAt: { type: string, format: date-time }
         createdAt: { type: string, format: date-time }

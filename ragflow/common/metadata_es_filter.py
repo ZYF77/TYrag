@@ -144,16 +144,20 @@ class MetaFilterPushdownPlan:
     def is_empty(self) -> bool:
         return not self.translated
 
-    def to_query(self, kb_ids: Sequence[str]) -> Dict[str, Any]:
+    def to_query(
+        self, kb_ids: Sequence[str], doc_ids: Optional[Sequence[str]] = None
+    ) -> Dict[str, Any]:
         """Render the full ES query body, scoped to the given KB ids.
 
         The KB filter is always a ``terms`` clause so the query can serve any
         number of knowledge bases without rewriting the caller.
         """
-        kb_clause = {"terms": {"kb_id": list(kb_ids)}}
+        filter_clauses: List[Dict[str, Any]] = [{"terms": {"kb_id": list(kb_ids)}}]
+        if doc_ids is not None:
+            filter_clauses.append({"terms": {"id": list(doc_ids)}})
 
         if self.is_empty():
-            return {"query": {"bool": {"filter": [kb_clause]}}}
+            return {"query": {"bool": {"filter": filter_clauses}}}
 
         sub_clauses = [t.to_clauses() for t in self.translated]
         flat_clauses: List[Dict[str, Any]] = [c for group in sub_clauses for c in group]
@@ -171,7 +175,7 @@ class MetaFilterPushdownPlan:
         return {
             "query": {
                 "bool": {
-                    "filter": [kb_clause, inner],
+                    "filter": [*filter_clauses, inner],
                 }
             }
         }
@@ -317,13 +321,14 @@ def build_meta_filter_query(
     logic: str,
     kb_ids: Sequence[str],
     translator: Optional[MetaFilterTranslator] = None,
+    doc_ids: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     """Top-level helper: translate every filter and render the ES query body.
 
     Raises ``UnsupportedMetaFilter`` if any filter cannot be expressed.
     """
     plan = plan_pushdown(filters, logic, translator=translator)
-    return plan.to_query(kb_ids)
+    return plan.to_query(kb_ids, doc_ids=doc_ids)
 
 
 def plan_pushdown(

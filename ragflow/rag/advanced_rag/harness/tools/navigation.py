@@ -25,6 +25,13 @@ import json_repair
 
 _LOG = logging.getLogger(__name__)
 
+
+def _restricted_empty_scope(tools, doc_scope) -> bool:
+    return doc_scope == [] and (
+        getattr(tools, "doc_scope_mode", None) == "restrict"
+        or getattr(tools, "doc_scope", None) == []
+    )
+
 # Compiled-structure kinds that describe a document's *layout*: a tree/outline
 # or a page index. ``_compilation_template_kind`` in the API folds page_index
 # and knowledge_graph into "timeline"; RAPTOR is its own bucket and is
@@ -502,6 +509,8 @@ async def dataset_navigation_by_tree(tools, topic: str, keywords: str = "", doc_
         return []
     if hasattr(tools, "scoped_doc_ids"):
         doc_scope = tools.scoped_doc_ids(doc_scope)
+    if _restricted_empty_scope(tools, doc_scope):
+        return []
 
     _LOG.info('[Dataset navigation] Walking the dataset tree for "%s"', query)
 
@@ -589,6 +598,8 @@ async def _kg_scopes(tools, doc_scope: list[str] | None = None):
 
     if hasattr(tools, "scoped_doc_ids"):
         doc_scope = tools.scoped_doc_ids(doc_scope)
+    if _restricted_empty_scope(tools, doc_scope):
+        return []
     if doc_scope:
         by_kb: dict[tuple, list[str]] = {}
         for doc_id in doc_scope:

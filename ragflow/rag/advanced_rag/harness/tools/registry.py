@@ -63,7 +63,7 @@ def _navigate_schema(name: str, desc: str) -> dict:
                 "properties": {
                     "topic": {"type": "string", "description": "the query/keywords to navigate to."},
                     "keywords": {"type": "string", "description": "the query/keywords used for searching split by space or ','."},
-                    "doc_scope": {"type": "array", "items": {"type": "string"}, "description": "The doc ID list to narrow down the searching scope. None or empty value means no limitation at all."},
+                    "doc_scope": {"type": "array", "items": {"type": "string"}, "description": "The doc ID list to narrow down the searching scope. None means no limitation; an empty list in Gateway restrict mode means no documents."},
                 },
                 "required": ["topic"],
             },

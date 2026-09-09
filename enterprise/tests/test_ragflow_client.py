@@ -111,6 +111,37 @@ async def test_v2_completion_sends_session_without_projected_messages():
 
 
 @pytest.mark.asyncio
+async def test_v2_completion_forwards_restrict_scope_and_explicit_empty_ids():
+    client = RAGFlowQueryClient()
+    captured = {}
+
+    async def fake_run_sync(fn, *args, **kwargs):
+        del fn, args
+        captured["body"] = kwargs["json_data"]
+        return {"code": 0, "data": {"answer": ""}}
+
+    client._run_sync = fake_run_sync
+    await client.chat_completion(
+        "chat-1",
+        "question",
+        doc_ids=[],
+        doc_scope_mode="restrict",
+        business_context={
+            "equipment_id": "EQ-1",
+            "model": "M-1",
+        },
+    )
+
+    body = captured["body"]
+    assert body["doc_ids"] == ""
+    assert body["doc_scope_mode"] == "restrict"
+    assert body["business_context"] == {
+        "equipment_id": "EQ-1",
+        "model": "M-1",
+    }
+
+
+@pytest.mark.asyncio
 async def test_completion_forwards_private_diagnostics_flag_and_run_id():
     client = RAGFlowQueryClient()
     captured = {}

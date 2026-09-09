@@ -434,6 +434,62 @@ def _submitted_snapshot(
     }
 
 
+def _business_context_values(values: dict) -> dict:
+    return v2_store.normalize_business_context(
+        {
+            "equipment_id": values.get("equipmentId"),
+            "fixed_asset_no": values.get("fixedAssetNo"),
+            "fault_code": values.get("faultCode"),
+            "model": values.get("model"),
+            "equipment_type": values.get("equipmentType"),
+            "manufacturer": values.get("manufacturer"),
+        }
+    )
+
+
+def _current_retrieval_scope_policy() -> str:
+    policy = getattr(config, "retrieval_scope_policy", "legacy_device")
+    return policy if policy in {"legacy_device", "authorized_context"} else "legacy_device"
+
+
+def _retrieval_context_snapshot(conversation: dict) -> dict:
+    policy = _current_retrieval_scope_policy()
+    return {
+        "schema_version": 1,
+        "policy": policy,
+        "doc_scope_mode": "restrict" if policy == "authorized_context" else None,
+        "context_version": int(conversation.get("context_version") or 0),
+        "business_context": v2_store.business_context_from_row(conversation),
+    }
+
+
+def _run_retrieval_context(run: dict, conversation: dict) -> dict:
+    raw = run.get("retrieval_context_json")
+    if isinstance(raw, str) and raw.strip():
+        try:
+            value = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            value = None
+        if isinstance(value, dict):
+            policy = value.get("policy")
+            if policy in {"legacy_device", "authorized_context"}:
+                value["doc_scope_mode"] = (
+                    "restrict" if policy == "authorized_context" else None
+                )
+                value["business_context"] = v2_store.normalize_business_context(
+                    value.get("business_context")
+                )
+                return value
+    # Pre-v7 runs have no immutable policy snapshot. Keep their legacy behavior.
+    return {
+        "schema_version": 1,
+        "policy": "legacy_device",
+        "doc_scope_mode": None,
+        "context_version": int(conversation.get("context_version") or 0),
+        "business_context": v2_store.business_context_from_row(conversation),
+    }
+
+
 def _ragflow_question(conversation: dict, question: str) -> str:
     """Pass the user question through for retrieval scoring.
 
@@ -499,6 +555,7 @@ def _v2_completion_kwargs(
     internet: bool = False,
     session_id: str | None = None,
     reasoning_mode: str = "simple",
+    retrieval_context: dict | None = None,
 ) -> dict[str, Any]:
     # scope_identifiers mirrors allowed_identifiers so RAGFlow can inject a
     # generation-side identity block without mistaking the user question for a
@@ -521,6 +578,18 @@ def _v2_completion_kwargs(
     mapped = _REASONING_MODE_TO_INT.get(reasoning_mode)
     if mapped is not None:
         kwargs["reasoning"] = mapped
+    if (
+        isinstance(retrieval_context, dict)
+        and retrieval_context.get("doc_scope_mode") == "restrict"
+    ):
+        kwargs["doc_scope_mode"] = "restrict"
+        kwargs["business_context"] = {
+            key: value
+            for key, value in dict(
+                retrieval_context.get("business_context") or {}
+            ).items()
+            if key in v2_store._BUSINESS_CONTEXT_KEYS
+        }
     if config.rag_diagnostics_enabled:
         kwargs["enterprise_diagnostics"] = True
     return kwargs
@@ -548,12 +617,18 @@ class CreateConversationRequest(StrictModel):
     equipmentId: str | None = Field(default=None, max_length=128)
     fixedAssetNo: str | None = Field(default=None, max_length=128)
     faultCode: str | None = Field(default=None, max_length=128)
+    model: str | None = Field(default=None, max_length=128)
+    equipmentType: str | None = Field(default=None, max_length=128)
+    manufacturer: str | None = Field(default=None, max_length=128)
 
 
 class PatchContextRequest(StrictModel):
     equipmentId: str | None = Field(default=None, max_length=128)
     fixedAssetNo: str | None = Field(default=None, max_length=128)
     faultCode: str | None = Field(default=None, max_length=128)
+    model: str | None = Field(default=None, max_length=128)
+    equipmentType: str | None = Field(default=None, max_length=128)
+    manufacturer: str | None = Field(default=None, max_length=128)
 
     @model_validator(mode="after")
     def at_least_one_field(self):
@@ -600,10 +675,14 @@ class MessageAttachmentMetadata(StrictModel):
 def _conversation_detail(row: dict) -> dict:
     summary = v2_store.conversation_payload(row)
     devices = v2_store.devices_from_row(row)
+    business_context = v2_store.business_context_from_row(row)
     summary["context"] = {
         "equipmentId": row["equipment_id"],
         "fixedAssetNo": row["fixed_asset_no"],
         "faultCode": row["fault_code"],
+        "model": business_context.get("model"),
+        "equipmentType": business_context.get("equipment_type"),
+        "manufacturer": business_context.get("manufacturer"),
         "contextVersion": row["context_version"],
         "registryVersion": row.get("registry_version"),
         "conversationDevices": devices,
@@ -640,6 +719,7 @@ async def create_conversation(
         fixed_asset_no=snapshot["fixed_asset_no"],
         asset_id=snapshot["asset_id"],
         fault_code=req.faultCode,
+        business_context=_business_context_values(req.model_dump()),
         registry_version=snapshot["registry_version"],
         context_resolved_at=snapshot["context_resolved_at"],
     )
@@ -698,6 +778,14 @@ async def patch_context(
             "fixedAssetNo": row["fixed_asset_no"],
             "faultCode": row["fault_code"],
         }
+        existing_business_context = v2_store.business_context_from_row(row)
+        values.update(
+            {
+                "model": existing_business_context.get("model"),
+                "equipmentType": existing_business_context.get("equipment_type"),
+                "manufacturer": existing_business_context.get("manufacturer"),
+            }
+        )
         for field in req.model_fields_set:
             values[field] = getattr(req, field)
         snapshot = _submitted_snapshot(
@@ -720,12 +808,14 @@ async def patch_context(
             snapshot["fixed_asset_no"],
             snapshot["asset_id"],
             values["faultCode"],
+            _business_context_values(values),
             devices,
         ) != (
             row["equipment_id"],
             row["fixed_asset_no"],
             row.get("asset_id"),
             row["fault_code"],
+            existing_business_context,
             v2_store.devices_from_row(row),
         )
         updated = await _gw_write(db, v2_store.update_context,
@@ -742,6 +832,7 @@ async def patch_context(
             expected_context_version=row["context_version"],
             conversation_devices=devices,
             update_devices=True,
+            business_context=_business_context_values(values),
         )
         if updated is None:
             return _error(
@@ -1090,6 +1181,11 @@ async def _resolve_turn_scope(
     else:
         # Open mode with no device id: wide retrieval over ACL-available docs.
         entity_ids = []
+        selected = available
+
+    # The rollout policy changes only the default device narrowing decision.
+    # ACL, readiness and the current turn's entity resolution remain Gateway-owned.
+    if not unresolved and _current_retrieval_scope_policy() == "authorized_context":
         selected = available
 
     if persist and (
@@ -1589,6 +1685,7 @@ async def _prepare_message_run(
         title=title,
         entity_scope=conversation.get("_turn_entity_ids") or [],
         allowed_doc_ids=conversation.get("_turn_document_ids") or [],
+        retrieval_context=_retrieval_context_snapshot(conversation),
     )
     if run is None:
         replay, response = await _replay_or_pending(db, principal, conversation, req, pending)
@@ -1689,6 +1786,7 @@ async def _execute_json_run(
     assistant_message_id = run.get("assistant_message_id") or str(uuid.uuid4())
     pending = pending or []
     client = None
+    retrieval_context = _run_retrieval_context(run, conversation)
     if config.rag_diagnostics_enabled:
         try:
             run["_diagnostics"] = start_trace(
@@ -1721,6 +1819,8 @@ async def _execute_json_run(
                     "entityIds": conversation.get("_turn_entity_ids") or [],
                     "requestedDocumentIds": conversation.get("_turn_document_ids") or [],
                     "allowedDocumentIds": list(scope.document_ids),
+                    "policy": retrieval_context.get("policy"),
+                    "docScopeMode": retrieval_context.get("doc_scope_mode"),
                 },
             )
             answer = NO_RELIABLE_EVIDENCE_ANSWER
@@ -1751,6 +1851,7 @@ async def _execute_json_run(
                     internet=effective_internet,
                     session_id=session_id,
                     reasoning_mode=req.reasoningMode,
+                    retrieval_context=retrieval_context,
                 )
                 upstream_started = perf_counter()
                 upstream_status = "success"
@@ -1957,6 +2058,7 @@ async def _stream_run_events(
     splitter = StreamThinkSplitter()
     pending = pending or []
     client = None
+    retrieval_context = _run_retrieval_context(run, conversation)
     live_streamed = False
     emitted_answer = ""
     first_stream_output_recorded = False
@@ -1981,6 +2083,8 @@ async def _stream_run_events(
                 "entityIds": conversation.get("_turn_entity_ids") or [],
                 "requestedDocumentIds": conversation.get("_turn_document_ids") or [],
                 "allowedDocumentIds": list(scope.document_ids),
+                "policy": retrieval_context.get("policy"),
+                "docScopeMode": retrieval_context.get("doc_scope_mode"),
             },
         )
         if not scope.is_empty:
@@ -2007,6 +2111,7 @@ async def _stream_run_events(
                 internet=effective_internet,
                 session_id=session_id,
                 reasoning_mode=req.reasoningMode,
+                retrieval_context=retrieval_context,
             )
             upstream_started = perf_counter()
             async def iter_upstream():

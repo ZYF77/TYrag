@@ -341,6 +341,7 @@ ext_v2_conversation = Table(
     Column("fixed_asset_no", Text),
     Column("asset_id", Text),
     Column("fault_code", Text),
+    Column("business_context_json", Text),
     Column("conversation_devices", Text, nullable=False, server_default="[]"),
     Column("anchor_equipment_id", Text),
     Column("context_version", Integer, nullable=False, server_default="0"),
@@ -390,6 +391,7 @@ ext_v2_message_run = Table(
     Column("result_json", Text),
     Column("entity_scope_json", Text),
     Column("allowed_doc_ids_json", Text),
+    Column("retrieval_context_json", Text),
     Column("created_at", Text, nullable=False),
 )
 

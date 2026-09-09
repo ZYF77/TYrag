@@ -85,7 +85,7 @@ def _build_formalize_evidence_text(tools, kbinfos) -> str:
     preamble so Agentic answers match the simple-path D2 contract.
     """
     scope_ids = list(getattr(tools, "scope_identifiers", None) or [])
-    if scope_ids:
+    if scope_ids or getattr(tools, "doc_scope_mode", None) == "restrict":
         from api.utils.reference_metadata_utils import enrich_chunks_with_document_metadata
 
         enrich_chunks_with_document_metadata(
@@ -94,10 +94,14 @@ def _build_formalize_evidence_text(tools, kbinfos) -> str:
     blocks = kb_prompt(kbinfos, tools.chat_mdl.max_length)
     if not isinstance(blocks, list):
         blocks = [blocks] if blocks else []
-    if scope_ids:
+    if scope_ids or getattr(tools, "doc_scope_mode", None) == "restrict":
         from api.utils.scope_identity_prompt import _build_scope_identity_knowledge_block
 
-        block = _build_scope_identity_knowledge_block(scope_ids)
+        block = _build_scope_identity_knowledge_block(
+            scope_ids,
+            doc_scope_mode=getattr(tools, "doc_scope_mode", None),
+            business_context=getattr(tools, "business_context", None),
+        )
         if block:
             blocks = [block, *blocks]
     return "\n".join(blocks)
@@ -227,6 +231,15 @@ def build_agentic_graph(tools, token_queue: asyncio.Queue, gen_conf: dict | None
         q = (q or "").strip()
         kw = (kw or "").strip()
         _LOG.info('[Formalizing the question] Understood the question as: "%s" — searching with keywords: %s', _snip(q), _snip(kw))
+        record_rag_diagnostics(
+            "scope",
+            {
+                "inferenceMode": getattr(tools, "thinking_mode", "medium"),
+                "requestedDocumentIds": getattr(tools, "requested_doc_scope", None) or [],
+                "actualDocumentIds": getattr(tools, "doc_scope", None) or [],
+                "docScopeMode": getattr(tools, "doc_scope_mode", None),
+            },
+        )
         return {
             "question": q,
             "keywords": kw,

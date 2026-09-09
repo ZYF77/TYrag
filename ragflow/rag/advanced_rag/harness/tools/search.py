@@ -10,6 +10,13 @@ from .navigation import _kg_scopes
 _LOG = logging.getLogger(__name__)
 
 
+def _restricted_empty_scope(tools, doc_scope) -> bool:
+    return doc_scope == [] and (
+        getattr(tools, "doc_scope_mode", None) == "restrict"
+        or getattr(tools, "doc_scope", None) == []
+    )
+
+
 # Sentence terminators: Chinese 。！？；, English ! ? ;, newline, and a
 # digit-guarded English period (so "3.14" / "v1.2" don't split).
 _SENT_END = re.compile(r"[。！？；!?;]+|(?<!\d)\.(?!\d)")
@@ -220,6 +227,8 @@ async def hybrid_search(tools, query: str, kb_ids: list[str] | None = None, top_
     target_ids = kb_ids or tools.kb_ids
     if hasattr(tools, "scoped_doc_ids"):
         doc_scope = tools.scoped_doc_ids(doc_scope)
+    if _restricted_empty_scope(tools, doc_scope):
+        return {"chunks": [], "doc_aggs": []}
     _LOG.info(
         "[Hybrid search] query_chars=%d keyword_chars=%d",
         len(query or ""),
@@ -293,6 +302,8 @@ async def vector_search(tools, query: str, kb_ids: list[str] | None = None, top_
     target_ids = kb_ids or tools.kb_ids
     if hasattr(tools, "scoped_doc_ids"):
         doc_scope = tools.scoped_doc_ids(doc_scope)
+    if _restricted_empty_scope(tools, doc_scope):
+        return {"chunks": [], "doc_aggs": []}
     kbinfos = await settings.retriever.retrieval(
         effective_query,
         tools.embed_mdl,
@@ -332,6 +343,8 @@ async def bm25_search(tools, query: str, kb_ids: list[str] | None = None, top_n:
     effective_query = f"{query} {keywords}".strip() if keywords else query
     if hasattr(tools, "scoped_doc_ids"):
         doc_scope = tools.scoped_doc_ids(doc_scope)
+    if _restricted_empty_scope(tools, doc_scope):
+        return {"chunks": [], "doc_aggs": []}
     kbinfos = await settings.retriever.retrieval(
         effective_query,
         None,
@@ -829,7 +842,9 @@ async def _expand_wiki_page_strategy(
 
 
 async def web_search(tools, query: str, keywords: str = "") -> dict:
-    if not tools.has_web():
+    if not tools.has_web() or _restricted_empty_scope(
+        tools, getattr(tools, "doc_scope", None)
+    ):
         return {"chunks": [], "doc_aggs": []}
 
     _LOG.info("[Web search] query_chars=%d", len(query or ""))
@@ -857,6 +872,8 @@ async def structured_query(tools, query: str, keywords: str = "", kb_ids: list[s
         return {"answer": "", "chunks": [], "doc_aggs": []}
     if hasattr(tools, "scoped_doc_ids"):
         doc_scope = tools.scoped_doc_ids(doc_scope)
+    if _restricted_empty_scope(tools, doc_scope):
+        return {"answer": "", "chunks": [], "doc_aggs": []}
     from api.db.services.dialog_service import use_sql
 
     tenant_id = sql_kbs[0].tenant_id

@@ -159,6 +159,7 @@ async def apply_meta_data_filter(
     manual_value_resolver: Callable[[dict], dict] | None = None,
     kb_ids: list[str] | None = None,
     metas_loader: Callable[[], dict] | None = None,
+    doc_scope_mode: str | None = None,
 ) -> list[str] | None:
     """
     Apply metadata filtering rules and return the filtered doc_ids.
@@ -179,15 +180,35 @@ async def apply_meta_data_filter(
     context in ``auto`` / ``semi_auto`` modes, or as the in-memory fallback
     when push-down can't service a request. ``manual`` mode that lands on the
     push-down path therefore skips the expensive
-    ``get_flatted_meta_by_kbs`` round-trip entirely.
+    get_flatted_meta_by_kbs round-trip entirely.
+
+    doc_scope_mode="restrict" makes base_doc_ids the hard candidate set.
+    Metadata results are intersected with it, and an empty or sentinel
+    candidate set returns [] without falling back to the corpus.
 
     Returns:
         list of doc_ids, ["-999"] when manual filters yield no result, or None
-        when auto/semi_auto filters return empty.
+        when auto/semi_auto filters return empty in the default mode. Restrict
+        mode returns [] for zero matches.
     """
     from rag.prompts.generator import gen_meta_filter  # move from the top of the file to avoid circular import
 
-    doc_ids = list(base_doc_ids) if base_doc_ids else []
+    strict_scope = doc_scope_mode == "restrict"
+    if strict_scope:
+        if base_doc_ids is None:
+            return []
+        doc_ids = list(
+            dict.fromkeys(
+                str(doc_id)
+                for doc_id in base_doc_ids
+                if doc_id is not None and str(doc_id).strip() and str(doc_id) != "-999"
+            )
+        )
+        if not doc_ids:
+            return []
+    else:
+        doc_ids = list(base_doc_ids) if base_doc_ids else []
+    scope_ids = set(doc_ids) if strict_scope else set()
 
     if not meta_data_filter:
         return doc_ids
@@ -197,12 +218,31 @@ async def apply_meta_data_filter(
     # Memoised metadata loader. ``_get_metas`` materialises the dict at most
     # once per call; downstream branches that never reach an in-memory eval
     # leave the loader untouched.
-    cached_metas: dict | None = metas
+    def _restrict_metas(value: dict | None) -> dict:
+        if not strict_scope or not isinstance(value, dict):
+            return value or {}
+        scoped: dict = {}
+        for key, buckets in value.items():
+            if not isinstance(buckets, dict):
+                continue
+            scoped_buckets = {}
+            for metadata_value, values in buckets.items():
+                values = values if isinstance(values, (list, tuple, set)) else [values]
+                scoped_values = [
+                    doc_id for doc_id in values if str(doc_id) in scope_ids
+                ]
+                if scoped_values:
+                    scoped_buckets[metadata_value] = scoped_values
+            if scoped_buckets:
+                scoped[key] = scoped_buckets
+        return scoped
+
+    cached_metas: dict | None = _restrict_metas(metas)
 
     def _get_metas() -> dict:
         nonlocal cached_metas
         if cached_metas is None:
-            cached_metas = metas_loader() if metas_loader else {}
+            cached_metas = _restrict_metas(metas_loader() if metas_loader else {})
         return cached_metas
 
     def _run_metadata_filter(conditions: list[dict], logic: str) -> list[str]:
@@ -211,23 +251,45 @@ async def apply_meta_data_filter(
             try:
                 from api.db.services.doc_metadata_service import DocMetadataService
 
-                doc_ids = DocMetadataService.filter_doc_ids_by_meta_pushdown(kb_ids, conditions, logic)
-                logging.debug(f"Doc ids filtered by metadata: {doc_ids}")
-                if doc_ids is not None:
-                    return doc_ids
+                if strict_scope:
+                    filtered = DocMetadataService.filter_doc_ids_by_meta_pushdown(
+                        kb_ids,
+                        conditions,
+                        logic,
+                        doc_ids=doc_ids,
+                    )
+                else:
+                    filtered = DocMetadataService.filter_doc_ids_by_meta_pushdown(
+                        kb_ids, conditions, logic
+                    )
+                logging.debug(f"Doc ids filtered by metadata: {filtered}")
+                if filtered is not None:
+                    if strict_scope:
+                        return [doc_id for doc_id in filtered if str(doc_id) in scope_ids]
+                    return filtered
             except Exception as e:
                 logging.error(f"Metadata filter push down errored: {e}")
 
         # In-memory fallback
         logging.debug("Metadata filter falls back to in-memory filter")
-        return meta_filter(_get_metas(), conditions, logic)
+        filtered = meta_filter(_get_metas(), conditions, logic)
+        if strict_scope:
+            return [doc_id for doc_id in filtered if str(doc_id) in scope_ids]
+        return filtered
 
     if method == "auto":
         filters: dict = await gen_meta_filter(chat_mdl, _get_metas(), question)
         logging.debug(f"Metadata filter(auto) generated: {filters}")
-        doc_ids.extend(_run_metadata_filter(filters["conditions"], filters.get("logic", "and")))
+        conditions = filters.get("conditions") or []
+        if not conditions:
+            return doc_ids if strict_scope or doc_ids else None
+        filtered = _run_metadata_filter(conditions, filters.get("logic", "and"))
+        if strict_scope:
+            doc_ids = filtered
+        else:
+            doc_ids.extend(filtered)
         if not doc_ids:
-            return None
+            return [] if strict_scope else None
     elif method == "semi_auto":
         selected_keys = []
         constraints = {}
@@ -247,16 +309,28 @@ async def apply_meta_data_filter(
             if filtered_metas:
                 filters: dict = await gen_meta_filter(chat_mdl, filtered_metas, question, constraints=constraints)
                 logging.debug(f"Metadata filter(semi_auto) generated: {filters}")
-                doc_ids.extend(_run_metadata_filter(filters["conditions"], filters.get("logic", "and")))
+                conditions = filters.get("conditions") or []
+                if not conditions:
+                    return doc_ids if strict_scope or doc_ids else None
+                filtered = _run_metadata_filter(conditions, filters.get("logic", "and"))
+                if strict_scope:
+                    doc_ids = filtered
+                else:
+                    doc_ids.extend(filtered)
                 if not doc_ids:
-                    return None
+                    return [] if strict_scope else None
     elif method == "manual":
         filters = meta_data_filter.get("manual", [])
         if manual_value_resolver:
             filters = [manual_value_resolver(flt) for flt in filters]
         logging.debug(f"Metadata filter(manual): {filters}")
-        doc_ids.extend(_run_metadata_filter(filters, meta_data_filter.get("logic", "and")))
-        if filters and not doc_ids:
+        if filters:
+            filtered = _run_metadata_filter(filters, meta_data_filter.get("logic", "and"))
+            if strict_scope:
+                doc_ids = filtered
+            else:
+                doc_ids.extend(filtered)
+        if filters and not doc_ids and not strict_scope:
             doc_ids = ["-999"]
 
     logging.debug(f"apply_meta_data_filter meta_filter={meta_data_filter}, returning doc_ids={doc_ids}")

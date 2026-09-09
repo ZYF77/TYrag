@@ -30,8 +30,10 @@ model (no tool schema is bound onto it) and its ``async_chat*`` calls take
 the fast non-tool-calling path.
 """
 
+import json
 import logging
 import re
+from timeit import default_timer as timer
 from typing import Any, List
 from urllib.parse import urlsplit
 
@@ -55,6 +57,8 @@ from rag.prompts.generator import (
     multi_queries_gen,
     sufficiency_select,
 )
+from common.metadata_utils import apply_meta_data_filter
+from rag.diagnostics import rag_diagnostics_stage, record_timed_rag_stage
 from api.db.db_models import Document, Knowledgebase
 from rag.utils.web_search_conn import WebSearchProvider
 
@@ -83,12 +87,26 @@ class RAGTools:
         do_refer: bool | None = True,
         thinking_mode: str = "medium",
         scope_identifiers: list[str] | None = None,
+        doc_scope_mode: str | None = None,
+        business_context: dict | None = None,
     ):
         self.tenant_ids = tenant_ids
         self.chat_mdl = chat_mdl.clone()
         self.embed_mdl = embed_mdl
         self.thinking_mode = thinking_mode
         self.scope_identifiers = list(scope_identifiers or [])
+        self.doc_scope_mode = doc_scope_mode
+        self.business_context = (
+            dict(business_context) if isinstance(business_context, dict) else {}
+        )
+        self.metadata_kb_ids = (
+            list(kb_ids)
+            if kb_ids is not None
+            else [kb.id for kb in (kbs or [])]
+        )
+        self.requested_doc_scope = (
+            list(doc_scope) if doc_scope is not None else None
+        )
         self.field_map = {}
         self.sql_kbs = []
         self.kbs = []
@@ -111,7 +129,13 @@ class RAGTools:
 
         self.web_search = web_search
         self.meta_data_filter = meta_data_filter
-        self.doc_scope = list(dict.fromkeys(doc_scope)) if doc_scope is not None else None
+        if doc_scope is not None:
+            normalized_scope = [
+                doc_id for doc_id in doc_scope if str(doc_id) != "-999"
+            ]
+            self.doc_scope = list(dict.fromkeys(normalized_scope))
+        else:
+            self.doc_scope = None
         self.user_defined_prompts = user_defined_prompts or {}
         self.kbinfos = {"chunks": [], "doc_aggs": []}
         self.do_refer = do_refer
@@ -148,7 +172,7 @@ class RAGTools:
     def scoped_doc_ids(self, doc_scope: List[str] | None = None) -> List[str] | None:
         if self.doc_scope is None:
             return doc_scope
-        if not doc_scope:
+        if doc_scope is None:
             return list(self.doc_scope)
         allowed = set(self.doc_scope)
         return [doc_id for doc_id in doc_scope if doc_id in allowed]
@@ -313,6 +337,27 @@ class RAGTools:
             "Output ONLY JSON, no prose, no code fences: "
             '{"question": "<standalone question>", "keywords": "<term1, term2, synonym1, ...>"}'
         )
+        if self.business_context:
+            context = {
+                key: str(value).strip()
+                for key, value in self.business_context.items()
+                if key in {
+                    "equipment_id",
+                    "fixed_asset_no",
+                    "fault_code",
+                    "model",
+                    "equipment_type",
+                    "manufacturer",
+                }
+                and isinstance(value, str)
+                and value.strip()
+            }
+            if context:
+                system += (
+                    "\nSoft business context is provided only to understand the "
+                    "question; it is not authorization or evidence:\n"
+                    + json.dumps(context, ensure_ascii=False, sort_keys=True)
+                )
         user = f"Conversation:\n{transcript}\n\nOutput JSON:"
         _, msg = message_fit_in(form_message(system, user), self.chat_mdl.max_length)
         ans = await self.chat_mdl.async_chat(msg[0]["content"], msg[1:], {"temperature": 0.1})
@@ -332,6 +377,51 @@ class RAGTools:
         if not question:
             # Fall back to the raw last user message rather than an empty question.
             question = (last_user or "").strip()
+
+        if self.meta_data_filter:
+            initial_scope = self.doc_scope
+            metadata_method = str(self.meta_data_filter.get("method") or "disabled")
+            metadata_started = timer()
+            metadata_status = "success"
+            try:
+                if self.doc_scope_mode == "restrict":
+                    metadata_loader = lambda: DocMetadataService.get_flatted_meta_by_kbs(
+                        self.metadata_kb_ids, doc_ids=initial_scope
+                    )
+                else:
+                    metadata_loader = lambda: DocMetadataService.get_flatted_meta_by_kbs(
+                        self.metadata_kb_ids
+                    )
+                with rag_diagnostics_stage("metadata_filter"):
+                    filtered_scope = await apply_meta_data_filter(
+                        self.meta_data_filter,
+                        None,
+                        question,
+                        self.chat_mdl,
+                        initial_scope,
+                        kb_ids=self.metadata_kb_ids,
+                        metas_loader=metadata_loader,
+                        doc_scope_mode=self.doc_scope_mode,
+                    )
+            except Exception:
+                metadata_status = "failed"
+                raise
+            finally:
+                record_timed_rag_stage(
+                    "metadata_filter",
+                    metadata_started,
+                    enabled=True,
+                    executed=True,
+                    method=metadata_method,
+                    status=metadata_status,
+                )
+            if initial_scope is None:
+                self.doc_scope = filtered_scope
+            else:
+                allowed = set(initial_scope)
+                self.doc_scope = [
+                    doc_id for doc_id in filtered_scope or [] if doc_id in allowed
+                ]
 
         keywords = data.get("keywords") or ""
         if isinstance(keywords, list):
@@ -453,6 +543,8 @@ class RAGTools:
         """
         if not self.kb_ids:
             return {"chunks": [], "doc_aggs": []}
+        if self.doc_scope == []:
+            return {"chunks": [], "doc_aggs": []}
         if isinstance(keywords, list):
             keywords = ",".join(keywords)
         logging.info(
@@ -462,7 +554,7 @@ class RAGTools:
         )
 
         doc_scope = self.scoped_doc_ids(doc_scope)
-        if doc_scope == ["-999"]:
+        if doc_scope == [] or doc_scope == ["-999"]:
             return {"chunks": [], "doc_aggs": []}
         if doc_scope:
             candidates = [d for d in doc_scope if isinstance(d, str)]
@@ -506,7 +598,7 @@ class RAGTools:
 
     async def web_retrieve(self, query: str) -> dict[str, list]:
         """Retrieve chunks from the public web. Raw kbinfos shape."""
-        if self.web_search is None:
+        if self.web_search is None or self.doc_scope == []:
             return {"chunks": [], "doc_aggs": []}
         try:
             web_res = await thread_pool_exec(self.web_search.retrieve_chunks, query)
@@ -523,6 +615,8 @@ class RAGTools:
         the chunks/doc_aggs feed the shared citation pool.
         """
         if not self.has_structured():
+            return {"answer": "", "chunks": [], "doc_aggs": []}
+        if self.doc_scope == []:
             return {"answer": "", "chunks": [], "doc_aggs": []}
 
         # Lazy import — dialog_service constructs RAGTools.
