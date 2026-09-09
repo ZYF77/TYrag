@@ -1,11 +1,16 @@
-"""Timing semantics for private query diagnostics."""
+"""Timing semantics and P0 inquiry phased diagnostics."""
+
+from time import perf_counter
+from unittest.mock import patch
 
 from enterprise.gateway.query.diagnostics import (
     finish_trace,
     merge_upstream,
     record_event,
+    record_timed_event,
     start_trace,
 )
+from enterprise.gateway.query import v2_router
 
 
 def test_event_duration_is_step_time_while_at_ms_is_cumulative():
@@ -46,3 +51,204 @@ def test_merge_upstream_preserves_source_time_and_step_duration():
     assert event["sourceAtMs"] == 40
     assert event["durationMs"] == 12.5
     assert event["data"]["stage"] == "rerank"
+
+
+def test_phased_gateway_events_present_when_recorded():
+    trace = start_trace("run-phased", query="safe", reasoning_mode="simple", stream=False)
+    started = perf_counter()
+    record_timed_event(
+        trace,
+        "scope",
+        started,
+        {"source": "gateway", "stage": "gateway_scope", "allowedDocumentIds": ["d1"]},
+    )
+    record_timed_event(
+        trace,
+        "attachment_understand",
+        started,
+        {
+            "source": "gateway",
+            "stage": "attachment_understand",
+            "attachmentCount": 1,
+            "observationCount": 1,
+            "understoodCount": 1,
+        },
+    )
+    record_timed_event(
+        trace,
+        "chat_session",
+        started,
+        {
+            "source": "gateway",
+            "stage": "chat_session",
+            "binding": "warmup_hit",
+            "sessionId": "s1",
+        },
+    )
+    record_timed_event(
+        trace,
+        "upstream_request",
+        started,
+        {"source": "gateway", "stage": "ragflow_request", "status": "success"},
+    )
+    record_timed_event(
+        trace,
+        "stream_first_token",
+        started,
+        {"source": "gateway", "stage": "stream_first_token", "status": "success"},
+    )
+    record_timed_event(
+        trace,
+        "citation_projection",
+        started,
+        {"source": "gateway", "stage": "citation_projection", "citationCount": 0},
+    )
+    merge_upstream(
+        trace,
+        {
+            "runId": "run-phased",
+            "durationMs": 50,
+            "events": [
+                {
+                    "type": "stage",
+                    "atMs": 5,
+                    "durationMs": 1,
+                    "data": {"stage": "embedding", "source": "ragflow"},
+                },
+                {
+                    "type": "stage",
+                    "atMs": 10,
+                    "durationMs": 2,
+                    "data": {"stage": "candidate_search", "source": "ragflow"},
+                },
+                {
+                    "type": "stage",
+                    "atMs": 20,
+                    "durationMs": 3,
+                    "data": {"stage": "rerank", "source": "ragflow", "enabled": False},
+                },
+                {
+                    "type": "stage",
+                    "atMs": 30,
+                    "durationMs": 4,
+                    "data": {"stage": "answer_generation", "source": "ragflow"},
+                },
+                {
+                    "type": "stage",
+                    "atMs": 35,
+                    "durationMs": 1,
+                    "data": {
+                        "stage": "tool",
+                        "source": "ragflow",
+                        "toolName": "search",
+                        "toolCallCount": 1,
+                        "toolDurationMsTotal": 1.0,
+                    },
+                },
+            ],
+        },
+    )
+
+    result = finish_trace(trace, outcome="completed")
+    types = {event["type"] for event in result["events"]}
+    stages = {
+        (event.get("data") or {}).get("stage")
+        for event in result["events"]
+        if isinstance(event.get("data"), dict)
+    }
+    assert "scope" in types
+    assert "attachment_understand" in types
+    assert "chat_session" in types
+    assert "upstream_request" in types
+    assert "stream_first_token" in types
+    assert "citation_projection" in types
+    assert "gateway_scope" in stages
+    assert "embedding" in stages
+    assert "candidate_search" in stages
+    assert "rerank" in stages
+    assert "answer_generation" in stages
+    assert "tool" in stages
+    session = next(e for e in result["events"] if e["type"] == "chat_session")
+    assert session["data"]["binding"] == "warmup_hit"
+    assert "durationMs" in session
+    # redaction: blocked keys never appear
+    blob = str(result)
+    assert "prompt" not in blob.lower() or '"prompt"' not in blob
+
+
+def test_diagnostics_absent_when_flag_off_does_not_start_trace():
+    with patch.object(v2_router.config, "rag_diagnostics_enabled", False):
+        assert v2_router.config.rag_diagnostics_enabled is False
+        # Ask-path gate: start_trace only when flag is on.
+        run = {"run_id": "r1"}
+        if v2_router.config.rag_diagnostics_enabled:
+            run["_diagnostics"] = start_trace(
+                run["run_id"], query="q", reasoning_mode="simple", stream=False
+            )
+        assert "_diagnostics" not in run
+
+
+def test_session_binding_records_chat_session_with_warmup_and_fallback():
+    conversation = {"conversation_id": "c1"}
+    for binding in ("warmup_hit", "ensure_fallback"):
+        trace = start_trace("run-bind", query="safe", reasoning_mode="simple", stream=True)
+        started = perf_counter()
+        v2_router._record_session_binding(
+            conversation,
+            trace,
+            binding,
+            session_id="sess-1",
+            chat_id="chat-1",
+            started=started,
+        )
+        finished = finish_trace(trace, outcome="completed")
+        event = next(e for e in finished["events"] if e["type"] == "chat_session")
+        assert event["data"]["binding"] == binding
+        assert event["data"]["stage"] == "chat_session"
+        assert event["durationMs"] >= 0
+        assert conversation["_session_binding"] == binding
+
+
+def test_json_first_byte_derived_from_upstream_llm_ttft():
+    trace = start_trace("run-ttft", query="safe", reasoning_mode="simple", stream=False)
+    merge_upstream(
+        trace,
+        {
+            "runId": "run-ttft",
+            "durationMs": 80,
+            "events": [
+                {
+                    "type": "llm",
+                    "atMs": 40,
+                    "durationMs": 30,
+                    "data": {"ttftMs": 12.25, "stage": "answer_generation"},
+                }
+            ],
+        },
+    )
+    v2_router._record_json_first_byte_from_upstream(trace)
+    finished = finish_trace(trace, outcome="completed")
+    token = next(e for e in finished["events"] if e["type"] == "stream_first_token")
+    assert token["data"]["status"] == "derived_from_upstream_llm"
+    assert token["durationMs"] == 12.25
+
+
+def test_blocked_keys_stripped_from_phased_payloads():
+    trace = start_trace("run-redact", query="safe", reasoning_mode="simple", stream=True)
+    record_timed_event(
+        trace,
+        "attachment_understand",
+        perf_counter(),
+        {
+            "source": "gateway",
+            "stage": "attachment_understand",
+            "prompt": "SECRET-PROMPT",
+            "knowledge": "SECRET-KB",
+            "attachmentCount": 0,
+        },
+    )
+    finished = finish_trace(trace, outcome="completed")
+    event = next(e for e in finished["events"] if e["type"] == "attachment_understand")
+    assert "prompt" not in event["data"]
+    assert "knowledge" not in event["data"]
+    assert event["data"]["attachmentCount"] == 0

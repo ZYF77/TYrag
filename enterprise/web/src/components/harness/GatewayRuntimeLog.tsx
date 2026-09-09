@@ -5,6 +5,8 @@ import type { GatewayHttpLogEvent } from '../../api/consoleTypes';
 import type { DisplayError } from '../../api/v2Types';
 import { ConsoleOverlay } from '../console/ConsoleOverlay';
 import { DEFAULT_PAGE_SIZE, PaginationBar } from '../console/ConsoleTableControls';
+import { PanelError } from '../common/Panel';
+import { formatTimeShort } from '../../lib/format';
 
 type BusinessScene = 'feed' | 'inquiry' | 'callback' | 'admin' | 'other';
 type InterfaceType = 'feed' | 'inquiry' | 'callback' | 'admin' | 'other';
@@ -44,20 +46,6 @@ const SCENE_LABELS: Record<BusinessScene, string> = {
   admin: '系统管理',
   other: '其他',
 };
-
-function formatTime(value: string): string {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime())
-    ? value
-    : date.toLocaleString('zh-CN', {
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      hour12: false,
-    });
-}
 
 function statusTone(status: number | null): string {
   if (status == null || status <= 0) return 'runtime-status--pending';
@@ -461,14 +449,7 @@ export function GatewayRuntimeLog() {
       </div>
 
       <div className="console-card-body">
-        {error && (
-          <div role="alert" className="console-alert">
-            <p>
-              <strong>{error.code}</strong>
-              {error.httpStatus ? ` · HTTP ${error.httpStatus}` : ''} · {error.message}
-            </p>
-          </div>
-        )}
+        {error && <PanelError error={error} />}
         {filteredItems.length === 0 && !error && (
           <p className="console-empty">当前筛选下没有请求。调整条件，或向 Gateway 发起一次调用。</p>
         )}
@@ -493,7 +474,7 @@ export function GatewayRuntimeLog() {
                       onClick={() => setOpenId(open ? null : item.id)}
                       aria-expanded={open}
                     >
-                      <time className="runtime-time" dateTime={item.ts}>{formatTime(item.ts)}</time>
+                      <time className="runtime-time" dateTime={item.ts}>{formatTimeShort(item.ts)}</time>
                       <span className="runtime-kind"><b>{SCENE_LABELS[scene]}</b><small>{INTERFACE_LABELS[kind]}</small></span>
                       <span className="runtime-method">{item.method}</span>
                       <span className="runtime-main"><b>{path}</b><small>{failure.code || failure.reason || preview(item.response_body) || preview(item.body) || '请求已完成'}</small></span>

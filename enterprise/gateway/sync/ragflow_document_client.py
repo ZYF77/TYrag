@@ -87,7 +87,8 @@ class RAGFlowDocumentClient:
 
     def _sync_request(self, method: str, path: str, request_id: str,
                       json_data: dict | None = None,
-                      files: dict | None = None) -> dict:
+                      files: dict | None = None,
+                      timeout: float | None = None) -> dict:
         import urllib.request, urllib.error
         url = f"{self.base_url}{path}"
         headers = self._headers(request_id)
@@ -115,8 +116,9 @@ class RAGFlowDocumentClient:
             headers["Content-Type"] = "application/json"
 
         req = urllib.request.Request(url, data=body, headers=headers, method=method)
+        request_timeout = self.timeout if timeout is None else float(timeout)
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            with urllib.request.urlopen(req, timeout=request_timeout) as resp:
                 return json.loads(resp.read().decode())
         except urllib.error.HTTPError as e:
             err_body = e.read().decode(errors="replace") if e.fp else ""
@@ -531,10 +533,9 @@ class RAGFlowDocumentStub(RAGFlowDocumentClient):
         if doc["data"][0].get("dataset_id") != dataset_id:
             raise RAGFlowAPIError("Stub: document not in dataset", 400)
         if meta_fields is not None:
-            doc["data"][0]["meta_fields"] = {
-                **doc["data"][0].get("meta_fields", {}),
-                **meta_fields,
-            }
+            # RAGFlow replaces the document metadata object; callers that need
+            # to preserve unrelated fields send the merged object explicitly.
+            doc["data"][0]["meta_fields"] = dict(meta_fields)
         if enabled is not None:
             doc["data"][0]["enabled"] = 1 if enabled else 0
         if chunk_method is not None:

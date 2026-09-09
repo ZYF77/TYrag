@@ -241,6 +241,48 @@ export interface DocumentMetadataPage {
   hasMore: boolean;
 }
 
+export interface EquipmentIdentityItem {
+  tenantId: string;
+  equipmentId: string;
+  fixedAssetNo: string | null;
+  assetId: string | null;
+  sourceSystem: string;
+  identityVersion: number;
+  updatedAt: string;
+  documentCount: number;
+  sync: {
+    status: string;
+    errorCode?: string | null;
+    errorMessage?: string | null;
+    updatedAt?: string | null;
+  };
+}
+
+export interface EquipmentIdentityPage {
+  items: EquipmentIdentityItem[];
+  hasMore: boolean;
+}
+
+export interface EquipmentRecognitionSettings {
+  pattern: string;
+  enabled: boolean;
+  configVersion: number;
+  updatedAt: string | null;
+  updatedBy: string | null;
+}
+
+export interface EquipmentRecognitionPreviewItem {
+  candidate: string;
+  equipmentId: string | null;
+  matched: boolean;
+}
+
+export interface EquipmentRecognitionPreview {
+  items: EquipmentRecognitionPreviewItem[];
+  pattern: string;
+  enabled: boolean;
+}
+
 /** 管理员文件元数据高级检索条件；空值表示不参与筛选。 */
 export interface DocumentMetadataFilters {
   externalDocumentId?: string | null;

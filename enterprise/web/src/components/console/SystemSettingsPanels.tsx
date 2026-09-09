@@ -1,13 +1,30 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowDown, ArrowUp, ArrowUpDown, Columns3, RefreshCw, SlidersHorizontal } from 'lucide-react';
+import { RefreshCw, SlidersHorizontal } from 'lucide-react';
 import { toDisplayError, v2Api } from '../../api/v2Client';
-import { ConsoleOverlay } from './ConsoleOverlay';
-import { DEFAULT_PAGE_SIZE, PaginationBar } from './ConsoleTableControls';
 import { DocumentInspector } from './DocumentInspector';
 import { ConversationInspector } from './ConversationInspector';
+import { AdvancedSearchOverlay } from '../common/AdvancedSearchOverlay';
+import {
+  ColumnMenu,
+  useHiddenTableColumns,
+} from '../common/ColumnMenu';
+import {
+  MetadataPagination,
+  MetadataSummaryStrip,
+  MetadataToolbar,
+  ToolbarSelect,
+  type MetadataActiveFilter,
+  type MetadataSummaryChip,
+} from '../common/MetadataControls';
+import { useMetadataPanelState, type MetadataPanelQuery } from '../../hooks/useMetadataPanelState';
+import { ConsoleDataTable } from '../common/ConsoleDataTable';
+import { PanelCard, PanelError, initialPanelState, panelErrorStatus } from '../common/Panel';
+import { StatusPill } from '../common/StatusPill';
+import { EmptyState } from '../common/EmptyState';
+import { ToggleSwitch } from '../common/ToggleSwitch';
+import { NOT_PROVIDED, formatMiB, formatTime, formatValue } from '../../lib/format';
 import type {
   CallbackEndpointConfig,
-  ConsoleModuleStatus,
   ConsoleState,
   ConversationMetadataFilters,
   ConversationMetadataItem,
@@ -19,14 +36,9 @@ import type {
   DocumentMetadataPage,
   EamProbeResult,
   GatewayRuntimeSettings,
-  MetadataSortOrder,
-  MetadataSummary,
   SystemIntegrations,
 } from '../../api/consoleTypes';
 import type { DisplayError } from '../../api/v2Types';
-
-const PAGE_LIMIT = DEFAULT_PAGE_SIZE;
-const NOT_PROVIDED = '未提供';
 
 const CONVERSATION_STATUS_OPTIONS = ['active', 'archived'] as const;
 // 常见同步状态，对齐 enterprise/gateway/sync/status_mapping.py 的 stage 枚举。
@@ -80,90 +92,6 @@ interface ProbeState {
   error?: DisplayError;
 }
 
-function initialPanelState<T>(): ConsoleState<T> {
-  return { status: 'processing', data: null, error: null };
-}
-
-export function panelErrorStatus(error: DisplayError): ConsoleModuleStatus {
-  if (error.httpStatus === 401 || error.httpStatus === 403) return 'unauthorized';
-  if (error.httpStatus === 0 || error.httpStatus === 502 || error.httpStatus === 503) {
-    return 'unavailable';
-  }
-  return 'failed';
-}
-
-export function formatTime(value: string | null | undefined): string {
-  if (!value) return NOT_PROVIDED;
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN', { hour12: false });
-}
-
-function formatValue(value: string | number | null | undefined): string {
-  if (value === null || value === undefined || value === '') return NOT_PROVIDED;
-  return String(value);
-}
-
-function formatMiB(value: number | null | undefined): string {
-  if (value === null || value === undefined) return NOT_PROVIDED;
-  const mib = value / (1024 * 1024);
-  return `${Number.isInteger(mib) ? mib : mib.toFixed(2)} MiB`;
-}
-
-function PanelBadge({ status }: { status: ConsoleModuleStatus }) {
-  return (
-    <span className={`console-status console-status--${status}`}>
-      <span className="console-status-dot" aria-hidden="true" />
-      {status}
-    </span>
-  );
-}
-
-export function PanelCard({
-  eyebrow,
-  title,
-  description,
-  status,
-  actions,
-  children,
-  testId,
-  className,
-}: {
-  eyebrow: string;
-  title: string;
-  description: string;
-  status: ConsoleModuleStatus;
-  actions?: React.ReactNode;
-  children: React.ReactNode;
-  testId: string;
-  className?: string;
-}) {
-  return (
-    <section data-testid={testId} className={`console-card${className ? ` ${className}` : ''}`}>
-      <div className="console-card-head">
-        <div>
-          <p className="console-eyebrow">{eyebrow}</p>
-          <h2>{title}</h2>
-          <p>{description}</p>
-        </div>
-        <div className="console-card-actions">
-          <PanelBadge status={status} />
-          {actions}
-        </div>
-      </div>
-      <div className="console-card-body">{children}</div>
-    </section>
-  );
-}
-
-export function PanelError({ error, onRetry }: { error: DisplayError; onRetry: () => void }) {
-  return (
-    <div role="alert" className="console-alert">
-      <p><strong>{error.code}</strong>{error.httpStatus ? ` · HTTP ${error.httpStatus}` : ''} · {error.message}</p>
-      <button type="button" onClick={onRetry} className="console-secondary-button">重试</button>
-    </div>
-  );
-}
-
 function ProbeBadge({ state }: { state: ProbeState }) {
   if (state.phase === 'probing') {
     return (
@@ -211,30 +139,6 @@ function RuntimeEffectBadge({
     <span className={`runtime-effect-badge ${readOnly ? 'runtime-effect-badge--readonly' : restart ? 'runtime-effect-badge--restart' : 'runtime-effect-badge--hot'}`}>
       {restart ? restartLabel : '可热加载'}
     </span>
-  );
-}
-
-function RuntimeSwitch({
-  checked,
-  label,
-  onChange,
-}: {
-  checked: boolean;
-  label: string;
-  onChange: (checked: boolean) => void;
-}) {
-  return (
-    <label className={`runtime-toggle ${checked ? 'is-on' : ''}`}>
-      <input
-        className="runtime-toggle-input"
-        type="checkbox"
-        checked={checked}
-        aria-label={label}
-        onChange={(event) => onChange(event.target.checked)}
-      />
-      <span className="runtime-toggle-track" aria-hidden="true"><span /></span>
-      <span className="runtime-toggle-text">{checked ? '已启用' : '已停用'}</span>
-    </label>
   );
 }
 
@@ -593,7 +497,7 @@ export function IntegrationsPanel() {
                   <div className="runtime-setting-row" key={section}>
                     <RuntimeSettingLabel title={title} variable={variable} description={description} />
                     <div className="runtime-setting-controls">
-                      <RuntimeSwitch
+                      <ToggleSwitch
                         checked={value.enabled}
                         label={`${title}启用开关`}
                         onChange={(enabled) => patchRuntimeSection(section, { enabled })}
@@ -614,7 +518,7 @@ export function IntegrationsPanel() {
                 <div className="runtime-setting-row">
                   <RuntimeSettingLabel title="临时附件清理" variable="TransientAttachmentCleanupWorker" description="清理过期临时附件，不追溯删除已有附件" />
                   <div className="runtime-setting-controls">
-                    <RuntimeSwitch
+                    <ToggleSwitch
                       checked={runtimeDraft.transientAttachmentCleanup.enabled}
                       label="临时附件清理启用开关"
                       onChange={(enabled) => patchRuntimeSection('transientAttachmentCleanup', { enabled })}
@@ -642,7 +546,7 @@ export function IntegrationsPanel() {
                 <div className="runtime-setting-row">
                   <RuntimeSettingLabel title="质量状态巡检" variable="QualityReconciler" description="补发质评并把卡住的 running 任务标记失败" />
                   <div className="runtime-setting-controls">
-                    <RuntimeSwitch
+                    <ToggleSwitch
                       checked={runtimeDraft.qualityReconciler.enabled}
                       label="质量状态巡检启用开关"
                       onChange={(enabled) => patchRuntimeSection('qualityReconciler', { enabled })}
@@ -670,7 +574,7 @@ export function IntegrationsPanel() {
                 <div className="runtime-setting-row">
                   <RuntimeSettingLabel title="RAG 诊断采集" variable="ENTERPRISE_RAG_DIAGNOSTICS_ENABLED" description="记录检索、重排序和模型阶段的脱敏诊断信息" />
                   <div className="runtime-setting-controls">
-                    <RuntimeSwitch
+                    <ToggleSwitch
                       checked={runtimeDraft.diagnostics.enabled}
                       label="RAG 诊断采集"
                       onChange={(enabled) => patchRuntimeSection('diagnostics', { enabled })}
@@ -830,221 +734,6 @@ export function IntegrationsPanel() {
   );
 }
 
-// ---- Shared metadata building blocks (toolbars, summary, sort, pills) ------
-
-export interface MetadataSortState {
-  orderBy: string | null;
-  order: MetadataSortOrder;
-}
-
-export const DEFAULT_SORT_STATE: MetadataSortState = { orderBy: null, order: 'desc' };
-
-/** 未排序 → desc → asc → 清除（回到服务端默认排序）。 */
-export function nextSortState(current: MetadataSortState, field: string): MetadataSortState {
-  if (current.orderBy !== field) return { orderBy: field, order: 'desc' };
-  if (current.order === 'desc') return { orderBy: field, order: 'asc' };
-  return DEFAULT_SORT_STATE;
-}
-
-/** 业务状态色板：绿=正常、红=失败、橙=需关注、蓝=处理中、灰=其他。 */
-const STATUS_PILL_TONES: Record<string, string> = {
-  ready: 'ok',
-  active: 'ok',
-  completed: 'ok',
-  failed: 'failed',
-  review_required: 'warn',
-  no_reliable_evidence: 'warn',
-  parsing: 'processing',
-  processing: 'processing',
-  running: 'processing',
-  registered: 'muted',
-  cancelled: 'muted',
-  archived: 'muted',
-  superseded: 'muted',
-  disabled: 'muted',
-};
-
-export function StatusPill({ code, label }: { code: string | null | undefined; label?: string }) {
-  const value = code ?? '';
-  const tone = STATUS_PILL_TONES[value] ?? 'muted';
-  return (
-    <span className={`console-status console-status--${tone}`}>
-      <span className="console-status-dot" aria-hidden="true" />
-      {label ?? (value || NOT_PROVIDED)}
-    </span>
-  );
-}
-
-export function SortableTh({
-  label,
-  field,
-  sort,
-  onSort,
-}: {
-  label: string;
-  field: string;
-  sort: MetadataSortState;
-  onSort: (field: string) => void;
-}) {
-  const active = sort.orderBy === field;
-  const Icon = !active ? ArrowUpDown : sort.order === 'asc' ? ArrowUp : ArrowDown;
-  return (
-    <th aria-sort={active ? (sort.order === 'asc' ? 'ascending' : 'descending') : 'none'}>
-      <button
-        type="button"
-        className={`console-th-btn${active ? ' is-active' : ''}`}
-        onClick={() => onSort(field)}
-      >
-        {label}
-        <Icon size={12} aria-hidden="true" />
-      </button>
-    </th>
-  );
-}
-
-export interface MetadataActiveFilter {
-  key: string;
-  label: string;
-  value: string;
-  onClear: () => void;
-}
-
-export function MetadataToolbar({
-  onApply,
-  onReset,
-  activeFilters,
-  totalCount,
-  totalLabel,
-  extra,
-  children,
-}: {
-  onApply?: () => void;
-  onReset: () => void;
-  activeFilters: MetadataActiveFilter[];
-  totalCount: number | null;
-  totalLabel: string;
-  extra?: React.ReactNode;
-  children: React.ReactNode;
-}) {
-  const controls = (
-    <>
-      {children}
-      {onApply && <button type="submit" className="console-secondary-button">筛选</button>}
-      <button type="button" className="console-secondary-button" onClick={onReset}>重置</button>
-    </>
-  );
-  return (
-    <div className="console-toolbar">
-      {onApply ? (
-        <form onSubmit={(event) => { event.preventDefault(); onApply(); }}>{controls}</form>
-      ) : (
-        <div className="console-toolbar-controls">{controls}</div>
-      )}
-      <span className="console-toolbar-spacer" aria-hidden="true" />
-      {extra}
-      <div className="console-toolbar-status">
-        {activeFilters.map((filter) => (
-          <span key={filter.key} className="console-filter-chip">
-            {filter.label} {filter.value}
-            <button type="button" aria-label={`清除${filter.label}筛选`} onClick={filter.onClear}>×</button>
-          </span>
-        ))}
-        <span className="console-chip">
-          {totalCount != null ? `${totalLabel} ${totalCount}` : '数据来源 · Gateway 元数据'}
-        </span>
-      </div>
-    </div>
-  );
-}
-
-function ToolbarSelect({
-  id,
-  label,
-  value,
-  options,
-  onChange,
-}: {
-  id: string;
-  label: string;
-  value: string;
-  options: readonly string[];
-  onChange: (value: string) => void;
-}) {
-  return (
-    <>
-      <label htmlFor={id}>{label}</label>
-      <select id={id} value={value} onChange={(event) => onChange(event.target.value)}>
-        <option value="">全部</option>
-        {options.map((option) => (
-          <option key={option} value={option}>{option}</option>
-        ))}
-      </select>
-    </>
-  );
-}
-
-export interface MetadataSummaryChip {
-  key: string;
-  label: string;
-  count: number;
-  active: boolean;
-  onClick: () => void;
-}
-
-export function MetadataSummaryStrip({
-  chips,
-  testId,
-}: {
-  chips: MetadataSummaryChip[];
-  testId: string;
-}) {
-  return (
-    <div className="console-summary" data-testid={testId}>
-      {chips.map((chip) => (
-        <button
-          key={chip.key}
-          type="button"
-          className={`console-chip console-summary-chip${chip.active ? ' is-active' : ''}`}
-          onClick={chip.onClick}
-        >
-          {chip.label} {chip.count}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-export function MetadataPagination({
-  offset,
-  itemCount,
-  hasMore,
-  onPrev,
-  onNext,
-  pageSize = PAGE_LIMIT,
-  onPageSizeChange,
-}: {
-  offset: number;
-  itemCount: number;
-  hasMore: boolean;
-  onPrev: () => void;
-  onNext: () => void;
-  pageSize?: number;
-  onPageSizeChange?: (pageSize: number) => void;
-}) {
-  const pageNumber = Math.floor(Math.max(0, offset) / Math.max(1, pageSize)) + 1;
-  return (
-    <PaginationBar
-      page={pageNumber}
-      itemCount={itemCount}
-      hasMore={hasMore}
-      pageSize={pageSize}
-      onPageSizeChange={onPageSizeChange}
-      onPrevious={onPrev}
-      onNext={onNext}
-    />
-  );
-}
-
 // ---- 会话元数据 ------------------------------------------------------------
 
 type ConversationColumnKey =
@@ -1134,17 +823,9 @@ function renderConversationCell(item: ConversationMetadataItem, key: Conversatio
 }
 
 export function ConversationMetadataPanel() {
-  const [state, setState] = useState<ConsoleState<ConversationMetadataPage>>(initialPanelState<ConversationMetadataPage>);
   const [statusFilter, setStatusFilter] = useState('');
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [advancedDraft, setAdvancedDraft] = useState<ConversationFilterDraft>(EMPTY_CONVERSATION_FILTERS);
-  const [advancedFilters, setAdvancedFilters] = useState<ConversationFilterDraft>(EMPTY_CONVERSATION_FILTERS);
   const advancedTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const [sort, setSort] = useState<MetadataSortState>(DEFAULT_SORT_STATE);
-  const [offset, setOffset] = useState(0);
-  const [pageSize, setPageSize] = useState(PAGE_LIMIT);
-  const [requestToken, setRequestToken] = useState(0);
-  const [summary, setSummary] = useState<MetadataSummary | null>(null);
   const [selectedConversation, setSelectedConversation] = useState<ConversationMetadataItem | null>(null);
   const { hiddenColumns: hiddenConversationColumns, visibleColumns: visibleConversationColumns, toggleColumn: toggleConversationColumn, resetColumns: resetConversationColumns } = useHiddenTableColumns(
     CONVERSATION_HIDDEN_COLUMNS_KEY,
@@ -1152,14 +833,11 @@ export function ConversationMetadataPanel() {
     CONVERSATION_COLUMNS,
   );
 
-  const reload = useCallback(() => setRequestToken((token) => token + 1), []);
-
-  const load = useCallback(async () => {
-    setState(initialPanelState<ConversationMetadataPage>());
-    const contextVersion = advancedFilters.contextVersion.trim();
-    try {
-      const data = await v2Api.listAdminConversationMetadata({
-        limit: pageSize,
+  const fetchPage = useCallback(
+    async ({ limit, offset, sort }: MetadataPanelQuery, advancedFilters: ConversationFilterDraft) => {
+      const contextVersion = advancedFilters.contextVersion.trim();
+      return v2Api.listAdminConversationMetadata({
+        limit,
         offset,
         status: statusFilter || null,
         filters: {
@@ -1173,61 +851,38 @@ export function ConversationMetadataPanel() {
         orderBy: sort.orderBy as ConversationMetadataOrderBy | null,
         order: sort.orderBy ? sort.order : null,
       });
-      setState({ status: 'healthy', data, error: null });
-    } catch (error) {
-      const displayError = toDisplayError(error);
-      setState({ status: panelErrorStatus(displayError), data: null, error: displayError });
-    }
-  }, [advancedFilters, offset, pageSize, sort, statusFilter]);
+    },
+    [statusFilter],
+  );
 
-  const loadSummary = useCallback(async () => {
-    try {
-      setSummary(await v2Api.getMetadataSummary());
-    } catch {
-      // 汇总失败静默降级，不阻断主表。
-      setSummary(null);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load, requestToken]);
-
-  useEffect(() => {
-    void loadSummary();
-  }, [loadSummary]);
+  const {
+    state, summary, sort, offset, pageSize,
+    advancedDraft, advancedFilters,
+    setAdvancedDraft, setAdvancedFilters, setOffset, setPageSize,
+    reload, loadSummary, handleSort,
+    applyAdvancedFilters, clearAdvancedFilter, resetAdvancedAndSort,
+  } = useMetadataPanelState<ConversationMetadataPage, ConversationFilterDraft>({
+    fetchPage,
+    emptyFilters: EMPTY_CONVERSATION_FILTERS,
+    normaliseFilters: normaliseConversationFilters,
+  });
 
   const applyFilters = useCallback(() => {
-    setAdvancedFilters(normaliseConversationFilters(advancedDraft));
-    setOffset(0);
+    applyAdvancedFilters();
     setAdvancedOpen(false);
-  }, [advancedDraft]);
+  }, [applyAdvancedFilters]);
 
   const resetFilters = useCallback(() => {
     setStatusFilter('');
-    setAdvancedDraft(EMPTY_CONVERSATION_FILTERS);
-    setAdvancedFilters(EMPTY_CONVERSATION_FILTERS);
-    setSort(DEFAULT_SORT_STATE);
-    setOffset(0);
-  }, []);
-
-  const clearAdvancedFilter = useCallback((key: ConversationFilterKey) => {
-    setAdvancedDraft((current) => ({ ...current, [key]: '' }));
-    setAdvancedFilters((current) => ({ ...current, [key]: '' }));
-    setOffset(0);
-  }, []);
+    resetAdvancedAndSort();
+  }, [resetAdvancedAndSort]);
 
   const clearConversationFilters = useCallback(() => {
     setStatusFilter('');
     setAdvancedDraft(EMPTY_CONVERSATION_FILTERS);
     setAdvancedFilters(EMPTY_CONVERSATION_FILTERS);
     setOffset(0);
-  }, []);
-
-  const handleSort = useCallback((field: string) => {
-    setSort((current) => nextSortState(current, field));
-    setOffset(0);
-  }, []);
+  }, [setAdvancedDraft, setAdvancedFilters, setOffset]);
 
   const activeFilters = useMemo<MetadataActiveFilter[]>(() => {
     const filters: MetadataActiveFilter[] = [];
@@ -1246,7 +901,7 @@ export function ConversationMetadataPanel() {
       }
     }
     return filters;
-  }, [advancedFilters, clearAdvancedFilter, statusFilter]);
+  }, [advancedFilters, clearAdvancedFilter, setOffset, statusFilter]);
 
   const summaryChips = useMemo<MetadataSummaryChip[]>(() => {
     const byStatus = summary?.conversations.byStatus ?? {};
@@ -1278,7 +933,7 @@ export function ConversationMetadataPanel() {
     <PanelCard
       eyebrow="Metadata"
       title="会话元数据"
-      description="每行代表一个 Gateway v2 会话；只读索引，不回显消息正文。需要查看问答内容请进入“会话管理”。"
+      description="会话目录/列表：每行一个 Gateway v2 会话，只展示目录与元数据；查看完整问答请到会话管理。"
       status={state.status}
       actions={(
         <button
@@ -1296,7 +951,7 @@ export function ConversationMetadataPanel() {
       <div className="console-info-banner" role="note">
         <div>
           <strong>这里显示什么？</strong>
-          <p>这是会话索引，不是消息正文；一行对应一个 Gateway v2 会话。</p>
+          <p>这是会话目录/列表，不是消息正文；一行对应一个 Gateway v2 会话。</p>
         </div>
         <p>会话 ID 用于定位，业务用户 / 设备 / 固定资产用于归属，状态、Context 版本、RAGFlow ID 和时间用于运行排查。</p>
         <span>可用上方筛选或“高级检索”组合条件；需要查看完整问答、思考中状态和引用，请进入“会话管理”。</span>
@@ -1335,98 +990,56 @@ export function ConversationMetadataPanel() {
           高级检索
         </button>
       </MetadataToolbar>
-      <ConsoleOverlay
+      <AdvancedSearchOverlay
         open={advancedOpen}
-        mode="dialog"
         onClose={() => setAdvancedOpen(false)}
         ariaLabel="会话高级检索"
-        className="console-advanced-search-overlay"
-      >
-        <section
-          id="conversation-advanced-search"
-          className="console-advanced-search"
-          data-testid="console-conversation-advanced-search"
-          aria-label="会话高级检索条件"
-        >
-          <div className="console-advanced-search-head">
-            <div>
-              <strong>组合条件</strong>
-              <span>多个条件同时满足；未填写的条件不会参与筛选</span>
-            </div>
-            <button type="button" className="console-text-button" onClick={() => setAdvancedDraft(EMPTY_CONVERSATION_FILTERS)}>
-              清空条件
-            </button>
-          </div>
-          <div className="console-advanced-search-grid">
-            {CONVERSATION_ADVANCED_FIELDS.map((field) => (
-              <label key={field.key} htmlFor={`conversation-filter-${field.key}`}>
-                <span>{field.label}</span>
-                <input
-                  id={`conversation-filter-${field.key}`}
-                  type={field.type ?? 'search'}
-                  min={field.type === 'number' ? 0 : undefined}
-                  step={field.type === 'number' ? 1 : undefined}
-                  value={advancedDraft[field.key]}
-                  placeholder={field.placeholder}
-                  onChange={(event) => setAdvancedDraft((current) => ({ ...current, [field.key]: event.target.value }))}
-                />
-              </label>
-            ))}
-          </div>
-          <div className="console-advanced-search-actions">
-            <button type="button" className="console-secondary-button" onClick={() => setAdvancedOpen(false)}>取消</button>
-            <button type="button" className="console-primary-button" onClick={applyFilters}>应用条件</button>
-          </div>
-        </section>
-      </ConsoleOverlay>
+        sectionId="conversation-advanced-search"
+        testId="console-conversation-advanced-search"
+        sectionLabel="会话高级检索条件"
+        fields={CONVERSATION_ADVANCED_FIELDS}
+        draft={advancedDraft}
+        onFieldChange={(key, value) => setAdvancedDraft((current) => ({ ...current, [key]: value }))}
+        onClearDraft={() => setAdvancedDraft(EMPTY_CONVERSATION_FILTERS)}
+        onCancel={() => setAdvancedOpen(false)}
+        onApply={applyFilters}
+        typedInput
+        idPrefix="conversation-filter"
+      />
       {summary && (
         <MetadataSummaryStrip chips={summaryChips} testId="console-conversations-summary" />
       )}
-      {page?.items.length ? (
-        <div className="console-table-wrap">
-          <table className="console-table" data-testid="console-meta-conversations-table">
-            <thead>
-              <tr>
-                {visibleConversationColumns.map((column) => (
-                  column.sortField
-                    ? <SortableTh key={column.key} label={column.label} field={column.sortField} sort={sort} onSort={handleSort} />
-                    : <th key={column.key}>{column.label}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {page.items.map((item) => (
-                <tr
-                  key={item.conversationId}
-                  data-row-action="true"
-                  tabIndex={0}
-                  onClick={() => setSelectedConversation(item)}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter' || event.key === ' ') {
-                      event.preventDefault();
-                      setSelectedConversation(item);
-                    }
-                  }}
-                >
-                  {visibleConversationColumns.map((column) => renderConversationCell(item, column.key))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : (
-        <p className="console-empty">
-          {state.status === 'processing' ? '会话元数据加载中…' : '暂无会话元数据。'}
-        </p>
-      )}
-      <MetadataPagination
-        offset={offset}
-        itemCount={page?.items.length ?? 0}
-        hasMore={Boolean(page?.hasMore)}
-        pageSize={pageSize}
-        onPageSizeChange={(value) => { setPageSize(value); setOffset(0); }}
-        onPrev={() => setOffset(Math.max(0, offset - pageSize))}
-        onNext={() => setOffset(offset + pageSize)}
+      <ConsoleDataTable
+        columns={visibleConversationColumns.map((column) => ({
+          key: column.key,
+          label: column.label,
+          sortField: column.sortField,
+          render: (item: ConversationMetadataItem) => renderConversationCell(item, column.key),
+        }))}
+        items={page?.items ?? []}
+        rowKey={(item) => item.conversationId}
+        onRowAction={setSelectedConversation}
+        sort={sort}
+        onSort={handleSort}
+        testId="console-meta-conversations-table"
+        empty={(
+          <EmptyState
+            loading={state.status === 'processing'}
+            loadingText="会话元数据加载中…"
+            emptyText="暂无会话元数据。"
+          />
+        )}
+        pagination={(
+          <MetadataPagination
+            offset={offset}
+            itemCount={page?.items.length ?? 0}
+            hasMore={Boolean(page?.hasMore)}
+            pageSize={pageSize}
+            onPageSizeChange={(value) => { setPageSize(value); setOffset(0); }}
+            onPrev={() => setOffset(Math.max(0, offset - pageSize))}
+            onNext={() => setOffset(offset + pageSize)}
+          />
+        )}
       />
       {state.error && <PanelError error={state.error} onRetry={reload} />}
     </PanelCard>
@@ -1515,154 +1128,25 @@ function renderDocumentCell(item: DocumentMetadataItem, key: DocColumnKey): Reac
   }
 }
 
-export interface ConsoleColumnDefinition {
-  key: string;
-  label: string;
-  /** 固定列在菜单里禁用勾选，且即使用户曾隐藏过也始终显示（如主键列、操作列）。 */
-  fixed?: boolean;
-}
-
-function readHiddenColumns(storageKey: string, defaults: string[]): string[] {
-  try {
-    const raw = localStorage.getItem(storageKey);
-    if (!raw) return defaults;
-    const parsed: unknown = JSON.parse(raw);
-    if (Array.isArray(parsed)) {
-      return parsed.filter((value): value is string => typeof value === 'string');
-    }
-  } catch {
-    // localStorage 不可用（隐私模式等）时退回默认预设。
-  }
-  return defaults;
-}
-
-export function useHiddenTableColumns<T extends ConsoleColumnDefinition>(
-  storageKey: string,
-  defaultHidden: string[],
-  columns: ReadonlyArray<T>,
-) {
-  const [hiddenColumns, setHiddenColumns] = useState<string[]>(
-    () => readHiddenColumns(storageKey, defaultHidden),
-  );
-
-  const toggleColumn = useCallback((key: string) => {
-    setHiddenColumns((current) => {
-      const next = current.includes(key)
-        ? current.filter((value) => value !== key)
-        : [...current, key];
-      try {
-        localStorage.setItem(storageKey, JSON.stringify(next));
-      } catch {
-        // 隐私模式下持久化失败可忽略，仅影响本次会话。
-      }
-      return next;
-    });
-  }, [storageKey]);
-
-  const resetColumns = useCallback(() => {
-    setHiddenColumns(defaultHidden);
-    try {
-      localStorage.setItem(storageKey, JSON.stringify(defaultHidden));
-    } catch {
-      // 忽略持久化失败。
-    }
-  }, [defaultHidden, storageKey]);
-
-  const visibleColumns = useMemo<ReadonlyArray<T>>(
-    () => columns.filter((column) => column.fixed || !hiddenColumns.includes(column.key)),
-    [columns, hiddenColumns],
-  );
-
-  return { hiddenColumns, visibleColumns, toggleColumn, resetColumns };
-}
-
-export function ColumnMenu({
-  columns,
-  hiddenColumns,
-  onToggle,
-  onReset,
-}: {
-  columns: ReadonlyArray<ConsoleColumnDefinition>;
-  hiddenColumns: string[];
-  onToggle: (key: string) => void;
-  onReset: () => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const menuRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if (!open) return undefined;
-    const handlePointerDown = (event: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener('mousedown', handlePointerDown);
-    return () => document.removeEventListener('mousedown', handlePointerDown);
-  }, [open]);
-
-  return (
-    <div className="console-col-wrap" ref={menuRef}>
-      <button
-        type="button"
-        className="console-icon-button"
-        aria-label="列显示设置"
-        aria-haspopup="true"
-        aria-expanded={open}
-        onClick={() => setOpen((current) => !current)}
-      >
-        <Columns3 size={16} />
-      </button>
-      {open && (
-        <div className="console-col-menu" role="group" aria-label="表格列显示">
-          <p className="console-col-menu-title">显示列</p>
-          {columns.map((column) => (
-            <label key={column.key} className="console-col-menu-row">
-              <input
-                type="checkbox"
-                checked={column.fixed || !hiddenColumns.includes(column.key)}
-                disabled={column.fixed}
-                onChange={() => onToggle(column.key)}
-              />
-              {column.label}
-            </label>
-          ))}
-          <div className="console-col-menu-actions">
-            <button type="button" className="console-secondary-button" onClick={onReset}>恢复默认</button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
 export function DocumentMetadataPanel() {
-  const [state, setState] = useState<ConsoleState<DocumentMetadataPage>>(initialPanelState<DocumentMetadataPage>);
   const [sourceDraft, setSourceDraft] = useState('');
   const [sourceFilter, setSourceFilter] = useState('');
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [advancedDraft, setAdvancedDraft] = useState<DocumentFilterDraft>(EMPTY_DOCUMENT_FILTERS);
-  const [advancedFilters, setAdvancedFilters] = useState<DocumentFilterDraft>(EMPTY_DOCUMENT_FILTERS);
   const advancedTriggerRef = useRef<HTMLButtonElement | null>(null);
   const [syncStatusFilter, setSyncStatusFilter] = useState('');
   const [businessStatusFilter, setBusinessStatusFilter] = useState('');
-  const [sort, setSort] = useState<MetadataSortState>(DEFAULT_SORT_STATE);
   const { hiddenColumns, visibleColumns: visibleDocColumns, toggleColumn: toggleDocColumn, resetColumns: resetDocColumns } = useHiddenTableColumns(
     DOC_HIDDEN_COLUMNS_KEY,
     DOC_DEFAULT_HIDDEN_COLUMNS,
     DOC_COLUMNS,
   );
-  const [offset, setOffset] = useState(0);
-  const [pageSize, setPageSize] = useState(PAGE_LIMIT);
-  const [requestToken, setRequestToken] = useState(0);
-  const [summary, setSummary] = useState<MetadataSummary | null>(null);
   const [selectedDocument, setSelectedDocument] = useState<DocumentMetadataItem | null>(null);
 
-  const reload = useCallback(() => setRequestToken((token) => token + 1), []);
-
-  const load = useCallback(async () => {
-    setState(initialPanelState<DocumentMetadataPage>());
-    try {
-      const data = await v2Api.listAdminDocumentMetadata({
-        limit: pageSize,
+  const fetchPage = useCallback(
+    async ({ limit, offset, sort }: MetadataPanelQuery, advancedFilters: DocumentFilterDraft) => {
+      const queryEquipmentId = new URLSearchParams(window.location.search).get('equipmentId')?.trim() || '';
+      return v2Api.listAdminDocumentMetadata({
+        limit,
         offset,
         sourceSystem: sourceFilter || null,
         status: syncStatusFilter || null,
@@ -1671,7 +1155,7 @@ export function DocumentMetadataPanel() {
           externalDocumentId: advancedFilters.externalDocumentId || null,
           sourceVersionId: advancedFilters.sourceVersionId || null,
           fileName: advancedFilters.fileName || null,
-          equipmentId: advancedFilters.equipmentId || null,
+          equipmentId: advancedFilters.equipmentId || queryEquipmentId || null,
           fixedAssetNo: advancedFilters.fixedAssetNo || null,
           assetId: advancedFilters.assetId || null,
           ragflowDocumentId: advancedFilters.ragflowDocumentId || null,
@@ -1679,36 +1163,27 @@ export function DocumentMetadataPanel() {
         orderBy: sort.orderBy as DocumentMetadataOrderBy | null,
         order: sort.orderBy ? sort.order : null,
       });
-      setState({ status: 'healthy', data, error: null });
-    } catch (error) {
-      const displayError = toDisplayError(error);
-      setState({ status: panelErrorStatus(displayError), data: null, error: displayError });
-    }
-  }, [advancedFilters, businessStatusFilter, offset, pageSize, sort, sourceFilter, syncStatusFilter]);
+    },
+    [businessStatusFilter, sourceFilter, syncStatusFilter],
+  );
 
-  const loadSummary = useCallback(async () => {
-    try {
-      setSummary(await v2Api.getMetadataSummary());
-    } catch {
-      // 汇总失败静默降级，不阻断主表。
-      setSummary(null);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load, requestToken]);
-
-  useEffect(() => {
-    void loadSummary();
-  }, [loadSummary]);
+  const {
+    state, summary, sort, offset, pageSize,
+    advancedDraft, advancedFilters,
+    setAdvancedDraft, setAdvancedFilters, setOffset, setPageSize,
+    reload, loadSummary, handleSort,
+    applyAdvancedFilters, clearAdvancedFilter, resetAdvancedAndSort,
+  } = useMetadataPanelState<DocumentMetadataPage, DocumentFilterDraft>({
+    fetchPage,
+    emptyFilters: EMPTY_DOCUMENT_FILTERS,
+    normaliseFilters: normaliseDocumentFilters,
+  });
 
   const applyFilters = useCallback(() => {
     setSourceFilter(sourceDraft.trim());
-    setAdvancedFilters(normaliseDocumentFilters(advancedDraft));
-    setOffset(0);
+    applyAdvancedFilters();
     setAdvancedOpen(false);
-  }, [advancedDraft, sourceDraft]);
+  }, [applyAdvancedFilters, sourceDraft]);
 
   const clearAllFilters = useCallback(() => {
     setSourceDraft('');
@@ -1718,17 +1193,15 @@ export function DocumentMetadataPanel() {
     setSyncStatusFilter('');
     setBusinessStatusFilter('');
     setOffset(0);
-  }, []);
+  }, [setAdvancedDraft, setAdvancedFilters, setOffset]);
 
   const resetFilters = useCallback(() => {
-    clearAllFilters();
-    setSort(DEFAULT_SORT_STATE);
-  }, [clearAllFilters]);
-
-  const handleSort = useCallback((field: string) => {
-    setSort((current) => nextSortState(current, field));
-    setOffset(0);
-  }, []);
+    setSourceDraft('');
+    setSourceFilter('');
+    setSyncStatusFilter('');
+    setBusinessStatusFilter('');
+    resetAdvancedAndSort();
+  }, [resetAdvancedAndSort]);
 
   const activeFilters = useMemo<MetadataActiveFilter[]>(() => {
     const filters: MetadataActiveFilter[] = [];
@@ -1748,16 +1221,12 @@ export function DocumentMetadataPanel() {
           key: field.key,
           label: field.label,
           value,
-          onClear: () => {
-            setAdvancedDraft((current) => ({ ...current, [field.key]: '' }));
-            setAdvancedFilters((current) => ({ ...current, [field.key]: '' }));
-            setOffset(0);
-          },
+          onClear: () => clearAdvancedFilter(field.key),
         });
       }
     }
     return filters;
-  }, [advancedFilters, businessStatusFilter, sourceFilter, syncStatusFilter]);
+  }, [advancedFilters, businessStatusFilter, clearAdvancedFilter, sourceFilter, syncStatusFilter]);
 
   const summaryChips = useMemo<MetadataSummaryChip[]>(() => {
     const bySync = summary?.documents.bySyncStatus ?? {};
@@ -1866,88 +1335,55 @@ export function DocumentMetadataPanel() {
           高级检索
         </button>
       </MetadataToolbar>
-      <ConsoleOverlay
+      <AdvancedSearchOverlay
         open={advancedOpen}
-        mode="dialog"
         onClose={() => setAdvancedOpen(false)}
         ariaLabel="文件高级检索"
-        className="console-advanced-search-overlay"
-      >
-        <section id="document-advanced-search" className="console-advanced-search" data-testid="console-document-advanced-search" aria-label="文件高级检索条件">
-          <div className="console-advanced-search-head">
-            <div>
-              <strong>组合条件</strong>
-              <span>多个条件同时满足；未填写的条件不会参与筛选</span>
-            </div>
-            <button type="button" className="console-text-button" onClick={() => setAdvancedDraft(EMPTY_DOCUMENT_FILTERS)}>清空条件</button>
-          </div>
-          <div className="console-advanced-search-grid">
-            {DOCUMENT_ADVANCED_FIELDS.map((field) => (
-              <label key={field.key} htmlFor={`document-filter-${field.key}`}>
-                <span>{field.label}</span>
-                <input
-                  id={`document-filter-${field.key}`}
-                  value={advancedDraft[field.key]}
-                  placeholder={field.placeholder}
-                  onChange={(event) => setAdvancedDraft((current) => ({ ...current, [field.key]: event.target.value }))}
-                />
-              </label>
-            ))}
-          </div>
-          <div className="console-advanced-search-actions">
-            <button type="button" className="console-secondary-button" onClick={() => setAdvancedOpen(false)}>取消</button>
-            <button type="button" className="console-primary-button" onClick={applyFilters}>应用条件</button>
-          </div>
-        </section>
-      </ConsoleOverlay>
+        sectionId="document-advanced-search"
+        testId="console-document-advanced-search"
+        sectionLabel="文件高级检索条件"
+        fields={DOCUMENT_ADVANCED_FIELDS}
+        draft={advancedDraft}
+        onFieldChange={(key, value) => setAdvancedDraft((current) => ({ ...current, [key]: value }))}
+        onClearDraft={() => setAdvancedDraft(EMPTY_DOCUMENT_FILTERS)}
+        onCancel={() => setAdvancedOpen(false)}
+        onApply={applyFilters}
+        idPrefix="document-filter"
+      />
       {summary && (
         <MetadataSummaryStrip chips={summaryChips} testId="console-documents-summary" />
       )}
-      {page?.items.length ? (
-        <div className="console-table-wrap">
-          <table className="console-table" data-testid="console-meta-documents-table">
-            <thead>
-              <tr>
-                {visibleDocColumns.map((column) => (
-                  column.sortField
-                    ? <SortableTh key={column.key} label={column.label} field={column.sortField} sort={sort} onSort={handleSort} />
-                    : <th key={column.key}>{column.label}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {page.items.map((item) => (
-                <tr
-                  key={`${item.externalDocumentId}-${item.sourceVersionId}`}
-                  data-row-action="true"
-                  tabIndex={0}
-                  onClick={() => setSelectedDocument(item)}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter' || event.key === ' ') {
-                      event.preventDefault();
-                      setSelectedDocument(item);
-                    }
-                  }}
-                >
-                  {visibleDocColumns.map((column) => renderDocumentCell(item, column.key))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : (
-        <p className="console-empty">
-          {state.status === 'processing' ? '文件元数据加载中…' : '暂无文件元数据。'}
-        </p>
-      )}
-      <MetadataPagination
-        offset={offset}
-        itemCount={page?.items.length ?? 0}
-        hasMore={Boolean(page?.hasMore)}
-        pageSize={pageSize}
-        onPageSizeChange={(value) => { setPageSize(value); setOffset(0); }}
-        onPrev={() => setOffset(Math.max(0, offset - pageSize))}
-        onNext={() => setOffset(offset + pageSize)}
+      <ConsoleDataTable
+        columns={visibleDocColumns.map((column) => ({
+          key: column.key,
+          label: column.label,
+          sortField: column.sortField,
+          render: (item: DocumentMetadataItem) => renderDocumentCell(item, column.key),
+        }))}
+        items={page?.items ?? []}
+        rowKey={(item) => `${item.externalDocumentId}-${item.sourceVersionId}`}
+        onRowAction={setSelectedDocument}
+        sort={sort}
+        onSort={handleSort}
+        testId="console-meta-documents-table"
+        empty={(
+          <EmptyState
+            loading={state.status === 'processing'}
+            loadingText="文件元数据加载中…"
+            emptyText="暂无文件元数据。"
+          />
+        )}
+        pagination={(
+          <MetadataPagination
+            offset={offset}
+            itemCount={page?.items.length ?? 0}
+            hasMore={Boolean(page?.hasMore)}
+            pageSize={pageSize}
+            onPageSizeChange={(value) => { setPageSize(value); setOffset(0); }}
+            onPrev={() => setOffset(Math.max(0, offset - pageSize))}
+            onNext={() => setOffset(offset + pageSize)}
+          />
+        )}
       />
       {state.error && <PanelError error={state.error} onRetry={reload} />}
     </PanelCard>

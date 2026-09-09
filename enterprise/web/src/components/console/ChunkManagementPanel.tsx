@@ -4,7 +4,10 @@ import { toDisplayError, v2Api } from '../../api/v2Client';
 import type { ConsoleModuleStatus, ConsoleState, DocumentMetadataItem, DocumentMetadataPage } from '../../api/consoleTypes';
 import { DEFAULT_PAGE_SIZE, PaginationBar } from './ConsoleTableControls';
 import { DocumentInspector } from './DocumentInspector';
-import { PanelCard, PanelError, panelErrorStatus, StatusPill, formatTime } from './SystemSettingsPanels';
+import { EmptyState } from '../common/EmptyState';
+import { PanelCard, PanelError, panelErrorStatus } from '../common/Panel';
+import { StatusPill } from '../common/StatusPill';
+import { formatTime } from '../../lib/format';
 
 function initialState(): ConsoleState<DocumentMetadataPage> {
   return { status: 'processing', data: null, error: null };
@@ -23,7 +26,9 @@ export function ChunkManagementPanel() {
       const data = await v2Api.listAdminDocumentMetadata({
         limit: pageSize,
         offset: (page - 1) * pageSize,
-        parserApplicationStatus: 'executed',
+        // 「已解析可检索」：默认按 sync_status=ready（有 ragflowDocumentId 的活文档）。
+        // 不强制 parserApplicationStatus=executed——线上 GQ 文档多为 legacy_unverified。
+        status: 'ready',
         orderBy: 'updatedAt',
         order: 'desc',
       });
@@ -44,7 +49,7 @@ export function ChunkManagementPanel() {
       <PanelCard
         eyebrow="Parsed chunks"
         title="解析 Chunk"
-        description="按文档查看 RAGFlow 已解析的 Chunk、解析方式和位置；点击任意行打开详情。"
+        description="按「已解析可检索」列出 sync_status=ready 的文档（不要求 parser executed）；点击行查看 Chunk、解析方式和位置。"
         status={status}
         className="console-table-card"
         testId="console-meta-chunks-card"
@@ -60,7 +65,7 @@ export function ChunkManagementPanel() {
                     <td><strong>{item.fileName}</strong><small className="console-route">{item.externalDocumentId} · {item.sourceVersionId}</small></td>
                     <td>{item.sourceSystem}</td>
                     <td>{item.parserProfile ?? '未提供'}</td>
-                    <td><StatusPill code={item.parserApplicationStatus ?? 'executed'} /></td>
+                    <td><StatusPill code={item.syncStatus ?? 'ready'} /></td>
                     <td>{formatTime(item.parsedAt)}</td>
                   </tr>
                 ))}
@@ -68,7 +73,11 @@ export function ChunkManagementPanel() {
             </table>
           </div>
         ) : (
-          <p className="console-empty">{state.status === 'processing' ? '解析文档加载中…' : '暂无已解析文档。'}</p>
+          <EmptyState
+            loading={state.status === 'processing'}
+            loadingText="解析文档加载中…"
+            emptyText="暂无已解析可检索文档（sync_status=ready）。"
+          />
         )}
         <PaginationBar
           page={page}

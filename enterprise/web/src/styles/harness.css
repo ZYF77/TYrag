@@ -1,0 +1,1708 @@
+.harness-shell {
+  min-height: 100vh;
+    background:
+      radial-gradient(circle at 82% -12%, rgba(10, 132, 255, 0.075), transparent 30rem),
+      var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+}
+
+/* runtime 与 harness 开关共用基础轨道/滑块声明（原两处重复定义叠加后的
+   最终计算值）；尺寸、配色与动效差异保留在各自 family 覆盖里。 */
+.harness-toggle-track {
+  display: inline-flex;
+    height: 24px;
+    align-items: center;
+    border-radius: 999px;
+}
+
+.harness-toggle-track span {
+  width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: #fff;
+}
+
+.diag-snapshot .console-metrics {
+  padding: 0;
+}
+
+.harness-bubble-assistant p {
+  margin: 8px 0 0;
+    white-space: pre-wrap;
+}
+
+.harness-bubble-assistant .console-chip-row {
+  margin-top: 10px;
+}
+
+.harness-shell {
+  --max-grid: 1500px;
+}
+
+.harness-shell .console-body {
+  gap: clamp(22px, 4vw, 36px);
+}
+
+.harness-layout {
+  display: grid;
+    grid-template-columns: 1fr;
+    gap: 14px;
+    align-items: start;
+}
+
+@media (min-width: 1280px) {
+  .harness-layout {
+  grid-template-columns: 300px minmax(0, 1fr);
+}
+}
+
+.harness-stack {
+  display: grid;
+    gap: 14px;
+}
+
+.diag-field {
+  display: grid;
+    gap: 6px;
+    color: var(--text-3);
+    font-size: 12px;
+}
+
+.diag-input {
+  min-height: 44px;
+    width: 100%;
+    border: 1px solid rgba(24, 27, 33, 0.09);
+    border-radius: 12px;
+    background: rgba(248, 249, 251, 0.88);
+    padding: 0 14px;
+    color: var(--text);
+    font: inherit;
+    font-size: 14px;
+    transition: background-color var(--motion-quick) var(--ease-out), border-color var(--motion-quick) var(--ease-out), box-shadow var(--motion-quick) var(--ease-out);
+}
+
+.diag-input:focus {
+  outline: 0;
+    border-color: rgba(10, 132, 255, 0.34);
+    background: #fff;
+    box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.13);
+}
+
+.diag-input::placeholder {
+  color: var(--text-4);
+}
+
+.diag-help {
+  margin: 0;
+    color: var(--text-3);
+    font-size: 12px;
+    line-height: 1.65;
+}
+
+.diag-help code {
+  font-family: var(--mono);
+    font-size: 11px;
+}
+
+.diag-snapshot {
+  border: 1px solid rgba(24, 27, 33, 0.055);
+    border-radius: 14px;
+    background: linear-gradient(145deg, #fafbfc, #f4f5f7);
+    padding: 12px 14px;
+    color: var(--text-2);
+    font-size: 12px;
+}
+
+.diag-snapshot p {
+  margin: 0 0 8px;
+    color: var(--text);
+    font-weight: 600;
+}
+
+.harness-chat {
+  display: flex;
+    min-height: 520px;
+    flex-direction: column;
+}
+
+.harness-chat .console-card-body {
+  display: flex;
+    flex: 1;
+    flex-direction: column;
+    border-top: 0;
+    padding: 0;
+}
+
+.harness-transcript {
+  flex: 1;
+    overflow-y: auto;
+    padding: 8px 16px 16px;
+}
+
+.harness-bubble-user,
+.harness-bubble-assistant {
+  max-width: 82%;
+    margin: 10px 0;
+    padding: 12px 14px;
+    border-radius: 18px;
+    font-size: 14px;
+    line-height: 1.55;
+    animation: message-materialize var(--motion-standard) var(--ease-out) both;
+}
+
+.harness-bubble-user {
+  margin-left: auto;
+    background: linear-gradient(145deg, #168bff, #087cf0);
+    color: #fff;
+    box-shadow: 0 7px 18px rgba(10, 132, 255, 0.16);
+}
+
+.harness-bubble-user .console-route {
+  margin-top: 6px;
+    color: rgba(255, 255, 255, 0.72);
+}
+
+.harness-bubble-assistant {
+  border: 1px solid rgba(24, 27, 33, 0.075);
+    background: #f8f9fa;
+    color: var(--text);
+}
+
+.harness-bubble-meta {
+  display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    color: var(--text-3);
+    font-size: 11px;
+}
+
+.harness-chat [aria-label='问题输入'] {
+  color: var(--text);
+    font-size: 15px;
+}
+
+.harness-chat [aria-label='发送'] {
+  background: var(--accent);
+    color: #fff;
+    border-radius: 12px;
+}
+
+.harness-shell input[type='file'] {
+  width: 100%;
+    color: var(--text-2);
+    font-size: 13px;
+}
+
+.harness-shell [role='alert'] {
+  margin: 0;
+    border-radius: var(--r-card);
+}
+
+/* ---- Session context bar (chat column header) ---- */
+.harness-context-bar {
+  display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    border: 1px solid rgba(24, 27, 33, 0.075);
+    border-radius: var(--r-card);
+    background: rgba(255, 255, 255, 0.92);
+    padding: 10px 14px;
+}
+
+.harness-context-summary {
+  display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+}
+
+.harness-context-summary strong {
+  color: var(--text);
+    font-size: 14px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.harness-device-badge {
+  display: inline-flex;
+    align-items: center;
+    max-width: 100%;
+    border-radius: 999px;
+    border: 1px solid rgba(10, 132, 255, 0.22);
+    background: rgba(10, 132, 255, 0.08);
+    color: var(--accent);
+    padding: 3px 10px;
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.harness-context-form {
+  display: grid;
+    gap: 10px;
+    width: 100%;
+    border-top: 1px dashed rgba(24, 27, 33, 0.12);
+    padding-top: 10px;
+}
+
+.harness-device-create {
+  display: grid;
+    gap: 10px;
+    border-top: 1px dashed rgba(24, 27, 33, 0.1);
+    margin-top: 6px;
+    padding-top: 12px;
+}
+
+/* ---- Question attachments (paperclip + file chips) ---- */
+.harness-clip-button {
+  display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 10px;
+    border: 1px solid rgba(24, 27, 33, 0.1);
+    background: #fff;
+    color: var(--text-2);
+    cursor: pointer;
+    transition: color var(--motion-quick) var(--ease-out), border-color var(--motion-quick) var(--ease-out), background-color var(--motion-quick) var(--ease-out);
+}
+
+.harness-clip-button:hover:not(:disabled) {
+  color: var(--accent);
+    border-color: rgba(10, 132, 255, 0.3);
+    background: rgba(10, 132, 255, 0.05);
+}
+
+.harness-clip-button:disabled {
+  opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.harness-file-chips {
+  display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+}
+
+.harness-file-chip {
+  display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 100%;
+    border-radius: 999px;
+    border: 1px solid rgba(24, 27, 33, 0.1);
+    background: #f4f5f7;
+    color: var(--text-2);
+    font-size: 12px;
+    padding: 3px 6px 3px 10px;
+}
+
+.harness-file-chip-name {
+  overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.harness-file-chip-remove {
+  display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    flex-shrink: 0;
+    border-radius: 50%;
+    border: 0;
+    background: rgba(24, 27, 33, 0.08);
+    color: var(--text-2);
+    cursor: pointer;
+    transition: background-color var(--motion-quick) var(--ease-out);
+}
+
+.harness-file-chip-remove:hover {
+  background: rgba(24, 27, 33, 0.16);
+}
+
+.harness-bubble-user .harness-file-chips {
+  margin-top: 8px;
+}
+
+.harness-bubble-user .harness-file-chip {
+  border-color: rgba(255, 255, 255, 0.34);
+    background: rgba(255, 255, 255, 0.16);
+    color: #fff;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .harness-bubble-user,
+  .harness-bubble-assistant {
+  animation: none !important;
+}
+}
+
+@media (prefers-contrast: more) {
+  .diag-input {
+  border-color: rgba(0, 0, 0, 0.35);
+}
+}
+
+/* ---- Harness conversation workbench ---- */
+.harness-layout {
+  min-height: 520px;
+    height: clamp(520px, calc(100vh - 210px), 760px);
+    align-items: stretch;
+}
+
+.harness-layout > .harness-stack,
+.harness-conversation-panel {
+  min-height: 0;
+    height: 100%;
+}
+
+.harness-layout > .harness-stack > .console-card {
+  display: flex;
+    height: 100%;
+    min-height: 0;
+    flex-direction: column;
+}
+
+.harness-layout > .harness-stack > .console-card > .console-card-head {
+  flex-shrink: 0;
+}
+
+.harness-session-body {
+  display: flex;
+    min-height: 0;
+    flex: 1;
+    flex-direction: column;
+    padding: 0;
+}
+
+.harness-session-list {
+  min-height: 0;
+    flex: 1;
+    overflow-y: auto;
+    scrollbar-gutter: stable;
+}
+
+.harness-session-list > .console-empty {
+  padding: 18px 14px;
+}
+
+.harness-conversation-panel {
+  display: flex;
+    overflow: hidden;
+    flex-direction: column;
+    border: 1px solid rgba(255, 255, 255, 0.86);
+    border-radius: var(--r-panel);
+    background: var(--surface);
+    box-shadow: inset 0 1px rgba(255, 255, 255, 0.92), var(--sh-panel);
+}
+
+.harness-conversation-panel .harness-context-bar {
+  flex-shrink: 0;
+    border: 0;
+    border-bottom: 1px solid var(--hairline);
+    border-radius: 0;
+    background: rgba(255, 255, 255, 0.68);
+}
+
+.harness-conversation-panel .harness-chat {
+  min-height: 0;
+    height: auto;
+    flex: 1;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+}
+
+.harness-reasoning-field,
+.harness-toggle {
+  display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-2);
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.harness-reasoning-field select {
+  min-height: 34px;
+    min-width: 112px;
+    border: 1px solid rgba(24, 27, 33, 0.1);
+    border-radius: 10px;
+    background: #fff;
+    padding: 0 9px;
+    color: var(--text);
+    font: inherit;
+    font-weight: 500;
+}
+
+.harness-reasoning-field select:focus-visible {
+  outline: 3px solid rgba(10, 132, 255, 0.18);
+    outline-offset: 1px;
+}
+
+.harness-reasoning-field select:disabled {
+  cursor: not-allowed;
+    opacity: 0.55;
+}
+
+.harness-toggle {
+  position: relative;
+    min-height: 34px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.harness-toggle input {
+  position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+}
+
+.harness-toggle-track {
+  position: relative;
+    width: 40px;
+    padding: 2px;
+    background: rgba(24, 27, 33, 0.16);
+    transition: background-color var(--motion-quick) var(--ease-out), box-shadow var(--motion-quick) var(--ease-out);
+}
+
+.harness-toggle-track span {
+  display: block;
+    box-shadow: 0 1px 3px rgba(16, 20, 28, 0.2);
+    transition: transform var(--motion-standard) var(--ease-out);
+}
+
+.harness-toggle input:checked + .harness-toggle-track {
+  background: var(--accent);
+}
+
+.harness-toggle input:checked + .harness-toggle-track span {
+  transform: translateX(16px);
+}
+
+.harness-toggle:focus-within .harness-toggle-track {
+  box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.16);
+}
+
+.harness-toggle input:disabled ~ * {
+  cursor: not-allowed;
+    opacity: 0.55;
+}
+
+.harness-chat .console-card-body {
+  min-height: 0;
+    overflow: hidden;
+}
+
+.harness-transcript {
+  min-height: 0;
+    scrollbar-gutter: stable;
+    scroll-behavior: smooth;
+}
+
+.harness-markdown {
+  overflow-wrap: anywhere;
+}
+
+.harness-markdown > :first-child,
+.harness-citation-markdown > :first-child {
+  margin-top: 8px;
+}
+
+.harness-markdown > :last-child,
+.harness-citation-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.harness-markdown p,
+.harness-markdown ul,
+.harness-markdown ol,
+.harness-markdown blockquote,
+.harness-markdown pre,
+.harness-citation-markdown p,
+.harness-citation-markdown ul,
+.harness-citation-markdown ol,
+.harness-citation-markdown blockquote,
+.harness-citation-markdown pre {
+  margin: 8px 0;
+    white-space: normal;
+}
+
+.harness-markdown ul,
+.harness-markdown ol,
+.harness-citation-markdown ul,
+.harness-citation-markdown ol {
+  padding-left: 22px;
+}
+
+.harness-markdown code,
+.harness-citation-markdown code {
+  border-radius: 5px;
+    background: rgba(24, 27, 33, 0.07);
+    padding: 1px 4px;
+    font-family: var(--mono);
+    font-size: 0.9em;
+}
+
+.harness-markdown pre,
+.harness-citation-markdown pre {
+  overflow-x: auto;
+    border-radius: 10px;
+    background: rgba(24, 27, 33, 0.07);
+    padding: 9px 10px;
+}
+
+.harness-citation-marker {
+  display: inline-flex;
+    vertical-align: super;
+    margin-left: 2px;
+    line-height: 1;
+}
+
+.harness-citation-marker button {
+  min-width: 18px;
+    min-height: 18px;
+    border: 0;
+    border-radius: 6px;
+    background: rgba(10, 132, 255, 0.12);
+    padding: 1px 4px;
+    color: var(--accent);
+    cursor: pointer;
+    font: inherit;
+    font-size: 10px;
+    font-weight: 700;
+    transition: background-color var(--motion-quick) var(--ease-out), transform var(--motion-quick) var(--ease-out);
+}
+
+.harness-citation-marker button:hover {
+  background: rgba(10, 132, 255, 0.22);
+}
+
+.harness-citation-marker button:active {
+  transform: scale(0.92);
+}
+
+.harness-source-list {
+  margin-top: 12px;
+    border-top: 1px solid rgba(24, 27, 33, 0.07);
+    padding-top: 9px;
+}
+
+.harness-source-list-label {
+  margin-bottom: 6px;
+    color: var(--text-3);
+    font-size: 11px;
+    font-weight: 650;
+}
+
+.harness-source-button {
+  min-height: 36px;
+    max-width: 100%;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1px;
+    padding: 6px 10px;
+    text-align: left;
+}
+
+.harness-source-button > span {
+  max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.harness-source-button small {
+  color: var(--text-3);
+    font-size: 10px;
+    font-weight: 500;
+}
+
+.harness-citation-card {
+  min-height: 100%;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+}
+
+.harness-citation-body {
+  overflow-y: auto;
+    padding: 4px 18px 22px;
+}
+
+.harness-citation-kind {
+  display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin: 2px 0 12px;
+    color: var(--text-3);
+    font-size: 11px;
+    line-height: 1.45;
+}
+
+.harness-citation-kind-badge {
+  border-radius: 999px;
+    background: rgba(10, 132, 255, 0.1);
+    padding: 4px 9px;
+    color: var(--accent);
+    font-weight: 650;
+}
+
+.harness-citation-metadata {
+  display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    margin: 0;
+}
+
+.harness-citation-metadata > div {
+  min-width: 0;
+    border-bottom: 1px solid var(--hairline);
+    padding-bottom: 9px;
+}
+
+.harness-citation-metadata-wide {
+  grid-column: 1 / -1;
+}
+
+.harness-citation-metadata dt {
+  display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px;
+    color: var(--text-3);
+    font-size: 11px;
+}
+
+.harness-citation-metadata dt strong {
+  color: var(--text-2);
+    font-size: 12px;
+}
+
+.harness-citation-metadata dt small,
+.harness-citation-section-head small {
+  color: var(--text-4);
+    font-family: var(--mono);
+    font-size: 10px;
+}
+
+.harness-citation-metadata dd {
+  margin: 4px 0 0;
+    overflow-wrap: anywhere;
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.45;
+}
+
+.harness-citation-section {
+  margin-top: 16px;
+    border: 1px solid rgba(24, 27, 33, 0.07);
+    border-radius: 14px;
+    background: rgba(247, 248, 250, 0.76);
+    padding: 12px 13px;
+}
+
+.harness-citation-section-head {
+  display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 7px;
+    color: var(--text-2);
+    font-size: 12px;
+}
+
+.harness-citation-markdown {
+  margin-top: 7px;
+    color: var(--text-body);
+    font-size: 13px;
+    line-height: 1.7;
+}
+
+.harness-citation-figure {
+  margin: 16px 0 0;
+    overflow: hidden;
+    border: 1px solid rgba(24, 27, 33, 0.08);
+    border-radius: 14px;
+    background: #fff;
+}
+
+.harness-citation-figure img {
+  display: block;
+    width: 100%;
+    max-height: 360px;
+    object-fit: contain;
+    background: #f7f8fa;
+}
+
+.harness-citation-figure figcaption {
+  border-top: 1px solid var(--hairline);
+    padding: 8px 10px;
+    color: var(--text-3);
+    font-size: 11px;
+    line-height: 1.45;
+}
+
+/* ---- Device creation modal ---- */
+.harness-device-modal {
+  position: relative;
+    z-index: 1;
+    width: min(460px, calc(100vw - 36px));
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.92);
+    border-radius: 22px;
+    background: rgba(250, 251, 253, 0.96);
+    box-shadow: 0 22px 60px rgba(16, 20, 28, 0.22), inset 0 1px rgba(255, 255, 255, 0.92);
+    pointer-events: auto;
+    animation: harness-modal-in var(--motion-standard) var(--ease-out) both;
+}
+
+.harness-device-modal-head {
+  display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    border-bottom: 1px solid var(--hairline);
+    padding: 20px 20px 15px;
+}
+
+.harness-device-modal-head h2 {
+  margin: 4px 0 0;
+    font-size: 20px;
+    letter-spacing: -0.03em;
+}
+
+.harness-device-modal-head p:last-child {
+  max-width: 34rem;
+    margin: 7px 0 0;
+    color: var(--text-3);
+    font-size: 12px;
+    line-height: 1.55;
+}
+
+.harness-device-modal-head .console-icon-button {
+  min-width: 34px;
+    min-height: 34px;
+    padding: 0;
+    font-size: 20px;
+    line-height: 1;
+}
+
+.harness-device-modal-body {
+  display: grid;
+    gap: 13px;
+    padding: 18px 20px 4px;
+}
+
+.harness-device-modal-body .diag-field small {
+  margin-left: 5px;
+    color: var(--text-4);
+    font-family: var(--mono);
+    font-size: 10px;
+}
+
+.harness-device-modal-actions {
+  display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    border-top: 1px solid var(--hairline);
+    margin-top: 14px;
+    padding: 13px 20px 16px;
+}
+
+@keyframes harness-modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (max-width: 1279px) {
+  .harness-layout {
+  height: auto;
+      min-height: 0;
+}
+
+  .harness-layout > .harness-stack,
+  .harness-conversation-panel {
+  height: auto;
+}
+
+  .harness-layout > .harness-stack > .console-card {
+  height: auto;
+      min-height: 0;
+}
+
+  .harness-session-list {
+  max-height: 340px;
+      min-height: 150px;
+}
+
+  .harness-conversation-panel {
+  min-height: 520px;
+      height: min(720px, calc(100vh - 190px));
+}
+}
+
+@media (max-width: 720px) {
+  .harness-composer-tools {
+  min-width: 0;
+}
+}
+
+@media (max-width: 520px) {
+  .harness-conversation-panel {
+  min-height: 480px;
+      height: calc(100vh - 170px);
+}
+
+  .harness-chat-settings {
+  padding-inline: 14px;
+}
+
+  .harness-citation-metadata {
+  grid-template-columns: 1fr;
+}
+
+  .harness-citation-metadata-wide {
+  grid-column: auto;
+}
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .harness-device-modal,
+  .harness-citation-marker button,
+  .harness-toggle-track,
+  .harness-toggle-track span {
+  animation: none;
+      transition: none;
+}
+
+  .harness-transcript {
+  scroll-behavior: auto;
+}
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .harness-device-modal,
+  .harness-conversation-panel {
+  backdrop-filter: none;
+      -webkit-backdrop-filter: none;
+      background: #f7f8fa;
+}
+}
+
+/* ---- Harness reference layout refinements ---- */
+.harness-shell {
+  --max-grid: 1480px;
+}
+
+.harness-shell.workbench {
+  grid-template-columns: 304px minmax(0, 1fr);
+}
+
+.harness-shell .workbench-brand-mark {
+  width: 54px;
+    height: 54px;
+    border-radius: 16px;
+}
+
+.harness-shell .workbench-brand-mark::before {
+  width: 28px;
+    height: 28px;
+}
+
+.harness-shell .workbench-brand-mark i {
+  width: 12px;
+    height: 12px;
+    box-shadow: 0 0 0 5px rgba(10, 132, 255, 0.12), 0 0 16px rgba(10, 132, 255, 0.32);
+}
+
+.harness-shell .workbench-brand-copy strong {
+  font-size: 21px;
+}
+
+.harness-shell .workbench-brand-copy small {
+  font-size: 12px;
+}
+
+.harness-shell .workbench-context span {
+  font-size: 11px;
+}
+
+.harness-shell .workbench-context strong {
+  font-size: 27px;
+}
+
+.harness-layout {
+  grid-template-columns: minmax(300px, 320px) minmax(0, 1fr);
+    gap: 16px;
+    height: clamp(620px, calc(100vh - 174px), 780px);
+    min-height: 620px;
+}
+
+.harness-shell .console-footer {
+  display: flex;
+    color: var(--text-4);
+    font-size: 11px;
+}
+
+.harness-shell .console-footer .console-route {
+  color: var(--text-4);
+    font-size: 10px;
+}
+
+.harness-layout > .harness-stack,
+.harness-conversation-panel,
+.harness-layout > .harness-stack > .console-card {
+  min-height: 0;
+    height: 100%;
+}
+
+.harness-layout > .harness-stack > .console-card {
+  display: flex;
+    flex-direction: column;
+}
+
+.harness-layout > .harness-stack > .console-card > .console-card-head {
+  flex-shrink: 0;
+    padding: 18px 18px 14px;
+}
+
+.harness-layout > .harness-stack > .console-card > .console-card-head h2 {
+  font-size: 22px;
+}
+
+.harness-session-body {
+  display: flex;
+    min-height: 0;
+    flex: 1;
+    flex-direction: column;
+    padding: 0;
+}
+
+.harness-session-list {
+  min-height: 0;
+    flex: 1;
+    overflow-y: auto;
+    scrollbar-gutter: stable;
+}
+
+.harness-session-item-head {
+  display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-width: 0;
+}
+
+.harness-session-item-head p {
+  min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.harness-session-item-head time {
+  flex: 0 0 auto;
+    color: var(--text-4);
+    font-family: var(--mono);
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+}
+
+.harness-session-list .console-list-btn {
+  min-height: 64px;
+    padding: 11px 14px 10px 16px;
+}
+
+.harness-session-list .console-route {
+  margin-top: 5px;
+}
+
+.harness-device-create .console-secondary-button {
+  gap: 8px;
+}
+
+.harness-conversation-panel {
+  display: flex;
+    overflow: hidden;
+    flex-direction: column;
+    border: 1px solid rgba(255, 255, 255, 0.88);
+    border-radius: var(--r-panel);
+    background: rgba(255, 255, 255, 0.94);
+    box-shadow: inset 0 1px rgba(255, 255, 255, 0.96), var(--sh-panel);
+}
+
+.harness-conversation-panel .harness-context-bar {
+  display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    flex-shrink: 0;
+    gap: 0;
+    justify-content: stretch;
+    border: 0;
+    border-bottom: 1px solid var(--hairline);
+    border-radius: 0;
+    background: rgba(255, 255, 255, 0.76);
+    padding: 0;
+}
+
+.harness-context-top {
+  display: flex;
+    min-width: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 18px 22px 14px;
+}
+
+.harness-context-summary {
+  min-width: 0;
+    gap: 10px;
+}
+
+.harness-context-summary strong {
+  max-width: min(100%, 42rem);
+    font-size: 18px;
+}
+
+.harness-device-badge {
+  overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.harness-rebind-button {
+  flex-shrink: 0;
+    min-height: 36px;
+    padding-inline: 13px;
+    font-size: 12px;
+}
+
+.harness-context-meta {
+  display: grid;
+    grid-template-columns: minmax(0, 1.55fr) repeat(2, minmax(150px, 0.72fr));
+    gap: 0;
+    margin: 0 22px 14px;
+    overflow: hidden;
+    border: 1px solid rgba(24, 27, 33, 0.06);
+    border-radius: 13px;
+    background: rgba(248, 249, 251, 0.72);
+}
+
+.harness-context-meta-item {
+  display: grid;
+    min-width: 0;
+    gap: 3px;
+    align-content: center;
+    min-height: 52px;
+    padding: 8px 12px;
+    border-left: 1px solid var(--hairline);
+}
+
+.harness-context-meta-item:first-child {
+  border-left: 0;
+}
+
+.harness-context-meta-item > span {
+  color: var(--text-3);
+    font-size: 10px;
+    font-weight: 600;
+}
+
+.harness-context-meta-item > strong,
+.harness-context-meta-item > time,
+.harness-context-meta-item > code {
+  min-width: 0;
+    overflow: hidden;
+    color: var(--text-body);
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.35;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.harness-context-meta-item > code {
+  font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 500;
+}
+
+.harness-context-meta-item--id {
+  display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 3px 8px;
+}
+
+.harness-context-meta-item--id > span {
+  flex: 0 0 100%;
+}
+
+.harness-context-meta-item--id > code {
+  flex: 1 1 160px;
+}
+
+.harness-copy-button {
+  display: inline-flex;
+    width: 26px;
+    height: 26px;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: center;
+    border: 0;
+    border-radius: 8px;
+    background: rgba(10, 132, 255, 0.08);
+    color: var(--accent);
+    cursor: pointer;
+    transition: background-color var(--motion-quick) var(--ease-out), transform var(--motion-quick) var(--ease-out);
+}
+
+.harness-copy-button:hover {
+  background: rgba(10, 132, 255, 0.16);
+}
+
+.harness-copy-button:active {
+  transform: scale(0.92);
+}
+
+.harness-copy-button:focus-visible {
+  outline: 3px solid rgba(10, 132, 255, 0.22);
+    outline-offset: 2px;
+}
+
+.harness-conversation-panel .harness-context-form {
+  margin: 0 22px 16px;
+    border: 1px solid rgba(10, 132, 255, 0.12);
+    border-radius: 14px;
+    background: rgba(248, 251, 255, 0.96);
+    padding: 14px;
+}
+
+.harness-conversation-panel .harness-chat {
+  min-height: 0;
+    height: auto;
+    flex: 1;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+}
+
+.harness-chat .console-card-body {
+  display: flex;
+    min-height: 0;
+    flex: 1;
+    flex-direction: column;
+    overflow: hidden;
+    padding: 0;
+}
+
+.harness-transcript {
+  min-height: 0;
+    flex: 1;
+    overflow-y: auto;
+    scrollbar-gutter: stable;
+    scroll-behavior: smooth;
+    padding: 18px clamp(18px, 3.5vw, 44px) 22px;
+}
+
+.harness-empty-state {
+  display: grid;
+    min-height: 100%;
+    align-content: center;
+    justify-items: center;
+    gap: 4px;
+    padding: 24px;
+    text-align: center;
+}
+
+.harness-empty-state img {
+  display: block;
+    width: 156px;
+    height: auto;
+    margin-bottom: 16px;
+    object-fit: contain;
+}
+
+.harness-empty-state h3 {
+  margin: 0;
+    color: var(--text);
+    font-size: 19px;
+    font-weight: 650;
+    letter-spacing: -0.03em;
+}
+
+.harness-empty-state p {
+  margin: 3px 0 0;
+    color: var(--text-3);
+    font-size: 13px;
+}
+
+.harness-composer-tools {
+  display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 10px;
+}
+
+.harness-composer-tools {
+  gap: 12px;
+}
+
+.harness-composer-tools .harness-toggle input:checked ~ .harness-toggle-track {
+  background: var(--accent);
+}
+
+.harness-composer-tools .harness-toggle input:checked ~ .harness-toggle-track span {
+  transform: translateX(16px);
+}
+
+.harness-composer-tools .harness-toggle,
+.harness-composer-tools .harness-reasoning-field {
+  min-height: 34px;
+    color: var(--text-2);
+    font-size: 11px;
+}
+
+.harness-composer-tools .harness-reasoning-field select {
+  min-width: 88px;
+    min-height: 34px;
+    border-radius: 999px;
+    background: rgba(247, 248, 250, 0.9);
+    padding-inline: 12px 28px;
+    color: var(--text-body);
+    font-size: 12px;
+    font-weight: 600;
+}
+
+@media (max-width: 1119px) {
+  .harness-layout {
+  grid-template-columns: 1fr;
+      height: auto;
+      min-height: 0;
+}
+
+  .harness-layout > .harness-stack,
+  .harness-layout > .harness-stack > .console-card {
+  height: auto;
+}
+
+  .harness-session-list {
+  max-height: 320px;
+      min-height: 150px;
+}
+
+  .harness-conversation-panel {
+  min-height: 620px;
+      height: min(760px, calc(100vh - 190px));
+}
+}
+
+@media (max-width: 900px) {
+  .harness-shell.workbench {
+  grid-template-columns: 1fr;
+}
+}
+
+@media (max-width: 720px) {
+  .harness-context-meta {
+  grid-template-columns: 1fr;
+}
+
+  .harness-context-meta-item,
+  .harness-context-meta-item:first-child {
+  border-left: 0;
+      border-top: 1px solid var(--hairline);
+}
+
+  .harness-context-meta-item:first-child {
+  border-top: 0;
+}
+
+  .harness-composer-tools {
+  gap: 8px;
+}
+}
+
+@media (max-width: 520px) {
+  .harness-context-top {
+  align-items: flex-start;
+      flex-direction: column;
+      padding-inline: 14px;
+}
+
+  .harness-context-meta {
+  margin-inline: 14px;
+}
+
+  .harness-transcript {
+  padding-inline: 14px;
+}
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .harness-copy-button,
+  .harness-empty-state img {
+  transition: none;
+      animation: none;
+}
+}
+
+.harness-composer-tools {
+  margin-left: auto;
+}
+
+.harness-reasoning-field {
+  display: inline-flex;
+    align-items: center;
+}
+
+.harness-copy-status {
+  color: var(--accent);
+    font-size: 10px;
+    font-weight: 650;
+    white-space: nowrap;
+}
+
+.harness-copy-status.is-failed {
+  color: #c93434;
+}
+
+.harness-reasoning-trigger {
+  display: inline-flex;
+    min-width: 88px;
+    min-height: 34px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    border: 1px solid rgba(24, 27, 33, 0.09);
+    border-radius: 999px;
+    background: rgba(247, 248, 250, 0.94);
+    padding: 0 12px;
+    color: var(--text-body);
+    font-size: 12px;
+    font-weight: 650;
+    cursor: pointer;
+    transition: border-color var(--motion-quick) var(--ease-out), background-color var(--motion-quick) var(--ease-out), box-shadow var(--motion-quick) var(--ease-out);
+}
+
+.harness-reasoning-trigger:hover:not(:disabled),
+.harness-reasoning-trigger[aria-expanded='true'] {
+  border-color: rgba(10, 132, 255, 0.3);
+    background: rgba(10, 132, 255, 0.09);
+    box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.08);
+}
+
+.harness-reasoning-trigger:disabled {
+  cursor: not-allowed;
+    opacity: 0.55;
+}
+
+.harness-reasoning-popover {
+  padding: 16px;
+}
+
+.harness-reasoning-popover-head {
+  display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.harness-reasoning-popover-head > div {
+  display: grid;
+    gap: 4px;
+}
+
+.harness-reasoning-popover-head strong {
+  font-size: 14px;
+}
+
+.harness-reasoning-popover-head span {
+  color: var(--accent);
+    font-size: 12px;
+    font-weight: 650;
+}
+
+.harness-reasoning-range {
+  width: 100%;
+    margin: 22px 0 10px;
+    accent-color: var(--accent);
+}
+
+.harness-reasoning-range-labels {
+  display: flex;
+    justify-content: space-between;
+    color: var(--text-3);
+    font-size: 11px;
+}
+
+.harness-reasoning-range-labels span:last-child {
+  color: var(--accent);
+}
+
+.harness-reasoning-description {
+  margin: 14px 0 0;
+    color: var(--text-2);
+    font-size: 12px;
+    line-height: 1.55;
+}
+
+.harness-reasoning {
+  margin: 10px 0 12px;
+    border: 1px solid rgba(10, 132, 255, 0.12);
+    border-radius: 12px;
+    background: rgba(10, 132, 255, 0.045);
+}
+
+.harness-reasoning-toggle {
+  display: inline-flex;
+    width: 100%;
+    min-height: 34px;
+    align-items: center;
+    gap: 7px;
+    border: 0;
+    background: transparent;
+    padding: 7px 10px;
+    color: var(--text-body);
+    font: inherit;
+    font-size: 12px;
+    text-align: left;
+    cursor: pointer;
+}
+
+.harness-reasoning-toggle small {
+  margin-left: auto;
+    color: var(--text-3);
+    font-size: 10px;
+}
+
+.harness-reasoning-chevron {
+  flex: 0 0 auto;
+    color: var(--accent);
+    transition: transform var(--motion-quick) var(--ease-out);
+}
+
+.harness-reasoning.is-expanded .harness-reasoning-chevron {
+  transform: rotate(90deg);
+}
+
+.harness-reasoning-content {
+  border-top: 1px solid rgba(10, 132, 255, 0.1);
+    padding: 10px 12px 12px 31px;
+    color: var(--text-2);
+    font-size: 12px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.harness-device-modal {
+  width: min(460px, calc(100vw - 32px));
+    padding: 0;
+}
+
+.harness-device-modal-form {
+  display: grid;
+}
+
+.harness-citation-overlay {
+  width: min(980px, calc(100vw - 32px));
+}
+
+.harness-citation-overlay > .harness-citation-card {
+  min-height: 0;
+    margin: 0;
+    box-shadow: none;
+}
+
+.harness-citation-group {
+  display: grid;
+    gap: 8px;
+    margin: 0 0 14px;
+    border: 1px solid rgba(10, 132, 255, 0.12);
+    border-radius: 14px;
+    background: rgba(10, 132, 255, 0.04);
+    padding: 10px;
+}
+
+.harness-citation-group-head {
+  display: flex;
+    align-items: center;
+    justify-content: space-between;
+    color: var(--text-2);
+    font-size: 12px;
+}
+
+.harness-citation-group-head strong {
+  color: var(--text);
+}
+
+.harness-citation-group-list {
+  display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.harness-citation-group-item {
+  display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 30px;
+    border: 1px solid rgba(24, 27, 33, 0.09);
+    border-radius: 999px;
+    background: #fff;
+    padding: 0 10px;
+    color: var(--text-2);
+    font-size: 11px;
+    cursor: pointer;
+}
+
+.harness-citation-group-item > span:first-child {
+  display: grid;
+    width: 18px;
+    height: 18px;
+    place-items: center;
+    border-radius: 50%;
+    background: rgba(10, 132, 255, 0.1);
+    color: var(--accent);
+    font-size: 10px;
+    font-weight: 700;
+}
+
+.harness-citation-group-item.is-active {
+  border-color: rgba(10, 132, 255, 0.34);
+    background: rgba(10, 132, 255, 0.08);
+    color: var(--text);
+}
+
+.harness-citation-group-item small {
+  color: var(--text-3);
+}
+
+@media (max-width: 720px) {
+  .harness-composer-tools {
+  gap: 8px;
+}
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .harness-reasoning-trigger,
+  .harness-reasoning-chevron {
+  animation: none;
+      transition: none;
+}
+}
+
+/* ---- Review fixes: shared sizing, readable states and bounded panels ---- */
+
+/* Harness and Console use the same brand/header scale. */
+.harness-shell .workbench-brand {
+  gap: 10px;
+    padding: 4px 8px 22px;
+}
+
+.harness-shell .workbench-brand-mark {
+  width: 34px;
+    height: 34px;
+    border-radius: 11px;
+}
+
+.harness-shell .workbench-brand-mark::before {
+  width: 18px;
+    height: 18px;
+}
+
+.harness-shell .workbench-brand-mark i {
+  width: 8px;
+    height: 8px;
+    box-shadow: 0 0 0 4px rgba(10, 132, 255, 0.12), 0 0 12px rgba(10, 132, 255, 0.3);
+}
+
+.harness-shell .workbench-brand-copy strong {
+  font-size: 16px;
+}
+
+.harness-shell .workbench-brand-copy small,
+.harness-shell .workbench-context span {
+  font-size: 10px;
+}
+
+.harness-shell .workbench-context strong {
+  font-size: 20px;
+}
+
+.harness-device-modal .console-icon-button {
+  border-radius: 12px;
+}
+
+/* The compact internet control uses the Globe icon as its thumb. */
+.harness-toggle-track .harness-toggle-thumb {
+  display: inline-grid;
+    width: 20px;
+    height: 20px;
+    place-items: center;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--text-3);
+    box-shadow: none;
+    transition: transform var(--motion-standard) var(--ease-out), color var(--motion-quick) var(--ease-out);
+}
+
+.harness-toggle-track .harness-toggle-thumb svg {
+  display: block;
+}
+
+.harness-toggle input:checked + .harness-toggle-track .harness-toggle-thumb {
+  transform: translateX(16px);
+    color: #fff;
+}
+
+.harness-toggle input:disabled + .harness-toggle-track .harness-toggle-thumb {
+  opacity: 0.55;
+}
+
+/* Every detail dialog has a fixed head and a separately scrolling body;
+   the portal panel itself never adds padding（统一收口在 overlay.css 末尾）. */
+
+.harness-citation-overlay {
+  max-width: min(980px, calc(100vw - 32px)) !important;
+    max-height: min(820px, calc(100vh - 32px));
+    display: flex;
+}
+
+.harness-citation-overlay > .harness-citation-card {
+  display: flex;
+    width: 100%;
+    min-height: 0;
+    flex-direction: column;
+}
+
+.harness-citation-overlay .harness-citation-body {
+  min-height: 0;
+    flex: 1 1 auto;
+    overflow-y: auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .harness-toggle-track .harness-toggle-thumb {
+  transition: none;
+}
+}

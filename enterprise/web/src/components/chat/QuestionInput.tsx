@@ -78,14 +78,14 @@ export function QuestionInput({
         multiple
         accept={FILE_INPUT_ACCEPT}
         aria-label="选择附件"
-        className="sr-only"
+        className="question-composer-sr-only"
         onChange={handleFileChange}
       />
       <button
         type="button"
         onClick={() => fileInputRef.current?.click()}
         disabled={disabled}
-        className="harness-clip-button flex-shrink-0"
+        className="harness-clip-button question-composer-clip"
         title="添加附件"
         aria-label="添加附件"
       >
@@ -97,7 +97,7 @@ export function QuestionInput({
   const sendControl = isStreaming ? (
     <button
       onClick={onCancel}
-      className="question-composer-action flex-shrink-0 p-1.5 rounded-lg bg-red-100 text-red-600 hover:bg-red-200 transition-colors"
+      className="question-composer-action question-composer-action--stop"
       title="停止生成"
       aria-label="停止生成"
     >
@@ -107,7 +107,7 @@ export function QuestionInput({
     <button
       onClick={handleSend}
       disabled={!value.trim() || disabled}
-      className="question-composer-action flex-shrink-0 p-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:bg-gray-200 disabled:text-gray-400 transition-colors"
+      className="question-composer-action question-composer-action--send"
       title="发送"
       aria-label="发送"
     >
@@ -116,8 +116,8 @@ export function QuestionInput({
   );
 
   return (
-    <div className={`question-composer ${harnessVariant ? 'question-composer--harness' : ''} px-4 py-3 border-t border-gray-100 bg-white`}>
-      <div className={`question-composer-field ${harnessVariant ? 'question-composer-field--harness' : ''} flex items-end gap-2 bg-gray-50 rounded-xl border border-gray-200 px-3 py-2 focus-within:border-blue-400 focus-within:ring-1 focus-within:ring-blue-100 transition-all`}>
+    <div className={`question-composer ${harnessVariant ? 'question-composer--harness' : 'question-composer--default'}`}>
+      <div className={`question-composer-field ${harnessVariant ? 'question-composer-field--harness' : 'question-composer-field--default'}`}>
         {!harnessVariant && attachmentControls}
         <textarea
           ref={textareaRef}
@@ -127,7 +127,7 @@ export function QuestionInput({
           placeholder="输入您的问题... (Enter 发送, Shift+Enter 换行)"
           disabled={disabled}
           rows={harnessVariant ? 4 : 1}
-          className={`${harnessVariant ? 'question-composer-textarea--harness' : ''} flex-1 resize-none bg-transparent text-sm text-gray-700 placeholder-gray-400 outline-none max-h-32 py-1`}
+          className={harnessVariant ? 'question-composer-textarea--harness' : 'question-composer-textarea--default'}
           aria-label="问题输入"
         />
         {harnessVariant ? (
@@ -158,7 +158,7 @@ export function QuestionInput({
         </div>
       )}
       {disabled && !isStreaming && (
-        <p className="text-[10px] text-gray-400 mt-1.5 text-center">
+        <p className="question-composer-hint">
           请先选择一个会话或新建会话
         </p>
       )}

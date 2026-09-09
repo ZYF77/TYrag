@@ -51,6 +51,10 @@ from enterprise.gateway.sync.sync_service import (
     DocumentSyncError, DocumentNotFoundError, SyncService,
 )
 from enterprise.gateway.sync.worker import OutboxWorker, StatusReconciler
+from enterprise.gateway.equipment_identity import (
+    external_router as equipment_identity_router,
+    admin_router as equipment_identity_admin_router,
+)
 from enterprise.gateway.quality.worker import (
     QualityEvaluationService,
     QualityEvaluationWorker,
@@ -856,6 +860,11 @@ from enterprise.gateway.sync.v2_router import router as v2_document_router
 app.include_router(v2_document_router)
 from enterprise.gateway.sync.v3_router import router as v3_document_router
 app.include_router(v3_document_router)
+app.include_router(equipment_identity_router)
+from enterprise.gateway.sync.ragflow_status_webhook import (
+    router as ragflow_status_webhook_router,
+)
+app.include_router(ragflow_status_webhook_router)
 app.include_router(transient_attachment_router)
 
 # WP-03 Phase 2 quality status APIs
@@ -865,6 +874,7 @@ app.include_router(quality_router)
 # Internal system-admin settings APIs; not part of the external OpenAPI.
 from enterprise.gateway.admin_router import router as system_admin_router
 app.include_router(system_admin_router)
+app.include_router(equipment_identity_admin_router)
 
 
 @app.api_route(

@@ -200,6 +200,16 @@ EAM 文档除 MIME 外必须写清行为变化（协议字段不变）：
 5. EAM 文档写清已完成可无 citations、PDF≠JPG、续问不带上一张图。
 6. `empty_response` 豁免仅 `messages[-1].files` 非空。
 
+
+## 图片检索桥接：独立 vision/OCR 模型
+
+图片 Understand（仅 jpeg/png）改为可配置轻量 vision/OCR，**不**绑定企业 RAG Chat 会话模型。
+
+- `ENTERPRISE_ATTACHMENT_VISION_ENABLED`（默认 `true`）：`false` 时跳过 Understand，空观察降级，主 ask 继续。
+- `ENTERPRISE_ATTACHMENT_VISION_LLM_ID`：传给 RAGFlow `/chat/completions` 的 `llm_id`；空则保持租户默认 Chat 回退并打迁移告警。
+- `ENTERPRISE_ATTACHMENT_VISION_TIMEOUT_SECONDS`（默认 `30`）：Understand 专用超时；超时/失败 → 空观察，不阻塞主路径。
+- 仍 `chat_id=None`、无知识库、无 session；仅 jpeg/png 走 Understand。
+
 ## 明确不做
 
 - Gateway 全文解析 Office / 再造 parser

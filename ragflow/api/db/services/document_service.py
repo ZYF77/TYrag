@@ -42,6 +42,51 @@ from rag.utils.redis_conn import REDIS_CONN
 class DocumentService(CommonService):
     model = Document
 
+
+    @classmethod
+    @DB.connection_context()
+    def update_by_id(cls, pid, data):
+        """Update document; emit enterprise terminal webhook when run newly terminals."""
+        old_run = None
+        new_run = data.get("run") if isinstance(data, dict) else None
+        kb_id = None
+        progress = None
+        progress_msg = None
+        meta = None
+        if new_run is not None:
+            try:
+                e, doc = cls.get_by_id(pid)
+                if e and doc:
+                    old_run = doc.run
+                    kb_id = doc.kb_id
+                    progress = data.get("progress", doc.progress)
+                    progress_msg = data.get("progress_msg", doc.progress_msg)
+                    meta = getattr(doc, "meta_fields", None) or {}
+            except Exception:
+                logging.exception("enterprise webhook pre-read failed for %s", pid)
+        num = super().update_by_id(pid, data)
+        if num and new_run is not None:
+            try:
+                from api.utils.enterprise_status_webhook import (
+                    emit_document_run_terminal,
+                    extract_enterprise_event_id,
+                )
+                emit_document_run_terminal(
+                    doc_id=str(pid),
+                    kb_id=str(kb_id or ""),
+                    old_run=old_run,
+                    new_run=new_run,
+                    progress=progress,
+                    progress_msg=progress_msg,
+                    trigger="update_by_id",
+                    update_time=(data or {}).get("update_time"),
+                    enterprise_event_id=extract_enterprise_event_id(meta),
+                )
+            except Exception:
+                logging.exception("enterprise status webhook emit failed doc=%s", pid)
+        return num
+
+
     @classmethod
     def get_cls_model_fields(cls):
         return [
@@ -1095,6 +1140,7 @@ class DocumentService(CommonService):
                 finished = True
                 bad = 0
                 e, doc = DocumentService.get_by_id(d["id"])
+                old_run = doc.run
                 status = doc.run  # TaskStatus.RUNNING.value
                 if status == TaskStatus.CANCEL.value:
                     continue
@@ -1155,6 +1201,29 @@ class DocumentService(CommonService):
                 info["update_time"] = current_timestamp()
                 info["update_date"] = get_format_time()
                 (cls.model.update(info).where((cls.model.id == d["id"]) & ((cls.model.run.is_null(True)) | (cls.model.run != TaskStatus.CANCEL.value))).execute())
+                try:
+                    from api.utils.enterprise_status_webhook import (
+                        emit_document_run_terminal,
+                        extract_enterprise_event_id,
+                    )
+                    emit_document_run_terminal(
+                        doc_id=str(d["id"]),
+                        kb_id=str(getattr(doc, "kb_id", None) or d.get("kb_id") or ""),
+                        old_run=old_run,
+                        new_run=status,
+                        progress=info.get("progress"),
+                        progress_msg=info.get("progress_msg"),
+                        trigger="sync_progress",
+                        update_time=info.get("update_time"),
+                        enterprise_event_id=extract_enterprise_event_id(
+                            getattr(doc, "meta_fields", None) or {}
+                        ),
+                    )
+                except Exception:
+                    logging.exception(
+                        "enterprise status webhook emit failed in _sync_progress doc=%s",
+                        d.get("id"),
+                    )
             except Exception as e:
                 if str(e).find("'0'") < 0:
                     logging.exception("fetch task exception")

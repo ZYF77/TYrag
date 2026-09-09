@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from enterprise.gateway.db.dialect import add_column_if_missing, exec_sql
 from enterprise.gateway.db.tables import metadata
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 6
 
 
 def _quote_identifier(value: str) -> str:
@@ -96,6 +96,32 @@ async def _upgrade_v1_to_v2(conn) -> None:
         )
 
 
+
+async def _upgrade_v3_to_v4(conn) -> None:
+    """Add RAGFlow document-run terminal webhook inbox."""
+    await exec_sql(
+        conn,
+        """CREATE TABLE IF NOT EXISTS ragflow_status_inbox (
+               id SERIAL PRIMARY KEY,
+               event_id TEXT NOT NULL UNIQUE,
+               event_type TEXT NOT NULL,
+               ragflow_document_id TEXT NOT NULL,
+               ragflow_dataset_id TEXT NOT NULL DEFAULT '',
+               run TEXT NOT NULL,
+               run_code TEXT NOT NULL DEFAULT '',
+               trigger TEXT NOT NULL DEFAULT '',
+               occurred_at TEXT NOT NULL DEFAULT '',
+               payload_json TEXT NOT NULL DEFAULT '',
+               created_at TEXT NOT NULL
+           )""",
+    )
+    await exec_sql(
+        conn,
+        """CREATE INDEX IF NOT EXISTS idx_ragflow_status_inbox_doc
+              ON ragflow_status_inbox (ragflow_document_id, run_code)""",
+    )
+
+
 async def _upgrade_v2_to_v3(conn) -> None:
     """Add the singleton runtime-settings row store."""
     await exec_sql(
@@ -106,6 +132,65 @@ async def _upgrade_v2_to_v3(conn) -> None:
                updated_at TEXT NOT NULL,
                updated_by TEXT
            )""",
+    )
+
+
+
+async def _upgrade_v4_to_v5(conn) -> None:
+    """Persist conversation device union + create-time anchor."""
+    await add_column_if_missing(
+        conn,
+        "ext_v2_conversation",
+        "conversation_devices",
+        "TEXT NOT NULL DEFAULT '[]'",
+    )
+    await add_column_if_missing(
+        conn,
+        "ext_v2_conversation",
+        "anchor_equipment_id",
+        "TEXT",
+    )
+    # Backfill scoped conversations created before device-union storage.
+    await exec_sql(
+        conn,
+        """UPDATE ext_v2_conversation
+              SET conversation_devices = CASE
+                    WHEN equipment_id IS NOT NULL AND TRIM(equipment_id) <> ''
+                      AND (conversation_devices IS NULL
+                           OR TRIM(conversation_devices) IN ('', '[]'))
+                    THEN json_build_array(equipment_id)::text
+                    ELSE COALESCE(NULLIF(TRIM(conversation_devices), ''), '[]')
+                  END,
+                  anchor_equipment_id = CASE
+                    WHEN anchor_equipment_id IS NULL
+                     AND equipment_id IS NOT NULL
+                     AND TRIM(equipment_id) <> ''
+                    THEN equipment_id
+                    ELSE anchor_equipment_id
+                  END""",
+    )
+
+
+async def _upgrade_v5_to_v6(conn) -> None:
+    """Persist the current EAM-owned identity snapshot on the asset registry."""
+    await add_column_if_missing(
+        conn, "ext_asset_registry", "source_system", "TEXT NOT NULL DEFAULT ''"
+    )
+    await add_column_if_missing(
+        conn, "ext_asset_registry", "identity_version", "INTEGER NOT NULL DEFAULT 0"
+    )
+    await add_column_if_missing(
+        conn, "ext_asset_registry", "updated_at", "TEXT NOT NULL DEFAULT ''"
+    )
+    await exec_sql(
+        conn,
+        """CREATE INDEX IF NOT EXISTS idx_asset_registry_fixed
+              ON ext_asset_registry (tenant_id, fixed_asset_no)""",
+    )
+    await exec_sql(
+        conn,
+        """CREATE INDEX IF NOT EXISTS idx_asset_registry_asset
+              ON ext_asset_registry (tenant_id, asset_id)""",
     )
 
 
@@ -127,17 +212,38 @@ async def initialize_schema(engine: AsyncEngine, *, schema: str = "public") -> N
         if existing_names:
             missing = sorted(expected_names - existing_names)
             extra = sorted(existing_names - expected_names)
-            if extra or (missing and missing != ["gateway_runtime_settings"]):
+            allowed_missing = {
+                "gateway_runtime_settings",
+                "ragflow_status_inbox",
+                "gateway_equipment_recognition_settings",
+            }
+            if extra or (missing and not set(missing).issubset(allowed_missing)):
                 raise RuntimeError(
                     f"incomplete Gateway schema: missing={missing!r}, extra={extra!r}"
                 )
         if not existing_names:
             await conn.run_sync(metadata.create_all)
-        elif "gateway_runtime_settings" not in existing_names:
+        elif (
+            "gateway_runtime_settings" not in existing_names
+            or "ragflow_status_inbox" not in existing_names
+            or "gateway_equipment_recognition_settings" not in existing_names
+        ):
             await conn.run_sync(metadata.create_all)
         # 新库由 create_all 建列；老库（含 v1/v2）在此幂等补列并升级版本。
         await add_column_if_missing(
             conn, "ext_document_map", "parsed_at", "TEXT"
+        )
+        await add_column_if_missing(
+            conn,
+            "ext_v2_conversation",
+            "conversation_devices",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )
+        await add_column_if_missing(
+            conn,
+            "ext_v2_conversation",
+            "anchor_equipment_id",
+            "TEXT",
         )
         result = await conn.execute(
             text("SELECT version FROM gateway_schema_version ORDER BY version")
@@ -148,10 +254,19 @@ async def initialize_schema(engine: AsyncEngine, *, schema: str = "public") -> N
             values = [2]
         if values == [2]:
             await _upgrade_v2_to_v3(conn)
+            values = [3]
+        if values == [3]:
+            await _upgrade_v3_to_v4(conn)
+            values = [4]
+        if values == [4]:
+            await _upgrade_v4_to_v5(conn)
+            values = [5]
+        if values == [5]:
+            await _upgrade_v5_to_v6(conn)
         elif values not in ([], [SCHEMA_VERSION]):
             raise RuntimeError(
                 f"unsupported Gateway schema version: {values!r}; "
-                f"expected [1], [2], or [{SCHEMA_VERSION}]"
+                f"expected [1], [2], [3], [4], [5], or [{SCHEMA_VERSION}]"
             )
         await conn.execute(text("DELETE FROM gateway_schema_version"))
         await conn.execute(

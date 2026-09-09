@@ -263,7 +263,7 @@ export const handlers = [
       tenantId: 'wp04e2e2',
       departmentIds: ['d10'],
       roles: ['end_user'],
-      capabilities: ['read', 'ask', 'list_sessions', 'view_citations'],
+      capabilities: ['read', 'ask', 'list_sessions', 'view_citations', 'admin'],
       securityLevel: 2,
       mappingStatus: 'active',
     });
@@ -1020,3 +1020,165 @@ const v2Handlers = [
 ];
 
 handlers.push(...v2Handlers);
+
+// [TEMP-VISUAL-BASELINE] 仅为 UI 重构视觉对比临时补充 admin 数据 mock，重构完成后整块删除。
+const V1_BASE_TEMP = '/enterprise/api/v1';
+handlers.push(
+  http.get(`${V1_BASE_TEMP}/admin/system/integrations`, () => HttpResponse.json({
+    ragflow: {
+      baseUrl: 'http://ragflow.internal:9380',
+      apiVersion: 'v1',
+      paths: {
+        health: '/api/v1/system/ping',
+        datasets: '/api/v1/datasets',
+        chats: '/api/v1/chats',
+        completions: '/api/v1/chat/completions',
+        retrieval: '/api/v1/retrieval',
+      },
+      processing: { maxConcurrentTasks: 3, maxConcurrentChunkBuilders: 2, executorWorkers: 1 },
+    },
+    limits: {
+      fileShareMaxBytes: 128 * 1024 * 1024,
+      s3MaxBytes: 128 * 1024 * 1024,
+      transientAttachmentMaxBytes: 10 * 1024 * 1024,
+      transientAttachmentMaxFiles: 5,
+    },
+    gatewayProcessing: { outboxInFlight: 1, qualityInFlight: 1, callbackBatch: 10, callbackConcurrent: 1 },
+    runtime: {
+      settings: {
+        outbox: { enabled: true, pollSeconds: 2 },
+        statusReconciler: { enabled: true, pollSeconds: 10 },
+        transientAttachmentCleanup: { enabled: true, pollSeconds: 60, ttlSeconds: 86400 },
+        qualityEvaluation: { enabled: true, pollSeconds: 2 },
+        qualityReconciler: { enabled: true, pollSeconds: 10, runningTimeoutSeconds: 1800 },
+        callbackDelivery: { enabled: true, pollSeconds: 2 },
+        limits: { fileShareMaxMiB: 128, s3MaxMiB: 128, transientAttachmentMaxMiB: 10 },
+        diagnostics: { enabled: false },
+      },
+      source: 'environment',
+      updatedAt: null,
+      hotReload: true,
+    },
+    callbacksEnabled: true,
+    callbacks: [
+      { binding: 'EAM', tenantId: null, sourceSystem: 'EAM', baseUrl: 'https://eam.example', path: '/callback', method: 'POST', enabled: true, credentialConfigured: true },
+      { binding: 'CMMS', tenantId: 'tenant-b', sourceSystem: 'CMMS', baseUrl: 'https://cmms.example', path: '/hooks/tyrag', method: 'POST', enabled: false, credentialConfigured: false },
+    ],
+  })),
+  http.get(`${V1_BASE_TEMP}/admin/system/equipment-recognition`, () => HttpResponse.json({
+    pattern: '[A-Za-z0-9][A-Za-z0-9._\\\\-]{3,127}',
+    enabled: true,
+    configVersion: 1,
+    updatedAt: null,
+    updatedBy: null,
+  })),
+  http.put(`${V1_BASE_TEMP}/admin/system/equipment-recognition`, async ({ request }) => {
+    return HttpResponse.json(await request.json());
+  }),
+  http.post(`${V1_BASE_TEMP}/admin/system/equipment-recognition/preview`, async ({ request }) => {
+    const body = await request.json() as { text?: string; pattern?: string };
+    const text = body.text ?? '';
+    const values = [...text.matchAll(/[A-Za-z0-9][A-Za-z0-9._-]{3,127}/g)].map((match) => match[0]);
+    return HttpResponse.json({
+      items: [...new Set(values)].map((candidate) => ({
+        candidate,
+        equipmentId: candidate === 'EQ-1001' ? 'EQ-1001' : null,
+        matched: candidate === 'EQ-1001',
+      })),
+      pattern: body.pattern ?? '[A-Za-z0-9][A-Za-z0-9._-]{3,127}',
+      enabled: true,
+    });
+  }),
+    http.post(`${V1_BASE_TEMP}/admin/system/equipment-identities/:equipmentId/sync`, ({ params }) => HttpResponse.json({
+    tenantId: 'tenant-a',
+    equipmentId: String(params.equipmentId),
+    fixedAssetNo: 'FA-1',
+    assetId: 'ASSET-1',
+    sourceSystem: 'EAM',
+    identityVersion: 2,
+    updatedAt: '2026-09-07T00:00:00Z',
+    documentCount: 1,
+    sync: { status: 'pending', errorCode: null, errorMessage: null, updatedAt: '2026-09-07T00:00:00Z' },
+    retried: true,
+  })),
+http.get(`${V1_BASE_TEMP}/admin/system/equipment-identities`, () => HttpResponse.json({
+    items: [{
+      tenantId: 'demo-tenant',
+      equipmentId: 'EQ-1001',
+      fixedAssetNo: 'FA-2001',
+      assetId: 'ASSET-1',
+      sourceSystem: 'EAM',
+      identityVersion: 2,
+      updatedAt: '2026-08-29T09:40:00.000Z',
+      documentCount: 3,
+      sync: { status: 'done' },
+    }],
+    hasMore: false,
+  })),
+  http.get(`${V1_BASE_TEMP}/admin/system/metadata/conversations`, () => HttpResponse.json({
+    items: [
+      { conversationId: 'conv-meta-1', businessUserId: 'user-a', equipmentId: 'EQ-1001', fixedAssetNo: 'FA-2001', status: 'active', ragflowChatId: 'chat-1', ragflowSessionId: 'sess-1', contextVersion: 3, createdAt: '2026-08-29T10:00:00.000Z', lastMessageAt: '2026-08-29T11:00:00.000Z' },
+      { conversationId: 'conv-meta-2', businessUserId: 'user-b', equipmentId: null, fixedAssetNo: null, status: 'closed', ragflowChatId: null, ragflowSessionId: 'sess-2', contextVersion: 1, createdAt: '2026-08-28T10:00:00.000Z', lastMessageAt: null },
+    ],
+    hasMore: false,
+  })),
+  http.get(`${V1_BASE_TEMP}/admin/system/metadata/documents`, () => HttpResponse.json({
+    items: [
+      { externalDocumentId: 'ext-doc-meta-1', sourceVersionId: 'v3', fileName: 'AX-200维修手册.pdf', sourceSystem: 'EAM', documentType: 'manual', equipmentId: 'EQ-1001', fixedAssetNo: 'FA-2001', assetId: 'ASSET-1', syncStatus: 'ready', businessStatus: 'active', ragflowDatasetId: 'ds-1', ragflowDocumentId: 'rag-doc-1', sourceSize: 12345, createdAt: '2026-08-29T09:00:00.000Z', updatedAt: '2026-08-29T09:30:00.000Z', parsedAt: '2026-08-29T09:20:00.000Z', eamNotifiedAt: '2026-08-29T09:40:00.000Z' },
+      { externalDocumentId: 'ext-doc-meta-2', sourceVersionId: 'v1', fileName: '保养清单.xlsx', sourceSystem: 'CMMS', documentType: null, equipmentId: null, fixedAssetNo: null, assetId: null, syncStatus: null, businessStatus: 'active', ragflowDatasetId: null, ragflowDocumentId: null, sourceSize: null, createdAt: '2026-08-27T09:00:00.000Z', updatedAt: null, parsedAt: null, eamNotifiedAt: null },
+    ],
+    hasMore: false,
+  })),
+  http.get(`${V1_BASE_TEMP}/admin/system/metadata/summary`, () => HttpResponse.json({
+    conversations: { total: 3, byStatus: { active: 2, archived: 1 } },
+    documents: {
+      total: 13,
+      bySyncStatus: { ready: 9, failed: 4 },
+      byBusinessStatus: { active: 10, review_required: 3 },
+    },
+  })),
+  http.get(`${V1_BASE_TEMP}/admin/system/metadata/conversations/:conversationId/messages`, () => HttpResponse.json({
+    conversationId: 'conv-meta-1',
+    items: [
+      { messageId: 'msg-u1', role: 'user', content: 'AX-200 报警 E-104 应该怎么处理？\n请给出步骤。', status: 'completed', createdAt: '2026-08-29T10:00:00.000Z' },
+      { messageId: 'msg-a1', role: 'assistant', content: '请先检查**液压油位**[ID:1]，再复位告警。', status: 'completed', citations: [{ citationId: 'admin-citation-1', sourceType: 'document', title: 'AX-200 维修手册.pdf', externalDocumentId: 'doc-ax-200', sourceVersionId: 'v1', pageNo: 6, refIndex: 1, fileKind: 'original' }], createdAt: '2026-08-29T10:00:05.000Z' },
+      { messageId: 'msg-a2', role: 'assistant', content: '没有找到可靠依据，无法回答该问题。', status: 'no_reliable_evidence', createdAt: '2026-08-29T10:01:00.000Z' },
+    ],
+  })),
+  http.get(`${V1_BASE_TEMP}/admin/system/diagnostics/traces`, () => HttpResponse.json({
+    items: [{
+      runId: 'run-diagnostics-1',
+      conversationId: 'conv-1',
+      clientMessageId: 'client-1',
+      status: 'completed',
+      outcome: 'completed',
+      startedAt: '2026-08-31T08:00:00.000Z',
+      durationMs: 120,
+      truncated: false,
+      createdAt: '2026-08-31T08:00:00.000Z',
+    }],
+    hasMore: false,
+  })),
+  http.get(`${V1_BASE_TEMP}/admin/system/diagnostics/traces/:runId`, () => HttpResponse.json({
+    runId: 'run-diagnostics-1',
+    conversationId: 'conv-1',
+    clientMessageId: 'client-1',
+    status: 'completed',
+    createdAt: '2026-08-31T08:00:00.000Z',
+    diagnostics: {
+      version: 1,
+      runId: 'run-diagnostics-1',
+      startedAt: '2026-08-31T08:00:00.000Z',
+      durationMs: 120,
+      truncated: false,
+      events: [
+        { type: 'stage', atMs: 15, durationMs: 8, data: { stage: 'rerank', status: 'success' } },
+        { type: 'retrieval', atMs: 20, durationMs: 12, data: { candidateCount: 2, selectedCount: 1 } },
+        { type: 'context', atMs: 40, data: { includedChunkIds: ['chunk-1'] } },
+        { type: 'llm', atMs: 100, data: { modelId: 'qwen', ttftMs: 30 } },
+        { type: 'outcome', atMs: 120, data: { outcome: 'completed' } },
+      ],
+    },
+  })),
+);
+// [/TEMP-VISUAL-BASELINE]

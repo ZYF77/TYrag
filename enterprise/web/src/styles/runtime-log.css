@@ -1,0 +1,1445 @@
+.runtime-inline-summary {
+  display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 12px 12px 4px;
+    padding: 8px;
+    border: 1px solid rgba(10, 132, 255, 0.09);
+    border-radius: 12px;
+    background: rgba(10, 132, 255, 0.045);
+    color: var(--text-3);
+    font-size: 11px;
+}
+
+.runtime-inline-summary span {
+  display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 6px;
+}
+
+.runtime-inline-summary strong {
+  color: var(--accent);
+    font-size: 13px;
+    font-weight: 650;
+}
+
+.runtime-section {
+  margin: 12px;
+    border: 1px solid rgba(24, 27, 33, 0.06);
+    border-radius: 14px;
+    background: rgba(248, 249, 251, 0.62);
+    overflow: hidden;
+}
+
+.runtime-section-heading {
+  display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 13px 14px 10px;
+    border-bottom: 1px solid var(--hairline);
+}
+
+.runtime-section-heading > div {
+  display: grid;
+    gap: 3px;
+}
+
+.runtime-section-heading strong {
+  color: var(--text);
+    font-size: 13px;
+    font-weight: 650;
+}
+
+.runtime-section-heading span {
+  color: var(--text-3);
+    font-size: 11px;
+}
+
+.runtime-section-heading--editable {
+  margin: 14px 12px 0;
+    border: 1px solid rgba(10, 132, 255, 0.1);
+    border-radius: 12px 12px 0 0;
+    background: rgba(10, 132, 255, 0.045);
+}
+
+.runtime-section-heading--limits {
+  margin-top: 16px;
+}
+
+.runtime-facts {
+  display: grid;
+}
+
+.runtime-fact {
+  display: flex;
+    min-width: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--hairline);
+}
+
+.runtime-fact:last-child {
+  border-bottom: 0;
+}
+
+.runtime-fact-copy {
+  display: grid;
+    min-width: 0;
+    gap: 3px;
+}
+
+.runtime-fact-copy strong {
+  color: var(--text-body);
+    font-size: 13px;
+    font-weight: 560;
+}
+
+.runtime-fact-copy small,
+.runtime-setting-label small {
+  color: var(--text-4);
+    font: 10px var(--mono);
+    overflow-wrap: anywhere;
+}
+
+.runtime-fact-copy span,
+.runtime-setting-label > span {
+  color: var(--text-3);
+    font-size: 11px;
+    line-height: 1.45;
+}
+
+.runtime-fact-value {
+  display: flex;
+    min-width: 0;
+    flex: 0 1 auto;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 6px;
+}
+
+.runtime-fact-value .console-chip {
+  max-width: min(100%, 480px);
+    overflow-wrap: anywhere;
+    white-space: normal;
+}
+
+.runtime-settings-form {
+  margin: 0 12px 14px;
+}
+
+.runtime-settings-grid {
+  display: grid;
+    overflow: hidden;
+    border: 1px solid rgba(10, 132, 255, 0.1);
+    border-top: 0;
+    border-radius: 0 0 12px 12px;
+    background: rgba(255, 255, 255, 0.72);
+}
+
+.runtime-setting-row {
+  display: grid;
+    grid-template-columns: minmax(230px, 0.85fr) minmax(0, 1.8fr);
+    gap: 20px;
+    align-items: center;
+    min-height: 76px;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--hairline);
+}
+
+.runtime-setting-row:last-child {
+  border-bottom: 0;
+}
+
+.runtime-setting-label {
+  display: grid;
+    min-width: 0;
+    gap: 3px;
+}
+
+.runtime-setting-label strong {
+  color: var(--text-body);
+    font-size: 14px;
+    font-weight: 590;
+}
+
+.runtime-setting-controls {
+  display: flex;
+    min-width: 0;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px 14px;
+    color: var(--text-3);
+}
+
+.runtime-toggle {
+  position: relative;
+    display: inline-flex;
+    min-height: 32px;
+    align-items: center;
+    gap: 7px;
+    flex: 0 0 auto;
+    color: var(--text-3);
+    cursor: pointer;
+    font-size: 11px;
+    user-select: none;
+}
+
+.runtime-toggle-input {
+  position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    opacity: 0;
+}
+
+/* runtime 与 harness 开关共用基础轨道/滑块声明（原两处重复定义叠加后的
+   最终计算值）；尺寸、配色与动效差异保留在各自 family 覆盖里。 */
+.runtime-toggle-track {
+  display: inline-flex;
+    height: 24px;
+    align-items: center;
+    border-radius: 999px;
+}
+
+.runtime-toggle-track {
+  width: 42px;
+    padding: 3px;
+    background: #d5d9e0;
+    box-shadow: inset 0 1px 2px rgba(16, 20, 28, 0.12);
+    transition: background-color 180ms var(--ease-out), box-shadow 180ms var(--ease-out);
+}
+
+.runtime-toggle-track span {
+  width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: #fff;
+}
+
+.runtime-toggle-track span {
+  box-shadow: 0 2px 6px rgba(16, 20, 28, 0.2), 0 0 0 1px rgba(16, 20, 28, 0.05);
+    transition: transform 180ms var(--ease-out), box-shadow 180ms var(--ease-out);
+}
+
+.runtime-toggle.is-on .runtime-toggle-track {
+  background: var(--accent);
+    box-shadow: inset 0 1px 2px rgba(0, 70, 150, 0.18), 0 0 0 3px rgba(10, 132, 255, 0.08);
+}
+
+.runtime-toggle.is-on .runtime-toggle-track span {
+  transform: translateX(18px);
+}
+
+.runtime-toggle:focus-within .runtime-toggle-track {
+  outline: 3px solid rgba(10, 132, 255, 0.2);
+    outline-offset: 2px;
+}
+
+.runtime-toggle:active .runtime-toggle-track span {
+  transform: scale(0.9);
+}
+
+.runtime-toggle.is-on:active .runtime-toggle-track span {
+  transform: translateX(18px) scale(0.9);
+}
+
+.runtime-toggle-text {
+  min-width: 3em;
+}
+
+.runtime-range-field {
+  display: flex;
+    min-width: min(100%, 260px);
+    flex: 1 1 280px;
+    align-items: center;
+    gap: 10px;
+}
+
+.runtime-range {
+  min-width: 100px;
+    flex: 1 1 auto;
+    accent-color: var(--accent);
+    cursor: pointer;
+}
+
+.runtime-range-value {
+  display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-3);
+    white-space: nowrap;
+}
+
+.runtime-range-value input {
+  width: 86px;
+    min-height: 34px;
+    border: 1px solid var(--hairline);
+    border-radius: 9px;
+    background: var(--surface);
+    padding: 0 9px;
+    color: var(--text-body);
+    font: inherit;
+}
+
+.runtime-range-value input:focus {
+  outline: 0;
+    border-color: rgba(10, 132, 255, 0.34);
+    box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.12);
+}
+
+.runtime-effect-badge {
+  display: inline-flex;
+    min-height: 24px;
+    align-items: center;
+    border-radius: 999px;
+    padding: 0 9px;
+    font-size: 10px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.runtime-effect-badge--hot {
+  background: rgba(50, 215, 75, 0.1);
+    color: #248a35;
+}
+
+.runtime-effect-badge--restart {
+  background: rgba(255, 107, 0, 0.1);
+    color: #b95512;
+}
+
+.runtime-effect-badge--readonly {
+  background: rgba(126, 135, 148, 0.12);
+    color: var(--text-3);
+}
+
+.runtime-settings-grid--limits {
+  margin: 0 12px;
+    border: 1px solid var(--hairline);
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.72);
+}
+
+.runtime-settings-actions {
+  display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    margin-top: 14px;
+}
+
+.runtime-settings-actions .console-primary-button:disabled {
+  background: #dfe3e8;
+    color: #8c929b;
+    box-shadow: none;
+    cursor: default;
+}
+
+.runtime-save-hint {
+  color: var(--text-4);
+    font-size: 11px;
+}
+
+@media (max-width: 720px) {
+  .runtime-setting-row {
+  grid-template-columns: 1fr;
+      gap: 10px;
+      padding: 12px;
+}
+
+  .runtime-setting-controls,
+  .runtime-range-field {
+  width: 100%;
+}
+
+  .runtime-fact {
+  align-items: flex-start;
+      flex-direction: column;
+      gap: 8px;
+}
+
+  .runtime-fact-value {
+  justify-content: flex-start;
+}
+}
+
+.runtime-card .console-card-body {
+  padding: 0;
+}
+
+.runtime-live {
+  display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--live);
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.runtime-live::before {
+  content: '';
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: currentColor;
+    box-shadow: 0 0 0 4px rgba(48, 209, 88, 0.16);
+}
+
+.runtime-live.is-paused {
+  color: var(--text-3);
+}
+
+.runtime-live.is-paused::before {
+  box-shadow: none;
+}
+
+.runtime-overview {
+  display: grid;
+    grid-template-columns: minmax(180px, 0.8fr) minmax(0, 2.2fr);
+    gap: 28px;
+    margin: 0 22px 18px;
+    border-radius: 18px;
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    background: linear-gradient(145deg, #17191f, #20242d);
+    color: #f5f7fa;
+    padding: 20px 22px;
+    box-shadow: inset 0 1px rgba(255, 255, 255, 0.08), 0 12px 30px rgba(12, 17, 29, 0.12);
+}
+
+.runtime-overview-lead p,
+.runtime-overview-lead span {
+  margin: 0;
+    color: #a9b2c2;
+    font-size: 11px;
+}
+
+.runtime-overview-lead strong {
+  display: inline-block;
+    margin: 3px 7px 0 0;
+    font-size: 38px;
+    font-weight: 620;
+    letter-spacing: -0.05em;
+    line-height: 1;
+}
+
+.runtime-health-track {
+  display: flex;
+    height: 4px;
+    margin-top: 15px;
+    overflow: hidden;
+    border-radius: 99px;
+    background: #313643;
+}
+
+.runtime-health-track span,
+.runtime-health-track i {
+  display: block;
+    height: 100%;
+    transition: width 260ms var(--ease-out);
+}
+
+.runtime-health-track span {
+  background: #53df91;
+}
+
+.runtime-health-track i {
+  background: #ff716b;
+}
+
+.runtime-overview-stats {
+  display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    align-items: center;
+    margin: 0;
+}
+
+.runtime-overview-stats div {
+  min-width: 0;
+    padding: 3px 18px;
+    border-left: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.runtime-overview-stats dt {
+  color: #9da7b8;
+    font-size: 11px;
+}
+
+.runtime-overview-stats dd {
+  margin: 5px 0 0;
+    font-family: var(--mono);
+    font-size: 20px;
+    font-weight: 650;
+}
+
+.runtime-overview-stats dd.is-danger {
+  color: #ff817c;
+}
+
+.runtime-overview-stats small {
+  color: #9da7b8;
+    font-size: 10px;
+    font-weight: 500;
+}
+
+.runtime-filter-panel {
+  padding: 18px 22px;
+    border-top: 1px solid var(--hairline);
+    background: rgba(247, 248, 250, 0.72);
+}
+
+.runtime-filter-grid {
+  display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.runtime-filter-grid label {
+  display: grid;
+    min-width: 0;
+    gap: 6px;
+}
+
+.runtime-filter-grid label > span {
+  color: var(--text-3);
+    font-size: 11px;
+    font-weight: 550;
+}
+
+.runtime-datetime-field > small {
+  color: var(--text-4);
+    font-size: 10px;
+    line-height: 1.2;
+}
+
+.runtime-datetime-input {
+  display: flex;
+    min-width: 0;
+    min-height: 40px;
+    align-items: center;
+    gap: 8px;
+    border: 1px solid rgba(0, 0, 0, 0.09);
+    border-radius: 11px;
+    background: rgba(255, 255, 255, 0.9);
+    padding: 0 10px;
+    color: var(--text-3);
+    transition: border-color 110ms var(--ease-out), box-shadow 110ms var(--ease-out), background-color 110ms var(--ease-out);
+}
+
+.runtime-datetime-input:focus-within {
+  border-color: rgba(10, 132, 255, 0.34);
+    background: #fff;
+    box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.13);
+}
+
+.runtime-datetime-input input {
+  width: 100%;
+    min-height: 38px;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    padding: 0;
+    color: var(--text);
+    font: 12px var(--mono);
+}
+
+.runtime-datetime-input input::placeholder {
+  color: var(--text-4);
+}
+
+.runtime-datetime-input > button {
+  display: inline-grid;
+    width: 20px;
+    height: 20px;
+    flex: 0 0 auto;
+    place-items: center;
+    border: 0;
+    border-radius: 50%;
+    background: var(--hover);
+    color: var(--text-3);
+    font-size: 15px;
+    line-height: 1;
+    cursor: pointer;
+    transition: background-color 110ms var(--ease-out), color 110ms var(--ease-out), transform 110ms var(--ease-out);
+}
+
+.runtime-datetime-input > button:hover {
+  background: rgba(10, 132, 255, 0.12);
+    color: var(--accent);
+}
+
+.runtime-datetime-input > button:active {
+  transform: scale(0.92);
+}
+
+.runtime-filter-grid input,
+.runtime-filter-grid select {
+  min-width: 0;
+    min-height: 40px;
+    border: 1px solid rgba(0, 0, 0, 0.09);
+    border-radius: 11px;
+    background: rgba(255, 255, 255, 0.9);
+    color: var(--text);
+    font: 12px var(--font);
+    padding: 0 11px;
+}
+
+.runtime-filter-grid input:focus,
+.runtime-filter-grid select:focus,
+.runtime-reset:focus-visible,
+.runtime-row:focus-visible {
+  outline: 3px solid rgba(10, 132, 255, 0.22);
+    outline-offset: 2px;
+}
+
+.runtime-reset {
+  align-self: end;
+    display: inline-flex;
+    min-height: 40px;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    border: 1px solid var(--hairline);
+    border-radius: 11px;
+    background: transparent;
+    color: var(--text-2);
+    font: 12px var(--font);
+    cursor: pointer;
+}
+
+.runtime-reset:active,
+.runtime-row:active {
+  transform: scale(0.985);
+}
+
+.runtime-table-head,
+.runtime-row {
+  display: grid;
+    grid-template-columns: 116px 88px 52px minmax(220px, 1fr) 120px 48px 66px;
+    gap: 12px;
+    align-items: center;
+}
+
+.runtime-table-head {
+  padding: 10px 18px 8px;
+    border-top: 1px solid var(--hairline);
+    border-bottom: 1px solid var(--hairline);
+    color: var(--text-3);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+}
+
+.runtime-log {
+  margin: 0;
+    padding: 0;
+    max-height: 560px;
+    overflow: auto;
+    list-style: none;
+}
+
+.runtime-row {
+  width: 100%;
+    padding: 11px 18px;
+    border: 0;
+    border-bottom: 1px solid var(--hairline);
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: transform 100ms var(--ease-out), background-color 160ms var(--ease-out);
+}
+
+.runtime-row:hover,
+.runtime-row.is-open {
+  background: var(--hover);
+}
+
+.runtime-time,
+.runtime-method,
+.runtime-kind,
+.runtime-main,
+.runtime-caller,
+.runtime-duration {
+  min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.runtime-time,
+.runtime-caller,
+.runtime-duration {
+  color: var(--text-3);
+    font-family: var(--mono);
+    font-size: 10px;
+}
+
+.runtime-method {
+  color: var(--accent);
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.runtime-kind,
+.runtime-main {
+  display: grid;
+    gap: 3px;
+}
+
+.runtime-kind b {
+  font-size: 12px;
+    font-weight: 620;
+}
+
+.runtime-kind small,
+.runtime-main small {
+  overflow: hidden;
+    color: var(--text-3);
+    font-size: 10px;
+    font-weight: 400;
+    text-overflow: ellipsis;
+}
+
+.runtime-main b {
+  overflow: hidden;
+    color: var(--text);
+    font: 550 11px var(--mono);
+    text-overflow: ellipsis;
+}
+
+.runtime-status {
+  font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    text-align: right;
+}
+
+.runtime-status--ok {
+  color: var(--tone-ok);
+}
+
+.runtime-status--heat {
+  color: var(--tone-warn);
+}
+
+.runtime-status--danger {
+  color: var(--tone-danger);
+}
+
+.runtime-status--pending {
+  color: var(--tone-muted);
+}
+
+.runtime-detail {
+  padding: 14px 18px 16px;
+    border-bottom: 1px solid var(--hairline);
+    background: #11151d;
+    color: #dce3ef;
+}
+
+.runtime-detail dl {
+  display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px 18px;
+    margin: 0 0 14px;
+}
+
+.runtime-detail dl div {
+  min-width: 0;
+}
+
+.runtime-detail dt {
+  color: #8692a6;
+    font-size: 10px;
+}
+
+.runtime-detail dd {
+  margin: 3px 0 0;
+    overflow-wrap: anywhere;
+    font-size: 12px;
+}
+
+.runtime-detail pre {
+  max-height: 300px;
+    margin: 0;
+    overflow: auto;
+    font-family: var(--mono);
+    font-size: 11px;
+    line-height: 1.55;
+}
+
+.runtime-detail-grid {
+  display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.runtime-detail-block {
+  min-width: 0;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    border-radius: 12px;
+    background: rgba(28, 34, 46, 0.82);
+}
+
+.runtime-detail-block--request {
+  border-color: rgba(83, 223, 145, 0.22);
+}
+
+.runtime-detail-block--response {
+  border-color: rgba(10, 132, 255, 0.22);
+}
+
+.runtime-detail-block--meta {
+  grid-column: 1 / -1;
+    background: rgba(22, 27, 37, 0.82);
+}
+
+.runtime-detail-block-head {
+  display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 10px 12px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.runtime-detail-block-head strong {
+  color: #f5f7fa;
+    font-size: 12px;
+    font-weight: 650;
+}
+
+.runtime-detail-block-head > span {
+  color: #9da7b8;
+    font: 10px var(--mono);
+}
+
+.runtime-detail-block > dl {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+    margin: 0;
+    padding: 10px 12px;
+}
+
+.runtime-detail-block > pre {
+  max-height: 240px;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    background: rgba(10, 14, 21, 0.28);
+    padding: 11px 12px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.runtime-detail-mono {
+  font-family: var(--mono);
+    font-size: 11px;
+}
+
+@media (max-width: 1050px) {
+  .runtime-table-head,
+  .runtime-row {
+  grid-template-columns: 96px 76px 44px minmax(130px, 1fr) 88px 42px 54px;
+      gap: 8px;
+}
+}
+
+@media (max-width: 820px) {
+  .runtime-overview {
+  grid-template-columns: 1fr;
+      gap: 18px;
+}
+
+  .runtime-overview-stats div:first-child {
+  border-left: 0;
+      padding-left: 0;
+}
+
+  .runtime-filter-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+  .runtime-table-head {
+  display: none;
+}
+
+  .runtime-row {
+  grid-template-columns: 84px 64px minmax(0, 1fr) 70px 42px;
+}
+
+  .runtime-method,
+  .runtime-duration {
+  display: none;
+}
+
+  .runtime-detail-grid {
+  grid-template-columns: 1fr;
+}
+
+  .runtime-detail-block--meta {
+  grid-column: auto;
+}
+
+  .runtime-detail dl {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+}
+
+@media (max-width: 560px) {
+  .runtime-overview {
+  margin-inline: 12px;
+      padding: 18px;
+}
+
+  .runtime-overview-stats {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 15px 0;
+}
+
+  .runtime-overview-stats div:nth-child(3) {
+  border-left: 0;
+      padding-left: 0;
+}
+
+  .runtime-filter-panel {
+  padding-inline: 14px;
+}
+
+  .runtime-filter-grid {
+  grid-template-columns: 1fr;
+}
+
+  .runtime-row {
+  grid-template-columns: 76px 58px minmax(0, 1fr) 62px 36px;
+      gap: 8px;
+      padding-inline: 14px;
+}
+
+  .runtime-detail {
+  padding-inline: 14px;
+}
+
+  .runtime-detail dl {
+  grid-template-columns: 1fr;
+}
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .runtime-row,
+  .runtime-health-track span,
+  .runtime-health-track i,
+  .runtime-datetime-input,
+  .runtime-datetime-input > button {
+  transition: none;
+}
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .runtime-filter-panel {
+  background: #f7f8fa;
+}
+}
+
+.runtime-detail {
+  transform-origin: top center;
+    animation: detail-materialize var(--motion-standard) var(--ease-out) both;
+}
+
+.runtime-live:not(.is-paused)::before {
+  animation: status-breathe 2.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .runtime-detail,
+  .runtime-live::before {
+  animation: none !important;
+}
+
+  .runtime-toggle-track,
+  .runtime-toggle-track span,
+  .runtime-range-value input {
+  transition: none;
+}
+}
+
+/* ---- Runtime controls and metadata orientation --------------------------- */
+.runtime-toggle {
+  min-height: 36px;
+    gap: 8px;
+    border: 1px solid rgba(24, 27, 33, 0.1);
+    border-radius: 999px;
+    background: rgba(247, 248, 250, 0.86);
+    padding: 4px 10px 4px 4px;
+    box-shadow: 0 2px 7px rgba(16, 20, 28, 0.05), inset 0 1px rgba(255, 255, 255, 0.9);
+    transition: border-color var(--motion-quick) var(--ease-out), background-color var(--motion-quick) var(--ease-out), box-shadow var(--motion-quick) var(--ease-out);
+}
+
+.runtime-toggle.is-on {
+  border-color: rgba(10, 132, 255, 0.28);
+    background: rgba(10, 132, 255, 0.08);
+    box-shadow: 0 3px 10px rgba(10, 132, 255, 0.1), inset 0 1px rgba(255, 255, 255, 0.92);
+}
+
+.runtime-toggle-text {
+  min-width: 3.4em;
+    color: var(--text-2);
+    font-size: 11px;
+    font-weight: 600;
+    text-align: center;
+}
+
+.runtime-range-field {
+  display: grid;
+    min-width: min(100%, 280px);
+    grid-template-columns: minmax(120px, 1fr) auto;
+    flex: 1 1 300px;
+    gap: 10px;
+}
+
+.runtime-range {
+  width: 100%;
+    min-width: 120px;
+    height: 20px;
+    appearance: none;
+    accent-color: transparent;
+    border-radius: 999px;
+    background: linear-gradient(90deg, var(--accent) 0 var(--runtime-range-progress, 0%), rgba(24, 27, 33, 0.12) var(--runtime-range-progress, 0%) 100%);
+    cursor: pointer;
+}
+
+.runtime-range::-webkit-slider-runnable-track {
+  height: 6px;
+    border-radius: 999px;
+    background: transparent;
+}
+
+.runtime-range::-webkit-slider-thumb {
+  width: 18px;
+    height: 18px;
+    appearance: none;
+    margin-top: -6px;
+    border: 3px solid #fff;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 2px 7px rgba(10, 132, 255, 0.28), 0 0 0 1px rgba(10, 132, 255, 0.22);
+}
+
+.runtime-range::-moz-range-track {
+  height: 6px;
+    border-radius: 999px;
+    background: rgba(24, 27, 33, 0.12);
+}
+
+.runtime-range::-moz-range-progress {
+  height: 6px;
+    border-radius: 999px;
+    background: var(--accent);
+}
+
+.runtime-range::-moz-range-thumb {
+  width: 12px;
+    height: 12px;
+    border: 3px solid #fff;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 2px 7px rgba(10, 132, 255, 0.28), 0 0 0 1px rgba(10, 132, 255, 0.22);
+}
+
+.runtime-range:focus-visible {
+  outline: 3px solid rgba(10, 132, 255, 0.2);
+    outline-offset: 3px;
+}
+
+.runtime-range-value {
+  min-height: 34px;
+    gap: 6px;
+    color: var(--text-3);
+    font-size: 11px;
+}
+
+.runtime-range-value input {
+  width: 78px;
+    min-height: 34px;
+    border-radius: 11px;
+    background: rgba(255, 255, 255, 0.9);
+    padding-inline: 10px;
+    font-family: var(--mono);
+    font-size: 12px;
+}
+
+.runtime-detail-payload-label {
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+    background: rgba(10, 14, 21, 0.18);
+    padding: 8px 12px 0;
+    color: #9da7b8;
+    font-size: 10px;
+    font-weight: 650;
+    letter-spacing: 0.02em;
+}
+
+@media (max-width: 720px) {
+  .runtime-range-field {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .runtime-toggle,
+  .runtime-toggle-track,
+  .runtime-toggle-track span {
+  transition: none;
+}
+}
+
+/* HTTP log range/detail overlays: native date controls, light dismissal layer,
+   and a fixed-height payload viewer that never grows the workbench page. */
+.runtime-date-range-trigger {
+  display: inline-flex;
+    width: 100%;
+    min-height: 40px;
+    align-items: center;
+    gap: 8px;
+    border: 1px solid rgba(0, 0, 0, 0.09);
+    border-radius: 11px;
+    background: rgba(255, 255, 255, 0.9);
+    padding: 0 11px;
+    color: var(--text-2);
+    font: 12px var(--font);
+    text-align: left;
+    cursor: pointer;
+    transition: border-color var(--motion-quick) var(--ease-out), box-shadow var(--motion-quick) var(--ease-out), background-color var(--motion-quick) var(--ease-out);
+}
+
+.runtime-date-range-trigger:hover,
+.runtime-date-range-trigger[aria-expanded='true'] {
+  border-color: rgba(10, 132, 255, 0.32);
+    background: #fff;
+    box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.1);
+}
+
+.runtime-date-range-trigger svg {
+  flex: 0 0 auto;
+    color: var(--accent);
+}
+
+.runtime-date-range-trigger > span {
+  min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* width 保留 !important：需压过 .console-overlay-layer--popover .console-overlay-panel
+   的 width（0,2,0），本规则仅 0,1,0，去掉后弹层会被压回 420px。 */
+.runtime-date-range-popover {
+  width: min(520px, calc(100vw - 32px)) !important;
+    padding: 16px;
+}
+
+.runtime-date-range-head,
+.runtime-date-range-actions {
+  display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.runtime-date-range-head > div {
+  display: grid;
+    gap: 4px;
+}
+
+.runtime-date-range-head strong {
+  color: var(--text);
+    font-size: 14px;
+}
+
+.runtime-date-range-head span {
+  color: var(--text-3);
+    font-size: 11px;
+}
+
+.runtime-date-range-fields {
+  display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    margin: 16px 0;
+}
+
+.runtime-date-range-fields label {
+  display: grid;
+    gap: 6px;
+}
+
+.runtime-date-range-fields label > span {
+  color: var(--text-3);
+    font-size: 11px;
+}
+
+.runtime-date-range-fields input {
+  min-height: 40px;
+    min-width: 0;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 11px;
+    background: #fff;
+    padding: 0 9px;
+    color: var(--text);
+    font: 12px var(--font);
+}
+
+.runtime-date-range-fields input:focus-visible {
+  outline: 3px solid rgba(10, 132, 255, 0.2);
+    outline-offset: 2px;
+    border-color: rgba(10, 132, 255, 0.38);
+}
+
+.runtime-date-range-actions {
+  justify-content: flex-end;
+}
+
+/* 以下 family 宽度保留 !important：与基础 .console-overlay-panel（max-width/width）
+   同特异性（0,1,0），去掉后依赖源顺序取胜；拆分后家族文件先于 overlay 基础文件
+   导入，等特异性覆盖会失效，故保留。 */
+.runtime-detail-overlay {
+  width: min(1060px, calc(100vw - 32px)) !important;
+    max-width: min(1060px, calc(100vw - 32px)) !important;
+}
+
+/* Shared fixed-height dialog frame used by metadata/diagnostics/admin and the
+   runtime HTTP-log detail; family rules below only add their differences. */
+.runtime-detail-dialog {
+  display: grid;
+    overflow: hidden;
+    max-height: min(800px, calc(100vh - 32px));
+    height: min(760px, calc(100vh - 32px));
+    min-height: 0;
+    grid-template-rows: auto minmax(0, 1fr);
+}
+
+.runtime-detail-dialog {
+  width: min(1060px, calc(100vw - 32px));
+}
+
+.runtime-detail-dialog .console-detail-dialog-body {
+  min-height: 0;
+    overflow: auto;
+}
+
+.runtime-detail-dialog .runtime-detail-grid {
+  padding: 0;
+}
+
+.runtime-detail-dialog .runtime-detail-block {
+  min-width: 0;
+    border: 1px solid rgba(24, 27, 33, 0.08);
+    border-radius: 14px;
+    background: #fff;
+    color: var(--text);
+    overflow: hidden;
+}
+
+.runtime-detail-dialog .runtime-detail-block--meta {
+  grid-column: 1 / -1;
+}
+
+.runtime-detail-dialog .runtime-detail-block-head {
+  border-bottom: 1px solid var(--hairline);
+    background: var(--hover);
+    color: var(--text-2);
+}
+
+.runtime-detail-dialog .runtime-detail-block-head strong {
+  color: var(--text);
+}
+
+.runtime-detail-dialog .runtime-detail-block-head > span {
+  color: var(--text-3);
+}
+
+.runtime-detail-dialog .runtime-detail-block > dl {
+  color: var(--text-2);
+}
+
+.runtime-detail-dialog .runtime-detail-block dt {
+  color: var(--text-3);
+}
+
+.runtime-detail-dialog .runtime-detail-block dd {
+  color: var(--text);
+}
+
+.runtime-detail-dialog .runtime-detail-block > pre,
+.runtime-detail-dialog .runtime-detail-block pre {
+  max-height: 260px;
+    overflow: auto;
+    border-top: 1px solid var(--hairline);
+    background: #f7f8fa;
+    color: var(--text-2);
+}
+
+.runtime-detail-dialog .runtime-detail-payload-label {
+  border-top: 1px solid var(--hairline);
+    background: #fbfcfd;
+    color: var(--text-3);
+}
+
+@media (max-width: 640px) {
+  .runtime-date-range-fields {
+  grid-template-columns: 1fr;
+}
+
+  .runtime-detail-overlay,
+  .runtime-detail-dialog {
+  width: calc(100vw - 20px) !important;
+}
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .runtime-date-range-trigger {
+  transition: none;
+}
+}
+
+/* A date-range trigger should read like the neighbouring filter controls. */
+.runtime-datetime-field > span {
+  color: var(--text-3);
+    font-size: 11px;
+    font-weight: 550;
+    line-height: 1.2;
+}
+
+.runtime-date-range-trigger,
+.runtime-filter-grid input,
+.runtime-filter-grid select {
+  min-height: 40px;
+    font-size: 12px;
+}
+
+/* Every detail dialog has a fixed head and a separately scrolling body;
+   the portal panel itself never adds padding（统一收口在 overlay.css 末尾）. */
+
+/* Runtime details retain the dense diagnostic treatment while remaining readable. */
+.runtime-detail-dialog {
+  background: #11151d;
+    color: #dce3ef;
+}
+
+.runtime-detail-dialog .console-detail-dialog-head {
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+    background: #11151d;
+}
+
+.runtime-detail-dialog .console-detail-dialog-head h2 {
+  color: #f5f7fa;
+}
+
+.runtime-detail-dialog .console-detail-dialog-head .console-eyebrow {
+  color: #53df91;
+}
+
+.runtime-detail-dialog .console-detail-dialog-head .console-route {
+  color: #9da7b8;
+}
+
+.runtime-detail-dialog .console-detail-dialog-head .console-icon-button {
+  border-color: rgba(255, 255, 255, 0.1);
+    background: rgba(255, 255, 255, 0.06);
+    color: #dce3ef;
+}
+
+.runtime-detail-dialog .console-detail-dialog-head .console-icon-button:hover {
+  border-color: rgba(255, 255, 255, 0.18);
+    background: rgba(255, 255, 255, 0.12);
+}
+
+.runtime-detail-dialog .console-detail-dialog-body {
+  background: #11151d;
+    color: #dce3ef;
+}
+
+.runtime-detail-dialog .runtime-detail-grid {
+  min-width: 0;
+    padding: 0;
+}
+
+.runtime-detail-dialog .runtime-detail-block {
+  border-color: rgba(255, 255, 255, 0.09);
+    background: rgba(28, 34, 46, 0.82);
+    color: #dce3ef;
+}
+
+.runtime-detail-dialog .runtime-detail-block--request {
+  border-color: rgba(83, 223, 145, 0.22);
+}
+
+.runtime-detail-dialog .runtime-detail-block--response {
+  border-color: rgba(10, 132, 255, 0.22);
+}
+
+.runtime-detail-dialog .runtime-detail-block--meta {
+  background: rgba(22, 27, 37, 0.82);
+}
+
+.runtime-detail-dialog .runtime-detail-block > dl {
+  display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px 18px;
+    margin: 0;
+    padding: 10px 12px;
+}
+
+.runtime-detail-dialog .runtime-detail-block-head {
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+    background: transparent;
+}
+
+.runtime-detail-dialog .runtime-detail-block-head strong {
+  color: #f5f7fa;
+}
+
+.runtime-detail-dialog .runtime-detail-block-head > span,
+.runtime-detail-dialog .runtime-detail-block dt {
+  color: #9da7b8;
+}
+
+.runtime-detail-dialog .runtime-detail-block dd {
+  color: #dce3ef;
+}
+
+.runtime-detail-dialog .runtime-detail-block > pre,
+.runtime-detail-dialog .runtime-detail-block pre {
+  max-height: 240px;
+    overflow: auto;
+    border-top-color: rgba(255, 255, 255, 0.06);
+    background: rgba(10, 14, 21, 0.28);
+    color: #dce3ef;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.runtime-detail-dialog .runtime-detail-payload-label {
+  border-top-color: rgba(255, 255, 255, 0.06);
+    background: rgba(10, 14, 21, 0.18);
+    color: #9da7b8;
+}
+
+@media (max-width: 640px) {
+  .runtime-detail-dialog {
+  height: calc(100vh - 20px);
+}
+
+  .runtime-detail-overlay {
+  max-width: calc(100vw - 20px) !important;
+}
+
+  .runtime-detail-dialog .runtime-detail-block > dl {
+  grid-template-columns: 1fr;
+}
+}

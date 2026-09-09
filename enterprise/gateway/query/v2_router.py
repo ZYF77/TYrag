@@ -21,6 +21,7 @@ from enterprise.gateway.acl.schema import AclScope
 from enterprise.gateway.auth.middleware import require_capability
 from enterprise.gateway.auth.user_principal import UserPrincipal
 from enterprise.gateway.config import config
+from enterprise.gateway.equipment_identity import get_recognition_settings
 from enterprise.gateway.query import v2_store
 from enterprise.gateway.query.attachment_context import (
     AttachmentObservation,
@@ -54,6 +55,7 @@ from enterprise.gateway.query.citation_select import (
 from enterprise.gateway.query.diagnostics import (
     finish_trace,
     merge_upstream,
+    record_event,
     record_timed_event,
     start_trace,
 )
@@ -84,10 +86,15 @@ from enterprise.gateway.sync.transient_attachment import (
 
 router = APIRouter(prefix="/enterprise/api/v2", tags=["query-v2"])
 logger = logging.getLogger(__name__)
+_warmup_tasks: set[asyncio.Task] = set()
 
 IDENTIFIER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._\-]{3,127}")
 PREVIOUS_COMPARISON_RE = re.compile(
     r"(?:刚才|上一台|前一台).{0,16}(?:比|比较|对比|区别|差异)"
+)
+
+MULTI_DEVICE_RE = re.compile(
+    r"(?:这两台|两台设备|两台都|相互比较|互相比较|相互对比|互相对比)"
 )
 # True equipment lookups (unknown ids fail-closed). Product models/serials do not.
 EQUIPMENT_QUERY_CUE_RE = re.compile(
@@ -252,21 +259,33 @@ async def _project_citations(
     return projected
 
 
-def _candidate_identifiers(question: str) -> list[str]:
+def _candidate_identifiers(
+    question: str,
+    pattern: str | None = None,
+) -> list[str]:
     seen: list[str] = []
-    for match in IDENTIFIER_RE.finditer(question or ""):
+    matcher = IDENTIFIER_RE if pattern is None else re.compile(pattern)
+    for match in matcher.finditer(question or ""):
         token = match.group(0)
         if token not in seen:
             seen.append(token)
     return seen
 
 
-def _device_like_identifiers(question: str) -> list[str]:
+def _device_like_identifiers(
+    question: str,
+    pattern: str | None = None,
+) -> list[str]:
+    candidates = _candidate_identifiers(question, pattern)
     return [
         token
-        for token in _candidate_identifiers(question)
+        for token in candidates
         if any(char.isalpha() for char in token)
         and (any(char.isdigit() for char in token) or any(char in "-_." for char in token))
+    ] + [
+        token
+        for token in candidates
+        if token.isdigit() and len(token) >= 4
     ]
 
 
@@ -293,7 +312,7 @@ def _equipment_index(
     for doc in docs_by_internal_id.values():
         if not doc.equipment_id:
             continue
-        for value in (doc.equipment_id, doc.fixed_asset_no):
+        for value in (doc.equipment_id, doc.fixed_asset_no, doc.asset_id):
             if value:
                 index.setdefault(value, set()).add(doc.equipment_id)
     return index
@@ -302,6 +321,9 @@ def _equipment_index(
 def _explicit_equipment_ids(
     question: str,
     docs_by_internal_id: dict[str, ExtDocumentMap],
+    *,
+    pattern: str | None = None,
+    enabled: bool = True,
 ) -> tuple[list[str], bool]:
     """Resolve explicit equipment ids from the question.
 
@@ -313,7 +335,9 @@ def _explicit_equipment_ids(
     Tokens adjacent to 型号/出厂编号 are ignored so product-model confirmations
     (e.g. XT30D) do not clear turn scope. Unknown ids with cues fail-closed.
     """
-    tokens = _device_like_identifiers(question)
+    if not enabled:
+        return [], False
+    tokens = _device_like_identifiers(question, pattern)
     if not tokens:
         return [], False
     index = _equipment_index(docs_by_internal_id)
@@ -575,15 +599,19 @@ class MessageAttachmentMetadata(StrictModel):
 
 def _conversation_detail(row: dict) -> dict:
     summary = v2_store.conversation_payload(row)
+    devices = v2_store.devices_from_row(row)
     summary["context"] = {
         "equipmentId": row["equipment_id"],
         "fixedAssetNo": row["fixed_asset_no"],
         "faultCode": row["fault_code"],
         "contextVersion": row["context_version"],
         "registryVersion": row.get("registry_version"),
+        "conversationDevices": devices,
+        "anchorEquipmentId": row.get("anchor_equipment_id"),
     }
     summary["suggestions"] = _suggestions(row)
-    summary["contextCompacted"] = bool((row.get("context_summary") or "").strip())
+    # Reserved for EAM compat; rolling summary/compress removed; always false.
+    summary["contextCompacted"] = False
     return summary
 
 
@@ -615,6 +643,8 @@ async def create_conversation(
         registry_version=snapshot["registry_version"],
         context_resolved_at=snapshot["context_resolved_at"],
     )
+    # Return Gateway Conversation immediately; warm RAGFlow chat/session in background.
+    _schedule_ragflow_warmup(db, principal, dict(row))
     return _conversation_detail(row)
 
 
@@ -675,16 +705,28 @@ async def patch_context(
             values["fixedAssetNo"],
             previous=row,
         )
+        devices = v2_store.devices_from_row(row)
+        anchor = row.get("anchor_equipment_id")
+        if snapshot["equipment_id"]:
+            devices = _union_conversation_devices(
+                devices,
+                add=[snapshot["equipment_id"]],
+                active=snapshot["equipment_id"],
+                anchor=anchor,
+                limit=_device_limit(),
+            )
         changed = (
             snapshot["equipment_id"],
             snapshot["fixed_asset_no"],
             snapshot["asset_id"],
             values["faultCode"],
+            devices,
         ) != (
             row["equipment_id"],
             row["fixed_asset_no"],
             row.get("asset_id"),
             row["fault_code"],
+            v2_store.devices_from_row(row),
         )
         updated = await _gw_write(db, v2_store.update_context,
             conversation_id=conversation_id,
@@ -698,6 +740,8 @@ async def patch_context(
             registry_version=snapshot["registry_version"],
             context_resolved_at=snapshot["context_resolved_at"],
             expected_context_version=row["context_version"],
+            conversation_devices=devices,
+            update_devices=True,
         )
         if updated is None:
             return _error(
@@ -877,110 +921,206 @@ async def _context_scope(
     )
 
 
+
+def _conversation_is_scoped(conversation: dict) -> bool:
+    """Implicit mode: create-with-equipment => scoped; create-without => open."""
+    anchor = conversation.get("anchor_equipment_id")
+    return bool(anchor and str(anchor).strip())
+
+
+def _conversation_devices(conversation: dict) -> list[str]:
+    return v2_store.devices_from_row(conversation)
+
+
+def _device_limit() -> int:
+    from enterprise.gateway.config import conversation_device_limit_from_env
+
+    return conversation_device_limit_from_env()
+
+
+def _union_conversation_devices(
+    devices: list[str],
+    *,
+    add: list[str],
+    active: str | None,
+    anchor: str | None,
+    limit: int,
+) -> list[str]:
+    """Accumulate devices as an ordered union; FIFO-evict with anchor/active protection."""
+    result: list[str] = []
+    for item in devices:
+        value = str(item or "").strip()
+        if value and value not in result:
+            result.append(value)
+    for item in add:
+        value = str(item or "").strip()
+        if not value:
+            continue
+        if value in result:
+            result = [existing for existing in result if existing != value]
+        result.append(value)
+    limit = max(1, int(limit))
+    while len(result) > limit:
+        non_anchor_non_active = [
+            device_id
+            for device_id in result
+            if device_id != anchor and device_id != active
+        ]
+        if non_anchor_non_active:
+            victim = non_anchor_non_active[0]
+        else:
+            non_anchor = [device_id for device_id in result if device_id != anchor]
+            if non_anchor:
+                victim = non_anchor[0]
+            else:
+                # Anchor is last to evict; still must respect hard limit.
+                victim = result[0]
+        result = [device_id for device_id in result if device_id != victim]
+    return result
+
+
+def _is_multi_device_question(question: str) -> bool:
+    text_value = question or ""
+    return bool(
+        PREVIOUS_COMPARISON_RE.search(text_value) or MULTI_DEVICE_RE.search(text_value)
+    )
+
+
 async def _resolve_turn_scope(
     db,
     principal: UserPrincipal,
     conversation: dict,
     question: str,
 ) -> dict:
+    """Resolve this-turn retrieval scope without A→B overwrite rebinding.
+
+    Conversation devices accumulate as a union. This-turn ``turn_devices`` follow
+    question FOCUS/MULTI; create-time anchor marks scoped mode and resists eviction.
+    """
     _scope, available = await _available_context_scope(db, principal, conversation)
-    explicit, unresolved = _explicit_equipment_ids(question, available)
-    recent_records = await _gw_read(db, v2_store.list_recent_entity_scopes,
+    recognition = await _gw_read(
+        db, get_recognition_settings, principal.tenant_id, write=False
+    )
+    explicit, unresolved = _explicit_equipment_ids(
+        question,
+        available,
+        pattern=recognition["pattern"],
+        enabled=recognition["enabled"],
+    )
+    recent_records = await _gw_read(
+        db,
+        v2_store.list_recent_entity_scopes,
         conversation_id=conversation["conversation_id"],
         tenant_id=principal.tenant_id,
         business_user_id=principal.business_user_id,
         limit=2,
     )
     recent = [record["entity_ids"] for record in recent_records]
-    context_resolved_at = conversation.get("context_resolved_at") or ""
-    latest_scope_at = recent_records[0]["created_at"] if recent_records else ""
-    context_is_newer = bool(context_resolved_at and context_resolved_at > latest_scope_at)
     conversation_fixed = conversation.get("fixed_asset_no")
+    devices = _conversation_devices(conversation)
+    anchor = conversation.get("anchor_equipment_id")
+    active = conversation.get("equipment_id")
+    scoped = _conversation_is_scoped(conversation)
+    limit = _device_limit()
+
+    new_devices = list(devices)
+    new_active = active
+    new_fixed = conversation_fixed
+    persist = False
+
     if unresolved:
         entity_ids: list[str] = []
         selected: dict[str, ExtDocumentMap] = {}
     elif explicit:
-        entity_ids = explicit
+        entity_ids = list(explicit)
         selected = _documents_for_equipment_ids(available, entity_ids)
-    elif PREVIOUS_COMPARISON_RE.search(question or ""):
+        # Explicit extract is strong FOCUS for this turn; still union into conversation.
+        new_active = explicit[-1]
+        new_devices = _union_conversation_devices(
+            devices,
+            add=explicit,
+            active=new_active,
+            anchor=anchor,
+            limit=limit,
+        )
+        new_fixed = _fixed_asset_for_equipment(available, new_active)
+        persist = True
+    elif _is_multi_device_question(question):
         entity_ids = []
-        for scope in recent:
-            for equipment_id in scope:
-                if equipment_id not in entity_ids:
-                    entity_ids.append(equipment_id)
+        for equipment_id in devices:
+            if equipment_id not in entity_ids:
+                entity_ids.append(equipment_id)
+            if len(entity_ids) == limit:
+                break
+        if len(entity_ids) < 2:
+            for scope in recent:
+                for equipment_id in scope:
+                    if equipment_id not in entity_ids:
+                        entity_ids.append(equipment_id)
+                    if len(entity_ids) == 2:
+                        break
                 if len(entity_ids) == 2:
                     break
-            if len(entity_ids) == 2:
-                break
-        if not entity_ids and conversation.get("equipment_id"):
-            entity_ids = [conversation["equipment_id"]]
+        if not entity_ids and active:
+            entity_ids = [active]
+        entity_ids = entity_ids[: max(1, limit)]
         selected = _documents_for_equipment_ids(
             available,
             entity_ids,
             fixed_asset_no=conversation_fixed if len(entity_ids) == 1 else None,
         )
-    elif context_is_newer:
-        entity_ids = (
-            [conversation["equipment_id"]]
-            if conversation.get("equipment_id")
-            else []
-        )
-        selected = _documents_for_equipment_ids(
-            available,
-            entity_ids,
-            fixed_asset_no=conversation_fixed,
-        )
-    elif recent:
-        entity_ids = list(recent[0])
-        selected = _documents_for_equipment_ids(
-            available,
-            entity_ids,
-            fixed_asset_no=(
-                conversation_fixed
-                if len(entity_ids) == 1
-                and entity_ids[0] == conversation.get("equipment_id")
-                else None
-            ),
-        )
-    elif conversation.get("equipment_id"):
-        entity_ids = [conversation["equipment_id"]]
+        if entity_ids:
+            merged = _union_conversation_devices(
+                devices,
+                add=entity_ids,
+                active=active,
+                anchor=anchor,
+                limit=limit,
+            )
+            if merged != devices:
+                new_devices = merged
+                persist = True
+    elif scoped and active:
+        entity_ids = [active]
         selected = _documents_for_equipment_ids(
             available,
             entity_ids,
             fixed_asset_no=conversation_fixed,
         )
     else:
+        # Open mode with no device id: wide retrieval over ACL-available docs.
         entity_ids = []
         selected = available
 
-    if explicit:
-        primary = explicit[-1]
-        fixed_asset_no = _fixed_asset_for_equipment(available, primary)
-        changed = (
-            conversation.get("equipment_id") != primary
-            or conversation.get("fixed_asset_no") != fixed_asset_no
+    if persist and (
+        new_devices != devices
+        or new_active != active
+        or new_fixed != conversation_fixed
+    ):
+        updated = await _gw_write(
+            db,
+            v2_store.update_context,
+            conversation_id=conversation["conversation_id"],
+            tenant_id=principal.tenant_id,
+            business_user_id=principal.business_user_id,
+            equipment_id=new_active,
+            fixed_asset_no=new_fixed,
+            fault_code=conversation.get("fault_code"),
+            context_version=conversation["context_version"] + 1,
+            asset_id=None,
+            registry_version=None,
+            context_resolved_at=v2_store.utc_now(),
+            expected_context_version=conversation["context_version"],
+            conversation_devices=new_devices,
+            update_devices=True,
         )
-        if changed:
-            updated = await _gw_write(db, v2_store.update_context,
-                conversation_id=conversation["conversation_id"],
-                tenant_id=principal.tenant_id,
-                business_user_id=principal.business_user_id,
-                equipment_id=primary,
-                fixed_asset_no=fixed_asset_no,
-                fault_code=conversation.get("fault_code"),
-                context_version=conversation["context_version"] + 1,
-                asset_id=None,
-                registry_version=None,
-                context_resolved_at=v2_store.utc_now(),
-                expected_context_version=conversation["context_version"],
+        if updated is None:
+            raise _FormalQueryError(
+                "CONVERSATION_CONTEXT_CONFLICT",
+                409,
+                "Conversation context version changed",
             )
-            if updated is None:
-                raise _FormalQueryError(
-                    "CONVERSATION_CONTEXT_CONFLICT",
-                    409,
-                    "Conversation context version changed",
-                )
-            conversation = updated
+        conversation = updated
 
     conversation["_turn_scope_resolved"] = True
     conversation["_turn_entity_ids"] = list(entity_ids)
@@ -1065,6 +1205,72 @@ def _web_search_configured(chat: dict) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def _record_session_binding(
+    conversation: dict,
+    diagnostics: dict | None,
+    binding: str,
+    *,
+    session_id: str,
+    chat_id: str | None = None,
+    started: float | None = None,
+) -> None:
+    conversation["_session_binding"] = binding
+    payload = {
+        "source": "gateway",
+        "stage": "chat_session",
+        "binding": binding,
+        "sessionId": session_id,
+        "chatId": chat_id,
+        "conversationId": conversation.get("conversation_id"),
+    }
+    if started is not None:
+        record_timed_event(diagnostics, "chat_session", started, payload)
+    else:
+        record_event(diagnostics, "chat_session", payload)
+    logger.info(
+        "ragflow_session_%s conversation_id=%s session_id=%s chat_id=%s",
+        binding,
+        conversation.get("conversation_id"),
+        session_id,
+        chat_id,
+    )
+
+
+def _record_json_first_byte_from_upstream(trace: dict | None) -> None:
+    """Derive TTFT for JSON asks from upstream llm.ttftMs when measurable."""
+    if not isinstance(trace, dict):
+        return
+    events = trace.get("events")
+    if not isinstance(events, list):
+        return
+    if any(
+        isinstance(event, dict) and event.get("type") == "stream_first_token"
+        for event in events
+    ):
+        return
+    ttft_ms = None
+    for event in events:
+        if not isinstance(event, dict) or event.get("type") != "llm":
+            continue
+        data = event.get("data") if isinstance(event.get("data"), dict) else {}
+        value = data.get("ttftMs")
+        if isinstance(value, (int, float)) and value >= 0:
+            ttft_ms = float(value)
+            break
+    if ttft_ms is None:
+        return
+    record_event(
+        trace,
+        "stream_first_token",
+        {
+            "source": "gateway",
+            "stage": "stream_first_token",
+            "status": "derived_from_upstream_llm",
+            "durationMs": round(ttft_ms, 3),
+        },
+    )
+
+
 async def _ensure_ragflow_session(
     db,
     principal: UserPrincipal,
@@ -1072,9 +1278,20 @@ async def _ensure_ragflow_session(
     client,
     chat_id: str,
     run_id: str,
+    diagnostics: dict | None = None,
 ) -> str:
+    """Reuse mapped session when present; otherwise create/claim (ask fallback)."""
+    session_started = perf_counter()
     existing = conversation.get("ragflow_session_id")
     if existing:
+        _record_session_binding(
+            conversation,
+            diagnostics,
+            "warmup_hit",
+            session_id=str(existing),
+            chat_id=str(conversation.get("ragflow_chat_id") or chat_id or "") or None,
+            started=session_started,
+        )
         return str(existing)
     lock = await _conversation_lock(conversation["conversation_id"])
     async with lock:
@@ -1084,6 +1301,14 @@ async def _ensure_ragflow_session(
         existing = current.get("ragflow_session_id") if current else None
         if existing:
             conversation.update(current)
+            _record_session_binding(
+                conversation,
+                diagnostics,
+                "warmup_hit",
+                session_id=str(existing),
+                chat_id=str(conversation.get("ragflow_chat_id") or chat_id or "") or None,
+                started=session_started,
+            )
             return str(existing)
         name = (
             f"eam-{principal.business_user_id[:128]}-"
@@ -1103,16 +1328,117 @@ async def _ensure_ragflow_session(
             ragflow_chat_id=chat_id,
             ragflow_session_id=session_id,
         )
+        binding = "ensure_fallback"
         if rowcount != 1:
             current = await _owned_conversation(
                 db, principal, conversation["conversation_id"]
             )
-            session_id = str((current or {}).get("ragflow_session_id") or "")
-            if not session_id:
+            claimed = str((current or {}).get("ragflow_session_id") or "")
+            if not claimed:
                 raise RAGFlowAPIError("Session mapping could not be saved", 502)
-        conversation["ragflow_chat_id"] = chat_id
+            # Another waiter (warmup or concurrent ask) won the claim.
+            if claimed != session_id:
+                binding = "warmup_hit"
+            session_id = claimed
+            if current:
+                conversation.update(current)
+        conversation["ragflow_chat_id"] = str(
+            conversation.get("ragflow_chat_id") or chat_id
+        )
         conversation["ragflow_session_id"] = session_id
+        _record_session_binding(
+            conversation,
+            diagnostics,
+            binding,
+            session_id=session_id,
+            chat_id=str(conversation.get("ragflow_chat_id") or chat_id),
+            started=session_started,
+        )
         return session_id
+
+
+def _schedule_ragflow_warmup(db, principal: UserPrincipal, conversation: dict) -> None:
+    """Fire-and-forget create-time warmup; never blocks the create response."""
+    conversation_id = str(conversation.get("conversation_id") or "")
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        logger.warning(
+            "ragflow_warmup_skipped reason=no_running_loop conversation_id=%s",
+            conversation_id,
+        )
+        return
+
+    task = loop.create_task(
+        _warmup_ragflow_mapping(db, principal, dict(conversation)),
+        name=f"ragflow-warmup-{conversation_id}",
+    )
+    _warmup_tasks.add(task)
+
+    def _done(done: asyncio.Task) -> None:
+        _warmup_tasks.discard(done)
+        if done.cancelled():
+            return
+        exc = done.exception()
+        if exc is not None:
+            logger.warning(
+                "ragflow_warmup_task_failed conversation_id=%s error=%s",
+                conversation_id,
+                exc,
+            )
+
+    task.add_done_callback(_done)
+
+
+async def _warmup_ragflow_mapping(
+    db,
+    principal: UserPrincipal,
+    conversation: dict,
+) -> None:
+    """Ensure chat + claim session after create; failures stay soft for ask fallback."""
+    conversation_id = str(conversation.get("conversation_id") or "")
+    try:
+        current = await _owned_conversation(db, principal, conversation_id)
+        if not current:
+            logger.info(
+                "ragflow_warmup_skipped reason=missing_conversation conversation_id=%s",
+                conversation_id,
+            )
+            return
+        if current.get("ragflow_session_id"):
+            logger.info(
+                "ragflow_warmup_skipped reason=already_mapped conversation_id=%s",
+                conversation_id,
+            )
+            return
+        scope, _docs = await _context_scope(db, principal, current)
+        if scope.is_empty:
+            logger.info(
+                "ragflow_warmup_skipped reason=empty_scope conversation_id=%s",
+                conversation_id,
+            )
+            return
+        client = _query_client()
+        chat_id = await _ensure_chat(client, principal, scope)
+        session_id = await _ensure_ragflow_session(
+            db,
+            principal,
+            current,
+            client,
+            chat_id,
+            run_id="warmup",
+        )
+        logger.info(
+            "ragflow_warmup_ok conversation_id=%s chat_id=%s session_id=%s",
+            conversation_id,
+            chat_id,
+            session_id,
+        )
+    except Exception:
+        logger.exception(
+            "ragflow_warmup_failed conversation_id=%s",
+            conversation_id,
+        )
 
 
 def _request_hash(
@@ -1322,15 +1648,29 @@ async def _retrieval_question(
     conversation: dict,
     question: str,
     pending: list[PendingAttachment],
+    diagnostics: dict | None = None,
 ) -> tuple[str, Any, list[AttachmentObservation]]:
     if not pending:
         return question, None, []
+    understand_started = perf_counter()
     client = _query_client()
     chat_id = None
     scope, _docs = await _context_scope(db, principal, conversation)
     if not scope.is_empty:
         chat_id = await _ensure_chat(client, principal, scope)
     observations = await observe_attachments(pending, client, chat_id, db)
+    record_timed_event(
+        diagnostics,
+        "attachment_understand",
+        understand_started,
+        {
+            "source": "gateway",
+            "stage": "attachment_understand",
+            "attachmentCount": len(pending),
+            "observationCount": len(observations),
+            "understoodCount": sum(1 for item in observations if item.understood),
+        },
+    )
     if not question.strip():
         question = DEFAULT_ATTACHMENT_QUESTION
     return enrich_question(question, observations), client, observations
@@ -1361,10 +1701,15 @@ async def _execute_json_run(
             run["_diagnostics"] = None
     try:
         try:
-            scope_started = perf_counter()
             question, client, observations = await _retrieval_question(
-                db, principal, conversation, question, pending
+                db,
+                principal,
+                conversation,
+                question,
+                pending,
+                diagnostics=run.get("_diagnostics"),
             )
+            scope_started = perf_counter()
             scope, docs_by_internal_id = await _context_scope(db, principal, conversation)
             record_timed_event(
                 run.get("_diagnostics"),
@@ -1393,6 +1738,7 @@ async def _execute_json_run(
                     client,
                     chat_id,
                     run["run_id"],
+                    diagnostics=run.get("_diagnostics"),
                 )
                 files = completion_files(
                     pending, vision=chat_is_vision_capable(chat)
@@ -1433,6 +1779,7 @@ async def _execute_json_run(
                 data = completion.get("data", {}) if isinstance(completion, dict) else {}
                 if isinstance(data, dict):
                     merge_upstream(run.get("_diagnostics"), data.get("_diagnostics"))
+                    _record_json_first_byte_from_upstream(run.get("_diagnostics"))
                 reference = data.get("reference", {}) if isinstance(data, dict) else {}
                 chunks = [
                     item
@@ -1504,6 +1851,25 @@ async def _execute_json_run(
                     for item in pending
                     if item.attachment_id
                 ]
+            if request is not None:
+                citation_started = perf_counter()
+                try:
+                    public_citations = await _project_citations(
+                        db, citations, request, principal
+                    )
+                except Exception:
+                    public_citations = citations
+                record_timed_event(
+                    run.get("_diagnostics"),
+                    "citation_projection",
+                    citation_started,
+                    {
+                        "source": "gateway",
+                        "stage": "citation_projection",
+                        "citationCount": len(citations),
+                    },
+                )
+                result["_public_citations"] = public_citations
             diagnostics = finish_trace(
                 run.get("_diagnostics"), outcome=status
             )
@@ -1595,10 +1961,15 @@ async def _stream_run_events(
     emitted_answer = ""
     first_stream_output_recorded = False
     try:
-        scope_started = perf_counter()
         question, client, observations = await _retrieval_question(
-            db, principal, conversation, question, pending
+            db,
+            principal,
+            conversation,
+            question,
+            pending,
+            diagnostics=run.get("_diagnostics"),
         )
+        scope_started = perf_counter()
         scope, docs_by_internal_id = await _context_scope(db, principal, conversation)
         record_timed_event(
             run.get("_diagnostics"),
@@ -1623,6 +1994,7 @@ async def _stream_run_events(
                 client,
                 chat_id,
                 run["run_id"],
+                diagnostics=run.get("_diagnostics"),
             )
             files = completion_files(
                 pending, vision=chat_is_vision_capable(chat)
@@ -1814,6 +2186,27 @@ async def _stream_run_events(
                 for item in pending
                 if item.attachment_id
             ]
+        if request is not None:
+            citation_started = perf_counter()
+            try:
+                public_citations = await _project_citations(
+                    db, citations, request, principal
+                )
+            except Exception:
+                public_citations = citations
+            record_timed_event(
+                run.get("_diagnostics"),
+                "citation_projection",
+                citation_started,
+                {
+                    "source": "gateway",
+                    "stage": "citation_projection",
+                    "citationCount": len(citations),
+                },
+            )
+            result["_public_citations"] = public_citations
+        else:
+            public_citations = citations
         diagnostics = finish_trace(run.get("_diagnostics"), outcome=status)
         if diagnostics:
             result["_diagnostics"] = diagnostics
@@ -1825,11 +2218,6 @@ async def _stream_run_events(
             result=result,
             status="completed",
             assistant_message_id=assistant_message_id,
-        )
-        public_citations = (
-            await _project_citations(db, citations, request, principal)
-            if request is not None
-            else citations
         )
         if live_streamed:
             if answer != emitted_answer:
@@ -2182,9 +2570,12 @@ async def create_message(
             return _error(503, "RUN_INTERRUPTED", "Message run could not be prepared")
         if "answer" in run_or_result and "messageId" in run_or_result:
             result = run_or_result
-            public_citations = await _project_citations(
-                db, result.get("citations") or [], request, principal
-            )
+            if isinstance(result.get("_public_citations"), list):
+                public_citations = result["_public_citations"]
+            else:
+                public_citations = await _project_citations(
+                    db, result.get("citations") or [], request, principal
+                )
             if "text/event-stream" in request.headers.get("accept", "").lower():
                 return StreamingResponse(
                     _result_events({**result, "citations": public_citations}),
@@ -2211,9 +2602,12 @@ async def create_message(
     )
     if error:
         return error
-    public_citations = await _project_citations(
-        db, result.get("citations") or [], request, principal
-    )
+    if isinstance((result or {}).get("_public_citations"), list):
+        public_citations = result["_public_citations"]
+    else:
+        public_citations = await _project_citations(
+            db, result.get("citations") or [], request, principal
+        )
     return _public_run_payload(result, public_citations)
 
 

@@ -559,6 +559,7 @@ _DOCUMENT_SELECT_SQL = """SELECT d.id, d.tenant_id, d.source_system,
        d.current_version, d.file_name, d.source_kind, d.document_type,
        d.parser_profile, d.parser_profile_version,
        d.parser_application_status,
+       d.parser_expected_json, d.parser_configured_json, d.parser_executed_json,
        d.media_type, d.source_page_count, d.department_id, d.security_level,
        d.document_subtype, d.source_document_type, d.ingest_state,
        d.source_state, d.source_state_reason, d.attempt_count,
@@ -840,13 +841,19 @@ async def get_document_metadata_detail(
         except Exception:
             logger.warning("admin document read failed request_id=%s error_type=unexpected", request_id)
             ragflow_error = "RAGFLOW_UNAVAILABLE"
+    def _cell(key: str, default=None):
+        try:
+            return row[key]
+        except (KeyError, IndexError):
+            return default
+
     parser = {
-        "applicationStatus": row["parser_application_status"],
-        "profile": row["parser_profile"],
-        "profileVersion": row["parser_profile_version"],
-        "expected": _parser_json(row["parser_expected_json"]),
-        "configured": _parser_json(row["parser_configured_json"]),
-        "executed": _parser_json(row["parser_executed_json"]),
+        "applicationStatus": _cell("parser_application_status"),
+        "profile": _cell("parser_profile"),
+        "profileVersion": _cell("parser_profile_version"),
+        "expected": _parser_json(_cell("parser_expected_json")),
+        "configured": _parser_json(_cell("parser_configured_json")),
+        "executed": _parser_json(_cell("parser_executed_json")),
         "ragflow": ragflow,
         "errorCode": ragflow_error,
     }

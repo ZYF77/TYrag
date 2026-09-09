@@ -382,9 +382,7 @@ async def _seed_test_registry_fixture(
             """INSERT INTO ext_asset_registry
                (tenant_id, equipment_id, fixed_asset_no, asset_id)
                VALUES (?, ?, ?, ?)
-               ON CONFLICT(tenant_id, equipment_id) DO UPDATE SET
-                 fixed_asset_no=excluded.fixed_asset_no,
-                 asset_id=excluded.asset_id""",
+               ON CONFLICT(tenant_id, equipment_id) DO NOTHING""",
             (tenant_id, equipment_id or fixed_asset_no or asset_id, fixed_asset_no, asset_id),
             )
 

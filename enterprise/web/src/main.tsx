@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client';
 import { App } from './App';
 import { isMockMode } from './api/mode';
 import './index.css';
+import './styles/index.css';
 
 async function bootstrap() {
   // MSW only runs in mock mode; demo/gateway use the real backend.

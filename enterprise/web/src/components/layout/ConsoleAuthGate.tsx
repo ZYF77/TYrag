@@ -3,7 +3,6 @@ import type { FormEvent, ReactNode } from 'react';
 import { UserRound } from 'lucide-react';
 import { setHarnessToken, toDisplayError, v2Api } from '../../api/v2Client';
 import type { ConsoleAuthSession } from '../../api/consoleTypes';
-import './console-auth.css';
 
 interface ConsoleAuthGateProps {
   children: ReactNode;

@@ -572,7 +572,7 @@ Accept: application/json
 - `suggestions` 由 Gateway **服务端定义**；EAM 只展示 `label`，发消息时传 `suggestionId` + 匹配的 `contextVersion`，**禁止**客户端自定义 chip prompt。
 - `GET/PATCH` 会话详情同样返回最新 `suggestions`。也可调用 `GET .../suggestions` 单独刷新。
 - `PATCH .../context` 成功后 `contextVersion` 递增，旧 `suggestionId` 会返回 `409 SUGGESTION_STALE`。
-- `contextCompacted` 表示 Gateway 是否已对该会话做过滚动摘要（排障用）；**不**返回摘要正文。压缩对 EAM 透明，完整原文仍在消息历史中。
+- `contextCompacted` 保留字段（EAM 兼容）；滚动摘要/压缩已移除，**恒为 false**；**不**返回摘要正文。完整原文仍在消息历史中。
 
 ## 11. 提问和续问
 

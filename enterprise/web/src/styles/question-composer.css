@@ -1,0 +1,305 @@
+.question-composer {
+  border-top-color: var(--hairline);
+    background: rgba(255, 255, 255, 0.92);
+    backdrop-filter: blur(14px) saturate(160%);
+    -webkit-backdrop-filter: blur(14px) saturate(160%);
+}
+
+.question-composer-field {
+  border-color: rgba(24, 27, 33, 0.08);
+    border-radius: 16px;
+    background: #f4f5f7;
+    box-shadow: inset 0 1px 2px rgba(16, 20, 28, 0.025);
+    transition: background-color var(--motion-quick) var(--ease-out), border-color var(--motion-quick) var(--ease-out), box-shadow var(--motion-standard) var(--ease-out);
+}
+
+.question-composer-field:focus-within {
+  border-color: rgba(10, 132, 255, 0.28);
+    background: #fff;
+    box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.11), 0 8px 24px rgba(16, 20, 28, 0.06);
+}
+
+.question-composer-action {
+  min-width: 32px;
+    min-height: 32px;
+    transition: transform var(--motion-quick) var(--ease-out), background-color var(--motion-quick) var(--ease-out), box-shadow var(--motion-standard) var(--ease-out);
+}
+
+.question-composer-action:active:not(:disabled) {
+  transform: scale(0.92);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .question-composer-field,
+  .question-composer-action {
+  transition: none;
+}
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .question-composer {
+  background: #f7f8fa;
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
+}
+}
+
+/* ---- Question composer: 默认变体（原 Tailwind 工具类换算，值保持一致） ----
+   置于 reduced-motion / reduced-transparency 媒体块之后，复现原工具类
+   （注入在最后）对这些同特异性规则的层叠胜负关系。 */
+.question-composer--default {
+  padding: 12px 16px;
+    border-top: 1px solid #f3f4f6;
+    background: #fff;
+}
+
+.question-composer-field--default {
+  display: flex;
+    align-items: flex-end;
+    gap: 8px;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    background: #f9fafb;
+    padding: 8px 12px;
+    transition: all 150ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.question-composer-field--default:focus-within {
+  border-color: #60a5fa;
+    box-shadow: 0 0 0 1px #dbeafe;
+}
+
+.question-composer-textarea--default {
+  flex: 1 1 0%;
+    resize: none;
+    max-height: 128px;
+    padding: 4px 0;
+    background: transparent;
+    color: #374151;
+    font-size: 14px;
+    line-height: 20px;
+    outline: 2px solid transparent;
+    outline-offset: 2px;
+}
+
+.question-composer-textarea--default::placeholder {
+  color: #9ca3af;
+}
+
+.question-composer-action--send,
+.question-composer-action--stop {
+  flex-shrink: 0;
+    padding: 6px;
+    border-radius: 8px;
+    transition:
+      color 150ms cubic-bezier(0.4, 0, 0.2, 1),
+      background-color 150ms cubic-bezier(0.4, 0, 0.2, 1),
+      border-color 150ms cubic-bezier(0.4, 0, 0.2, 1),
+      text-decoration-color 150ms cubic-bezier(0.4, 0, 0.2, 1),
+      fill 150ms cubic-bezier(0.4, 0, 0.2, 1),
+      stroke 150ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.question-composer-action--send {
+  background: #2563eb;
+    color: #fff;
+}
+
+.question-composer-action--send:hover:not(:disabled) {
+  background: #1d4ed8;
+}
+
+.question-composer-action--send:disabled {
+  background: #e5e7eb;
+    color: #9ca3af;
+}
+
+.question-composer-action--stop {
+  background: #fee2e2;
+    color: #dc2626;
+}
+
+.question-composer-action--stop:hover:not(:disabled) {
+  background: #fecaca;
+}
+
+.question-composer-clip {
+  flex-shrink: 0;
+}
+
+.question-composer-sr-only {
+  position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border-width: 0;
+}
+
+.question-composer-hint {
+  margin: 6px 0 0;
+    color: #9ca3af;
+    font-size: 10px;
+    text-align: center;
+}
+
+/* ---- harness 变体：HEAD 里同一组 Tailwind 工具类（px-4 py-3 border-t bg-white /
+   flex items-end gap-2 bg-gray-50 rounded-xl … / flex-1 text-sm text-gray-700 …）
+   对两个变体同样生效，同特异性下后注入的工具类胜出——这里与 --default 同源取值；
+   仅保留无工具类冲突的企业增量（min-height、flex-direction、inset 阴影、width），
+   textarea 左右内边距保留 harness 原规则的 4px。 */
+.question-composer--harness {
+  flex-shrink: 0;
+    border-top: 1px solid #f3f4f6;
+    background: #fff;
+    padding: 12px 16px;
+}
+
+.question-composer-field--harness {
+  display: flex;
+    min-height: 154px;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 8px;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    background: #f9fafb;
+    padding: 8px 12px;
+    box-shadow: inset 0 1px rgba(255, 255, 255, 0.9), 0 7px 22px rgba(16, 20, 28, 0.045);
+    transition: all 150ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.question-composer-field--harness:focus-within {
+  border-color: #60a5fa;
+    background: #fff;
+    box-shadow: 0 0 0 1px #dbeafe;
+}
+
+.question-composer-textarea--harness {
+  width: 100%;
+    min-height: 84px;
+    max-height: 128px;
+    flex: 1 1 0%;
+    resize: none;
+    outline: 2px solid transparent;
+    outline-offset: 2px;
+    padding: 4px;
+    color: #374151;
+    font-size: 14px;
+    line-height: 20px;
+}
+
+.question-composer-textarea--harness::placeholder {
+    color: #9ca3af;
+}
+
+.question-composer-toolbar {
+  display: flex;
+    width: 100%;
+    min-height: 38px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.question-composer-toolbar-start {
+  display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 10px;
+}
+
+.question-composer-toolbar-start {
+  flex: 1 1 auto;
+    justify-content: flex-start;
+    margin-right: auto;
+    overflow-x: auto;
+    scrollbar-width: none;
+}
+
+.question-composer-toolbar-start::-webkit-scrollbar {
+  display: none;
+}
+
+.question-composer--harness .harness-clip-button {
+  width: 34px;
+    height: 34px;
+    border-color: transparent;
+    background: transparent;
+}
+
+.question-composer--harness .harness-clip-button:hover:not(:disabled) {
+  border-color: rgba(10, 132, 255, 0.12);
+    background: rgba(10, 132, 255, 0.08);
+}
+
+.question-composer--harness .question-composer-action {
+  width: 44px;
+    min-width: 44px;
+    height: 44px;
+    min-height: 44px;
+    border-radius: 50%;
+}
+
+.question-composer--harness .question-composer-action[aria-label='发送'] {
+  background: var(--accent);
+    box-shadow: 0 6px 15px rgba(10, 132, 255, 0.24);
+}
+
+.question-composer--harness .question-composer-action[aria-label='发送']:hover:not(:disabled) {
+  background: #168bff;
+}
+
+.question-composer--harness .question-composer-action[aria-label='发送']:disabled {
+  background: #e4e8ee;
+    color: #9aa1ab;
+    box-shadow: none;
+}
+
+.question-composer--harness .question-composer-action[aria-label='停止生成'] {
+  background: rgba(255, 59, 48, 0.12);
+    color: var(--danger);
+}
+
+@media (max-width: 720px) {
+  .question-composer--harness {
+  padding-inline: 14px;
+}
+
+  .question-composer-toolbar {
+  align-items: flex-end;
+}
+}
+
+@media (max-width: 520px) {
+  .question-composer-field--harness {
+  min-height: 132px;
+}
+
+  .question-composer-textarea--harness {
+  min-height: 64px;
+}
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .question-composer--harness .question-composer-action {
+  transition: none;
+      animation: none;
+}
+}
+
+.question-composer--harness .question-composer-action {
+  display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    line-height: 0;
+}
+
+.question-composer--harness .question-composer-action svg {
+  display: block;
+    flex: 0 0 auto;
+}

@@ -335,13 +335,20 @@ function documentDetailHandlers() {
         sourceUpdatedAt: '2026-08-29T09:00:00.000Z',
       },
       parser: {
-        applicationStatus: 'executed',
-        profile: 'manual-v2',
-        profileVersion: '2',
-        expected: { method: 'naive' },
-        configured: { chunk_token_num: 512 },
-        executed: { chunkCount: 1 },
-        ragflow: { run: 'DONE', chunkMethod: 'naive', chunkCount: 1, tokenCount: 24, progress: 1, parserConfig: {} },
+        applicationStatus: 'legacy_unverified',
+        profile: null,
+        profileVersion: null,
+        expected: {},
+        configured: {},
+        executed: {},
+        ragflow: {
+          run: 'DONE',
+          chunkMethod: 'naive',
+          chunkCount: 1,
+          tokenCount: 24,
+          progress: 1,
+          parserConfig: { chunk_token_num: 512 },
+        },
         errorCode: null,
       },
     })),
@@ -648,8 +655,10 @@ describe('SystemSettingsPanels (admin system settings)', () => {
     expect(table.textContent).toContain('FA-2001');
     expect(table.textContent).toContain('chat-1');
     expect(table.textContent).toContain('v3');
+    expect(screen.getByRole('note').textContent).toContain('会话目录/列表');
     expect(screen.getByRole('note').textContent).toContain('一行对应一个 Gateway v2 会话');
     expect(screen.getByRole('note').textContent).toContain('会话管理');
+    expect(screen.getByRole('note').textContent).not.toContain('会话索引');
 
     await waitFor(() => expect(urls.length).toBe(1));
     expect(urls[0]).toContain('limit=20');
@@ -724,6 +733,38 @@ describe('SystemSettingsPanels (admin system settings)', () => {
     expect(urls[1]).toContain('contextVersion=4');
     expect(urls[1]).toContain('offset=0');
     expect(screen.getByText(/业务用户 user-advanced/)).toBeTruthy();
+  });
+
+  it('opens conversation directory detail without Q&A bubbles', async () => {
+    const messageUrls: string[] = [];
+    server.use(
+      ...adminScenario(),
+      metadataSummaryHandler(),
+      conversationsMetadataHandler(),
+      conversationMessagesHandler({ urls: messageUrls }),
+    );
+    const user = userEvent.setup();
+    render(<EnterpriseConsolePage />);
+
+    await openSystemSettings(user);
+    await user.click(await screen.findByRole('button', { name: '会话元数据' }));
+    const table = await screen.findByTestId('console-meta-conversations-table');
+    await user.click(within(table).getAllByRole('row')[1]);
+
+    const dialog = await screen.findByRole('dialog', { name: '会话目录详情' });
+    expect(dialog.textContent).toContain('会话目录/列表');
+    expect(dialog.textContent).toContain('查看完整问答请到会话管理');
+    expect(dialog.textContent).toContain('业务用户 · user-a');
+    expect(dialog.textContent).toContain('设备 · EQ-1001');
+    expect(dialog.textContent).toContain('固定资产 · FA-2001');
+    expect(dialog.textContent).toContain('conv-meta-1');
+    expect(dialog.textContent).toContain('chat-1');
+    expect(dialog.querySelector('.console-chat-bubble')).toBeNull();
+    expect(dialog.querySelector('[data-testid="console-admin-chat"]')).toBeNull();
+    expect(messageUrls).toEqual([]);
+
+    await user.click(within(dialog).getByRole('button', { name: '关闭会话目录详情' }));
+    expect(screen.queryByRole('dialog', { name: '会话目录详情' })).toBeNull();
   });
 
   it('renders document metadata with filters, sorting and new columns', async () => {
@@ -817,8 +858,13 @@ describe('SystemSettingsPanels (admin system settings)', () => {
     await user.click(within(table).getAllByRole('row')[1]);
 
     const dialog = await screen.findByRole('dialog', { name: '文件详情' });
-    expect(dialog.textContent).toContain('manual-v2');
     expect(dialog.textContent).toContain('DeepDOC / PDF 文档');
+    expect(dialog.textContent).toContain('DONE');
+    expect(dialog.textContent).toContain('查看 RAGFlow 解析配置');
+    expect(dialog.textContent).toContain('Gateway 未托管');
+    expect(dialog.textContent).not.toContain('配置 Profile');
+    expect(dialog.textContent).not.toContain('应用状态');
+    expect(dialog.textContent).not.toContain('legacy_unverified');
     expect(dialog.textContent).toContain('解析后的维护步骤');
     await user.click(within(dialog).getByRole('button', { name: /chunk-1/ }));
     expect(await screen.findByRole('dialog', { name: 'Chunk 详情' })).toBeTruthy();
@@ -851,6 +897,27 @@ describe('SystemSettingsPanels (admin system settings)', () => {
     await waitFor(() => expect(dialog.textContent).toContain('解析方式暂不可用'));
     expect(dialog.textContent).not.toContain('解析信息加载中…');
     expect(dialog.textContent).toContain('不可用');
+  });
+
+  it('lists ready documents by default on the parsed chunks tab', async () => {
+    const urls: string[] = [];
+    server.use(...adminScenario(), metadataSummaryHandler(), documentsMetadataHandler(urls), ...documentDetailHandlers());
+    const user = userEvent.setup();
+    render(<EnterpriseConsolePage />);
+
+    await openSystemSettings(user);
+    await user.click(await screen.findByRole('button', { name: '解析 Chunk' }));
+    const table = await screen.findByTestId('console-meta-chunks-table');
+    expect(within(table).getAllByRole('row').length).toBeGreaterThan(1);
+    expect(table.textContent).toContain('AX-200维修手册.pdf');
+
+    await waitFor(() => expect(urls.length).toBeGreaterThan(0));
+    expect(urls[0]).toContain('status=ready');
+    expect(urls[0]).not.toContain('parserApplicationStatus=executed');
+
+    await user.click(within(table).getAllByRole('row')[1]);
+    const dialog = await screen.findByRole('dialog', { name: '文件详情' });
+    expect(await within(dialog).findByText('chunk-1')).toBeTruthy();
   });
 
   it('renders summary strip chips with quick filters', async () => {

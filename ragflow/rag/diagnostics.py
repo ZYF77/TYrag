@@ -223,6 +223,17 @@ def record_timed_rag_stage(stage: str, started: float, **payload: Any) -> None:
             "durationMs": round(max(0.0, (time.perf_counter() - started) * 1000), 3),
         }
         record_rag_diagnostics("stage", data)
+        # Additive mirror into the public Thinking timeline (no bodies).
+        try:
+            from rag.advanced_rag.think_timeline import (
+                record_think_timeline_stage,
+                think_timeline_active,
+            )
+
+            if think_timeline_active():
+                record_think_timeline_stage(str(stage)[:64], meta=data, source="ragflow")
+        except Exception:
+            pass
     except Exception:
         pass
 

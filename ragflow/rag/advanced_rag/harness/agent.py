@@ -14,8 +14,10 @@ that the loop parses.
 import json
 import logging
 import re
+from time import perf_counter
 
 from rag.advanced_rag.harness.types import ClaimTarget, ExecutionStrategy, ToolResult
+from rag.diagnostics import record_timed_rag_stage
 from rag.advanced_rag.harness.pipeline import Pipeline
 from rag.advanced_rag.harness.tools.gating import (
     get_gated_tools,
@@ -53,15 +55,43 @@ class ResearchToolSession:
         self.got_evidence = False
         self.evidence_ids: list[int] = []
         self._seen_evidence_ids: set[int] = set()
+        self._tool_call_count = 0
+        self._tool_duration_ms = 0.0
+
+    def _record_tool_diag(self, name: str, started: float, status: str = "success") -> None:
+        try:
+            elapsed_ms = max(0.0, (perf_counter() - started) * 1000)
+            self._tool_call_count += 1
+            self._tool_duration_ms += elapsed_ms
+            record_timed_rag_stage(
+                "tool",
+                started,
+                toolName=str(name)[:64],
+                toolCallCount=self._tool_call_count,
+                toolDurationMsTotal=round(self._tool_duration_ms, 3),
+                status=status,
+            )
+        except Exception:
+            pass
 
     async def tool_call_async(self, name: str, arguments: dict, request_timeout: float | int = 300):
         arguments = arguments or {}
+        tool_started = perf_counter()
         if name == "generate_report":
             self.report = self._normalize_report(arguments)
+            self._record_tool_diag(name, tool_started)
             return "Report received. Stop calling tools now."
         if name == "think_tool":
+            self._record_tool_diag(name, tool_started)
             return "Noted. Proceed with the next tool call."
-        result = await execute_with_fallback(self.pipeline, name, self.phase, **arguments)
+        status = "success"
+        try:
+            result = await execute_with_fallback(self.pipeline, name, self.phase, **arguments)
+        except Exception:
+            status = "failed"
+            self._record_tool_diag(name, tool_started, status=status)
+            raise
+        self._record_tool_diag(name, tool_started, status=status)
         if result.chunks:
             self.got_evidence = True
             self._record_evidence_ids(result.chunks)
@@ -72,7 +102,11 @@ class ResearchToolSession:
         if name in _NAV_CHUNK_TOOLS and result.chunks and self.claim is not None:
             if await self._navigation_sufficient(result.chunks):
                 ev = ", ".join(str(i) for i in self.evidence_ids) or "the passages above"
-                message += f"\n\n[sufficiency check] These passages appear to answer the task. Call generate_report now with evidence_ids=[{ev}] — do not run further searches."
+                message += (
+                    f"\n\n[sufficiency check] These passages appear to answer the task. "
+                    f"Call generate_report now with evidence_ids=[{ev}] "
+                    f"— do not run further searches."
+                )
         return message
 
     async def _navigation_sufficient(self, chunks: list[dict]) -> bool:
@@ -235,6 +269,25 @@ async def _research_text(
     )
 
     history: list[dict] = []
+    tool_call_count = 0
+    tool_duration_ms = 0.0
+
+    def _record_text_tool(name: str, started: float, status: str = "success") -> None:
+        nonlocal tool_call_count, tool_duration_ms
+        try:
+            elapsed_ms = max(0.0, (perf_counter() - started) * 1000)
+            tool_call_count += 1
+            tool_duration_ms += elapsed_ms
+            record_timed_rag_stage(
+                "tool",
+                started,
+                toolName=str(name)[:64],
+                toolCallCount=tool_call_count,
+                toolDurationMsTotal=round(tool_duration_ms, 3),
+                status=status,
+            )
+        except Exception:
+            pass
 
     for cycle in range(mode.max_agent_cycles):
         try:
@@ -253,14 +306,24 @@ async def _research_text(
             continue
 
         if tool_call.get("name") == "generate_report":
+            _record_text_tool("generate_report", perf_counter())
             return tool_call.get("arguments", {})
 
         if tool_call.get("name") == "think_tool":
+            _record_text_tool("think_tool", perf_counter())
             history.append({"role": "user", "content": "[continue]"})
             continue
 
         args = tool_call.get("arguments", {})
-        result = await execute_with_fallback(pipeline, tool_call["name"], phase, **args)
+        tool_started = perf_counter()
+        status = "success"
+        try:
+            result = await execute_with_fallback(pipeline, tool_call["name"], phase, **args)
+        except Exception:
+            status = "failed"
+            _record_text_tool(str(tool_call.get("name") or "tool"), tool_started, status=status)
+            raise
+        _record_text_tool(str(tool_call.get("name") or "tool"), tool_started, status=status)
         history.append({"role": "user", "content": _fmt_tool_result(result)})
 
     return await _force_generate_report(history, tools, claim.claim_id)

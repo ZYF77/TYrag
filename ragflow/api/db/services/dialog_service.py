@@ -84,7 +84,8 @@ def _grounding_requested(version) -> bool:
 # in it for enterprise grounding requests.
 _GROUNDING_PROMPT_SUMMARY = (
     "Enterprise grounding is enabled. The full prompt and source content are hidden; "
-    "the thinking section contains sanitized execution stages."
+    "open the Thinking section for the structured safe execution timeline "
+    "(stages, durations, counts - no raw prompt/knowledge/tool bodies)."
 )
 
 
@@ -227,7 +228,15 @@ def _fuse_or_keep(
             result = result2
 
     fused = dict(ans)
-    fused["answer"] = STANDARD_ABSTAIN_ANSWER
+    # Prefer attaching any collected safe timeline so the lightbulb still explains
+    # what ran before abstain, without leaking prompt/knowledge bodies.
+    # Mirror _grounding_abstain_event: fuse failure must not wipe the timeline.
+    answer = STANDARD_ABSTAIN_ANSWER
+    try:
+        answer = _append_public_think_trace(answer, None)
+    except Exception:
+        answer = STANDARD_ABSTAIN_ANSWER
+    fused["answer"] = answer
     fused["reference"] = empty_reference()
     return fused, result
 
@@ -300,14 +309,25 @@ def _completion_status(answer: str) -> str:
     field to the user-facing business state and never re-judges by text.
     """
     text = str(answer or "").strip()
+    # Thinking timeline is UX-only; business status judges the visible answer.
+    if "</think>" in text:
+        text = text.rsplit("</think>", 1)[-1].strip()
+    text = re.sub(r"</?think>", "", text).strip()
     if not text or text == STANDARD_ABSTAIN_ANSWER:
         return _COMPLETION_STATUS_NO_RELIABLE_EVIDENCE
     return _COMPLETION_STATUS_COMPLETED
 
 
 def _grounding_abstain_event(**extra) -> dict:
+    answer = STANDARD_ABSTAIN_ANSWER
+    # Prefer attaching any collected safe timeline so the lightbulb still explains
+    # what ran before abstain, without leaking prompt/knowledge bodies.
+    try:
+        answer = _append_public_think_trace(answer, None)
+    except Exception:
+        answer = STANDARD_ABSTAIN_ANSWER
     payload = {
-        "answer": STANDARD_ABSTAIN_ANSWER,
+        "answer": answer,
         "reference": empty_reference(),
         "prompt": _GROUNDING_PROMPT_SUMMARY,
         "audio_binary": None,
@@ -944,6 +964,13 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
     logging.debug("Begin async_chat")
     assert messages[-1]["role"] == "user", "The last content of this conversation is not from user."
     grounding_enabled = _grounding_requested(kwargs.get("grounding_version"))
+    if grounding_enabled:
+        try:
+            from rag.advanced_rag.think_timeline import begin_think_timeline
+
+            begin_think_timeline()
+        except Exception:
+            pass
     # Prefer Gateway scope_identifiers for the generation-side identity block.
     # Fall back to a copy of allowed_identifiers taken BEFORE appending last_user
     # (grounding appends the full question; that must never become an equipment id).
@@ -1264,21 +1291,45 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
 
         else:
             if embd_mdl:
-                kbinfos = await retriever.retrieval(
-                    " ".join(questions),
-                    embd_mdl,
-                    tenant_ids,
-                    dialog.kb_ids,
-                    1,
-                    dialog.top_n,
-                    dialog.similarity_threshold,
-                    dialog.vector_similarity_weight,
-                    doc_ids=attachments,
-                    top=dialog.top_k,
-                    aggs=True,
-                    rerank_mdl=rerank_mdl,
-                    rank_feature=label_question(" ".join(questions), kbs),
-                )
+                retrieval_started = timer()
+                retrieval_status = "success"
+                try:
+                    kbinfos = await retriever.retrieval(
+                        " ".join(questions),
+                        embd_mdl,
+                        tenant_ids,
+                        dialog.kb_ids,
+                        1,
+                        dialog.top_n,
+                        dialog.similarity_threshold,
+                        dialog.vector_similarity_weight,
+                        doc_ids=attachments,
+                        top=dialog.top_k,
+                        aggs=True,
+                        rerank_mdl=rerank_mdl,
+                        rank_feature=label_question(" ".join(questions), kbs),
+                    )
+                except Exception:
+                    retrieval_status = "failed"
+                    raise
+                finally:
+                    record_timed_rag_stage(
+                        "retrieval",
+                        retrieval_started,
+                        hitCount=len((kbinfos or {}).get("chunks", [])),
+                        chunkCount=len((kbinfos or {}).get("chunks", [])),
+                        rerankEnabled=bool(dialog.rerank_id),
+                        status=retrieval_status,
+                    )
+                    if dialog.rerank_id:
+                        record_timed_rag_stage(
+                            "rerank",
+                            retrieval_started,
+                            enabled=True,
+                            executed=True,
+                            hitCount=len((kbinfos or {}).get("chunks", [])),
+                            status=retrieval_status,
+                        )
                 if prompt_config.get("toc_enhance"):
                     toc_started = timer()
                     toc_status = "success"
@@ -1604,8 +1655,11 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
             )
             langfuse_generation.end()
 
+        final_answer = think + answer
+        if grounding_enabled:
+            final_answer = _append_public_think_trace(final_answer, None)
         payload = {
-            "answer": think + answer,
+            "answer": final_answer,
             "reference": refs,
             "prompt": _GROUNDING_PROMPT_SUMMARY if grounding_enabled else re.sub(r"\n", "  \n", prompt),
             "created_at": time.time(),
@@ -2299,14 +2353,33 @@ def _extract_visible_answer(text: str) -> str:
     return f"<think>{thought}</think>{answer}"
 
 
-def _append_public_think_trace(answer: str, stages: list[str]) -> str:
-    """Attach only already-sanitized stage messages to a final answer."""
+def _append_public_think_trace(answer: str, stages: list[str] | None = None) -> str:
+    """Attach structured safe timeline (nested details) or flat sanitized stages."""
+    from rag.advanced_rag.think_timeline import (
+        render_think_timeline,
+        snapshot_think_timeline,
+        stages_from_flat_lines,
+    )
+
     visible = _extract_visible_answer(answer)
-    trace = "\n".join(stage.strip() for stage in stages if stage and stage.strip())
-    if not trace:
+    # Idempotent: fuse-retry decorate may call this again on the same request.
+    if 'class="think-stage"' in visible:
         return visible
+    entries = snapshot_think_timeline()
+    if not entries and stages:
+        entries = stages_from_flat_lines(list(stages))
+    trace = render_think_timeline(entries)
+    if not trace:
+        flat = "\n".join(stage.strip() for stage in (stages or []) if stage and stage.strip())
+        if not flat:
+            return visible
+        trace = flat
     if visible.startswith("<think>"):
-        return f"<think>{trace}\n{visible[len('<think>'):]}"
+        rest = visible[len("<think>"):]
+        if "</think>" in rest:
+            _thought_body, after = rest.rsplit("</think>", 1)
+            return f"<think>{trace}</think>{after}"
+        return f"<think>{trace}\n{rest}"
     return f"<think>{trace}</think>{visible}"
 
 
@@ -2624,6 +2697,13 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
     prompt_config = dialog.prompt_config or {}
     assert messages[-1]["role"] == "user", "The last content of this conversation is not from user."
     grounding_enabled = _grounding_requested(kwargs.get("grounding_version"))
+    if grounding_enabled:
+        try:
+            from rag.advanced_rag.think_timeline import begin_think_timeline
+
+            begin_think_timeline()
+        except Exception:
+            pass
     if _use_simple_chat(prompt_config, kwargs):
         async for ans in async_chat(dialog, messages, stream, **kwargs):
             yield ans
@@ -2779,8 +2859,11 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
         if answer.lower().find("invalid key") >= 0 or answer.lower().find("invalid api") >= 0:
             answer += " Please set LLM API-Key in 'User Setting -> Model providers -> API-Key'"
 
+        final_answer = think + answer
+        if grounding_enabled:
+            final_answer = _append_public_think_trace(final_answer, None)
         return {
-            "answer": think + answer,
+            "answer": final_answer,
             "reference": refs,
             "prompt": _GROUNDING_PROMPT_SUMMARY if grounding_enabled else "",
             "created_at": time.time(),
@@ -2900,7 +2983,14 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
 
         full_answer = last_state.full_text if last_state else ""
         if full_answer:
-            final = await decorate_answer(_append_public_think_trace(full_answer, think_stages))
+            # Grounding: decorate_answer attaches the structured timeline once.
+            # Non-grounding: keep the flat sanitized stage prepend for the lightbulb.
+            traced = (
+                full_answer
+                if grounding_enabled
+                else _append_public_think_trace(full_answer, think_stages)
+            )
+            final = await decorate_answer(traced)
             final["final"] = True
             final["audio_binary"] = None
             final["status"] = _completion_status(final.get("answer") or "")

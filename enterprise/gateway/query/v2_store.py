@@ -14,6 +14,44 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+
+def encode_conversation_devices(devices: list[str] | tuple[str, ...] | None) -> str:
+    values: list[str] = []
+    for item in devices or ():
+        value = str(item or "").strip()
+        if value and value not in values:
+            values.append(value)
+    return json.dumps(values, ensure_ascii=False, separators=(",", ":"))
+
+
+def decode_conversation_devices(raw) -> list[str]:
+    if isinstance(raw, list):
+        values = raw
+    elif isinstance(raw, str) and raw.strip():
+        try:
+            values = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            values = []
+    else:
+        values = []
+    if not isinstance(values, list):
+        return []
+    devices: list[str] = []
+    for item in values:
+        value = str(item or "").strip()
+        if value and value not in devices:
+            devices.append(value)
+    return devices
+
+
+def devices_from_row(row) -> list[str]:
+    devices = decode_conversation_devices(row.get("conversation_devices") if hasattr(row, "get") else None)
+    if devices:
+        return devices
+    equipment_id = row["equipment_id"] if "equipment_id" in row.keys() else None
+    return [equipment_id] if equipment_id else []
+
+
 def encode_cursor(timestamp: str, item_id: str) -> str:
     raw = json.dumps([timestamp, item_id], separators=(",", ":")).encode()
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
@@ -55,6 +93,10 @@ def public_status(status: str | None) -> str:
 
 
 def conversation_payload(row) -> dict:
+    devices = devices_from_row(row)
+    anchor = None
+    if "anchor_equipment_id" in row.keys():
+        anchor = row["anchor_equipment_id"]
     return {
         "conversationId": row["conversation_id"],
         "title": row["title"],
@@ -62,6 +104,8 @@ def conversation_payload(row) -> dict:
         "equipmentId": row["equipment_id"],
         "fixedAssetNo": row["fixed_asset_no"],
         "faultCode": row["fault_code"],
+        "conversationDevices": devices,
+        "anchorEquipmentId": anchor,
         "contextVersion": row["context_version"],
         "lastMessageAt": row["last_message_at"],
         "createdAt": row["created_at"],
@@ -80,18 +124,29 @@ async def create_conversation(
     asset_id: str | None = None,
     registry_version: str | None = None,
     context_resolved_at: str | None = None,
+    conversation_devices: list[str] | tuple[str, ...] | None = None,
+    anchor_equipment_id: str | None = None,
 ) -> dict:
     now = utc_now()
     context_version = int(
         any(value is not None for value in (equipment_id, fixed_asset_no, fault_code))
     )
+    if conversation_devices is None:
+        devices = [equipment_id] if equipment_id else []
+    else:
+        devices = list(conversation_devices)
+    if anchor_equipment_id is None and equipment_id:
+        # Create-with-equipment => scoped; create-time device is the durable anchor.
+        anchor_equipment_id = equipment_id
+    devices_json = encode_conversation_devices(devices)
     result = await exec_sql(conn,
         """INSERT INTO ext_v2_conversation
            (conversation_id, tenant_id, business_user_id, title,
-            equipment_id, fixed_asset_no, asset_id, fault_code, context_version,
+            equipment_id, fixed_asset_no, asset_id, fault_code,
+            conversation_devices, anchor_equipment_id, context_version,
             status, ragflow_chat_id, ragflow_session_id, registry_version,
             context_resolved_at, first_message_at, created_at, last_message_at)
-           VALUES (?, ?, ?, 'New conversation', ?, ?, ?, ?, ?, 'active',
+           VALUES (?, ?, ?, 'New conversation', ?, ?, ?, ?, ?, ?, ?, 'active',
                    NULL, NULL, ?, ?, NULL, ?, ?)""",
         (
             conversation_id,
@@ -101,6 +156,8 @@ async def create_conversation(
             fixed_asset_no,
             asset_id,
             fault_code,
+            devices_json,
+            anchor_equipment_id,
             context_version,
             registry_version,
             context_resolved_at,
@@ -195,11 +252,14 @@ async def update_context(
     registry_version: str | None = None,
     context_resolved_at: str | None = None,
     expected_context_version: int | None = None,
+    conversation_devices: list[str] | tuple[str, ...] | None = None,
+    update_devices: bool = False,
+    anchor_equipment_id: str | None = None,
+    update_anchor: bool = False,
 ) -> dict | None:
     query = """UPDATE ext_v2_conversation
                SET equipment_id=?, fixed_asset_no=?, asset_id=?, fault_code=?,
-                   context_version=?, registry_version=?, context_resolved_at=?
-               WHERE conversation_id=? AND tenant_id=? AND business_user_id=?"""
+                   context_version=?, registry_version=?, context_resolved_at=?"""
     params: list[object] = [
         equipment_id,
         fixed_asset_no,
@@ -208,10 +268,21 @@ async def update_context(
         context_version,
         registry_version,
         context_resolved_at,
-        conversation_id,
-        tenant_id,
-        business_user_id,
     ]
+    if update_devices:
+        query += ", conversation_devices=?"
+        params.append(encode_conversation_devices(conversation_devices))
+    if update_anchor:
+        query += ", anchor_equipment_id=?"
+        params.append(anchor_equipment_id)
+    query += " WHERE conversation_id=? AND tenant_id=? AND business_user_id=?"
+    params.extend(
+        [
+            conversation_id,
+            tenant_id,
+            business_user_id,
+        ]
+    )
     if expected_context_version is not None:
         query += " AND context_version=?"
         params.append(expected_context_version)
@@ -251,39 +322,6 @@ async def list_messages_ordered(
            ORDER BY created_at ASC, message_id ASC""", (conversation_id, tenant_id, business_user_id))
     return [dict(row) for row in rows]
 
-
-async def save_context_summary(
-    conn,
-    *,
-    conversation_id: str,
-    tenant_id: str,
-    business_user_id: str,
-    context_summary: str,
-    compressed_turn_watermark: int,
-    clear_ragflow_session: bool = True,
-) -> dict | None:
-    now = utc_now()
-    session_clause = ", ragflow_session_id=NULL" if clear_ragflow_session else ""
-    result = await exec_sql(conn,
-        f"""UPDATE ext_v2_conversation
-           SET context_summary=?, summary_updated_at=?,
-               compressed_turn_watermark=?{session_clause}
-           WHERE conversation_id=? AND tenant_id=? AND business_user_id=?""",
-        (
-            context_summary,
-            now,
-            int(compressed_turn_watermark),
-            conversation_id,
-            tenant_id,
-            business_user_id,
-        ),
-    )
-    return await get_conversation(
-        conn,
-        conversation_id=conversation_id,
-        tenant_id=tenant_id,
-        business_user_id=business_user_id,
-    )
 
 
 async def archive_conversation(

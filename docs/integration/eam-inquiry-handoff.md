@@ -242,7 +242,7 @@ Gateway **不做**跨系统设备一致性回查。设备身份由 EAM 保证。
 
 - `suggestions` 由 Gateway **服务端定义**；EAM 只展示 `label`（可用 `displayPrompt` 作预览）
 - 发消息时传 `suggestionId` + 匹配的 `contextVersion`；**禁止**客户端自定义 chip prompt
-- `contextCompacted` 仅表示是否做过滚动摘要（排障用）；**不**返回摘要正文
+- `contextCompacted` 保留字段（EAM 兼容）；滚动摘要/压缩已移除，**恒为 false**；**不**返回摘要正文
 - 也可 `GET .../conversations/{id}/suggestions` 单独刷新 chips
 - `PATCH .../context` 成功后 `contextVersion` 递增；旧 chip 会 `409 SUGGESTION_STALE`
 - 首条消息后仍可 PATCH 切换设备；不需要为另一设备新建 conversation

@@ -6,6 +6,7 @@ import { HarnessCitationPanel } from '../components/harness/HarnessCitationPanel
 import { GatewayRuntimeLog } from '../components/harness/GatewayRuntimeLog';
 import { ConsoleOverlay } from '../components/console/ConsoleOverlay';
 import { DEFAULT_PAGE_SIZE, PaginationBar } from '../components/console/ConsoleTableControls';
+import { DeviceModalForm } from '../components/common/DeviceModalForm';
 import { WorkbenchShell, useWorkbenchTab } from '../components/layout/WorkbenchShell';
 import { toDisplayError, v2Api } from '../api/v2Client';
 import { MessageCircle } from 'lucide-react';
@@ -18,7 +19,6 @@ import type {
   ReasoningMode,
 } from '../api/v2Types';
 import { useV2Chat } from '../hooks/useV2Chat';
-import './enterprise-console.css';
 
 function summaryFromDetail(detail: ConversationDetail): ConversationSummary {
   return {
@@ -386,34 +386,23 @@ export function IntegrationHarnessPage() {
         ariaLabel="指定设备创建"
         className="harness-device-modal"
       >
-          <form
-            className="harness-device-modal-form"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void createConversationWithDevice();
-            }}
-          >
-            <div className="harness-device-modal-head">
-              <div>
-                <p className="console-eyebrow">可选上下文</p>
-                <h2>指定设备创建</h2>
-                <p>为新会话预先绑定设备，后续检索会优先限定在该设备资料内。</p>
-              </div>
-              <button type="button" className="console-icon-button" aria-label="关闭指定设备创建" onClick={() => setShowDeviceCreate(false)}>×</button>
-            </div>
-            <div className="harness-device-modal-body">
-              <label className="diag-field">
-                设备编号 <small>equipmentId</small>
-                <input aria-label="new equipmentId" value={newEquipmentId} onChange={(event) => setNewEquipmentId(event.target.value)} placeholder="可留空" className="diag-input" autoFocus />
-              </label>
-              <p className="diag-help">设备号可留空：不绑定时在当前用户可见文档内全局检索，回答末尾会提示补充设备号。</p>
-              {conversationError && <ErrorBanner error={conversationError} onDismiss={() => {}} />}
-            </div>
-            <div className="harness-device-modal-actions">
-              <button type="button" className="console-secondary-button" onClick={() => setShowDeviceCreate(false)}>取消</button>
-              <button type="submit" disabled={conversationLoading} className="console-primary-button">{conversationLoading ? '创建中…' : '创建会话'}</button>
-            </div>
-          </form>
+          <DeviceModalForm
+            title="指定设备创建"
+            description="为新会话预先绑定设备，后续检索会优先限定在该设备资料内。"
+            closeLabel="关闭指定设备创建"
+            onClose={() => setShowDeviceCreate(false)}
+            equipmentAriaLabel="new equipmentId"
+            equipmentPlaceholder="可留空"
+            equipmentValue={newEquipmentId}
+            onEquipmentChange={setNewEquipmentId}
+            helpText="设备号可留空：不绑定时在当前用户可见文档内全局检索，回答末尾会提示补充设备号。"
+            error={conversationError && <ErrorBanner error={conversationError} onDismiss={() => {}} />}
+            submitLabel="创建会话"
+            submittingLabel="创建中…"
+            submitting={conversationLoading}
+            onCancel={() => setShowDeviceCreate(false)}
+            onSubmit={() => void createConversationWithDevice()}
+          />
       </ConsoleOverlay>
 
       {tab === 'runtime' && <GatewayRuntimeLog />}

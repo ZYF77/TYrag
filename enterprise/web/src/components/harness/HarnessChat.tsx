@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import ReactMarkdown from 'react-markdown';
-import { ChevronDown, ChevronRight, Globe2 } from 'lucide-react';
+import { ChevronDown, ChevronRight } from 'lucide-react';
 import { QuestionInput } from '../chat/QuestionInput';
 import { ConsoleOverlay } from '../console/ConsoleOverlay';
+import { ConsoleAlert } from '../common/ConsoleAlert';
+import { CitationMarkdown } from '../common/CitationMarkdown';
+import { ToggleSwitch } from '../common/ToggleSwitch';
 import emptyChatIllustration from '../../assets/harness-empty-chat.png';
 import type {
   Citation,
@@ -46,71 +48,12 @@ export const REASONING_OPTIONS: ReasoningOption[] = [
   { value: 'ultra', level: 4, label: '极致', description: '最充分的推理与复核，准确度优先；速度最慢、成本最高。' },
 ];
 
-const CITATION_HREF_PREFIX = '#harness-citation-';
-
 function statusLabel(status: string): string {
   if (status === 'streaming') return '思考中';
   if (status === '已完成' || status === 'completed') return '业务状态：已完成';
   if (status === '无可靠依据' || status === 'no_reliable_evidence') return '业务状态：无可靠依据';
   if (status === '失败' || status === 'failed') return '业务状态：失败';
   return `业务状态：${status}`;
-}
-
-function citationForMarker(citations: Citation[], marker: number): Citation | undefined {
-  return citations.find((citation) => citation.refIndex === marker)
-    ?? citations[marker - 1];
-}
-
-function citationMarkdown(content: string): string {
-  return content.replace(/\[(?:ID:)\s*(\d+)\]|\[(\d+)\]/gi, (_match, prefixed, plain) => {
-    const marker = prefixed ?? plain;
-    return `[${marker}](${CITATION_HREF_PREFIX}${marker})`;
-  });
-}
-
-function CitationMarkdown({
-  content,
-  citations,
-  onCitation,
-}: {
-  content: string;
-  citations: Citation[];
-  onCitation: (citation: Citation) => void;
-}) {
-  return (
-    <div className="harness-markdown">
-      <ReactMarkdown
-        components={{
-          a: ({ href, children, ...props }) => {
-            const marker = href?.startsWith(CITATION_HREF_PREFIX)
-              ? Number(href.slice(CITATION_HREF_PREFIX.length))
-              : Number.NaN;
-            if (Number.isInteger(marker) && marker > 0) {
-              const citation = citationForMarker(citations, marker);
-              return citation ? (
-                <sup className="harness-citation-marker">
-                  <button
-                    type="button"
-                    onClick={() => onCitation(citation)}
-                    aria-label={`打开引用 ${marker}`}
-                  >
-                    {marker}
-                  </button>
-                </sup>
-              ) : <sup className="harness-citation-marker">{marker}</sup>;
-            }
-            return (
-              <a href={href} {...props} target="_blank" rel="noreferrer">
-                {children}
-              </a>
-            );
-          },
-        }}
-      >
-        {citationMarkdown(content)}
-      </ReactMarkdown>
-    </div>
-  );
 }
 
 interface CitationSourceGroup {
@@ -184,18 +127,13 @@ export function HarnessChat({
 
   const composerTools = (
     <div className="harness-composer-tools">
-      <label className="harness-toggle">
-        <input
-          type="checkbox"
-          aria-label="联网检索"
-          checked={internetEnabled}
-          disabled={!conversation || isStreaming}
-          onChange={(event) => onInternetEnabledChange(event.target.checked)}
-        />
-        <span className="harness-toggle-track" aria-hidden="true">
-          <span className="harness-toggle-thumb"><Globe2 size={12} /></span>
-        </span>
-      </label>
+      <ToggleSwitch
+        variant="harness"
+        label="联网检索"
+        checked={internetEnabled}
+        disabled={!conversation || isStreaming}
+        onChange={onInternetEnabledChange}
+      />
       <label className="harness-reasoning-field">
         <span className="sr-only">推理强度</span>
         <button
@@ -298,7 +236,11 @@ export function HarnessChat({
                   <CitationMarkdown
                     content={message.content}
                     citations={message.citations}
-                    onCitation={(citation) => {
+                    hrefPrefix="#harness-citation-"
+                    markerClassName="harness-citation-marker"
+                    markerAriaLabel="打开引用"
+                    className="harness-markdown"
+                    onMarkerActivate={(citation) => {
                       setSelected(citation.citationId);
                       onCitation(citation);
                     }}
@@ -333,7 +275,7 @@ export function HarnessChat({
                   </div>
                 )}
                 {message.citationError && <p className="diag-help">证据数据独立加载失败：{message.citationError}</p>}
-                {message.error && <p className="console-alert">[{message.error.code}] {message.error.message}</p>}
+                {message.error && <ConsoleAlert error={message.error} />}
                 {isFailed && <button type="button" onClick={onRetry} disabled={isStreaming} className="console-secondary-button">使用相同 clientMessageId 重试</button>}
                 {selected && selected === message.citations[0]?.citationId && <span className="sr-only">已选择 citation</span>}
               </article>
@@ -341,7 +283,7 @@ export function HarnessChat({
           })}
           <div ref={transcriptEndRef} aria-hidden="true" />
         </div>
-        {error && <p className="console-alert">[{error.code}] {error.message}</p>}
+        {error && <ConsoleAlert error={error} />}
         <QuestionInput
           onSend={onSend}
           onCancel={onCancel}

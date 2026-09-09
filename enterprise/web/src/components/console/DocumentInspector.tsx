@@ -8,18 +8,15 @@ import type {
   DocumentMetadataItem,
 } from '../../api/consoleTypes';
 import type { DisplayError } from '../../api/v2Types';
+import { ConsoleAlert } from '../common/ConsoleAlert';
+import { DialogHeader } from '../common/DialogHeader';
 import { ConsoleOverlay } from './ConsoleOverlay';
 import { DEFAULT_PAGE_SIZE, PaginationBar } from './ConsoleTableControls';
+import { formatTime } from '../../lib/format';
 
 interface DocumentInspectorProps {
   document: DocumentMetadataItem;
   onClose: () => void;
-}
-
-function formatTime(value: string | null | undefined): string {
-  if (!value) return '未提供';
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN', { hour12: false });
 }
 
 function value(value: unknown): string {
@@ -44,18 +41,26 @@ function jsonPreview(data: unknown): string {
   }
 }
 
+/** True for null/undefined/[]/{} — Gateway parse blobs that would mislead if shown as primary config. */
+function isEmptyConfigBlob(data: unknown): boolean {
+  if (data == null) return true;
+  if (typeof data !== 'object') return false;
+  if (Array.isArray(data)) return data.length === 0;
+  return Object.keys(data as Record<string, unknown>).length === 0;
+}
+
 function ChunkDetail({ chunk, onClose }: { chunk: AdminChunk; onClose: () => void }) {
   return (
     <ConsoleOverlay open mode="dialog" onClose={onClose} ariaLabel="Chunk 详情" className="console-chunk-detail-overlay">
       <section className="console-detail-dialog" aria-label="Chunk 详情">
-        <header className="console-detail-dialog-head">
-          <div>
-            <p className="console-eyebrow">Parsed chunk</p>
-            <h2>Chunk 详情</h2>
-            <p className="console-route">{chunk.id}</p>
-          </div>
-          <button type="button" className="console-icon-button" aria-label="关闭 Chunk 详情" onClick={onClose}><X size={17} /></button>
-        </header>
+        <DialogHeader
+          eyebrow="Parsed chunk"
+          title="Chunk 详情"
+          meta={<p className="console-route">{chunk.id}</p>}
+          closeLabel="关闭 Chunk 详情"
+          onClose={onClose}
+          closeContent={<X size={17} />}
+        />
         <div className="console-detail-dialog-body">
           <dl className="console-detail-facts">
             <div><dt>文档 ID</dt><dd>{chunk.documentId}</dd></div>
@@ -118,19 +123,17 @@ export function DocumentInspector({ document, onClose }: DocumentInspectorProps)
   return (
     <ConsoleOverlay open mode="dialog" onClose={onClose} ariaLabel="文件详情" className="console-document-inspector-overlay">
       <section className="console-detail-dialog console-document-inspector" data-testid="console-document-inspector">
-        <header className="console-detail-dialog-head">
-          <div>
-            <p className="console-eyebrow">Document metadata</p>
-            <h2>{item.fileName}</h2>
-            <p className="console-route">{item.externalDocumentId} · {item.sourceVersionId}</p>
-          </div>
-          <div className="console-detail-dialog-actions">
-            <button type="button" className="console-icon-button" aria-label="刷新文件详情" onClick={() => { void loadDetail(); void loadChunks(); }}><RefreshCw size={16} /></button>
-            <button type="button" className="console-icon-button" aria-label="关闭文件详情" onClick={onClose}><X size={17} /></button>
-          </div>
-        </header>
+        <DialogHeader
+          eyebrow="Document metadata"
+          title={item.fileName}
+          meta={<p className="console-route">{item.externalDocumentId} · {item.sourceVersionId}</p>}
+          closeLabel="关闭文件详情"
+          onClose={onClose}
+          closeContent={<X size={17} />}
+          actions={<button type="button" className="console-icon-button" aria-label="刷新文件详情" onClick={() => { void loadDetail(); void loadChunks(); }}><RefreshCw size={16} /></button>}
+        />
         <div className="console-detail-dialog-body">
-          {detailError && <div className="console-alert" role="alert">[{detailError.code}] {detailError.message}</div>}
+          {detailError && <ConsoleAlert error={detailError} as="div" withRole />}
           <section className="console-detail-section">
             <div className="console-detail-section-head"><strong>文档属性</strong><span>metadata</span></div>
             <dl className="console-detail-facts">
@@ -160,8 +163,6 @@ export function DocumentInspector({ document, onClose }: DocumentInspectorProps)
             {parser ? (
               <>
                 <dl className="console-detail-facts">
-                  <div><dt>应用状态</dt><dd>{value(parser.applicationStatus)}</dd></div>
-                  <div><dt>配置 Profile</dt><dd>{value(parser.profile)} · {value(parser.profileVersion)}</dd></div>
                   <div><dt>RAGFlow 方法</dt><dd>{parserMethod(parser.ragflow?.chunkMethod)}</dd></div>
                   <div><dt>RAGFlow 状态</dt><dd>{value(parser.ragflow?.run ?? parser.errorCode)}</dd></div>
                   <div><dt>Chunk 数</dt><dd>{value(parser.ragflow?.chunkCount)}</dd></div>
@@ -169,9 +170,33 @@ export function DocumentInspector({ document, onClose }: DocumentInspectorProps)
                 </dl>
                 {parser.errorCode && <p className="console-help-text">RAGFlow 读取状态：{parser.errorCode}</p>}
                 <details className="console-json-details">
-                  <summary>查看解析配置</summary>
-                  <pre className="console-json-preview">{jsonPreview({ expected: parser.expected, configured: parser.configured, executed: parser.executed, ragflow: parser.ragflow?.parserConfig })}</pre>
+                  <summary>查看 RAGFlow 解析配置</summary>
+                  <pre className="console-json-preview">{jsonPreview(parser.ragflow?.parserConfig ?? {})}</pre>
                 </details>
+                {(() => {
+                  const gatewayEmpty =
+                    isEmptyConfigBlob(parser.expected)
+                    && isEmptyConfigBlob(parser.configured)
+                    && isEmptyConfigBlob(parser.executed);
+                  if (gatewayEmpty) {
+                    return (
+                      <details className="console-json-details">
+                        <summary>高级/兼容 · Gateway 未托管</summary>
+                        <p className="console-help-text">Gateway 不托管解析方法；有效配置以 RAGFlow 为准。</p>
+                      </details>
+                    );
+                  }
+                  return (
+                    <details className="console-json-details">
+                      <summary>高级/兼容</summary>
+                      <pre className="console-json-preview">{jsonPreview({
+                        expected: parser.expected,
+                        configured: parser.configured,
+                        executed: parser.executed,
+                      })}</pre>
+                    </details>
+                  );
+                })()}
               </>
             ) : detailError ? (
               <p className="console-empty">解析方式暂不可用，请稍后重试。</p>
@@ -180,7 +205,7 @@ export function DocumentInspector({ document, onClose }: DocumentInspectorProps)
 
           <section className="console-detail-section">
             <div className="console-detail-section-head"><strong>解析 Chunk</strong><span>{chunks ? `${chunks.total} 个` : chunkError ? '不可用' : '加载中'}</span></div>
-            {chunkError && <div className="console-alert" role="alert">[{chunkError.code}] {chunkError.message}</div>}
+            {chunkError && <ConsoleAlert error={chunkError} as="div" withRole />}
             {chunks?.state === 'not_ready' && <p className="console-empty">该文档尚未完成 RAGFlow 解析。</p>}
             {chunks && chunks.items.length > 0 && (
               <div className="console-chunk-list" role="list" aria-label="解析 Chunk 列表">

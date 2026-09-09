@@ -21,8 +21,13 @@ from enterprise.gateway.sync.models import (
     clear_ragflow_binding,
     get_outbox_by_event_id,
     reset_outbox_to_pending,
+    list_mappings_for_equipment,
     claim_failed_processing_round,
     update_mapping_status,
+)
+from enterprise.gateway.equipment_identity import (
+    IDENTITY_EVENT_TYPE,
+    get_current_identity,
 )
 from enterprise.gateway.sync.ragflow_document_client import (
     RAGFlowAPIError,
@@ -210,6 +215,104 @@ class SyncService:
     async def _db_call(self, fn, /, *args, write: bool = True, **kwargs):
         async with self.gateway.transaction(write=write) as conn:
             return await fn(conn, *args, **kwargs)
+
+    async def process_identity_event(self, event: OutboxEvent) -> None:
+        """Apply the current Gateway identity to existing RAGFlow documents.
+
+        This updates only document-level metadata. It never uploads, parses,
+        reindexes, or changes chunks.
+        """
+        try:
+            payload = json.loads(event.payload)
+            target_version = int(payload.get("identityVersion") or event.source_version_id)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise TerminalDocumentSyncError(
+                "IDENTITY_EVENT_INVALID", "Invalid equipment identity event"
+            ) from exc
+
+        identity = await self._db_call(
+            get_current_identity,
+            event.tenant_id,
+            event.external_document_id,
+            write=False,
+        )
+        if identity is None:
+            raise TerminalDocumentSyncError(
+                "IDENTITY_NOT_FOUND", "Equipment identity was removed"
+            )
+        if identity.identity_version > target_version:
+            # A newer event owns the projection; this stale event is complete.
+            return
+
+        docs = await self._db_call(
+            list_mappings_for_equipment,
+            identity.tenant_id,
+            identity.equipment_id,
+            write=False,
+        )
+        desired = {
+            "equipment_id": identity.equipment_id,
+            "enterprise_identity_version": identity.identity_version,
+        }
+        if identity.fixed_asset_no is not None:
+            desired["fixed_asset_no"] = identity.fixed_asset_no
+        if identity.asset_id is not None:
+            desired["asset_id"] = identity.asset_id
+        # Empty variable identifiers omit/delete keys so stale aliases cannot linger.
+        omit_keys = []
+        if identity.fixed_asset_no is None:
+            omit_keys.append("fixed_asset_no")
+        if identity.asset_id is None:
+            omit_keys.append("asset_id")
+
+        for doc in docs:
+            if not doc.ragflow_dataset_id or not doc.ragflow_document_id:
+                continue
+            try:
+                remote_docs = await self.ragflow_client.list_documents(
+                    doc.ragflow_dataset_id,
+                    document_id=doc.ragflow_document_id,
+                )
+                if not remote_docs:
+                    raise RetryableDocumentSyncError(
+                        "RAGFLOW_UNAVAILABLE",
+                        "RAGFlow document metadata readback is empty",
+                    )
+                current = remote_docs[0]
+                current_meta = current.get("meta_fields")
+                current_meta = dict(current_meta) if isinstance(current_meta, dict) else {}
+                for key in omit_keys:
+                    current_meta.pop(key, None)
+                for key, value in desired.items():
+                    current_meta[key] = value
+                if current_meta != (current.get("meta_fields") or {}):
+                    await self.ragflow_client.update_document_metadata(
+                        doc.ragflow_dataset_id,
+                        doc.ragflow_document_id,
+                        current_meta,
+                    )
+                verified_docs = await self.ragflow_client.list_documents(
+                    doc.ragflow_dataset_id,
+                    document_id=doc.ragflow_document_id,
+                )
+                if not verified_docs:
+                    raise RetryableDocumentSyncError(
+                        "RAGFLOW_UNAVAILABLE",
+                        "RAGFlow identity metadata readback is empty",
+                    )
+                verified_meta = verified_docs[0].get("meta_fields") or {}
+                if any(verified_meta.get(key) != value for key, value in desired.items()):
+                    raise RetryableDocumentSyncError(
+                        "RAGFLOW_METADATA_STALE",
+                        "RAGFlow identity metadata did not converge",
+                    )
+                if any(key in verified_meta for key in omit_keys):
+                    raise RetryableDocumentSyncError(
+                        "RAGFLOW_METADATA_STALE",
+                        "RAGFlow identity metadata retained cleared keys",
+                    )
+            except RAGFlowAPIError as exc:
+                raise self._ragflow_error(exc) from exc
 
     async def process_event(
         self, event: OutboxEvent,
@@ -1060,6 +1163,77 @@ class SyncService:
                     "Quality evaluation could not be queued",
                 )
 
+
+    async def apply_ragflow_run(
+        self,
+        doc: ExtDocumentMap,
+        run: str,
+        *,
+        source: str = "poll",
+    ) -> ExtDocumentMap:
+        """Apply a known RAGFlow document ``run`` value (poll or webhook).
+
+        Side effects match historical ``refresh_status``: technical parse retry,
+        quality enqueue on ready, terminal failed callback when no quality path.
+        """
+        if doc.sync_status in ("superseded", "disabled", "deleted"):
+            return doc
+        mapped = map_ragflow_run_to_sync_status(run)
+        if mapped in {"ready", "failed"} and await self._retry_technical_parse_once(
+            doc, run,
+        ):
+            return await self._db_call(
+                get_mapping,
+                doc.tenant_id,
+                doc.source_system,
+                doc.external_document_id,
+                doc.source_version_id,
+            ) or doc
+        if mapped == "ready":
+            if doc.sync_status != "ready":
+                await self._set_status(
+                    doc,
+                    "ready",
+                    event_status="completed",
+                    pipeline_status=run,
+                    business_status="active",
+                )
+                await self._ensure_quality_evaluation(doc)
+            else:
+                await self._db_call(
+                    update_mapping_status,
+                    doc,
+                    "ready",
+                    pipeline_status=run,
+                    event_status="completed",
+                )
+        elif mapped == "failed":
+            failure_fields = {
+                "pipeline_status": run,
+                "error_code": "DOCUMENT_PARSE_FAILED",
+                "error_message": "文档解析失败。",
+                "last_error_retryable": True,
+                "event_status": "failed",
+            }
+            if not doc.current_version:
+                failure_fields["business_status"] = "review_required"
+            await self._set_status(doc, "failed", **failure_fields)
+            await self._emit_terminal_failed_if_no_quality(doc)
+        elif (
+            doc.sync_status != mapped
+            and transition_allowed(doc.sync_status, mapped, "document")
+        ):
+            await self._set_status(
+                doc, mapped, event_status="completed", pipeline_status=run,
+            )
+        return await self._db_call(
+            get_mapping,
+            doc.tenant_id,
+            doc.source_system,
+            doc.external_document_id,
+            doc.source_version_id,
+        ) or doc
+
     async def refresh_status(self, doc: ExtDocumentMap) -> ExtDocumentMap:
         if (
             not doc.ragflow_dataset_id
@@ -1080,45 +1254,7 @@ class SyncService:
                 continue
             readback_found = True
             run = rf_doc.get("run") or "UNSTART"
-            mapped = map_ragflow_run_to_sync_status(run)
-            if mapped in {"ready", "failed"} and await self._retry_technical_parse_once(
-                doc, run,
-            ):
-                break
-            if mapped == "ready":
-                if doc.sync_status != "ready":
-                    await self._set_status(
-                        doc,
-                        "ready",
-                        event_status="completed",
-                        pipeline_status=run,
-                        business_status="active",
-                    )
-                    await self._ensure_quality_evaluation(doc)
-                else:
-                    await self._db_call(update_mapping_status, doc, "ready",
-                        pipeline_status=run,
-                        event_status="completed",
-                    )
-            elif mapped == "failed":
-                failure_fields = {
-                    "pipeline_status": run,
-                    "error_code": "DOCUMENT_PARSE_FAILED",
-                    "error_message": "文档解析失败。",
-                    "last_error_retryable": True,
-                    "event_status": "failed",
-                }
-                if not doc.current_version:
-                    failure_fields["business_status"] = "review_required"
-                await self._set_status(doc, "failed", **failure_fields)
-                await self._emit_terminal_failed_if_no_quality(doc)
-            elif (
-                doc.sync_status != mapped
-                and transition_allowed(doc.sync_status, mapped, "document")
-            ):
-                await self._set_status(
-                    doc, mapped, event_status="completed", pipeline_status=run,
-                )
+            await self.apply_ragflow_run(doc, run, source="poll")
             break
         if not readback_found:
             return await self.mark_ragflow_document_missing(doc)

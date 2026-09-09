@@ -1,4 +1,5 @@
 import ReactMarkdown from 'react-markdown';
+import { ConsoleAlert } from '../common/ConsoleAlert';
 import type { Citation, DisplayError } from '../../api/v2Types';
 
 interface HarnessCitationPanelProps {
@@ -120,7 +121,7 @@ export function HarnessCitationPanel({ citation, citations = [], loading, error,
             )}
           </>
         )}
-        {error && <p className="console-alert">[{error.code}] {error.message}</p>}
+        {error && <ConsoleAlert error={error} />}
       </div>
     </section>
   );

@@ -212,6 +212,9 @@ async def observe_attachments(
 ) -> list[AttachmentObservation]:
     del chat_id  # image understand uses vision-only completion, not RAG chat
 
+    from enterprise.gateway.config import attachment_vision_enabled_from_env
+
+    vision_enabled = attachment_vision_enabled_from_env()
     observations: list[AttachmentObservation] = []
     for item in pending:
         # Upload failure raises RAGFlowAPIError; TXT/PDF/Office bodies are
@@ -223,6 +226,9 @@ async def observe_attachments(
             )
             continue
         if item.media_type not in IMAGE_MEDIA_TYPES:
+            observations.append(AttachmentObservation(trust_level="observed"))
+            continue
+        if not vision_enabled:
             observations.append(AttachmentObservation(trust_level="observed"))
             continue
         try:

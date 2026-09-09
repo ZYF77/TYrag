@@ -119,7 +119,19 @@ def public_think_log_detail(msg: str) -> str | None:
     if display_tag.startswith("<br>"):
         display_tag = display_tag[4:].strip()
     description = _STAGE_DESCRIPTIONS.get(display_tag)
-    return f"{display_tag} {description}" if description else display_tag
+    safe = f"{display_tag} {description}" if description else display_tag
+    # Additive: project into structured Thinking timeline when collector is on.
+    try:
+        from rag.advanced_rag.think_timeline import (
+            record_think_timeline_from_agentic_log,
+            think_timeline_active,
+        )
+
+        if think_timeline_active():
+            record_think_timeline_from_agentic_log(safe)
+    except Exception:
+        pass
+    return safe
 
 
 def install_think_log_handler() -> None:

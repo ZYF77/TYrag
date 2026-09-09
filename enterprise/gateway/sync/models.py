@@ -217,6 +217,21 @@ async def insert_mapping(
     return_inserted: bool = False,
 ) -> ExtDocumentMap | tuple[ExtDocumentMap, bool]:
     now = utc_now()
+    # A document retry must use the current EAM projection when one exists.
+    identity = (
+        await fetchone(
+            conn,
+            """SELECT fixed_asset_no, asset_id
+                 FROM ext_asset_registry
+                WHERE tenant_id=? AND equipment_id=?""",
+            (doc.tenant_id, doc.equipment_id),
+        )
+        if doc.equipment_id
+        else None
+    )
+    if identity is not None:
+        doc.fixed_asset_no = identity["fixed_asset_no"]
+        doc.asset_id = identity["asset_id"]
     try:
         result = await exec_sql(conn,
             """INSERT INTO ext_document_map
@@ -282,9 +297,7 @@ async def insert_mapping(
                     """INSERT INTO ext_asset_registry
                        (tenant_id, equipment_id, fixed_asset_no, asset_id)
                        VALUES (?, ?, ?, ?)
-                       ON CONFLICT(tenant_id, equipment_id) DO UPDATE SET
-                         fixed_asset_no=excluded.fixed_asset_no,
-                         asset_id=excluded.asset_id""",
+                       ON CONFLICT(tenant_id, equipment_id) DO NOTHING""",
                     (
                         doc.tenant_id,
                         doc.equipment_id or doc.fixed_asset_no or doc.asset_id,
@@ -472,6 +485,24 @@ async def list_all_mappings(
         if len(batch) < page_size:
             return docs
         offset += page_size
+
+
+async def list_mappings_for_equipment(
+    conn: AsyncConnection,
+    tenant_id: str,
+    equipment_id: str,
+    *,
+    page_size: int = 100,
+) -> list[ExtDocumentMap]:
+    """Return all document versions bound to one stable equipment id."""
+    rows = await fetchall(
+        conn,
+        """SELECT * FROM ext_document_map
+             WHERE tenant_id=? AND equipment_id=?
+             ORDER BY updated_at ASC, id ASC""",
+        (tenant_id, equipment_id),
+    )
+    return [_row_to_mapping(row) for row in rows]
 
 
 async def update_mapping_status(
@@ -967,3 +998,70 @@ async def list_outbox_events(
             (limit,),
         )
     return [_row_to_outbox(r) for r in rows]
+
+
+async def get_mapping_by_ragflow_document_id(
+    conn: AsyncConnection,
+    ragflow_document_id: str,
+    *,
+    ragflow_dataset_id: str | None = None,
+) -> ExtDocumentMap | None:
+    """Resolve a Gateway mapping from RAGFlow document (+ optional dataset) ids."""
+    if not ragflow_document_id:
+        return None
+    if ragflow_dataset_id:
+        row = await fetchone(
+            conn,
+            """SELECT * FROM ext_document_map
+               WHERE ragflow_document_id=? AND ragflow_dataset_id=?
+               ORDER BY id DESC LIMIT 1""",
+            (ragflow_document_id, ragflow_dataset_id),
+        )
+    else:
+        row = await fetchone(
+            conn,
+            """SELECT * FROM ext_document_map
+               WHERE ragflow_document_id=?
+               ORDER BY id DESC LIMIT 1""",
+            (ragflow_document_id,),
+        )
+    return _row_to_mapping(row) if row else None
+
+
+async def insert_ragflow_status_inbox(
+    conn: AsyncConnection,
+    *,
+    event_id: str,
+    event_type: str,
+    ragflow_document_id: str,
+    ragflow_dataset_id: str,
+    run: str,
+    run_code: str,
+    trigger: str,
+    occurred_at: str,
+    payload_json: str,
+) -> bool:
+    """Insert inbox row. Returns True if inserted, False on event_id replay."""
+    now = utc_now()
+    result = await exec_sql(
+        conn,
+        """INSERT INTO ragflow_status_inbox
+           (event_id, event_type, ragflow_document_id, ragflow_dataset_id,
+            run, run_code, trigger, occurred_at, payload_json, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(event_id) DO NOTHING
+           RETURNING id""",
+        (
+            event_id,
+            event_type,
+            ragflow_document_id,
+            ragflow_dataset_id or "",
+            run,
+            run_code or "",
+            trigger or "",
+            occurred_at or "",
+            payload_json or "",
+            now,
+        ),
+    )
+    return result.scalar_one_or_none() is not None

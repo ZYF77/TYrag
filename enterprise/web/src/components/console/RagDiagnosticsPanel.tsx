@@ -6,7 +6,10 @@ import type {
   RagDiagnosticTraceDetail,
   RagDiagnosticTracePage,
 } from '../../api/consoleTypes';
-import { formatTime, PanelCard, PanelError, panelErrorStatus } from './SystemSettingsPanels';
+import { PanelCard, PanelError, panelErrorStatus } from '../common/Panel';
+import { ConsoleDataTable } from '../common/ConsoleDataTable';
+import { DialogHeader } from '../common/DialogHeader';
+import { formatTime } from '../../lib/format';
 import { DEFAULT_PAGE_SIZE, PaginationBar } from './ConsoleTableControls';
 import { ConsoleOverlay } from './ConsoleOverlay';
 
@@ -209,33 +212,37 @@ export function RagDiagnosticsPanel() {
 
         {list.error && <PanelError error={list.error} onRetry={() => void loadList()} />}
         {list.data && (
-          <div className="console-table-wrap">
-            <table className="console-table">
-              <thead><tr><th>runId</th><th>结果</th><th>耗时</th><th>时间</th><th>操作</th></tr></thead>
-              <tbody>
-                {list.data.items.map((item) => (
-                  <tr key={item.runId} data-row-action="true" tabIndex={0} onClick={() => void loadDetail(item.runId)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); void loadDetail(item.runId); } }}>
-                    <td className="console-table-mono">{item.runId}</td>
-                    <td>{item.outcome ?? item.status}{item.truncated ? ' · truncated' : ''}</td>
-                    <td>{item.durationMs == null ? '未计时' : `${Math.round(item.durationMs)}ms`}</td>
-                    <td>{formatTime(item.createdAt)}</td>
-                    <td className="console-col-center console-col-actions"><button type="button" className="console-secondary-button" onClick={(event) => { event.stopPropagation(); void loadDetail(item.runId); }}>查看</button></td>
-                  </tr>
-                ))}
-                {list.data.items.length === 0 && <tr><td colSpan={5}>暂无诊断记录。功能默认关闭，仅显示开启后产生的运行。</td></tr>}
-              </tbody>
-            </table>
-          </div>
+          <ConsoleDataTable
+            columns={[
+              { key: 'runId', label: 'runId', render: (item) => <td key="runId" className="console-table-mono">{item.runId}</td> },
+              { key: 'outcome', label: '结果', render: (item) => <td key="outcome">{item.outcome ?? item.status}{item.truncated ? ' · truncated' : ''}</td> },
+              { key: 'durationMs', label: '耗时', render: (item) => <td key="durationMs">{item.durationMs == null ? '未计时' : `${Math.round(item.durationMs)}ms`}</td> },
+              { key: 'createdAt', label: '时间', render: (item) => <td key="createdAt">{formatTime(item.createdAt)}</td> },
+              {
+                key: 'actions',
+                label: '操作',
+                render: (item) => (
+                  <td key="actions" className="console-col-center console-col-actions"><button type="button" className="console-secondary-button" onClick={(event) => { event.stopPropagation(); void loadDetail(item.runId); }}>查看</button></td>
+                ),
+              },
+            ]}
+            items={list.data.items}
+            rowKey={(item) => item.runId}
+            onRowAction={(item) => void loadDetail(item.runId)}
+            emptyRow={<tr><td colSpan={5}>暂无诊断记录。功能默认关闭，仅显示开启后产生的运行。</td></tr>}
+            pagination={(
+              <PaginationBar
+                page={page}
+                itemCount={list.data.items.length}
+                hasMore={list.data.hasMore}
+                pageSize={pageSize}
+                onPageSizeChange={(value) => { setPageSize(value); setPage(1); }}
+                onPrevious={() => setPage((current) => Math.max(1, current - 1))}
+                onNext={() => setPage((current) => current + 1)}
+              />
+            )}
+          />
         )}
-        {list.data && <PaginationBar
-          page={page}
-          itemCount={list.data.items.length}
-          hasMore={list.data.hasMore}
-          pageSize={pageSize}
-          onPageSizeChange={(value) => { setPageSize(value); setPage(1); }}
-          onPrevious={() => setPage((current) => Math.max(1, current - 1))}
-          onNext={() => setPage((current) => current + 1)}
-        />}
       </PanelCard>
 
       <ConsoleOverlay
@@ -246,16 +253,16 @@ export function RagDiagnosticsPanel() {
         className="rag-diagnostics-detail-overlay"
       >
           <section className="rag-diagnostics-detail-modal" aria-labelledby="rag-diagnostics-detail-title">
-            <header className="rag-diagnostics-detail-head">
-              <div>
-                <p className="console-eyebrow">RAG diagnostics · run detail</p>
-                <h2 id="rag-diagnostics-detail-title">诊断运行详情</h2>
-                <p className="rag-diagnostics-detail-run-id">{runId}</p>
-              </div>
-              <button type="button" className="console-icon-button" aria-label="关闭诊断详情" onClick={() => setDetailOpen(false)}>
-                <X size={17} />
-              </button>
-            </header>
+            <DialogHeader
+              headClassName="rag-diagnostics-detail-head"
+              eyebrow="RAG diagnostics · run detail"
+              title="诊断运行详情"
+              titleId="rag-diagnostics-detail-title"
+              meta={<p className="rag-diagnostics-detail-run-id">{runId}</p>}
+              closeLabel="关闭诊断详情"
+              onClose={() => setDetailOpen(false)}
+              closeContent={<X size={17} />}
+            />
 
             <div className="rag-diagnostics-detail-body">
               <div className="rag-diagnostics-detail-summary">

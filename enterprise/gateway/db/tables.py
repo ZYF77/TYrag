@@ -23,6 +23,9 @@ ext_asset_registry = Table(
     Column("equipment_id", Text, primary_key=True),
     Column("fixed_asset_no", Text),
     Column("asset_id", Text),
+    Column("source_system", Text, nullable=False, server_default=""),
+    Column("identity_version", Integer, nullable=False, server_default="0"),
+    Column("updated_at", Text, nullable=False, server_default=""),
 )
 
 ext_document_map = Table(
@@ -108,6 +111,16 @@ Index(
     ext_document_map.c.sha256,
 )
 Index("idx_ext_doc_batch", ext_document_map.c.tenant_id, ext_document_map.c.batch_id)
+Index(
+    "idx_asset_registry_fixed",
+    ext_asset_registry.c.tenant_id,
+    ext_asset_registry.c.fixed_asset_no,
+)
+Index(
+    "idx_asset_registry_asset",
+    ext_asset_registry.c.tenant_id,
+    ext_asset_registry.c.asset_id,
+)
 
 sync_outbox = Table(
     "sync_outbox",
@@ -204,6 +217,29 @@ callback_delivery = Table(
         "source_version_id", "processing_round", "terminal_status",
         name="uq_callback_delivery_round_terminal",
     ),
+)
+
+
+ragflow_status_inbox = Table(
+    "ragflow_status_inbox",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("event_id", Text, nullable=False, unique=True),
+    Column("event_type", Text, nullable=False),
+    Column("ragflow_document_id", Text, nullable=False),
+    Column("ragflow_dataset_id", Text, nullable=False, server_default=""),
+    Column("run", Text, nullable=False),
+    Column("run_code", Text, nullable=False, server_default=""),
+    Column("trigger", Text, nullable=False, server_default=""),
+    Column("occurred_at", Text, nullable=False, server_default=""),
+    Column("payload_json", Text, nullable=False, server_default=""),
+    Column("created_at", Text, nullable=False),
+)
+
+Index(
+    "idx_ragflow_status_inbox_doc",
+    ragflow_status_inbox.c.ragflow_document_id,
+    ragflow_status_inbox.c.run_code,
 )
 
 Index("idx_callback_delivery_pending", callback_delivery.c.state, callback_delivery.c.next_attempt_at)
@@ -305,10 +341,13 @@ ext_v2_conversation = Table(
     Column("fixed_asset_no", Text),
     Column("asset_id", Text),
     Column("fault_code", Text),
+    Column("conversation_devices", Text, nullable=False, server_default="[]"),
+    Column("anchor_equipment_id", Text),
     Column("context_version", Integer, nullable=False, server_default="0"),
     Column("status", Text, nullable=False, server_default="active"),
     Column("ragflow_chat_id", Text),
     Column("ragflow_session_id", Text),
+    # Deprecated: formerly used by context_compress (removed). Kept to avoid schema migration.
     Column("context_summary", Text),
     Column("summary_updated_at", Text),
     Column("compressed_turn_watermark", Integer, nullable=False, server_default="0"),
@@ -660,6 +699,18 @@ gateway_schema_version = Table(
     Column("applied_at", Text, nullable=False),
 )
 
+gateway_equipment_recognition_settings = Table(
+    "gateway_equipment_recognition_settings",
+    metadata,
+    Column("tenant_id", Text, primary_key=True),
+    Column("pattern", Text, nullable=False),
+    Column("enabled", Integer, nullable=False, server_default="1"),
+    Column("config_version", Integer, nullable=False, server_default="1"),
+    Column("updated_at", Text, nullable=False, server_default=""),
+    Column("updated_by", Text),
+)
+
+
 gateway_runtime_settings = Table(
     "gateway_runtime_settings",
     metadata,
@@ -697,5 +748,6 @@ ALL_TABLES = (
     parsing_import_item,
     parsing_review,
     parsing_audit_event,
+    gateway_equipment_recognition_settings,
     gateway_runtime_settings,
 )

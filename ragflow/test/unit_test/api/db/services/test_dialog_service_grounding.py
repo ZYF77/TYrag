@@ -10,6 +10,14 @@ from api.db.services import dialog_service
 from rag.grounding.guard import STANDARD_ABSTAIN_ANSWER
 
 
+def _visible_answer(answer: str) -> str:
+    """Strip optional Thinking timeline wrapper for exact content assertions."""
+    text = answer or ""
+    if "</think>" in text:
+        return text.rsplit("</think>", 1)[-1]
+    return text
+
+
 def _collect(async_gen):
     async def _run():
         return [event async for event in async_gen]
@@ -46,6 +54,7 @@ def test_grounding_request_flag_rejects_non_int_one():
 def test_completion_status_is_exact_match_only():
     assert dialog_service._completion_status("设备 EQ-104 压力 2 MPa") == "completed"
     assert dialog_service._completion_status(STANDARD_ABSTAIN_ANSWER) == "no_reliable_evidence"
+    assert dialog_service._completion_status("<think>timeline</think>" + STANDARD_ABSTAIN_ANSWER) == "no_reliable_evidence"
     assert dialog_service._completion_status("  " + STANDARD_ABSTAIN_ANSWER + "  ") == "no_reliable_evidence"
     assert dialog_service._completion_status("") == "no_reliable_evidence"
     assert dialog_service._completion_status("   ") == "no_reliable_evidence"
@@ -251,7 +260,7 @@ def test_grounding_guard_fail_replaces_candidate_before_yield(monkeypatch):
     assert "WO-99999" not in answers
     assert "20%" not in answers
     assert "candidate" not in answers
-    assert events[-1]["answer"] == STANDARD_ABSTAIN_ANSWER
+    assert _visible_answer(events[-1]["answer"]) == STANDARD_ABSTAIN_ANSWER
     assert events[-1]["reference"].get("chunks") == []
     assert events[-1]["status"] == "no_reliable_evidence"
     assert all(not event.get("answer") for event in events if not event.get("final"))
@@ -278,7 +287,7 @@ def test_grounding_guard_short_retry_recovers_grounded_answer(monkeypatch):
 
     # Identifier mismatch must not trigger short numeric retry.
     assert model.chat_calls == 1
-    assert events[-1]["answer"] == STANDARD_ABSTAIN_ANSWER
+    assert _visible_answer(events[-1]["answer"]) == STANDARD_ABSTAIN_ANSWER
 
 
 def test_grounding_guard_short_retry_on_numeric_only_recovers(monkeypatch):
@@ -322,7 +331,7 @@ def test_grounding_guard_short_retry_still_abstains_when_retry_ungrounded(monkey
     )
 
     assert model.chat_calls == 2
-    assert events[-1]["answer"] == STANDARD_ABSTAIN_ANSWER
+    assert _visible_answer(events[-1]["answer"]) == STANDARD_ABSTAIN_ANSWER
     assert events[-1]["reference"].get("chunks") == []
     assert events[-1]["status"] == "no_reliable_evidence"
 
@@ -340,7 +349,7 @@ def test_grounding_kpa_mpa_passes_and_keeps_answer(monkeypatch):
         )
     )
 
-    assert events[-1]["answer"] == "压力 2 MPa"
+    assert _visible_answer(events[-1]["answer"]) == "压力 2 MPa"
     assert "grounding" not in events[-1]
 
 
@@ -359,7 +368,7 @@ def test_grounding_non_stream_and_empty_response_are_terminal_only(monkeypatch):
 
     assert len(events) == 1
     assert events[0]["final"] is True
-    assert events[0]["answer"] == STANDARD_ABSTAIN_ANSWER
+    assert _visible_answer(events[0]["answer"]) == STANDARD_ABSTAIN_ANSWER
     assert events[0]["reference"].get("chunks") == []
     assert events[0]["status"] == "no_reliable_evidence"
     assert "grounding" not in events[0]
@@ -411,7 +420,7 @@ def test_grounding_prompt_fit_rejects_without_calling_model_when_one_block_canno
     )
 
     assert model.systems == []
-    assert events[-1]["answer"] == STANDARD_ABSTAIN_ANSWER
+    assert _visible_answer(events[-1]["answer"]) == STANDARD_ABSTAIN_ANSWER
     assert events[-1]["status"] == "no_reliable_evidence"
     assert "grounding" not in events[-1]
 
@@ -699,3 +708,112 @@ def test_simple_web_search_failure_keeps_internal_knowledge(
     assert "web search unavailable; continuing with internal knowledge" in caplog.text
     assert question not in caplog.text
     assert secret not in caplog.text
+
+def test_grounding_think_timeline_has_stages_without_raw_text(monkeypatch):
+    """Scheme A: lightbulb gets foldable safe stages, never prompt/knowledge bodies."""
+    secret_knowledge = "CONFIDENTIAL_CHUNK_BODY_EQ-SECRET-999"
+    secret_question = "SECRET_USER_QUESTION_should_not_appear"
+    model = _FakeModel("设备 EQ-104 压力 2 MPa")
+    _patch_chat(monkeypatch, model, knowledge=(secret_knowledge,))
+
+    events = _collect(
+        dialog_service.async_chat(
+            _dialog(),
+            [{"role": "user", "content": secret_question}],
+            stream=True,
+            grounding_version=1,
+        )
+    )
+
+    final = [event for event in events if event.get("final")][-1]
+    answer = final.get("answer") or ""
+    prompt = final.get("prompt") or ""
+
+    assert prompt == dialog_service._GROUNDING_PROMPT_SUMMARY
+    assert "timeline" in prompt.lower() or "Thinking" in prompt or "thinking" in prompt.lower()
+    assert secret_knowledge not in answer
+    assert secret_knowledge not in prompt
+    assert secret_question not in answer
+    assert secret_question not in prompt
+    assert "<think>" in answer
+    assert 'class="think-stage"' in answer
+    assert "</details>" in answer
+    # At least retrieval/generation-oriented stages should be present.
+    assert ("retrieval" in answer) or ("llm" in answer) or ("warmup" in answer)
+
+def test_fuse_or_keep_abstain_preserves_think_timeline(monkeypatch):
+    """Fuse failure must keep safe timeline on abstain (parity with _grounding_abstain_event)."""
+    from rag.advanced_rag.think_timeline import (
+        begin_think_timeline,
+        record_think_timeline_stage,
+        reset_think_timeline,
+    )
+
+    monkeypatch.setattr(dialog_service, "_IDENTIFIER_NUMERIC_FUSE_ENABLED", True)
+    secret_knowledge = "CONFIDENTIAL_CHUNK_BODY_EQ-SECRET-888"
+    secret_prompt = "SECRET_SYSTEM_PROMPT_should_not_appear"
+    secret_candidate = "candidate_raw_WO-99999"
+
+    token = begin_think_timeline()
+    try:
+        record_think_timeline_stage("retrieval", meta={"status": "success"}, source="ragflow")
+        record_think_timeline_stage("llm", meta={"status": "success"}, source="ragflow")
+        fused, result = dialog_service._fuse_or_keep(
+            {
+                "answer": f"<think>{secret_candidate}</think>工单 WO-99999 完成率 20%",
+                "reference": {"chunks": [{"content": secret_knowledge}]},
+                "prompt": secret_prompt,
+            },
+            effective_knowledge="发票和收据各一份。",
+            attachment_observations=None,
+            allowed_identifiers=None,
+        )
+    finally:
+        reset_think_timeline(token)
+
+    assert not result.passed
+    answer = fused["answer"] or ""
+    assert _visible_answer(answer) == STANDARD_ABSTAIN_ANSWER
+    assert "<think>" in answer
+    assert ('class="think-stage"' in answer) or ("<details" in answer)
+    assert ("</details>" in answer) or ("retrieval" in answer) or ("llm" in answer)
+    assert secret_knowledge not in answer
+    assert secret_prompt not in answer
+    assert secret_candidate not in answer
+    assert "WO-99999" not in answer
+    assert "20%" not in answer
+    assert fused["reference"].get("chunks") == []
+
+
+def test_grounding_guard_fail_stream_keeps_think_timeline(monkeypatch):
+    """End-to-end: fuse abstain after decorate still shows foldable safe timeline."""
+    monkeypatch.setattr(dialog_service, "_IDENTIFIER_NUMERIC_FUSE_ENABLED", True)
+    secret_knowledge = "CONFIDENTIAL_CHUNK_BODY_EQ-SECRET-777"
+    secret_question = "SECRET_USER_QUESTION_fuse_fail_should_not_appear"
+    model = _FakeModel("<think>candidate</think>工单 WO-99999 完成率 20%")
+    _patch_chat(monkeypatch, model, knowledge=(secret_knowledge,))
+
+    events = _collect(
+        dialog_service.async_chat(
+            _dialog(),
+            [{"role": "user", "content": secret_question}],
+            stream=True,
+            grounding_version=1,
+        )
+    )
+
+    final = [event for event in events if event.get("final")][-1]
+    answer = final.get("answer") or ""
+    prompt = final.get("prompt") or ""
+
+    assert _visible_answer(answer) == STANDARD_ABSTAIN_ANSWER
+    assert final["status"] == "no_reliable_evidence"
+    assert "<think>" in answer
+    assert ('class="think-stage"' in answer) or ("<details" in answer)
+    assert secret_knowledge not in answer
+    assert secret_knowledge not in prompt
+    assert secret_question not in answer
+    assert secret_question not in prompt
+    assert "WO-99999" not in answer
+    assert "20%" not in answer
+

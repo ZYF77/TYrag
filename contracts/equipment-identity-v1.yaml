@@ -1,0 +1,90 @@
+openapi: 3.1.0
+info:
+  title: TYrag Equipment Identity Feed
+  version: 1.0.0
+  description: >-
+    EAM current equipment identity snapshots and asynchronous RAGFlow metadata
+    projection (PATCH meta only: equipment_id, fixed_asset_no, asset_id,
+    enterprise_identity_version; empty variable ids omit/delete keys; never parse).
+servers:
+  - url: /
+paths:
+  /enterprise/api/v3/equipment-identities/{equipmentId}:
+    put:
+      summary: Publish the current identity snapshot for one stable equipment
+      security:
+        - serviceBearer: []
+      parameters:
+        - name: equipmentId
+          in: path
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 128 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EquipmentIdentityUpdate'
+      responses:
+        '200':
+          description: Idempotent or stale snapshot
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EquipmentIdentityStatus' }
+        '202':
+          description: Current snapshot accepted; RAGFlow projection is asynchronous
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EquipmentIdentityStatus' }
+        '409':
+          description: Same identity version contains different values
+        '422':
+          description: Invalid snapshot
+    get:
+      summary: Read current identity and projection status
+      security:
+        - serviceBearer: []
+      parameters:
+        - name: equipmentId
+          in: path
+          required: true
+          schema: { type: string }
+        - { name: tenantId, in: query, required: true, schema: { type: string } }
+        - { name: sourceSystem, in: query, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Current identity
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EquipmentIdentityStatus' }
+        '404': { description: Identity not found }
+components:
+  securitySchemes:
+    serviceBearer:
+      type: http
+      scheme: bearer
+  schemas:
+    EquipmentIdentityUpdate:
+      type: object
+      additionalProperties: false
+      required: [tenantId, sourceSystem, identityVersion]
+      properties:
+        tenantId: { type: string, minLength: 1, maxLength: 64 }
+        sourceSystem: { type: string, minLength: 1, maxLength: 64 }
+        identityVersion: { type: integer, minimum: 1, maximum: 2147483647 }
+        fixedAssetNo: { type: [string, 'null'], maxLength: 128 }
+        assetId: { type: [string, 'null'], maxLength: 128 }
+    EquipmentIdentityStatus:
+      type: object
+      required: [tenantId, equipmentId, identityVersion, outcome, syncStatus]
+      properties:
+        tenantId: { type: string }
+        equipmentId: { type: string }
+        fixedAssetNo: { type: [string, 'null'] }
+        assetId: { type: [string, 'null'] }
+        sourceSystem: { type: string }
+        identityVersion: { type: integer }
+        updatedAt: { type: string }
+        outcome: { type: string }
+        syncStatus: { type: string }
+        sync: { type: object }

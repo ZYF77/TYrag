@@ -34,6 +34,10 @@ import type {
   DocumentMetadataFilters,
   DocumentMetadataOrderBy,
   DocumentMetadataPage,
+  EquipmentIdentityItem,
+  EquipmentIdentityPage,
+  EquipmentRecognitionPreview,
+  EquipmentRecognitionSettings,
   ChunkPage,
   EamProbeResult,
   GatewayHealth,
@@ -480,6 +484,40 @@ export const v2Api = {
     }, V1_BASE);
   },
 
+  getEquipmentRecognition(): Promise<EquipmentRecognitionSettings> {
+    return request<EquipmentRecognitionSettings>('/admin/system/equipment-recognition', {}, V1_BASE);
+  },
+
+  updateEquipmentRecognition(settings: EquipmentRecognitionSettings): Promise<EquipmentRecognitionSettings> {
+    return request<EquipmentRecognitionSettings>('/admin/system/equipment-recognition', {
+      method: 'PUT',
+      body: JSON.stringify(settings),
+    }, V1_BASE);
+  },
+
+  previewEquipmentRecognition(text: string, pattern?: string): Promise<EquipmentRecognitionPreview> {
+    return request<EquipmentRecognitionPreview>('/admin/system/equipment-recognition/preview', {
+      method: 'POST',
+      body: JSON.stringify({ text, pattern }),
+    }, V1_BASE);
+  },
+
+  listEquipmentIdentities(params: {
+    limit?: number;
+    offset?: number;
+    identifier?: string | null;
+  } = {}): Promise<EquipmentIdentityPage> {
+    return request<EquipmentIdentityPage>(
+      queryPath('/admin/system/equipment-identities', {
+        limit: params.limit,
+        offset: params.offset,
+        identifier: params.identifier,
+      }),
+      {},
+      V1_BASE,
+    );
+  },
+
   listAdminConversationMetadata(
     params: {
       limit?: number;
@@ -547,6 +585,14 @@ export const v2Api = {
 
   getMetadataSummary(): Promise<MetadataSummary> {
     return request<MetadataSummary>('/admin/system/metadata/summary', {}, V1_BASE);
+  },
+
+  retryEquipmentIdentitySync(equipmentId: string): Promise<EquipmentIdentityItem> {
+    return request<EquipmentIdentityItem>(
+      `/admin/system/equipment-identities/${encodeURIComponent(equipmentId)}/sync`,
+      { method: 'POST' },
+      V1_BASE,
+    );
   },
 
   getAdminConversationMessages(conversationId: string): Promise<AdminConversationMessagesPage> {

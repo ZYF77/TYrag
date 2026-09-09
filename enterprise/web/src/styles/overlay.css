@@ -1,0 +1,90 @@
+.console-overlay-layer {
+  position: fixed;
+    inset: 0;
+    z-index: 120;
+    pointer-events: none;
+    /* tokens resolve from :root (see top of file); the layer is portaled to <body>. */
+    font-family: var(--font);
+}
+
+.console-overlay-layer--dialog {
+  display: grid;
+    place-items: center;
+    padding: 16px;
+}
+
+.console-overlay-scrim {
+  position: absolute;
+    inset: 0;
+    border: 0;
+    background: rgba(16, 20, 28, 0.1);
+    cursor: default;
+    pointer-events: auto;
+}
+
+.console-overlay-panel {
+  position: relative;
+    z-index: 1;
+    max-width: min(960px, calc(100vw - 32px));
+    max-height: min(820px, calc(100vh - 32px));
+    overflow: auto;
+    border: 1px solid rgba(255, 255, 255, 0.94);
+    border-radius: 22px;
+    background: rgba(250, 251, 253, 0.98);
+    box-shadow: 0 22px 64px rgba(16, 20, 28, 0.18), inset 0 1px rgba(255, 255, 255, 0.96);
+    pointer-events: auto;
+}
+
+.console-overlay-layer--popover .console-overlay-panel {
+  position: fixed;
+    width: min(420px, calc(100vw - 32px));
+    max-height: min(620px, calc(100vh - 32px));
+    border-radius: 18px;
+    box-shadow: 0 16px 42px rgba(16, 20, 28, 0.16), inset 0 1px rgba(255, 255, 255, 0.96);
+}
+
+@media (max-width: 720px) {
+  .console-overlay-layer--dialog {
+  padding: 10px;
+}
+
+  .console-overlay-panel,
+  .console-overlay-layer--popover .console-overlay-panel {
+  max-width: calc(100vw - 20px);
+}
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .console-overlay-panel {
+  animation: none;
+      transition: none;
+}
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .console-overlay-scrim,
+  .console-overlay-panel {
+  backdrop-filter: none;
+      -webkit-backdrop-filter: none;
+      background: #f7f8fa;
+}
+}
+
+.console-overlay-panel .console-icon-button {
+  border-radius: 12px;
+}
+
+/* Every detail dialog has a fixed head and a separately scrolling body;
+   the portal panel itself never adds padding. 这 7 个 wrapper 类与
+   .console-overlay-panel 同元素同特异性，必须保持在 base 之后裁决（原文件
+   中它们位于文件末段，拆分后统一收口在此处以维持同样的胜出关系）。 */
+.console-document-inspector-overlay,
+.console-conversation-inspector-overlay,
+.console-admin-detail-overlay,
+.console-chunk-detail-overlay,
+.runtime-detail-overlay,
+.harness-citation-overlay,
+.rag-diagnostics-detail-overlay {
+  overflow: hidden;
+  padding: 0;
+}

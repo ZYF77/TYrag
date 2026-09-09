@@ -1,39 +1,32 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, RefreshCw } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
 import { toDisplayError, v2Api } from '../../api/v2Client';
 import type {
   AdminConversationMessage,
   ConsoleModuleStatus,
-  ConsoleState,
   ConversationMetadataItem,
   ConversationMetadataOrderBy,
   ConversationMetadataPage,
-  MetadataSummary,
 } from '../../api/consoleTypes';
 import type { Citation, DisplayError } from '../../api/v2Types';
+import { useMetadataPanelState, type MetadataPanelQuery } from '../../hooks/useMetadataPanelState';
+import { CitationMarkdown } from '../common/CitationMarkdown';
+import { DialogHeader } from '../common/DialogHeader';
+import { EmptyState } from '../common/EmptyState';
+import { ColumnMenu, useHiddenTableColumns } from '../common/ColumnMenu';
 import {
-  ColumnMenu,
-  DEFAULT_SORT_STATE,
   MetadataPagination,
   MetadataSummaryStrip,
   MetadataToolbar,
-  PanelCard,
-  PanelError,
-  SortableTh,
-  StatusPill,
-  formatTime,
-  nextSortState,
-  panelErrorStatus,
-  useHiddenTableColumns,
   type MetadataActiveFilter,
-  type MetadataSortState,
   type MetadataSummaryChip,
-} from './SystemSettingsPanels';
-import { DEFAULT_PAGE_SIZE } from './ConsoleTableControls';
+} from '../common/MetadataControls';
+import { ConsoleDataTable } from '../common/ConsoleDataTable';
+import { PanelCard, PanelError, panelErrorStatus } from '../common/Panel';
+import { StatusPill } from '../common/StatusPill';
+import { formatTime } from '../../lib/format';
 import { ConsoleOverlay } from './ConsoleOverlay';
 
-const PAGE_LIMIT = DEFAULT_PAGE_SIZE;
 const NOT_PROVIDED = '未提供';
 
 type AdminConversationColumnKey =
@@ -58,6 +51,7 @@ const ADMIN_CONVERSATION_COLUMNS: Array<{ key: AdminConversationColumnKey; label
 const ADMIN_CONVERSATION_HIDDEN_COLUMNS_KEY = 'console.convAdmin.hiddenColumns';
 const ADMIN_CONVERSATION_DEFAULT_HIDDEN_COLUMNS: string[] = [];
 const ADMIN_CITATION_HREF_PREFIX = '#console-admin-citation-';
+const EMPTY_ADMIN_FILTERS: Record<string, string> = {};
 
 // 与后端 public_status（gateway/query/v2_store.py）一致的中文映射；未知码原样展示。
 const MESSAGE_STATUS_LABELS: Record<string, string> = {
@@ -73,43 +67,6 @@ const MESSAGE_STATUS_LABELS: Record<string, string> = {
 
 function messageStatusLabel(status: string): string {
   return MESSAGE_STATUS_LABELS[status] ?? status;
-}
-
-function citationForMarker(citations: Citation[], marker: number): Citation | undefined {
-  return citations.find((citation) => citation.refIndex === marker) ?? citations[marker - 1];
-}
-
-function citationMarkdown(content: string, messageId: string): string {
-  return content.replace(/\[(?:ID:)\s*(\d+)\]|\[(\d+)\]/gi, (_match, prefixed, plain) => {
-    const marker = prefixed ?? plain;
-    return `[${marker}](${ADMIN_CITATION_HREF_PREFIX}${messageId}-${marker})`;
-  });
-}
-
-function AdminCitationMarkdown({ content, citations, messageId }: { content: string; citations: Citation[]; messageId: string }) {
-  const anchorPrefix = `${ADMIN_CITATION_HREF_PREFIX}${messageId}-`;
-  return (
-    <ReactMarkdown
-      components={{
-        a: ({ href, children, ...props }) => {
-          const marker = href?.startsWith(anchorPrefix)
-            ? Number(href.slice(anchorPrefix.length))
-            : Number.NaN;
-          if (Number.isInteger(marker) && marker > 0) {
-            const citation = citationForMarker(citations, marker);
-            return citation ? (
-              <sup className="console-citation-marker">
-                <a href={href} {...props} aria-label={`查看引用 ${marker}`}>{marker}</a>
-              </sup>
-            ) : <sup className="console-citation-marker">{marker}</sup>;
-          }
-          return <a href={href} {...props} target="_blank" rel="noreferrer">{children}</a>;
-        },
-      }}
-    >
-      {citationMarkdown(content, messageId)}
-    </ReactMarkdown>
-  );
 }
 
 function AdminCitationList({ messageId, citations }: { messageId: string; citations: Citation[] }) {
@@ -170,10 +127,6 @@ function renderAdminConversationCell(
   }
 }
 
-function initialState(): ConsoleState<ConversationMetadataPage> {
-  return { status: 'processing', data: null, error: null };
-}
-
 interface ConversationDetailState {
   conversation: ConversationMetadataItem;
   status: 'processing' | 'healthy' | 'failed';
@@ -198,7 +151,17 @@ function AdminMessageBubble({ message }: { message: AdminConversationMessage }) 
         {isUser ? (
           <p className="console-chat-text">{message.content}</p>
         ) : (
-          message.content ? <AdminCitationMarkdown content={message.content} citations={citations} messageId={message.messageId} /> : null
+          message.content ? (
+            <CitationMarkdown
+              content={message.content}
+              citations={citations}
+              hrefPrefix={ADMIN_CITATION_HREF_PREFIX}
+              messageId={message.messageId}
+              markerClassName="console-citation-marker"
+              markerAriaLabel="查看引用"
+              missingMarker="marker"
+            />
+          ) : null
         )}
       </div>
       {isThinking && !message.content && <div className="console-thinking-block"><span className="console-thinking-dot" aria-hidden="true" />思考中，正在生成回答…</div>}
@@ -208,13 +171,7 @@ function AdminMessageBubble({ message }: { message: AdminConversationMessage }) 
 }
 
 export function ConversationAdminPanel() {
-  const [state, setState] = useState<ConsoleState<ConversationMetadataPage>>(initialState);
   const [statusFilter, setStatusFilter] = useState('');
-  const [sort, setSort] = useState<MetadataSortState>(DEFAULT_SORT_STATE);
-  const [offset, setOffset] = useState(0);
-  const [pageSize, setPageSize] = useState(PAGE_LIMIT);
-  const [requestToken, setRequestToken] = useState(0);
-  const [summary, setSummary] = useState<MetadataSummary | null>(null);
   const [detail, setDetail] = useState<ConversationDetailState | null>(null);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
   const { hiddenColumns: hiddenAdminColumns, visibleColumns: visibleAdminColumns, toggleColumn: toggleAdminColumn, resetColumns: resetAdminColumns } = useHiddenTableColumns(
@@ -223,57 +180,37 @@ export function ConversationAdminPanel() {
     ADMIN_CONVERSATION_COLUMNS,
   );
 
-  const reload = useCallback(() => setRequestToken((token) => token + 1), []);
-
-  const load = useCallback(async () => {
-    setState(initialState());
-    try {
-      const data = await v2Api.listAdminConversationMetadata({
-        limit: pageSize,
+  const fetchPage = useCallback(
+    async ({ limit, offset, sort }: MetadataPanelQuery) => {
+      return v2Api.listAdminConversationMetadata({
+        limit,
         offset,
         status: statusFilter || null,
         orderBy: sort.orderBy as ConversationMetadataOrderBy | null,
         order: sort.orderBy ? sort.order : null,
       });
-      setState({ status: 'healthy', data, error: null });
-    } catch (error) {
-      const displayError = toDisplayError(error);
-      setState({ status: panelErrorStatus(displayError), data: null, error: displayError });
-    }
-  }, [offset, pageSize, sort, statusFilter]);
+    },
+    [statusFilter],
+  );
 
-  const loadSummary = useCallback(async () => {
-    try {
-      setSummary(await v2Api.getMetadataSummary());
-    } catch {
-      // 汇总失败静默降级，不阻断主表。
-      setSummary(null);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load, requestToken]);
-
-  useEffect(() => {
-    void loadSummary();
-  }, [loadSummary]);
+  const {
+    state, summary, sort, offset, pageSize,
+    setOffset, setPageSize,
+    reload, loadSummary, handleSort, resetAdvancedAndSort,
+  } = useMetadataPanelState<ConversationMetadataPage, Record<string, string>>({
+    fetchPage,
+    emptyFilters: EMPTY_ADMIN_FILTERS,
+  });
 
   const applyFilters = useCallback(() => {
     setOffset(0);
     reload();
-  }, [reload]);
+  }, [reload, setOffset]);
 
   const resetFilters = useCallback(() => {
     setStatusFilter('');
-    setSort(DEFAULT_SORT_STATE);
-    setOffset(0);
-  }, []);
-
-  const handleSort = useCallback((field: string) => {
-    setSort((current) => nextSortState(current, field));
-    setOffset(0);
-  }, []);
+    resetAdvancedAndSort();
+  }, [resetAdvancedAndSort]);
 
   const openConversation = useCallback(async (conversation: ConversationMetadataItem) => {
     setDetail({ conversation, status: 'processing', messages: [], error: null });
@@ -387,51 +324,38 @@ export function ConversationAdminPanel() {
               testId="console-admin-conversations-summary"
             />
           )}
-          {page?.items.length ? (
-            <div className="console-table-wrap">
-              <table className="console-table" data-testid="console-admin-conversations-table">
-                <thead>
-                  <tr>
-                    {visibleAdminColumns.map((column) => (
-                      column.sortField
-                        ? <SortableTh key={column.key} label={column.label} field={column.sortField} sort={sort} onSort={handleSort} />
-                        : <th key={column.key} className={column.key === 'actions' ? 'console-col-center' : undefined}>{column.label}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {page.items.map((item) => (
-                    <tr
-                      key={item.conversationId}
-                      data-row-action="true"
-                      tabIndex={0}
-                      onClick={() => void openConversation(item)}
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter' || event.key === ' ') {
-                          event.preventDefault();
-                          void openConversation(item);
-                        }
-                      }}
-                    >
-                      {visibleAdminColumns.map((column) => renderAdminConversationCell(item, column.key, openConversation))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <p className="console-empty">
-              {state.status === 'processing' ? '会话列表加载中…' : '暂无会话。'}
-            </p>
-          )}
-          <MetadataPagination
-            offset={offset}
-            itemCount={page?.items.length ?? 0}
-            hasMore={Boolean(page?.hasMore)}
-            pageSize={pageSize}
-            onPageSizeChange={(value) => { setPageSize(value); setOffset(0); }}
-            onPrev={() => setOffset(Math.max(0, offset - pageSize))}
-            onNext={() => setOffset(offset + pageSize)}
+          <ConsoleDataTable
+            columns={visibleAdminColumns.map((column) => ({
+              key: column.key,
+              label: column.label,
+              sortField: column.sortField,
+              thClassName: column.key === 'actions' ? 'console-col-center' : undefined,
+              render: (item: ConversationMetadataItem) => renderAdminConversationCell(item, column.key, openConversation),
+            }))}
+            items={page?.items ?? []}
+            rowKey={(item) => item.conversationId}
+            onRowAction={(item) => void openConversation(item)}
+            sort={sort}
+            onSort={handleSort}
+            testId="console-admin-conversations-table"
+            empty={(
+              <EmptyState
+                loading={state.status === 'processing'}
+                loadingText="会话列表加载中…"
+                emptyText="暂无会话。"
+              />
+            )}
+            pagination={(
+              <MetadataPagination
+                offset={offset}
+                itemCount={page?.items.length ?? 0}
+                hasMore={Boolean(page?.hasMore)}
+                pageSize={pageSize}
+                onPageSizeChange={(value) => { setPageSize(value); setOffset(0); }}
+                onPrev={() => setOffset(Math.max(0, offset - pageSize))}
+                onNext={() => setOffset(offset + pageSize)}
+              />
+            )}
           />
           {state.error && <PanelError error={state.error} onRetry={reload} />}
         </>
@@ -445,19 +369,16 @@ export function ConversationAdminPanel() {
     >
       {detail && (
         <section className="console-detail-dialog console-admin-detail-dialog" aria-label="会话详情">
-          <header className="console-detail-dialog-head">
-            <div>
-              <p className="console-eyebrow">Conversation history</p>
-              <h2>会话详情</h2>
-              <p className="console-route">{detail.conversation.conversationId}</p>
-            </div>
-            <div className="console-detail-dialog-actions">
-              <button type="button" className="console-secondary-button" onClick={() => setDetail(null)}>
-                <ArrowLeft size={14} /> 返回列表
-              </button>
-              <button type="button" className="console-icon-button" aria-label="关闭会话详情" onClick={() => setDetail(null)}>×</button>
-            </div>
-          </header>
+          <DialogHeader
+            eyebrow="Conversation history"
+            title="会话详情"
+            meta={<p className="console-route">{detail.conversation.conversationId}</p>}
+            closeLabel="关闭会话详情"
+            onClose={() => setDetail(null)}
+            actions={<button type="button" className="console-secondary-button" onClick={() => setDetail(null)}>
+              <ArrowLeft size={14} /> 返回列表
+            </button>}
+          />
           <div className="console-detail-dialog-body console-admin-detail-body">
             <div className="console-chip-row">
               <span className="console-chip">业务用户 · {detail.conversation.businessUserId}</span>

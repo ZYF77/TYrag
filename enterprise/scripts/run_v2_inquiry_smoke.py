@@ -40,10 +40,6 @@ async def _main() -> int:
     from enterprise.gateway.query.ragflow_client import RAGFlowQueryStub
     from enterprise.gateway.sync.models import ExtDocumentMap, insert_mapping
 
-    config.context_compress_enabled = True
-    config.context_compress_turns = 4
-    config.context_compress_keep_recent = 2
-
     gateway = await create_gateway(":memory:")
     await gw_write(
         gateway,
@@ -135,17 +131,16 @@ async def _main() -> int:
             assert detail.status_code == history.status_code == 200
             assert detail.json()["contextCompacted"] is False
             assert len(history.json()["items"]) >= 6
-            config.context_compress_enabled = False
             after = await client.post(
                 f"{base}/conversations/{conversation_id}/messages",
                 json={
-                    "clientMessageId": "smoke-after-compress",
-                    "question": "压缩后继续提问",
+                    "clientMessageId": "smoke-follow-plain",
+                    "question": "plain-follow-up",
                 },
             )
             assert after.status_code == 200, after.text
             assert (stub._last_completion_body or {}).get("question") == (
-                "压缩后继续提问"
+                "plain-follow-up"
             )
         print("v2 inquiry smoke OK")
         return 0

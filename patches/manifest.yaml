@@ -120,3 +120,16 @@ patches:
       - "enterprise/tests/test_system_admin.py"
       - "enterprise/scripts/run_rag_diagnostics_e2e.py"
     upgrade_notes: "Replay the request ContextVar sink, chat entry attachment, retrieval/context/LLM metadata calls, and their isolated tests. Keep diagnostics disabled by default and never restore Prompt, chunk body, tool payload, or raw response capture."
+
+  - id: RF-PATCH-010
+    reason: "document run terminal webhook to Gateway (DONE/FAIL/CANCEL) without EAM coupling"
+    upstream_files:
+      - ragflow/api/utils/enterprise_status_webhook.py
+      - ragflow/api/db/services/document_service.py
+      - ragflow/api/db/services/task_service.py
+    adr: "docs/superpowers/plans/2026-09-04-ragflow-status-webhook.md"
+    change_request: "patches/CHANGE-REQUEST-RF-PATCH-010-DOCUMENT-RUN-TERMINAL-WEBHOOK.md"
+    introduced_in: "RF-PATCH-010-document-run-terminal-webhook"
+    tests:
+      - "enterprise/tests/test_ragflow_status_webhook.py"
+    upgrade_notes: "Replay enterprise_status_webhook helpers plus emit-on-run-change hooks in DocumentService._sync_progress/update_by_id and TaskService.update_progress FAIL. Keep StatusReconciler; do not productize RF outbound outbox. Rollback removes hooks and disables ENTERPRISE_STATUS_WEBHOOK_ENABLED / ENTERPRISE_RAGFLOW_STATUS_WEBHOOK_ENABLED."

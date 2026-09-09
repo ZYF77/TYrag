@@ -1487,6 +1487,10 @@ class TestDocumentMetadata:
         detail_body = detail.json()
         assert detail_body["item"]["parserApplicationStatus"] == "executed"
         assert detail_body["parser"]["profile"] == "enterprise-pdf"
+        assert detail_body["parser"]["expected"]["safeField"] == "visible"
+        assert "apiKey" not in str(detail_body["parser"]["expected"])
+        assert isinstance(detail_body["parser"]["configured"], dict)
+        assert isinstance(detail_body["parser"]["executed"], dict)
         assert detail_body["parser"]["ragflow"]["chunkMethod"] == "naive"
         assert "apiKey" not in detail.text
         assert chunks.status_code == 200, chunks.text

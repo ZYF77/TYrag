@@ -342,6 +342,8 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
         attachment_observations: list[str] | None = None,
         reasoning: int | None = None,
         enterprise_diagnostics: bool = False,
+        llm_id: str | None = None,
+        timeout: float | None = None,
     ) -> dict:
         rid = request_id or self._new_request_id()
         body: dict[str, Any] = {
@@ -388,13 +390,18 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
             body["reasoning"] = int(reasoning)
         if enterprise_diagnostics:
             body["enterprise_diagnostics"] = True
+        if llm_id:
+            body["llm_id"] = str(llm_id)
         _trace_doc_ids(rid, doc_ids)
+        sync_kwargs: dict[str, Any] = {"json_data": body}
+        if timeout is not None:
+            sync_kwargs["timeout"] = timeout
         result = await self._run_sync(
             self._sync_request,
             "POST",
             "/api/v1/chat/completions",
             rid,
-            json_data=body,
+            **sync_kwargs,
         )
         return self._require_ok(result)
 
@@ -470,6 +477,10 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
         Intentionally omits the enterprise RAG ``chat_id``. Binding the
         equipment dataset chat causes retrieval to contaminate observations
         with knowledge-base facts that are not in the image.
+
+        Uses ``ENTERPRISE_ATTACHMENT_VISION_LLM_ID`` when set; otherwise falls
+        back to the tenant default Chat model (with a migration warning).
+        Applies ``ENTERPRISE_ATTACHMENT_VISION_TIMEOUT_SECONDS`` per request.
         """
         del chat_id  # kept for call-site compatibility; must not bind RAG chat
         prompt = (
@@ -494,12 +505,26 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
                 502,
                 request_id,
             )
+        from enterprise.gateway.config import (
+            attachment_vision_llm_id_from_env,
+            attachment_vision_timeout_seconds_from_env,
+        )
+
+        vision_llm_id = attachment_vision_llm_id_from_env()
+        if not vision_llm_id:
+            logger.warning(
+                "ENTERPRISE_ATTACHMENT_VISION_LLM_ID is empty; "
+                "attachment understand falls back to tenant default Chat model"
+            )
+        vision_timeout = attachment_vision_timeout_seconds_from_env()
         result = await self.chat_completion(
             None,
             prompt,
             session_id=None,
             files=[attachment],
             request_id=request_id,
+            llm_id=vision_llm_id or None,
+            timeout=vision_timeout,
         )
         data = result.get("data", {}) if isinstance(result, dict) else {}
         answer = str(data.get("answer") or "").strip()
@@ -954,7 +979,10 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         attachment_observations: list[str] | None = None,
         reasoning: int | None = None,
         enterprise_diagnostics: bool = False,
+        llm_id: str | None = None,
+        timeout: float | None = None,
     ) -> dict:
+        del llm_id, timeout
         turn_id = f"msg-{uuid.uuid4().hex[:12]}"
         body_messages = [dict(item) for item in messages] if messages is not None else None
         if files and body_messages:

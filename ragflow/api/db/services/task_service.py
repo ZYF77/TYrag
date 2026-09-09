@@ -425,9 +425,47 @@ class TaskService(CommonService):
             doc_info = {"progress": -1, "run": TaskStatus.FAIL.value, "update_time": current_timestamp(), "update_date": get_format_time()}
             if info.get("progress_msg"):
                 doc_info["progress_msg"] = trim_header_by_lines((task.progress_msg or "") + "\n" + info["progress_msg"], TASK_MAX_LOG_LENGTH)
+            old_run = None
+            kb_id = ""
+            try:
+                e, doc_row = DocumentService.get_by_id(task.doc_id)
+                if e and doc_row:
+                    old_run = doc_row.run
+                    kb_id = doc_row.kb_id or ""
+            except Exception:
+                logging.exception("enterprise webhook pre-read failed for doc %s", task.doc_id)
             DocumentService.model.update(doc_info).where(
                 (DocumentService.model.id == task.doc_id) & ((DocumentService.model.run.is_null(True)) | (DocumentService.model.run != TaskStatus.CANCEL.value))
             ).execute()
+            try:
+                from api.utils.enterprise_status_webhook import (
+                    emit_document_run_terminal,
+                    extract_enterprise_event_id,
+                )
+                meta = {}
+                try:
+                    e2, doc2 = DocumentService.get_by_id(task.doc_id)
+                    if e2 and doc2:
+                        meta = getattr(doc2, "meta_fields", None) or {}
+                        kb_id = kb_id or (doc2.kb_id or "")
+                except Exception:
+                    pass
+                emit_document_run_terminal(
+                    doc_id=str(task.doc_id),
+                    kb_id=str(kb_id or ""),
+                    old_run=old_run,
+                    new_run=TaskStatus.FAIL.value,
+                    progress=-1,
+                    progress_msg=doc_info.get("progress_msg"),
+                    trigger="task_fail",
+                    update_time=doc_info.get("update_time"),
+                    enterprise_event_id=extract_enterprise_event_id(meta),
+                )
+            except Exception:
+                logging.exception(
+                    "enterprise status webhook emit failed after task FAIL doc=%s",
+                    task.doc_id,
+                )
 
     @classmethod
     @DB.connection_context()

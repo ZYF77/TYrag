@@ -1,24 +1,23 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { RefreshCw } from 'lucide-react';
 import { API_MODE } from '../api/mode';
 import { toDisplayError, v2Api } from '../api/v2Client';
 import type {
-  ConsoleModuleStatus,
   ConsoleState,
   ConsoleUserPrincipal,
   GatewayHealth,
 } from '../api/consoleTypes';
 import type {
   ConversationAttachmentResponse,
-  DisplayError,
 } from '../api/v2Types';
 import { TransientAttachmentPanel } from '../components/harness/TransientAttachmentPanel';
 import { ConversationAdminPanel } from '../components/console/ConversationAdminPanel';
 import { RagDiagnosticsPanel } from '../components/console/RagDiagnosticsPanel';
 import { ChunkManagementPanel } from '../components/console/ChunkManagementPanel';
 import { ConversationMetadataPanel, DocumentMetadataPanel, IntegrationsPanel } from '../components/console/SystemSettingsPanels';
+import { EquipmentIdentityPanel } from '../components/console/EquipmentIdentityPanel';
+import { PanelBadge, PanelCard, PanelError, initialPanelState, panelErrorStatus } from '../components/common/Panel';
 import { WorkbenchShell, useWorkbenchTab } from '../components/layout/WorkbenchShell';
-import './enterprise-console.css';
 
 const CONSOLE_TABS = [
   'service',
@@ -27,6 +26,7 @@ const CONSOLE_TABS = [
   'meta-conversations',
   'conversation-admin',
   'meta-documents',
+  'equipment-identities',
   'meta-chunks',
   'rag-diagnostics',
 ] as const;
@@ -51,28 +51,13 @@ const SYSTEM_NAV_GROUP = {
     { id: 'meta-conversations', label: '会话元数据' },
     { id: 'conversation-admin', label: '会话管理' },
     { id: 'meta-documents', label: '文件元数据' },
+    { id: 'equipment-identities', label: '设备标识' },
     { id: 'meta-chunks', label: '解析 Chunk' },
     { id: 'rag-diagnostics', label: 'RAG 诊断' },
   ],
 };
 
 const SYSTEM_TAB_IDS: readonly string[] = SYSTEM_NAV_GROUP.items.map((item) => item.id);
-
-function initialState<T>(): ConsoleState<T> {
-  return { status: 'processing', data: null, error: null };
-}
-
-function errorStatus(error: DisplayError): ConsoleModuleStatus {
-  if (error.httpStatus === 401 || error.httpStatus === 403) return 'unauthorized';
-  if (error.httpStatus === 0 || error.httpStatus === 502 || error.httpStatus === 503) {
-    return 'unavailable';
-  }
-  return 'failed';
-}
-
-function statusText(status: ConsoleModuleStatus): string {
-  return status;
-}
 
 async function encodeAttachment(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -90,59 +75,6 @@ async function encodeAttachment(file: File): Promise<string> {
   });
 }
 
-function StatusBadge({ status, testId }: { status: ConsoleModuleStatus; testId?: string }) {
-  return (
-    <span data-testid={testId} className={`console-status console-status--${status}`}>
-      <span className="console-status-dot" aria-hidden="true" />
-      {statusText(status)}
-    </span>
-  );
-}
-
-function ConsoleCard({
-  eyebrow,
-  title,
-  description,
-  status,
-  children,
-  actions,
-  testId,
-}: {
-  eyebrow: string;
-  title: string;
-  description: string;
-  status: ConsoleModuleStatus;
-  children: ReactNode;
-  actions?: ReactNode;
-  testId: string;
-}) {
-  return (
-    <section data-testid={testId} className="console-card">
-      <div className="console-card-head">
-        <div>
-          <p className="console-eyebrow">{eyebrow}</p>
-          <h2>{title}</h2>
-          <p>{description}</p>
-        </div>
-        <div className="console-card-actions">
-          <StatusBadge status={status} />
-          {actions}
-        </div>
-      </div>
-      <div className="console-card-body">{children}</div>
-    </section>
-  );
-}
-
-function ModuleError({ error, onRetry }: { error: DisplayError; onRetry: () => void }) {
-  return (
-    <div role="alert" className="console-alert">
-      <p><strong>{error.code}</strong>{error.httpStatus ? ` · HTTP ${error.httpStatus}` : ''} · {error.message}</p>
-      <button type="button" onClick={onRetry} className="console-secondary-button">重试</button>
-    </div>
-  );
-}
-
 function ProbeRow({
   label,
   route,
@@ -158,7 +90,7 @@ function ProbeRow({
         <p>{label}</p>
         <p className="console-route">{route}</p>
       </div>
-      <StatusBadge status={state.status} />
+      <PanelBadge status={state.status} />
     </div>
   );
 }
@@ -181,7 +113,7 @@ function ServicePanel({
         : 'processing';
   const modeLabel = API_MODE === 'mock' ? 'mock / MSW' : `${API_MODE} / public Gateway routes`;
   return (
-    <ConsoleCard
+    <PanelCard
       eyebrow="Gateway"
       title="服务与用户边界"
       description="只探测公开 Gateway；健康探针与认证会话分开显示，任何一项失败都不会阻断其他卡片。"
@@ -199,9 +131,9 @@ function ServicePanel({
         {health.data && <p className="console-route">gateway version · {health.data.version}</p>}
         {identity.data && <p>用户映射：{identity.data.mappingStatus} · capabilities {identity.data.capabilities.length}</p>}
       </div>
-      {health.error && <ModuleError error={health.error} onRetry={onRefresh} />}
-      {identity.error && <ModuleError error={identity.error} onRetry={onRefresh} />}
-    </ConsoleCard>
+      {health.error && <PanelError error={health.error} onRetry={onRefresh} />}
+      {identity.error && <PanelError error={identity.error} onRetry={onRefresh} />}
+    </PanelCard>
   );
 }
 
@@ -230,7 +162,7 @@ function AttachmentPanel({
           <h2>Transient attachment</h2>
           <p>正式 create → ticket → download 诊断入口。失败只影响本卡片，不改变 FILE_SHARE 或会话状态。</p>
         </div>
-        <StatusBadge status={state.status === 'processing' ? 'processing' : state.status} />
+        <PanelBadge status={state.status === 'processing' ? 'processing' : state.status} />
       </div>
       <div className="console-card-body">
         {!activeId && <p className="console-hint">请先在 Harness 问答会话中创建会话。</p>}
@@ -254,8 +186,8 @@ function AttachmentPanel({
 
 export function EnterpriseConsolePage() {
   const [tab, setTab] = useWorkbenchTab<ConsoleTab>('service', CONSOLE_TABS);
-  const [health, setHealth] = useState<ConsoleState<GatewayHealth>>(initialState);
-  const [identity, setIdentity] = useState<ConsoleState<ConsoleUserPrincipal>>(initialState);
+  const [health, setHealth] = useState<ConsoleState<GatewayHealth>>(initialPanelState<GatewayHealth>);
+  const [identity, setIdentity] = useState<ConsoleState<ConsoleUserPrincipal>>(initialPanelState<ConsoleUserPrincipal>);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [attachmentState, setAttachmentState] = useState<ConsoleState<ConversationAttachmentResponse>>({ status: 'configured', data: null, error: null });
   const [attachment, setAttachment] = useState<ConversationAttachmentResponse | null>(null);
@@ -273,7 +205,7 @@ export function EnterpriseConsolePage() {
       setHealth({ status: data.status === 'healthy' ? 'healthy' : 'failed', data, error: null });
     } catch (error) {
       const displayError = toDisplayError(error);
-      setHealth({ status: errorStatus(displayError), data: null, error: displayError });
+      setHealth({ status: panelErrorStatus(displayError), data: null, error: displayError });
     }
   }, []);
 
@@ -284,7 +216,7 @@ export function EnterpriseConsolePage() {
       setIdentity({ status: 'healthy', data, error: null });
     } catch (error) {
       const displayError = toDisplayError(error);
-      setIdentity({ status: errorStatus(displayError), data: null, error: displayError });
+      setIdentity({ status: panelErrorStatus(displayError), data: null, error: displayError });
     }
   }, []);
 
@@ -335,7 +267,7 @@ export function EnterpriseConsolePage() {
       setAttachmentNotice('create 与 ticket 已完成；下载响应体不会在 Console 展示。');
     } catch (error) {
       const displayError = toDisplayError(error);
-      setAttachmentState({ status: errorStatus(displayError), data: null, error: displayError });
+      setAttachmentState({ status: panelErrorStatus(displayError), data: null, error: displayError });
     }
   }, [activeId]);
 
@@ -350,7 +282,7 @@ export function EnterpriseConsolePage() {
       setAttachmentNotice('新下载票据已签发；票据本身不会显示。');
     } catch (error) {
       const displayError = toDisplayError(error);
-      setAttachmentState({ status: errorStatus(displayError), data: attachment, error: displayError });
+      setAttachmentState({ status: panelErrorStatus(displayError), data: attachment, error: displayError });
     }
   }, [attachment]);
 
@@ -364,7 +296,7 @@ export function EnterpriseConsolePage() {
       setAttachmentNotice(`download route verified · ${result.sizeBytes} bytes · ${result.contentType}`);
     } catch (error) {
       const displayError = toDisplayError(error);
-      setAttachmentState({ status: errorStatus(displayError), data: attachment, error: displayError });
+      setAttachmentState({ status: panelErrorStatus(displayError), data: attachment, error: displayError });
     }
   }, [attachment]);
 
@@ -404,6 +336,7 @@ export function EnterpriseConsolePage() {
       {isAdmin && tab === 'meta-conversations' && <ConversationMetadataPanel />}
       {isAdmin && tab === 'conversation-admin' && <ConversationAdminPanel />}
       {isAdmin && tab === 'meta-documents' && <DocumentMetadataPanel />}
+      {isAdmin && tab === 'equipment-identities' && <EquipmentIdentityPanel />}
       {isAdmin && tab === 'meta-chunks' && <ChunkManagementPanel />}
       {isAdmin && tab === 'rag-diagnostics' && <RagDiagnosticsPanel />}
       {!isAdmin && SYSTEM_TAB_IDS.includes(tab) && (

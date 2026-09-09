@@ -1,0 +1,72 @@
+/* Apple Liquid Glass tokens — shared by /console and /harness.
+   Declared on :root so overlays portaled to <body> and the auth page
+   (both rendered outside .console-shell/.harness-shell) resolve them too. */
+:root {
+  --bg: #f2f3f5;
+    --surface: #ffffff;
+    --hover: #f6f6f8;
+    --text: #17181b;
+    --text-body: #3d3f44;
+    --text-2: #64666c;
+    --text-3: #7d8087;
+    --text-4: #a6a9b0;
+    --hairline: rgba(24, 27, 33, 0.08);
+    --accent: #0a84ff;
+    --heat: #ff6b00;
+    --live: #32d74b;
+    --danger: #ff3b30;
+    --font: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue',
+      'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+    --mono: ui-monospace, 'SF Mono', Menlo, monospace;
+    --r-pill: 999px;
+    --r-card: 18px;
+    --r-panel: 22px;
+    --sh-panel: 0 1px 2px rgba(16, 20, 28, 0.04), 0 12px 34px rgba(16, 20, 28, 0.055);
+    --max-grid: 1080px;
+    --pad-x: 22px;
+    --ease-out: cubic-bezier(0.2, 0, 0, 1);
+    --motion-quick: 110ms;
+    --motion-standard: 220ms;
+    --motion-slow: 360ms;
+    --workbench-side-width: 304px;
+  
+    /* 状态 tone 语义别名：console-status--* 与 runtime-status--* 两个家族共用。
+       两家族同名 tone 现值一致（均引用同一基础 token）。 */
+    --tone-ok: var(--live);
+    --tone-warn: var(--heat);
+    --tone-danger: var(--danger);
+    --tone-muted: var(--text-4);
+    --tone-processing: var(--accent);
+}
+
+@keyframes detail-materialize {
+  from {
+    opacity: 0;
+    transform: translateY(-5px) scaleY(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scaleY(1);
+  }
+}
+
+@keyframes message-materialize {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes status-breathe {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(50, 215, 75, 0.08); }
+  50% { box-shadow: 0 0 0 6px rgba(50, 215, 75, 0.16); }
+}
+
+@keyframes processing-breathe {
+  0%, 100% { opacity: 0.55; transform: scale(0.9); }
+  50% { opacity: 1; transform: scale(1.08); }
+}

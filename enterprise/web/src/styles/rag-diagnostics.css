@@ -1,0 +1,383 @@
+/* ---- RAG diagnostics detail drawer ---- */
+.rag-diagnostics-detail-layer {
+  position: fixed;
+    inset: 0;
+    z-index: 70;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+}
+
+.rag-diagnostics-detail-backdrop {
+  position: absolute;
+    inset: 0;
+    border: 0;
+    background: rgba(16, 20, 28, 0.32);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    cursor: default;
+    pointer-events: auto;
+}
+
+.rag-diagnostics-detail-modal {
+  position: relative;
+    z-index: 1;
+    display: flex;
+    width: min(720px, calc(100vw - 40px));
+    height: min(680px, calc(100vh - 64px));
+    flex-direction: column;
+    margin: 32px;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.9);
+    border-radius: 24px;
+    background: rgba(250, 251, 253, 0.97);
+    box-shadow: -18px 18px 54px rgba(16, 20, 28, 0.2), inset 0 1px rgba(255, 255, 255, 0.96);
+    pointer-events: auto;
+    animation: rag-diagnostics-detail-in var(--motion-standard) var(--ease-out) both;
+}
+
+.rag-diagnostics-detail-head {
+  display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    border-bottom: 1px solid var(--hairline);
+    padding: 20px 22px 16px;
+}
+
+.rag-diagnostics-detail-head h2 {
+  margin: 4px 0 0;
+    color: var(--text);
+    font-size: 21px;
+    letter-spacing: -0.035em;
+}
+
+.rag-diagnostics-detail-run-id {
+  max-width: 620px;
+    margin: 8px 0 0;
+    overflow-wrap: anywhere;
+    color: var(--text-3);
+    font-family: var(--mono);
+    font-size: 11px;
+}
+
+.rag-diagnostics-detail-head .console-icon-button {
+  flex: 0 0 auto;
+    width: 36px;
+    min-width: 36px;
+    height: 36px;
+    min-height: 36px;
+    padding: 0;
+}
+
+.rag-diagnostics-detail-body {
+  min-height: 0;
+    overflow-y: auto;
+    padding: 16px 22px 24px;
+    scrollbar-gutter: stable;
+}
+
+.rag-diagnostics-detail-summary {
+  display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+    margin-bottom: 14px;
+}
+
+.rag-diagnostics-detail-summary > div {
+  display: grid;
+    gap: 4px;
+    min-width: 0;
+    border: 1px solid rgba(24, 27, 33, 0.06);
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.72);
+    padding: 10px 12px;
+}
+
+.rag-diagnostics-detail-summary span {
+  color: var(--text-3);
+    font-size: 11px;
+}
+
+.rag-diagnostics-detail-summary strong {
+  min-width: 0;
+    overflow-wrap: anywhere;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.rag-diagnostics-detail-help {
+  margin: 0 0 12px;
+}
+
+.rag-diagnostics-event-list {
+  display: grid;
+    gap: 10px;
+}
+
+.rag-diagnostics-event {
+  overflow: hidden;
+    border: 1px solid rgba(24, 27, 33, 0.07);
+    border-radius: 16px;
+    background: rgba(255, 255, 255, 0.82);
+    box-shadow: 0 5px 16px rgba(16, 20, 28, 0.035);
+}
+
+.rag-diagnostics-event-head {
+  display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    border-bottom: 1px solid var(--hairline);
+    padding: 12px 14px;
+}
+
+.rag-diagnostics-event-title {
+  display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 10px;
+}
+
+.rag-diagnostics-event-title h3 {
+  margin: 0;
+    overflow-wrap: anywhere;
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 650;
+}
+
+.rag-diagnostics-event-title p {
+  margin: 3px 0 0;
+    color: var(--text-4);
+    font-family: var(--mono);
+    font-size: 10px;
+}
+
+.rag-diagnostics-event-index {
+  display: inline-flex;
+    width: 28px;
+    height: 28px;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: center;
+    border-radius: 9px;
+    background: rgba(10, 132, 255, 0.1);
+    color: var(--accent);
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 700;
+}
+
+.rag-diagnostics-event-timing {
+  display: flex;
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 5px 12px;
+    color: var(--text-3);
+    font-family: var(--mono);
+    font-size: 10px;
+    text-align: right;
+}
+
+.rag-diagnostics-event-timing strong {
+  color: var(--text-2);
+    font-weight: 650;
+}
+
+.rag-json-tree {
+  padding: 10px 14px 13px;
+    color: var(--text-2);
+}
+
+.rag-json-node,
+.rag-json-leaf {
+  min-width: 0;
+    font-family: var(--mono);
+    font-size: 11px;
+    line-height: 1.5;
+}
+
+.rag-json-toggle {
+  display: flex;
+    width: 100%;
+    min-width: 0;
+    align-items: center;
+    gap: 5px;
+    border: 0;
+    background: transparent;
+    padding: 3px 0;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.rag-json-toggle svg {
+  flex: 0 0 auto;
+    color: var(--text-4);
+    transition: transform var(--motion-quick) var(--ease-out), color var(--motion-quick) var(--ease-out);
+}
+
+.rag-json-toggle svg.is-expanded {
+  transform: rotate(90deg);
+    color: var(--accent);
+}
+
+.rag-json-toggle:hover:not(:disabled) .rag-json-key {
+  color: var(--accent);
+}
+
+.rag-json-toggle:focus-visible {
+  outline: 2px solid rgba(10, 132, 255, 0.3);
+    outline-offset: 2px;
+    border-radius: 4px;
+}
+
+.rag-json-toggle:disabled {
+  cursor: default;
+    opacity: 0.76;
+}
+
+.rag-json-children {
+  margin-left: 7px;
+    border-left: 1px solid rgba(10, 132, 255, 0.13);
+    padding-left: 13px;
+}
+
+.rag-json-leaf {
+  display: flex;
+    min-width: 0;
+    align-items: baseline;
+    gap: 9px;
+    padding: 3px 0 3px 19px;
+}
+
+.rag-json-key {
+  min-width: 0;
+    overflow-wrap: anywhere;
+    color: var(--text-2);
+}
+
+.rag-json-value {
+  min-width: 0;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+}
+
+.rag-json-value--string {
+  color: #0a6f42;
+}
+
+.rag-json-value--number {
+  color: #995c00;
+}
+
+.rag-json-value--boolean {
+  color: #6d3db5;
+}
+
+.rag-json-value--null,
+.rag-json-value--unknown {
+  color: var(--text-4);
+}
+
+.rag-json-kind {
+  flex: 0 0 auto;
+    color: var(--text-4);
+    font-family: var(--sans);
+    font-size: 10px;
+}
+
+@keyframes rag-diagnostics-detail-in {
+  from {
+    opacity: 0;
+    transform: translateX(24px) scale(0.985);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+}
+
+@media (max-width: 720px) {
+  .rag-diagnostics-detail-modal {
+  width: calc(100vw - 16px);
+      height: calc(100vh - 16px);
+      margin: 8px;
+      border-radius: 20px;
+}
+
+  .rag-diagnostics-detail-head,
+  .rag-diagnostics-detail-body {
+  padding-inline: 16px;
+}
+
+  .rag-diagnostics-detail-summary {
+  grid-template-columns: 1fr;
+}
+
+  .rag-diagnostics-event-head {
+  align-items: flex-start;
+      flex-direction: column;
+}
+
+  .rag-diagnostics-event-timing {
+  justify-content: flex-start;
+      text-align: left;
+}
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rag-diagnostics-detail-modal,
+  .rag-json-toggle svg {
+  animation: none;
+      transition: none;
+}
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .rag-diagnostics-detail-backdrop,
+  .rag-diagnostics-detail-modal {
+  backdrop-filter: none;
+      -webkit-backdrop-filter: none;
+      background: #f7f8fa;
+}
+}
+
+@media (prefers-contrast: more) {
+  .rag-diagnostics-detail-modal,
+  .rag-diagnostics-event,
+  .rag-diagnostics-detail-summary > div {
+  border-color: currentColor;
+}
+}
+
+.rag-diagnostics-detail-overlay {
+  width: min(860px, calc(100vw - 32px)) !important;
+}
+
+.rag-diagnostics-detail-overlay .rag-diagnostics-detail-modal {
+  width: min(860px, calc(100vw - 32px));
+    height: min(760px, calc(100vh - 32px));
+    margin: 0;
+    border: 0;
+    border-radius: 22px;
+    box-shadow: none;
+    animation: none;
+}
+
+@media (max-width: 640px) {
+  .rag-diagnostics-detail-overlay .rag-diagnostics-detail-modal {
+  width: calc(100vw - 20px) !important;
+      min-width: 0;
+}
+}
+
+/* Every detail dialog has a fixed head and a separately scrolling body;
+   the portal panel itself never adds padding（统一收口在 overlay.css 末尾）. */

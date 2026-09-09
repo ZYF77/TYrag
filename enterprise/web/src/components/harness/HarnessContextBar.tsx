@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Check, Copy } from 'lucide-react';
 import { ConsoleOverlay } from '../console/ConsoleOverlay';
+import { ConsoleAlert } from '../common/ConsoleAlert';
+import { DeviceModalForm } from '../common/DeviceModalForm';
 import type { ConversationDetail, DisplayError, PatchConversationContextRequest } from '../../api/v2Types';
 
 interface HarnessContextBarProps {
@@ -127,37 +129,27 @@ export function HarnessContextBar({ conversation, saving, error, onSave }: Harne
         ariaLabel="换绑设备"
         className="harness-device-modal harness-rebind-modal"
       >
-        <form
-          className="harness-device-modal-form"
-          onSubmit={(event) => {
-            event.preventDefault();
+        <DeviceModalForm
+          title="换绑设备"
+          description="后续检索会优先限定在新设备资料内。"
+          closeLabel="关闭换绑设备"
+          onClose={() => setOpen(false)}
+          equipmentAriaLabel="equipmentId"
+          equipmentPlaceholder="新的设备编号"
+          equipmentValue={equipmentId}
+          onEquipmentChange={setEquipmentId}
+          helpText="只提交设备编号；清空后不会覆盖当前绑定。"
+          error={error && <ConsoleAlert error={error} />}
+          submitLabel="保存换绑"
+          submittingLabel="保存中…"
+          submitting={saving}
+          submitDisabled={!canSubmit}
+          onCancel={() => setOpen(false)}
+          onSubmit={() => {
             if (!canSubmit) return;
             onSave({ equipmentId: equipmentId.trim() });
           }}
-        >
-          <div className="harness-device-modal-head">
-            <div>
-              <p className="console-eyebrow">可选上下文</p>
-              <h2>换绑设备</h2>
-              <p>后续检索会优先限定在新设备资料内。</p>
-            </div>
-            <button type="button" className="console-icon-button" aria-label="关闭换绑设备" onClick={() => setOpen(false)}>×</button>
-          </div>
-          <div className="harness-device-modal-body">
-            <label className="diag-field">
-              设备编号 <small>equipmentId</small>
-              <input aria-label="equipmentId" value={equipmentId} onChange={(event) => setEquipmentId(event.target.value)} placeholder="新的设备编号" className="diag-input" autoFocus />
-            </label>
-            <p className="diag-help">只提交设备编号；清空后不会覆盖当前绑定。</p>
-            {error && <p className="console-alert">[{error.code}] {error.message}</p>}
-          </div>
-          <div className="harness-device-modal-actions">
-            <button type="button" className="console-secondary-button" onClick={() => setOpen(false)}>取消</button>
-            <button type="submit" disabled={saving || !canSubmit} className="console-primary-button">
-              {saving ? '保存中…' : '保存换绑'}
-            </button>
-          </div>
-        </form>
+        />
       </ConsoleOverlay>
     </div>
   );

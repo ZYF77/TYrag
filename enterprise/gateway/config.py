@@ -179,6 +179,34 @@ def _safe_env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_flag(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).lower() in ("1", "true", "yes", "on")
+
+
+
+def conversation_device_limit_from_env() -> int:
+    """Max devices retained per conversation (FIFO; anchor/active protected)."""
+    try:
+        value = int(os.getenv("ENTERPRISE_CONVERSATION_DEVICE_LIMIT", "2"))
+    except (TypeError, ValueError):
+        value = 2
+    return max(1, value)
+
+def attachment_vision_enabled_from_env() -> bool:
+    """Image pre-understand switch; default on to preserve current behavior."""
+    return _env_flag("ENTERPRISE_ATTACHMENT_VISION_ENABLED", "true")
+
+
+def attachment_vision_llm_id_from_env() -> str:
+    """Independent vision/OCR model id for RAGFlow /chat/completions llm_id."""
+    return os.getenv("ENTERPRISE_ATTACHMENT_VISION_LLM_ID", "").strip()
+
+
+def attachment_vision_timeout_seconds_from_env() -> float:
+    """Understand-specific timeout; shorter than RAGFLOW_TIMEOUT by default."""
+    return _safe_env_float("ENTERPRISE_ATTACHMENT_VISION_TIMEOUT_SECONDS", 30.0)
+
+
 @dataclass
 class GatewayConfig:
     """Central configuration for the enterprise integration gateway."""
@@ -192,6 +220,17 @@ class GatewayConfig:
     )
     ragflow_api_version: str = field(
         default_factory=lambda: os.getenv("RAGFLOW_API_VERSION", "v1")
+    )
+
+    # --- Attachment image pre-understand (vision/OCR bridge) ---
+    attachment_vision_enabled: bool = field(
+        default_factory=attachment_vision_enabled_from_env
+    )
+    attachment_vision_llm_id: str = field(
+        default_factory=attachment_vision_llm_id_from_env
+    )
+    attachment_vision_timeout_seconds: float = field(
+        default_factory=attachment_vision_timeout_seconds_from_env
     )
 
     # --- Business PostgreSQL read-only adapter ---
@@ -377,6 +416,32 @@ class GatewayConfig:
         )
     )
 
+
+    # --- RAGFlow → Gateway document-run terminal webhook (inbound) ---
+    ragflow_status_webhook_enabled: bool = field(
+        default_factory=lambda: os.getenv(
+            "ENTERPRISE_RAGFLOW_STATUS_WEBHOOK_ENABLED", "false"
+        ).lower()
+        in ("1", "true", "yes", "on")
+    )
+    ragflow_status_webhook_secret: str = field(
+        default_factory=lambda: os.getenv(
+            "ENTERPRISE_RAGFLOW_STATUS_WEBHOOK_SECRET", ""
+        )
+    )
+    ragflow_status_webhook_ignore_cancel: bool = field(
+        default_factory=lambda: os.getenv(
+            "ENTERPRISE_RAGFLOW_STATUS_WEBHOOK_IGNORE_CANCEL", "true"
+        ).lower()
+        in ("1", "true", "yes", "on")
+    )
+    ragflow_status_webhook_trusted_cidrs: str = field(
+        default_factory=lambda: os.getenv(
+            "ENTERPRISE_RAGFLOW_STATUS_WEBHOOK_TRUSTED_CIDRS",
+            "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,::1/128,fc00::/7",
+        )
+    )
+
     _runtime_settings: GatewayRuntimeSettings | None = field(
         default=None, init=False, repr=False
     )
@@ -473,25 +538,10 @@ class GatewayConfig:
         ).lower()
         in ("1", "true", "yes", "on")
     )
-    context_compress_enabled: bool = field(
-        default_factory=lambda: os.getenv(
-            "ENTERPRISE_CONTEXT_COMPRESS_ENABLED", "true"
-        ).lower()
-        in ("1", "true", "yes", "on")
-    )
-    context_compress_turns: int = field(
-        default_factory=lambda: int(
-            os.getenv("ENTERPRISE_CONTEXT_COMPRESS_TURNS", "20")
-        )
-    )
-    context_summary_max_chars: int = field(
-        default_factory=lambda: int(
-            os.getenv("ENTERPRISE_CONTEXT_SUMMARY_MAX_CHARS", "1500")
-        )
-    )
-    context_compress_keep_recent: int = field(
-        default_factory=lambda: int(
-            os.getenv("ENTERPRISE_CONTEXT_COMPRESS_KEEP_RECENT", "4")
+    conversation_device_limit: int = field(
+        default_factory=lambda: max(
+            1,
+            int(os.getenv("ENTERPRISE_CONVERSATION_DEVICE_LIMIT", "2")),
         )
     )
     rag_diagnostics_enabled: bool = field(

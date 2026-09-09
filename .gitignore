@@ -188,3 +188,22 @@ enterprise/ext_document_map.db*
 enterprise/scripts/_*.py
 **/gateway-test.db
 
+# Local QA and test-run artifacts. Keep executable test sources and checked-in
+# fixtures; ignore only generated output and workspace scratch files.
+.tmp_*.py
+.ui-refactor-*/
+.vite/
+screenshots/
+**/screenshots/
+visual-diff/
+**/visual-diff/
+test-results/
+**/test-results/
+playwright-report/
+**/playwright-report/
+*.snap
+enterprise/_codex_last_msgs.txt
+
+# Unrelated local reference bundle, not part of the TYrag product tree.
+/arbore智能体平台规范/
+

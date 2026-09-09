@@ -15,6 +15,7 @@ from enterprise.gateway.sync.sync_service import (
     DocumentSyncError,
     SyncService,
 )
+from enterprise.gateway.equipment_identity import IDENTITY_EVENT_TYPE
 
 logger = logging.getLogger(__name__)
 
@@ -39,10 +40,14 @@ class OutboxWorker:
             events = await claim_outbox(conn, self.worker_id, limit)
         for event in events:
             try:
-                await self.service.process_event(event)
+                if event.event_type == IDENTITY_EVENT_TYPE:
+                    await self.service.process_identity_event(event)
+                else:
+                    await self.service.process_event(event)
                 async with self.service.gateway.transaction(write=True) as conn:
                     await mark_outbox_done(conn, event)
             except DocumentSyncError as e:
+                identity_event = event.event_type == IDENTITY_EVENT_TYPE
                 async with self.service.gateway.transaction(write=True) as conn:
                     if e.retryable and event.attempts < event.max_attempts:
                         await mark_outbox_retry(
@@ -52,7 +57,9 @@ class OutboxWorker:
                         await mark_outbox_failed(
                             conn, event, e.code, str(e),
                         )
-                if not (e.retryable and event.attempts < event.max_attempts):
+                if not identity_event and not (
+                    e.retryable and event.attempts < event.max_attempts
+                ):
                     try:
                         await self.service.finalize_outbox_exhausted(
                             event, e.code, str(e), e.retryable,
@@ -69,6 +76,8 @@ class OutboxWorker:
                         conn, event, "INTERNAL_ERROR",
                         "服务开小差了，请稍后重试。",
                     )
+                if event.event_type == IDENTITY_EVENT_TYPE:
+                    continue
                 try:
                     await self.service.finalize_outbox_exhausted(
                         event, "INTERNAL_ERROR", "服务开小差了，请稍后重试。",

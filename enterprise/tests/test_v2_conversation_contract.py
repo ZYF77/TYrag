@@ -657,8 +657,22 @@ async def test_turn_scope_switch_compare_and_snapshot(runtime):
         == 200
     )
     assert detail.json()["equipmentId"] == "EQ-B"
+    assert set(detail.json()["conversationDevices"]) == {"EQ-A", "EQ-B"}
+    assert detail.json()["anchorEquipmentId"] == "EQ-A"
+    assert set(detail.json()["context"]["conversationDevices"]) == {"EQ-A", "EQ-B"}
     assert previous_compare_ids == {"doc-turn-a", "doc-turn-b"}
     assert _stub_doc_ids(runtime) == {"doc-turn-a", "doc-turn-b"}
+    # After FOCUS on B, a no-id follow-up must still use active B (not drop A from set).
+    async with _client(runtime) as client:
+        follow = await client.post(
+            f"{BASE}/conversations/{conversation_id}/messages",
+            json={"clientMessageId": "turn-follow-active", "question": "继续刚才的问题"},
+        )
+        detail_follow = await client.get(f"{BASE}/conversations/{conversation_id}")
+    assert follow.status_code == 200
+    assert _stub_doc_ids(runtime) == {"doc-turn-b"}
+    assert set(detail_follow.json()["conversationDevices"]) == {"EQ-A", "EQ-B"}
+    assert detail_follow.json()["equipmentId"] == "EQ-B"
     snapshot = await gw_read(runtime.db, fetchone, """SELECT entity_scope_json, allowed_doc_ids_json
         FROM ext_v2_message_run
         WHERE client_message_id='turn-explicit-compare'""")
@@ -2860,3 +2874,204 @@ async def test_department_mismatch_still_retrieves_same_equipment(runtime):
     )
     assert response.json()["status"] in {"已完成", "无可靠依据"}
     assert response.json().get("citations") is not None
+
+
+@pytest.mark.asyncio
+async def test_scoped_create_ask_b_unions_devices_and_focuses_turn(runtime):
+    """P0: create A, ask B => devices A∪B, this-turn docs=B, next no-id uses active B."""
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-SCOPE-A",
+        ragflow_id="doc-scope-a",
+        equipment_id="EQ-A",
+        fixed_asset_no="FA-A",
+    )
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-SCOPE-B",
+        ragflow_id="doc-scope-b",
+        equipment_id="EQ-B",
+        fixed_asset_no="FA-B",
+    )
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(client, equipmentId="EQ-A")
+        conversation_id = conversation["conversationId"]
+        assert conversation["conversationDevices"] == ["EQ-A"]
+        assert conversation["anchorEquipmentId"] == "EQ-A"
+
+        focused = await client.post(
+            f"{BASE}/conversations/{conversation_id}/messages",
+            json={
+                "clientMessageId": "focus-b",
+                "question": "查一下 EQ-B 的说明书",
+            },
+        )
+        focus_ids = _stub_doc_ids(runtime)
+        detail = await client.get(f"{BASE}/conversations/{conversation_id}")
+        follow = await client.post(
+            f"{BASE}/conversations/{conversation_id}/messages",
+            json={"clientMessageId": "follow-active", "question": "密封圈怎么换？"},
+        )
+
+    assert focused.status_code == follow.status_code == 200
+    assert focus_ids == {"doc-scope-b"}
+    assert _stub_doc_ids(runtime) == {"doc-scope-b"}
+    body = detail.json()
+    assert body["equipmentId"] == "EQ-B"
+    assert set(body["conversationDevices"]) == {"EQ-A", "EQ-B"}
+    assert body["anchorEquipmentId"] == "EQ-A"
+    snapshot = await gw_read(
+        runtime.db,
+        fetchone,
+        """SELECT entity_scope_json, allowed_doc_ids_json
+             FROM ext_v2_message_run
+            WHERE client_message_id='focus-b'""",
+    )
+    assert json.loads(snapshot["entity_scope_json"]) == ["EQ-B"]
+    assert set(json.loads(snapshot["allowed_doc_ids_json"])) == {"doc-scope-b"}
+
+
+@pytest.mark.asyncio
+async def test_open_no_id_stays_wide_without_false_bind(runtime):
+    """P0: open conversation with no device id keeps wide ACL retrieval."""
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-OPEN-A",
+        ragflow_id="doc-open-a",
+        equipment_id="EQ-OPEN-A",
+        fixed_asset_no="FA-OPEN-A",
+    )
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-OPEN-B",
+        ragflow_id="doc-open-b",
+        equipment_id="EQ-OPEN-B",
+        fixed_asset_no="FA-OPEN-B",
+    )
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(client)
+        assert conversation["equipmentId"] is None
+        assert conversation["conversationDevices"] == []
+        assert conversation["anchorEquipmentId"] is None
+        first = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={"clientMessageId": "open-wide", "question": "密封圈怎么保养？"},
+        )
+        # Explicit bind B, then no-id must remain wide (open mode is sticky).
+        bound = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={
+                "clientMessageId": "open-bind-b",
+                "question": "查一下 EQ-OPEN-B 的说明书",
+            },
+        )
+        bind_ids = _stub_doc_ids(runtime)
+        again = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={"clientMessageId": "open-wide-again", "question": "通用保养步骤？"},
+        )
+        detail = await client.get(
+            f"{BASE}/conversations/{conversation['conversationId']}"
+        )
+
+    assert first.status_code == bound.status_code == again.status_code == 200
+    assert bind_ids == {"doc-open-b"}
+    assert _stub_doc_ids(runtime) == {"doc-open-a", "doc-open-b"}
+    assert detail.json()["equipmentId"] == "EQ-OPEN-B"
+    assert set(detail.json()["conversationDevices"]) == {"EQ-OPEN-B"}
+    assert detail.json()["anchorEquipmentId"] is None
+
+
+@pytest.mark.asyncio
+async def test_device_limit_evicts_non_anchor_before_anchor(runtime, monkeypatch):
+    """P0: at limit, FIFO-evict prefers non-anchor/non-active; anchor last."""
+    monkeypatch.setenv("ENTERPRISE_CONVERSATION_DEVICE_LIMIT", "2")
+    for suffix, ragflow_id in (("A", "doc-lim-a"), ("B", "doc-lim-b"), ("C", "doc-lim-c")):
+        await _insert_document(
+            runtime.db,
+            external_id=f"DOC-LIM-{suffix}",
+            ragflow_id=ragflow_id,
+            equipment_id=f"EQ-LIM-{suffix}",
+            fixed_asset_no=f"FA-LIM-{suffix}",
+        )
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(client, equipmentId="EQ-LIM-A")
+        conversation_id = conversation["conversationId"]
+        await client.post(
+            f"{BASE}/conversations/{conversation_id}/messages",
+            json={
+                "clientMessageId": "lim-b",
+                "question": "查一下 EQ-LIM-B 的说明书",
+            },
+        )
+        mid = await client.get(f"{BASE}/conversations/{conversation_id}")
+        await client.post(
+            f"{BASE}/conversations/{conversation_id}/messages",
+            json={
+                "clientMessageId": "lim-c",
+                "question": "查一下 EQ-LIM-C 的说明书",
+            },
+        )
+        detail = await client.get(f"{BASE}/conversations/{conversation_id}")
+
+    assert mid.status_code == detail.status_code == 200
+    assert set(mid.json()["conversationDevices"]) == {"EQ-LIM-A", "EQ-LIM-B"}
+    # Adding C with active=C should evict B (non-anchor, no longer active), keep anchor A.
+    assert set(detail.json()["conversationDevices"]) == {"EQ-LIM-A", "EQ-LIM-C"}
+    assert detail.json()["anchorEquipmentId"] == "EQ-LIM-A"
+    assert detail.json()["equipmentId"] == "EQ-LIM-C"
+    assert _stub_doc_ids(runtime) == {"doc-lim-c"}
+
+
+@pytest.mark.asyncio
+async def test_multi_these_two_uses_conversation_device_union(runtime):
+    """P0: 「这两台」uses conversation device union for turn scope."""
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-MULTI-A",
+        ragflow_id="doc-multi-a",
+        equipment_id="EQ-MULTI-A",
+        fixed_asset_no="FA-MULTI-A",
+    )
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-MULTI-B",
+        ragflow_id="doc-multi-b",
+        equipment_id="EQ-MULTI-B",
+        fixed_asset_no="FA-MULTI-B",
+    )
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(client, equipmentId="EQ-MULTI-A")
+        conversation_id = conversation["conversationId"]
+        await client.post(
+            f"{BASE}/conversations/{conversation_id}/messages",
+            json={
+                "clientMessageId": "multi-focus-b",
+                "question": "查一下 EQ-MULTI-B 的说明书",
+            },
+        )
+        compared = await client.post(
+            f"{BASE}/conversations/{conversation_id}/messages",
+            json={
+                "clientMessageId": "multi-these-two",
+                "question": "这两台设备有什么差异？",
+            },
+        )
+        detail = await client.get(f"{BASE}/conversations/{conversation_id}")
+
+    assert compared.status_code == 200
+    assert _stub_doc_ids(runtime) == {"doc-multi-a", "doc-multi-b"}
+    assert set(detail.json()["conversationDevices"]) == {"EQ-MULTI-A", "EQ-MULTI-B"}
+    assert detail.json()["equipmentId"] == "EQ-MULTI-B"
+    snapshot = await gw_read(
+        runtime.db,
+        fetchone,
+        """SELECT entity_scope_json, allowed_doc_ids_json
+             FROM ext_v2_message_run
+            WHERE client_message_id='multi-these-two'""",
+    )
+    assert set(json.loads(snapshot["entity_scope_json"])) == {
+        "EQ-MULTI-A",
+        "EQ-MULTI-B",
+    }
+

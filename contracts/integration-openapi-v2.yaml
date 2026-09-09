@@ -886,8 +886,9 @@ components:
         contextCompacted:
           type: boolean
           description: >
-            True when Gateway has stored a rolling conversation summary.
-            Summary text is never exposed to clients.
+            Reserved for EAM compatibility. Always false; rolling conversation
+            summary / context compress has been removed. Summary text is never
+            exposed to clients.
     ConversationPage:
       type: object
       additionalProperties: false
