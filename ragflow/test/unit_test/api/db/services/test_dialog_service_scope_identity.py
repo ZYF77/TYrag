@@ -135,13 +135,14 @@ def test_build_scope_identity_block_absent_when_empty():
     assert dialog_service._build_scope_identity_knowledge_block([""]) is None
 
 
-def test_build_scope_identity_block_includes_forbid_phrases():
+def test_build_scope_identity_block_allows_evidence_insufficiency():
     block = dialog_service._build_scope_identity_knowledge_block(["GQ01250024"])
     assert block is not None
     assert "GQ01250024" in block
     assert "document_metadata.equipment_id" in block
-    assert "无法按该编号匹配" in block
-    assert "正文未找到该设备号" in block
+    assert "证据不足" in block
+    assert "无法按该编号匹配" not in block
+    assert "正文未找到该设备号" not in block
 
 
 def test_full_user_question_never_becomes_equipment_token():
@@ -176,7 +177,8 @@ def test_async_chat_injects_block_from_scope_identifiers(monkeypatch):
     system = model.systems[0]
     assert "【本轮检索范围设备身份】" in system
     assert "GQ01250024" in system
-    assert "无法按该编号匹配" in system
+    assert "证据不足" in system
+    assert "无法按该编号匹配" not in system
     # Full question must not appear as the equipment-id list entry.
     assert f"设备标识为：{question}" not in system
 
@@ -219,3 +221,35 @@ def test_async_chat_skips_identity_block_when_no_identifiers(monkeypatch):
     system = model.systems[0]
     assert "【本轮检索范围设备身份】" not in system
     assert "无法按该编号匹配" not in system
+
+
+def test_restricted_chat_rewrites_before_metadata_filter(monkeypatch):
+    model = _FakeModel()
+    _patch_chat(monkeypatch, model)
+    dialog = _dialog()
+    dialog.meta_data_filter = {"method": "manual", "manual": []}
+    calls = []
+
+    async def _rewrite(*_args, **_kwargs):
+        calls.append("rewrite")
+        return "rewritten question"
+
+    async def _filter(_config, _metas, question, *_args, **_kwargs):
+        calls.append(("metadata", question))
+        return ["doc-1"]
+
+    monkeypatch.setattr(dialog_service, "full_question", _rewrite)
+    monkeypatch.setattr(dialog_service, "apply_meta_data_filter", _filter)
+
+    events = _collect(
+        dialog_service.async_chat(
+            dialog,
+            [{"role": "user", "content": "这个设备怎么维护？"}],
+            stream=False,
+            doc_ids=["doc-1"],
+            doc_scope_mode="restrict",
+        )
+    )
+
+    assert events
+    assert calls == ["rewrite", ("metadata", "rewritten question")]

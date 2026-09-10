@@ -32,13 +32,14 @@ def test_build_scope_identity_block_absent_when_empty():
     assert sip._build_scope_identity_knowledge_block([""]) is None
 
 
-def test_build_scope_identity_block_includes_forbid_phrases():
+def test_build_scope_identity_block_allows_evidence_insufficiency():
     block = sip._build_scope_identity_knowledge_block(["GQ01250024"])
     assert block is not None
     assert "GQ01250024" in block
     assert "document_metadata.equipment_id" in block
-    assert "无法按该编号匹配" in block
-    assert "正文未找到该设备号" in block
+    assert "证据不足" in block
+    assert "无法按该编号匹配" not in block
+    assert "正文未找到该设备号" not in block
 
 
 def test_prepend_puts_block_first():
@@ -67,8 +68,8 @@ def test_authorized_scope_identity_separates_soft_context_from_evidence():
     assert "下列资料即属于上述设备" not in block
 
 
-def test_authorized_scope_identity_forbids_empty_mismatch_when_restrict():
-    """With chunks present, restrict preamble must require Content answers."""
+def test_authorized_scope_identity_allows_empty_mismatch_when_restrict():
+    """Restrict preamble keeps evidence and authorization as separate concerns."""
     block = sip._build_scope_identity_knowledge_block(
         ["EQ-1"],
         doc_scope_mode="restrict",
@@ -76,6 +77,7 @@ def test_authorized_scope_identity_forbids_empty_mismatch_when_restrict():
     )
     assert block is not None
     assert "软业务上下文不是授权条件或证据" in block
-    assert "无法按该编号匹配" in block
-    assert "正文未找到该设备号" in block
+    assert "证据不足" in block
+    assert "无法按该编号匹配" not in block
+    assert "正文未找到该设备号" not in block
     assert "Content" in block

@@ -14,8 +14,9 @@ RAGFlow 负责问题理解、metadata 条件生成、检索和回答。现有设
 ## 决策
 
 1. Gateway 增加 ENTERPRISE_RETRIEVAL_SCOPE_POLICY。默认 legacy_device，保留当前设备
-   收窄；authorized_context 只改变默认设备收窄决策，ACL、文档 readiness、设备解析和
-   最终硬 doc_ids=G 仍由 Gateway 负责。显式设备线索无法解析时继续 fail closed。
+   收窄；authorized_context 只使用 ACL、文档 readiness 和质量门形成的完整 G。设备
+   解析结果可以作为审计和软上下文，但无论设备线索是否解析，都不能改变最终硬
+   doc_ids=G。legacy_device 的显式设备线索无法解析时继续 fail closed。
 Gateway Console 运行时可热更新检索范围策略（retrievalScope.policy），默认仍为 legacy_device；非法值回退到 legacy_device。
 
 2. Gateway 将本轮策略、doc_scope_mode、context_version 和有限业务上下文写入
@@ -41,6 +42,19 @@ Gateway Console 运行时可热更新检索范围策略（retrievalScope.policy�
 - model、equipment_type 和 manufacturer 必须在文档 metadata 中可信存在。缺失时模型
   不能把会话字段当作文档事实。
 - ragflow/** 的改动需要构建新镜像；仅重启旧镜像不会生效。
+
+## 上游补丁清单
+
+- `ragflow/api/db/services/dialog_service.py:async_chat`：Gateway `restrict` 请求强制
+  复用现有 `full_question()`，确保理解在 metadata 条件生成之前；普通非 Gateway 路径
+  仍遵守 `refine_multiturn`。
+- `ragflow/common/metadata_utils.py:apply_meta_data_filter`：保留 `metas=None` 以便
+  延迟 loader 真正执行；restrict 的 G 求交和空集合不回退语义不变。
+- `ragflow/rag/llm/chat_model.py:Base.async_chat_streamly_with_tools` 与
+  `VolcEngineChat`：Base 钩子默认关闭，仅 VolcEngine 解析有界 PLHD 文本并最多重试
+  一次 `tool_choice=required`；标准 `delta.tool_calls` 和其它 provider 不变。
+- `enterprise/gateway/query/v2_router.py`：在引用清洗前拒绝未处理的工具协议残留，
+  使用 `RAGFLOW_TOOL_PROTOCOL_INVALID` 持久化 failed run。
 
 ## 发布与回滚
 

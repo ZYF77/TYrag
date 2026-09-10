@@ -237,7 +237,9 @@ async def apply_meta_data_filter(
                 scoped[key] = scoped_buckets
         return scoped
 
-    cached_metas: dict | None = _restrict_metas(metas)
+    cached_metas: dict | None = (
+        _restrict_metas(metas) if metas is not None else None
+    )
 
     def _get_metas() -> dict:
         nonlocal cached_metas

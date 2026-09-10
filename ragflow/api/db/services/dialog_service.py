@@ -1100,19 +1100,23 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
             prompt_config["system"] = prompt_config["system"].replace("{%s}" % p["key"], " ")
 
     refine_enabled = bool(prompt_config.get("refine_multiturn"))
+    scope_refine_enabled = doc_scope_mode == "restrict"
+    refine_requested = refine_enabled or scope_refine_enabled
     refine_started = timer()
     refine_executed = False
     refine_status = "success"
     refine_skip_reason = None
     try:
-        if len(questions) > 1 and refine_enabled:
+        if scope_refine_enabled or (len(questions) > 1 and refine_enabled):
             with rag_diagnostics_stage("refine_multiturn"):
                 questions = [
                     await full_question(
                         dialog.tenant_id,
                         dialog.llm_id,
                         messages,
-                        chat_mdl=chat_mdl if grounding_enabled else None,
+                        chat_mdl=chat_mdl
+                        if (grounding_enabled or scope_refine_enabled)
+                        else None,
                         business_context=business_context
                         if doc_scope_mode == "restrict"
                         else None,
@@ -1121,7 +1125,7 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
             refine_executed = True
         else:
             questions = questions[-1:]
-            refine_skip_reason = "disabled" if not refine_enabled else "single_turn"
+            refine_skip_reason = "disabled" if not refine_requested else "single_turn"
     except Exception:
         refine_status = "failed"
         raise
@@ -1129,7 +1133,7 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
         record_timed_rag_stage(
             "refine_multiturn",
             refine_started,
-            enabled=refine_enabled,
+            enabled=refine_requested,
             executed=refine_executed,
             inputQuestionCount=len([m for m in messages if m.get("role") == "user"]),
             skipReason=refine_skip_reason,

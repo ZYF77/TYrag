@@ -694,10 +694,10 @@ async def test_authorized_context_open_mode_uses_full_g(runtime, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_authorized_context_unresolved_does_not_expand_to_full_g(
+async def test_authorized_context_unknown_device_does_not_shrink_g(
     runtime, monkeypatch
 ):
-    """Non-Open unresolved must fail closed — never silently expand to full G."""
+    """An unknown question device is soft context under authorized_context."""
     monkeypatch.setattr(
         v2_router.config, "retrieval_scope_policy", "authorized_context"
     )
@@ -729,7 +729,6 @@ async def test_authorized_context_unresolved_does_not_expand_to_full_g(
         )
 
     assert response.status_code == 200, response.text
-    assert response.json()["status"] == "无可靠依据"
     snapshot = await gw_read(
         runtime.db,
         fetchone,
@@ -737,7 +736,10 @@ async def test_authorized_context_unresolved_does_not_expand_to_full_g(
         "WHERE client_message_id=?",
         ("authorized-unresolved-1",),
     )
-    assert json.loads(snapshot["allowed_doc_ids_json"]) == []
+    assert set(json.loads(snapshot["allowed_doc_ids_json"])) == {
+        "doc-unres-a",
+        "doc-unres-b",
+    }
 
 
 @pytest.mark.asyncio
@@ -3249,4 +3251,68 @@ async def test_multi_these_two_uses_conversation_device_union(runtime):
         "EQ-MULTI-A",
         "EQ-MULTI-B",
     }
+
+
+@pytest.mark.asyncio
+async def test_v2_json_tool_protocol_artifact_fails_and_is_not_completed(runtime):
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-TOOL-PROTOCOL",
+        ragflow_id="doc-tool-protocol",
+        equipment_id="EQ-TOOL-PROTOCOL",
+        fixed_asset_no="FA-TOOL-PROTOCOL",
+    )
+    runtime.stub.forced_answer = (
+        '<[PLHD20_never_used_test]>'
+        '[{"name":"rag","parameters":{"question":"bad"}}]'
+        '<[PLHD21_never_used_test>]'
+    )
+
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(
+            client, equipmentId="EQ-TOOL-PROTOCOL"
+        )
+        response = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            headers={"Accept": "application/json"},
+            json={
+                "clientMessageId": "tool-protocol-invalid",
+                "question": "查询资料",
+            },
+        )
+        history = await client.get(
+            f"{BASE}/conversations/{conversation['conversationId']}"
+        )
+        stream_conversation = await _create_conversation(
+            client, equipmentId="EQ-TOOL-PROTOCOL"
+        )
+        stream_response = await client.post(
+            f"{BASE}/conversations/{stream_conversation['conversationId']}/messages",
+            headers={"Accept": "text/event-stream"},
+            json={
+                "clientMessageId": "tool-protocol-invalid-stream",
+                "question": "查询资料",
+            },
+        )
+        stream_history = await client.get(
+            f"{BASE}/conversations/{stream_conversation['conversationId']}"
+        )
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "RAGFLOW_TOOL_PROTOCOL_INVALID"
+    assistant = next(
+        item for item in history.json()["messages"] if item["role"] == "assistant"
+    )
+    assert assistant["status"] == "failed"
+    assert "PLHD" not in assistant["content"]
+    assert stream_response.status_code == 200
+    assert '"code": "RAGFLOW_TOOL_PROTOCOL_INVALID"' in stream_response.text
+    assert "event: answer.replaced" in stream_response.text
+    assert "event: answer.completed" not in stream_response.text
+    stream_assistant = next(
+        item
+        for item in stream_history.json()["messages"]
+        if item["role"] == "assistant"
+    )
+    assert stream_assistant["status"] == "failed"
 

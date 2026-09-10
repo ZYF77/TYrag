@@ -93,6 +93,9 @@ errors:
   - code: RAGFLOW_API_INCOMPATIBLE
     http_status: 503
     retryable: false
+  - code: RAGFLOW_TOOL_PROTOCOL_INVALID
+    http_status: 502
+    retryable: false
   - code: RAGFLOW_UNAVAILABLE
     http_status: 503
     retryable: true

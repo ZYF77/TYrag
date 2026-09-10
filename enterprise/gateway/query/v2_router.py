@@ -177,6 +177,28 @@ def _mapped_llm_provider_failure(text: str) -> tuple[str, int, str] | None:
     return code, status_code, safe_error_message(code)
 
 
+_TOOL_PROTOCOL_ARTIFACT_RE = re.compile(
+    r"<\[PLHD|<\s*/?\s*tool_call\b|RAGFLOW_TOOL_PROTOCOL_INVALID",
+    re.IGNORECASE,
+)
+_TOOL_JSON_ARTIFACT_RE = re.compile(
+    r'\s*(?:\[\s*)?\{\s*"name"\s*:\s*"(?:rag|summarize_document)"\s*,\s*'
+    r'"parameters"\s*:\s*[\s\S]*\}\s*\]?\s*',
+    re.IGNORECASE,
+)
+_DAMAGED_TOOL_OUTPUT_RE = re.compile(r"(?:<>){1,2}")
+_TOOL_PROTOCOL_ERROR_MESSAGE = "问答服务返回了无法识别的工具结果，请稍后重试。"
+
+
+def _contains_tool_protocol_artifact(text: str | None) -> bool:
+    value = str(text or "")
+    return bool(
+        _TOOL_PROTOCOL_ARTIFACT_RE.search(value)
+        or _TOOL_JSON_ARTIFACT_RE.fullmatch(value)
+        or _DAMAGED_TOOL_OUTPUT_RE.search(value)
+    )
+
+
 def _public_run_payload(result: dict, citations: list[dict] | None = None) -> dict:
     payload = {
         key: v2_store.public_status(value) if key == "status" else value
@@ -1184,15 +1206,11 @@ async def _resolve_turn_scope(
         entity_ids = []
         selected = available
 
-    # authorized_context: G = available (ACL ceiling). When NOT unresolved,
-    # restore selected = available (full G). Device/model are soft context only;
-    # do NOT hard-narrow doc_ids to device subset F (no G∩F).
-    # Unresolved stays fail-closed (empty selected). restrict + business_context unchanged.
-    # legacy_device keeps device-narrowed selected from the branches above.
-    if (
-        _current_retrieval_scope_policy() == "authorized_context"
-        and not unresolved
-    ):
+    # authorized_context: G = available (ACL ceiling), regardless of whether
+    # the question's optional device hint resolves. Device/model are soft
+    # context only; do not hard-narrow doc_ids to a device subset.
+    # legacy_device keeps device-narrowed selection and fail-closed resolution.
+    if _current_retrieval_scope_policy() == "authorized_context":
         selected = available
 
     if persist and (
@@ -1898,7 +1916,34 @@ async def _execute_json_run(
                     )
                     if isinstance(item, dict)
                 ]
-                split = split_assistant_output(str(data.get("answer") or ""))
+                raw_answer = str(data.get("answer") or "")
+                if _contains_tool_protocol_artifact(raw_answer):
+                    return None, await _save_failed_run(
+                        db,
+                        principal,
+                        conversation,
+                        req,
+                        run,
+                        assistant_message_id,
+                        code="RAGFLOW_TOOL_PROTOCOL_INVALID",
+                        status_code=502,
+                        message=_TOOL_PROTOCOL_ERROR_MESSAGE,
+                    )
+                split = split_assistant_output(raw_answer)
+                if _contains_tool_protocol_artifact(split.answer) or _contains_tool_protocol_artifact(
+                    split.reasoning
+                ):
+                    return None, await _save_failed_run(
+                        db,
+                        principal,
+                        conversation,
+                        req,
+                        run,
+                        assistant_message_id,
+                        code="RAGFLOW_TOOL_PROTOCOL_INVALID",
+                        status_code=502,
+                        message=_TOOL_PROTOCOL_ERROR_MESSAGE,
+                    )
                 mapped = _mapped_llm_provider_failure(split.answer)
                 if mapped is not None:
                     code, status_code, message = mapped
@@ -2211,11 +2256,47 @@ async def _stream_run_events(
 
             # Safety net: strip timeline / think wrappers even if stream flags or
             # tags were missing/corrupted before persist + outbound answer.delta.
+            raw_stream_outputs = (accumulated, accumulated_reasoning, final_delta)
             finalized = finalize_streamed_output(
                 accumulated, accumulated_reasoning, final_delta
             )
             accumulated = finalized.answer
             accumulated_reasoning = finalized.reasoning
+
+            if any(
+                _contains_tool_protocol_artifact(value)
+                for value in (*raw_stream_outputs, accumulated, accumulated_reasoning)
+            ):
+                await _save_failed_run(
+                    db,
+                    principal,
+                    conversation,
+                    req,
+                    run,
+                    assistant_message_id,
+                    code="RAGFLOW_TOOL_PROTOCOL_INVALID",
+                    status_code=502,
+                    message=_TOOL_PROTOCOL_ERROR_MESSAGE,
+                )
+                if live_streamed and emitted_answer:
+                    yield _sse(
+                        "answer.replaced",
+                        {
+                            "conversationId": conversation_id,
+                            "runId": run["run_id"],
+                            "content": "",
+                        },
+                    )
+                yield _sse(
+                    "run.failed",
+                    {
+                        "conversationId": conversation_id,
+                        "runId": run["run_id"],
+                        "code": "RAGFLOW_TOOL_PROTOCOL_INVALID",
+                        "message": _TOOL_PROTOCOL_ERROR_MESSAGE,
+                    },
+                )
+                return
 
             conversation["ragflow_chat_id"] = chat_id
             conversation["ragflow_session_id"] = session_id

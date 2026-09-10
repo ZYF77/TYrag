@@ -97,8 +97,8 @@ def _build_scope_identity_knowledge_block(
             f"{context_hint}"
             "软业务上下文不是授权条件或证据；每份资料的设备事实以 "
             "document_metadata.equipment_id / fixed_asset_no 为准。\n"
-            "已检索到资料片段时，必须依据 Content 回答型号、出厂编号等事实；"
-            "禁止写「无法按该编号匹配」「正文未找到该设备号」等空喊拒答。"
+            "仅在 Content 和 document_metadata 确实支持时回答型号、出厂编号等事实；"
+            "关联不足时说明证据不足或请求澄清。"
         )
     if not ids:
         return None
@@ -107,8 +107,8 @@ def _build_scope_identity_knowledge_block(
         "【本轮检索范围设备身份】\n"
         f"本轮检索范围对应的设备标识为：{joined}。\n"
         "下列资料即属于上述设备（以 document_metadata.equipment_id / fixed_asset_no 为准）。\n"
-        "禁止写「无法按该编号匹配」或「正文未找到该设备号」；"
-        "应直接依据 Content 回答型号、出厂编号等事实。"
+        "仅在 Content 和 document_metadata 确实支持时回答型号、出厂编号等事实；"
+        "关联不足时说明证据不足或请求澄清。"
     )
 
 

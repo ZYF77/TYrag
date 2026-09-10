@@ -22,6 +22,7 @@ import re
 import time
 from abc import ABC
 from copy import deepcopy
+from types import SimpleNamespace
 from urllib.parse import urljoin
 
 import json_repair
@@ -62,6 +63,8 @@ class ReActMode(StrEnum):
 
 
 ERROR_PREFIX = "**ERROR**"
+_TOOL_PROTOCOL_ERROR = f"{ERROR_PREFIX}: RAGFLOW_TOOL_PROTOCOL_INVALID"
+_TEXT_TOOL_PROTOCOL_MAX_BYTES = 32 * 1024
 LENGTH_NOTIFICATION_CN = "······\n由于大模型的上下文窗口大小限制，回答已经被大模型截断。"
 LENGTH_NOTIFICATION_EN = "...\nThe answer is truncated by your chosen LLM due to its limitation on context length."
 
@@ -426,6 +429,19 @@ class Base(ABC):
     def _verbose_tool_use(self, name, args, res):
         return "<tool_call>" + json.dumps({"name": name, "args": args, "result": res}, ensure_ascii=False, indent=2) + "</tool_call>"
 
+    def _supports_text_tool_protocol(self) -> bool:
+        """Whether this provider has a bounded text fallback for tool calls."""
+        return False
+
+    def _text_tool_candidate_state(self, text: str) -> str:
+        """Return ``none``, ``pending`` or ``candidate`` for provider text."""
+        del text
+        return "none"
+
+    def _parse_text_tool_calls(self, text: str) -> list:
+        del text
+        return []
+
     def _append_history(self, hist, tool_call, tool_res):
         hist.append(
             {
@@ -618,6 +634,9 @@ class Base(ABC):
         # only the (estimated) total accumulates.
         agg_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         hist = deepcopy(history)
+        text_tool_protocol = self._supports_text_tool_protocol()
+        protocol_retry_used = False
+        force_required = False
 
         def _commit_round(round_usage, round_estimate):
             nonlocal total_tokens
@@ -633,18 +652,31 @@ class Base(ABC):
         for attempt in range(self.max_retries + 1):
             history = deepcopy(hist)
             try:
-                for _round in range(self.max_rounds + 1):
+                round_count = self.max_rounds + 1 + (1 if text_tool_protocol else 0)
+                for _round in range(round_count):
+                    if text_tool_protocol and _round > self.max_rounds and not force_required:
+                        break
                     reasoning_start = False
                     logging.info(f"[Tool loop] Deciding what to do next (step {_round + 1}); available tools: {', '.join(t['function']['name'] for t in tools)}")
 
                     response = await self.async_client.chat.completions.create(
-                        model=self.model_name, messages=history, stream=True, tools=tools, tool_choice="auto", **gen_conf, **extra_request_kwargs
+                        model=self.model_name,
+                        messages=history,
+                        stream=True,
+                        tools=tools,
+                        tool_choice="required" if force_required else "auto",
+                        **gen_conf,
+                        **extra_request_kwargs,
                     )
 
                     final_tool_calls = {}
                     answer = ""
                     round_estimate = 0
                     round_usage = None
+                    text_tool_candidate = ""
+                    text_tool_candidate_overflow = False
+                    retry_round = False
+                    round_truncated = False
 
                     async for resp in response:
                         _u = usage_from_response(resp)
@@ -669,6 +701,9 @@ class Base(ABC):
 
                         if not hasattr(delta, "content") or delta.content is None:
                             delta.content = ""
+                        content = delta.content
+                        if text_tool_protocol:
+                            content = str(content or "")
 
                         _reasoning = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
                         if _reasoning:
@@ -680,22 +715,86 @@ class Base(ABC):
                             yield ans
                         else:
                             reasoning_start = False
-                            answer += delta.content
-                            yield delta.content
+                            if text_tool_protocol and (
+                                protocol_retry_used or not answer.strip()
+                            ):
+                                if not text_tool_candidate_overflow:
+                                    probe = text_tool_candidate + content
+                                    if len(probe.encode("utf-8")) > _TEXT_TOOL_PROTOCOL_MAX_BYTES:
+                                        text_tool_candidate_overflow = True
+                                    elif protocol_retry_used:
+                                        text_tool_candidate = probe
+                                    else:
+                                        state = self._text_tool_candidate_state(probe)
+                                        if state == "none":
+                                            if text_tool_candidate:
+                                                answer += text_tool_candidate
+                                                yield text_tool_candidate
+                                                text_tool_candidate = ""
+                                            answer += content
+                                            yield content
+                                        else:
+                                            text_tool_candidate = probe
+                            else:
+                                answer += content
+                                yield content
 
                         if not _u["total_tokens"]:
-                            round_estimate += num_tokens_from_string(delta.content)
+                            round_estimate += num_tokens_from_string(content)
 
                         finish_reason = getattr(resp.choices[0], "finish_reason", "")
                         if finish_reason == "length":
-                            yield self._length_stop("")
+                            if text_tool_protocol:
+                                round_truncated = True
+                            else:
+                                yield self._length_stop("")
 
                     # Commit this round's tokens (each round is a separate provider
                     # request — accumulate, never overwrite).
                     _commit_round(round_usage, round_estimate)
 
+                    if text_tool_protocol and not final_tool_calls:
+                        candidate_state = (
+                            self._text_tool_candidate_state(text_tool_candidate)
+                            if text_tool_candidate
+                            else "none"
+                        )
+                        parsed_tool_calls = (
+                            self._parse_text_tool_calls(text_tool_candidate)
+                            if text_tool_candidate and not text_tool_candidate_overflow
+                            else []
+                        )
+                        if parsed_tool_calls:
+                            final_tool_calls = {
+                                tc.index: tc for tc in parsed_tool_calls
+                            }
+                        elif force_required or (
+                            text_tool_candidate
+                            and candidate_state in {"candidate", "pending"}
+                        ):
+                            if not protocol_retry_used:
+                                protocol_retry_used = True
+                                force_required = True
+                                retry_round = True
+                            else:
+                                yield _TOOL_PROTOCOL_ERROR
+                                yield total_tokens
+                                return
+                        elif text_tool_candidate:
+                            answer += text_tool_candidate
+                            yield text_tool_candidate
+                            text_tool_candidate = ""
+
+                    if retry_round:
+                        continue
+
+                    if final_tool_calls:
+                        force_required = False
+
                     if answer and not final_tool_calls:
                         logging.info(f"[Tool loop] Answering directly at step {_round + 1} — no tool needed.")
+                        if round_truncated:
+                            yield self._length_stop("")
                         yield total_tokens
                         return
 
@@ -742,6 +841,10 @@ class Base(ABC):
                         yield self._verbose_tool_use(name, args, err if err else result)
 
                 logging.warning(f"Exceed max rounds: {self.max_rounds}")
+                if text_tool_protocol:
+                    yield _TOOL_PROTOCOL_ERROR
+                    yield total_tokens
+                    return
                 history.append({"role": "user", "content": f"Exceed max rounds: {self.max_rounds}"})
 
                 response = await self.async_client.chat.completions.create(
@@ -1010,6 +1113,17 @@ class LocalLLM(Base):
 class VolcEngineChat(Base):
     _FACTORY_NAME = "VolcEngine"
 
+    _PLHD_PREFIX = "<[PLHD"
+    _PLHD_MARKER_PATTERN = r"<\[PLHD\d+_never_used_[A-Za-z0-9_-]+\]>"
+    _PLHD_FRAME_RE = re.compile(
+        r"^\s*"
+        + _PLHD_MARKER_PATTERN
+        + r"\s*(?P<body>.*?)\s*"
+        + _PLHD_MARKER_PATTERN
+        + r"\s*$",
+        re.DOTALL,
+    )
+
     def __init__(self, key, model_name, base_url="https://ark.cn-beijing.volces.com/api/v3", **kwargs):
         """
         Since do not want to modify the original database fields, and the VolcEngine authentication method is quite special,
@@ -1023,6 +1137,72 @@ class VolcEngineChat(Base):
             super().__init__(ark_api_key, model_name, base_url, **kwargs)
         except JSONDecodeError:
             super().__init__(key, model_name, base_url, **kwargs)
+
+    def _supports_text_tool_protocol(self) -> bool:
+        return True
+
+    def _text_tool_candidate_state(self, text: str) -> str:
+        value = str(text or "").lstrip()
+        if not value:
+            return "none"
+        if value.startswith(self._PLHD_PREFIX):
+            return "candidate"
+        if self._PLHD_PREFIX.startswith(value):
+            return "pending"
+        return "none"
+
+    def _parse_text_tool_calls(self, text: str) -> list:
+        if not text or len(text.encode("utf-8")) > _TEXT_TOOL_PROTOCOL_MAX_BYTES:
+            return []
+        match = self._PLHD_FRAME_RE.fullmatch(text)
+        if match is None:
+            return []
+        try:
+            payload = json.loads(match.group("body"))
+        except (TypeError, json.JSONDecodeError):
+            return []
+        items = payload if isinstance(payload, list) else [payload]
+        if not items or not all(isinstance(item, dict) for item in items):
+            return []
+
+        registered = {
+            str(schema.get("function", {}).get("name"))
+            for schema in self.tools
+            if isinstance(schema, dict)
+            and isinstance(schema.get("function"), dict)
+            and schema["function"].get("name")
+        }
+        calls = []
+        for index, item in enumerate(items):
+            if set(item) != {"name", "parameters"}:
+                return []
+            name = item.get("name")
+            parameters = item.get("parameters")
+            if name not in registered or not isinstance(parameters, dict):
+                return []
+            if name == "rag":
+                if set(parameters) != {"question"} or not isinstance(
+                    parameters.get("question"), str
+                ) or not parameters["question"].strip():
+                    return []
+            elif name == "summarize_document":
+                if set(parameters) != {"doc_id"} or not isinstance(
+                    parameters.get("doc_id"), str
+                ) or not parameters["doc_id"].strip():
+                    return []
+            else:
+                return []
+            calls.append(
+                SimpleNamespace(
+                    index=index,
+                    id=f"volcengine-text-{index}",
+                    function=SimpleNamespace(
+                        name=name,
+                        arguments=json.dumps(parameters, ensure_ascii=False),
+                    ),
+                )
+            )
+        return calls
 
 
 class MistralChat(Base):

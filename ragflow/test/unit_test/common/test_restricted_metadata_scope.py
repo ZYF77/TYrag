@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from common.metadata_es_filter import build_meta_filter_query
 from common.metadata_utils import apply_meta_data_filter
@@ -41,6 +41,24 @@ async def test_restrict_metadata_filter_intersects_eager_metadata():
     )
 
     assert result == ["doc-in"]
+
+
+@pytest.mark.asyncio
+async def test_restrict_metadata_filter_loads_lazy_metadata_when_metas_is_none():
+    loader = Mock(return_value={"type": {"pump": ["doc-in"]}})
+    result = await apply_meta_data_filter(
+        {
+            "method": "manual",
+            "manual": [{"key": "type", "op": "=", "value": "pump"}],
+        },
+        metas=None,
+        base_doc_ids=["doc-in"],
+        metas_loader=loader,
+        doc_scope_mode="restrict",
+    )
+
+    assert result == ["doc-in"]
+    loader.assert_called_once_with()
 
 
 @pytest.mark.asyncio

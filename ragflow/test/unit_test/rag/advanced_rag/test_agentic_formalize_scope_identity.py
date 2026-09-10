@@ -123,7 +123,8 @@ def test_formalize_evidence_prepends_identity_block(monkeypatch):
 
     assert evidence.startswith("【本轮检索范围设备身份】")
     assert "GQ01250024" in evidence
-    assert "无法按该编号匹配" in evidence
+    assert "证据不足" in evidence
+    assert "无法按该编号匹配" not in evidence
     assert "产品型号：XT30D" in evidence
     assert enrich_calls and enrich_calls[0][1] == {"equipment_id", "fixed_asset_no"}
     assert chunks[0]["document_metadata"]["equipment_id"] == "GQ01250024"
