@@ -73,6 +73,15 @@ def transient_attachment_max_size_mb_from_env() -> int:
     )
 
 
+RETRIEVAL_SCOPE_POLICIES = {"legacy_device", "authorized_context"}
+
+
+def retrieval_scope_policy_from_env() -> str:
+    """Return the safe default when the rollout flag is missing or invalid."""
+    value = os.getenv("ENTERPRISE_RETRIEVAL_SCOPE_POLICY", "legacy_device").strip().lower()
+    return value if value in RETRIEVAL_SCOPE_POLICIES else "legacy_device"
+
+
 @dataclass(frozen=True)
 class GatewayRuntimeSettings:
     """Mutable-at-runtime Gateway controls persisted by the admin API."""
@@ -95,6 +104,7 @@ class GatewayRuntimeSettings:
     s3_max_size_mb: int
     transient_attachment_max_size_mb: int
     rag_diagnostics_enabled: bool
+    retrieval_scope_policy: str
 
     @classmethod
     def from_config(cls, source: "GatewayConfig") -> "GatewayRuntimeSettings":
@@ -124,6 +134,9 @@ class GatewayRuntimeSettings:
             s3_max_size_mb=source.s3_max_size_mb,
             transient_attachment_max_size_mb=transient_attachment_max_size_mb_from_env(),
             rag_diagnostics_enabled=source.rag_diagnostics_enabled,
+            retrieval_scope_policy=source.retrieval_scope_policy
+            if source.retrieval_scope_policy in RETRIEVAL_SCOPE_POLICIES
+            else "legacy_device",
         )
 
     def to_api(self) -> dict[str, Any]:
@@ -162,6 +175,11 @@ class GatewayRuntimeSettings:
             "diagnostics": {
                 "enabled": self.rag_diagnostics_enabled,
             },
+            "retrievalScope": {
+                "policy": self.retrieval_scope_policy
+                if self.retrieval_scope_policy in RETRIEVAL_SCOPE_POLICIES
+                else "legacy_device",
+            },
         }
 
 
@@ -192,14 +210,6 @@ def conversation_device_limit_from_env() -> int:
         value = 2
     return max(1, value)
 
-
-RETRIEVAL_SCOPE_POLICIES = {"legacy_device", "authorized_context"}
-
-
-def retrieval_scope_policy_from_env() -> str:
-    """Return the safe default when the rollout flag is missing or invalid."""
-    value = os.getenv("ENTERPRISE_RETRIEVAL_SCOPE_POLICY", "legacy_device").strip().lower()
-    return value if value in RETRIEVAL_SCOPE_POLICIES else "legacy_device"
 
 def attachment_vision_enabled_from_env() -> bool:
     """Image pre-understand switch; default on to preserve current behavior."""
@@ -466,12 +476,18 @@ class GatewayConfig:
         # Keep legacy callers that read this feature flag directly in sync
         # with the persisted runtime snapshot.
         self.rag_diagnostics_enabled = settings.rag_diagnostics_enabled
+        self.retrieval_scope_policy = (
+            settings.retrieval_scope_policy
+            if settings.retrieval_scope_policy in RETRIEVAL_SCOPE_POLICIES
+            else "legacy_device"
+        )
 
     def clear_runtime_settings(self) -> None:
         self._runtime_settings = None
         self.rag_diagnostics_enabled = os.getenv(
             "ENTERPRISE_RAG_DIAGNOSTICS_ENABLED", "false"
         ).lower() in ("1", "true", "yes", "on")
+        self.retrieval_scope_policy = retrieval_scope_policy_from_env()
 
     @property
     def demo_routes_enabled(self) -> bool:

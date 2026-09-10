@@ -65,3 +65,17 @@ def test_authorized_scope_identity_separates_soft_context_from_evidence():
     assert "软业务上下文不是授权条件或证据" in block
     assert "MODEL-1" in block
     assert "下列资料即属于上述设备" not in block
+
+
+def test_authorized_scope_identity_forbids_empty_mismatch_when_restrict():
+    """With chunks present, restrict preamble must require Content answers."""
+    block = sip._build_scope_identity_knowledge_block(
+        ["EQ-1"],
+        doc_scope_mode="restrict",
+        business_context={"equipment_id": "EQ-1", "model": "MODEL-1"},
+    )
+    assert block is not None
+    assert "软业务上下文不是授权条件或证据" in block
+    assert "无法按该编号匹配" in block
+    assert "正文未找到该设备号" in block
+    assert "Content" in block

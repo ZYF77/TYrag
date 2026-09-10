@@ -16,6 +16,8 @@ RAGFlow 负责问题理解、metadata 条件生成、检索和回答。现有设
 1. Gateway 增加 ENTERPRISE_RETRIEVAL_SCOPE_POLICY。默认 legacy_device，保留当前设备
    收窄；authorized_context 只改变默认设备收窄决策，ACL、文档 readiness、设备解析和
    最终硬 doc_ids=G 仍由 Gateway 负责。显式设备线索无法解析时继续 fail closed。
+Gateway Console 运行时可热更新检索范围策略（retrievalScope.policy），默认仍为 legacy_device；非法值回退到 legacy_device。
+
 2. Gateway 将本轮策略、doc_scope_mode、context_version 和有限业务上下文写入
    ext_v2_message_run.retrieval_context_json。重试和回放使用这个快照，不重新读取已变化
    的配置。会话的型号、设备类型和制造商作为增量字段持久化。

@@ -204,6 +204,12 @@ playwright-report/
 *.snap
 enterprise/_codex_last_msgs.txt
 
+# Root-level local QA scratch
+/_qa_*.txt
+/_tmp_*.py
+/_tmp_*.sh
+/_tmp_*.txt
+
 # Unrelated local reference bundle, not part of the TYrag product tree.
 /arbore智能体平台规范/
 

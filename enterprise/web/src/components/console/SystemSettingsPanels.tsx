@@ -316,7 +316,7 @@ export function IntegrationsPanel() {
   }, [runtimeDirty, runtimeDraft]);
 
   const patchRuntimeSection = useCallback(
-    (section: keyof GatewayRuntimeSettings, patch: Record<string, number | boolean>) => {
+    (section: keyof GatewayRuntimeSettings, patch: Record<string, number | boolean | string>) => {
       setRuntimeDraft((current) => {
         if (!current) return current;
         return {
@@ -579,6 +579,32 @@ export function IntegrationsPanel() {
                       label="RAG 诊断采集"
                       onChange={(enabled) => patchRuntimeSection('diagnostics', { enabled })}
                     />
+                    <RuntimeEffectBadge />
+                  </div>
+                </div>
+                <div className="runtime-setting-row">
+                  <RuntimeSettingLabel
+                    title="检索范围策略"
+                    variable="ENTERPRISE_RETRIEVAL_SCOPE_POLICY"
+                    description="默认 legacy_device 保持现有设备收窄；authorized_context 在授权集合 G 内检索，设备/型号仅作软上下文。保存后热更新，无需重启。"
+                  />
+                  <div className="runtime-setting-controls">
+                    <label className="runtime-select-label" htmlFor="runtime-retrieval-scope-policy">
+                      策略
+                      <select
+                        id="runtime-retrieval-scope-policy"
+                        className="runtime-select"
+                        value={runtimeDraft.retrievalScope.policy}
+                        onChange={(event) => patchRuntimeSection('retrievalScope', {
+                          policy: event.target.value === 'authorized_context'
+                            ? 'authorized_context'
+                            : 'legacy_device',
+                        })}
+                      >
+                        <option value="legacy_device">legacy_device（默认安全）— 保持现有设备收窄</option>
+                        <option value="authorized_context">authorized_context — 在授权集合 G 内检索；设备/型号作软上下文</option>
+                      </select>
+                    </label>
                     <RuntimeEffectBadge />
                   </div>
                 </div>

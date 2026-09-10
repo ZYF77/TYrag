@@ -10,7 +10,12 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-from enterprise.gateway.config import GatewayRuntimeSettings, config
+from enterprise.gateway.config import (
+    RETRIEVAL_SCOPE_POLICIES,
+    GatewayRuntimeSettings,
+    config,
+    retrieval_scope_policy_from_env,
+)
 from enterprise.gateway.db.database import GatewayDatabase
 from enterprise.gateway.db.dialect import exec_sql, fetchone
 
@@ -76,6 +81,7 @@ def parse_runtime_settings(payload: Mapping[str, Any]) -> GatewayRuntimeSettings
         "callbackDelivery",
         "limits",
         "diagnostics",
+        "retrievalScope",
     }
     if set(payload) != expected:
         raise RuntimeSettingsError("runtime settings contain unknown or missing fields")
@@ -100,6 +106,14 @@ def parse_runtime_settings(payload: Mapping[str, Any]) -> GatewayRuntimeSettings
         {"fileShareMaxMiB", "s3MaxMiB", "transientAttachmentMaxMiB"},
     )
     diagnostics = _section(payload, "diagnostics", {"enabled"})
+    retrieval_scope = _section(payload, "retrievalScope", {"policy"})
+    policy_raw = retrieval_scope["policy"]
+    if not isinstance(policy_raw, str):
+        raise RuntimeSettingsError("invalid runtime setting: retrievalScope.policy")
+    policy = policy_raw.strip().lower()
+    if policy not in RETRIEVAL_SCOPE_POLICIES:
+        # Match env/config: illegal values fall back to the safe default.
+        policy = "legacy_device"
     return GatewayRuntimeSettings(
         outbox_enabled=_bool(outbox["enabled"], "outbox.enabled"),
         outbox_poll_seconds=_float(
@@ -180,6 +194,7 @@ def parse_runtime_settings(payload: Mapping[str, Any]) -> GatewayRuntimeSettings
             ATTACHMENT_MAX_MIB,
         ),
         rag_diagnostics_enabled=_bool(diagnostics["enabled"], "diagnostics.enabled"),
+        retrieval_scope_policy=policy,
     )
 
 
@@ -268,24 +283,35 @@ class RuntimeSettingsManager:
                 else:
                     try:
                         stored = json.loads(str(row["settings_json"]))
-                        if isinstance(stored, dict) and "diagnostics" not in stored:
-                            # Backfill the field added after the first runtime-settings
-                            # release without discarding any administrator choices.
-                            stored["diagnostics"] = {
-                                "enabled": os.getenv(
-                                    "ENTERPRISE_RAG_DIAGNOSTICS_ENABLED", "false"
-                                ).lower()
-                                in ("1", "true", "yes", "on"),
-                            }
-                            await exec_sql(
-                                conn,
-                                "UPDATE gateway_runtime_settings SET settings_json=? "
-                                "WHERE id=?",
-                                (
-                                    json.dumps(stored, ensure_ascii=False, sort_keys=True),
-                                    RUNTIME_SETTINGS_ROW_ID,
-                                ),
-                            )
+                        if isinstance(stored, dict):
+                            mutated = False
+                            if "diagnostics" not in stored:
+                                # Backfill the field added after the first runtime-settings
+                                # release without discarding any administrator choices.
+                                stored["diagnostics"] = {
+                                    "enabled": os.getenv(
+                                        "ENTERPRISE_RAG_DIAGNOSTICS_ENABLED", "false"
+                                    ).lower()
+                                    in ("1", "true", "yes", "on"),
+                                }
+                                mutated = True
+                            if "retrievalScope" not in stored:
+                                stored["retrievalScope"] = {
+                                    "policy": retrieval_scope_policy_from_env(),
+                                }
+                                mutated = True
+                            if mutated:
+                                await exec_sql(
+                                    conn,
+                                    "UPDATE gateway_runtime_settings SET settings_json=? "
+                                    "WHERE id=?",
+                                    (
+                                        json.dumps(
+                                            stored, ensure_ascii=False, sort_keys=True
+                                        ),
+                                        RUNTIME_SETTINGS_ROW_ID,
+                                    ),
+                                )
                         settings = parse_runtime_settings(stored)
                     except (TypeError, ValueError, json.JSONDecodeError) as exc:
                         raise RuntimeSettingsError(

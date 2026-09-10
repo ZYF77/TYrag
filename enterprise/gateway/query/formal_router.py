@@ -38,6 +38,7 @@ from enterprise.gateway.quality.models import get_latest_evaluation
 from enterprise.gateway.query import conversation_store
 from enterprise.gateway.query.answer_split import (
     StreamThinkSplitter,
+    finalize_streamed_output,
     public_reasoning,
     split_assistant_output,
 )
@@ -961,6 +962,7 @@ async def _stream_ask_events(
     )
     accumulated = ""
     accumulated_reasoning = ""
+    final_delta: str | None = None
     chunks: list[dict] = []
     upstream_status: str | None = None
     ragflow_message_id: str | None = None
@@ -1000,10 +1002,8 @@ async def _stream_ask_events(
             chunks.extend(c for c in raw_chunks if isinstance(c, dict))
             delta = data.get("answer")
             is_final = bool(data.get("final"))
-            if is_final and not accumulated and not accumulated_reasoning and delta:
-                split = split_assistant_output(str(delta))
-                accumulated = split.answer
-                accumulated_reasoning = split.reasoning
+            if is_final and delta:
+                final_delta = str(delta)
             elif not is_final:
                 pieces = splitter.feed(
                     str(delta or ""),
@@ -1024,6 +1024,11 @@ async def _stream_ask_events(
                             "content": chunk,
                         },
                     )
+        finalized = finalize_streamed_output(
+            accumulated, accumulated_reasoning, final_delta
+        )
+        accumulated = finalized.answer
+        accumulated_reasoning = finalized.reasoning
         status = _explicit_run_status(upstream_status)
         citations = _build_citations(
             select_cited_chunks(accumulated, chunks, status),

@@ -128,6 +128,8 @@ def _apply_model_family_policies(
 
         enable_thinking = sanitized_gen_conf.get("enable_thinking")
 
+        if isinstance(val, bool):
+            return "enabled" if val else "disabled"
         if isinstance(val, str) and val in {"enabled", "disabled"}:
             return val
         if isinstance(enable_thinking, bool):
@@ -165,6 +167,18 @@ def _apply_model_family_policies(
             _merge_extra_body(sanitized_kwargs, {"enable_thinking": enable_thinking})
 
     if backend == "base":
+        # Ark / Doubao (VolcEngine OpenAI-compatible Base path): pass assistant
+        # llm_setting.thinking through extra_body only when explicitly set.
+        # Default / unset must not inject vendor thinking params. Qwen3 already
+        # handled above via enable_thinking.
+        if "qwen3" not in model_name_lower:
+            if thinking_type:
+                _pop_thinking_controls()
+                _merge_extra_body(
+                    sanitized_kwargs, {"thinking": {"type": thinking_type}}
+                )
+            else:
+                _pop_thinking_controls()
         return sanitized_gen_conf, sanitized_kwargs
 
     if backend == "litellm":
@@ -276,7 +290,15 @@ class Base(ABC):
         if "max_tokens" in gen_conf:
             del gen_conf["max_tokens"]
 
+        # Preserve reasoning controls so _apply_model_family_policies can map
+        # llm_setting.thinking onto provider extra_body (Ark/Doubao/Qwen).
+        preserved = {
+            key: gen_conf[key]
+            for key in ("thinking", "enable_thinking")
+            if key in gen_conf
+        }
         gen_conf = {k: v for k, v in gen_conf.items() if k in ALLOWED_GEN_CONF_KEYS}
+        gen_conf.update(preserved)
         return gen_conf
 
     async def _async_chat_streamly(self, history, gen_conf, **kwargs):

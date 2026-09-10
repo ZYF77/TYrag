@@ -2,6 +2,7 @@
 
 from enterprise.gateway.query.answer_split import (
     StreamThinkSplitter,
+    finalize_streamed_output,
     split_assistant_output,
 )
 
@@ -70,3 +71,63 @@ def test_stream_embedded_tags_split_the_same_delta():
         ("reasoning", "规划"),
         ("answer", "你好呀"),
     ]
+
+
+_TIMELINE_HTML = (
+    "<p><em>Structured safe execution timeline (no prompt / knowledge / tool bodies).</em></p>\n"
+    '<details class="think-stage"><summary><strong>warmup</strong></summary>\n'
+    "<ul>\n<li><code>status</code>: success</li>\n</ul>\n"
+    "</details>"
+)
+
+
+def test_think_stage_html_inside_think_tags_goes_to_reasoning():
+    result = split_assistant_output(f"<think>{_TIMELINE_HTML}</think>FINAL_ANSWER")
+
+    assert result.answer == "FINAL_ANSWER"
+    assert "think-stage" in result.reasoning
+    assert "Structured safe execution timeline" in result.reasoning
+    assert "think-stage" not in result.answer
+
+
+def test_think_stage_html_without_think_tags_is_stripped_from_answer():
+    result = split_assistant_output(f"{_TIMELINE_HTML}\nFINAL_ANSWER")
+
+    assert result.answer == "FINAL_ANSWER"
+    assert "think-stage" in result.reasoning
+    assert "warmup" in result.reasoning
+    assert "Structured safe execution timeline" not in result.answer
+
+
+def test_damaged_empty_think_wrappers_around_timeline_are_repaired():
+    # Verified leak sample shape: "<>" prefix after <think> corruption.
+    raw = f"<>{_TIMELINE_HTML}</>FINAL_ANSWER"
+    result = split_assistant_output(raw)
+
+    assert result.answer == "FINAL_ANSWER"
+    assert "think-stage" in result.reasoning
+    assert "<>" not in result.answer
+    assert "think-stage" not in result.answer
+
+
+def test_finalize_streamed_output_strips_leaked_timeline_from_accumulated_answer():
+    leaked = f"<>{_TIMELINE_HTML}\nFINAL_ANSWER"
+    result = finalize_streamed_output(leaked, "", None)
+
+    assert result.answer == "FINAL_ANSWER"
+    assert "think-stage" in result.reasoning
+
+
+def test_finalize_prefers_final_delta_with_timeline_when_buffers_empty():
+    final = f"<think>{_TIMELINE_HTML}</think>FINAL_ANSWER"
+    result = finalize_streamed_output("", "", final)
+
+    assert result.answer == "FINAL_ANSWER"
+    assert "think-stage" in result.reasoning
+
+
+def test_finalize_keeps_clean_streamed_answer_without_timeline():
+    result = finalize_streamed_output("CLEAN_ANSWER", "planning notes", None)
+
+    assert result.answer == "CLEAN_ANSWER"
+    assert result.reasoning == "planning notes"

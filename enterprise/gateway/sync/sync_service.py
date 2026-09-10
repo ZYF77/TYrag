@@ -928,6 +928,40 @@ class SyncService:
             meta["equipment_id"] = doc.equipment_id
         if doc.fixed_asset_no:
             meta["fixed_asset_no"] = doc.fixed_asset_no
+
+        # Registration attributes (feed / soft-context keys). Not OCR truth.
+        # Prefer ExtDocumentMap attrs when present; otherwise event payload
+        # metadata. Omit when unset so merge does not clobber other keys.
+        try:
+            payload = (
+                json.loads(event.payload)
+                if isinstance(event.payload, str)
+                else (event.payload or {})
+            )
+        except (TypeError, json.JSONDecodeError, ValueError):
+            payload = {}
+        metadata = payload.get("metadata") if isinstance(payload, dict) else {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        def _registration_scalar(*keys: str) -> str | None:
+            for key in keys:
+                raw = getattr(doc, key, None)
+                if raw is None and key in metadata:
+                    raw = metadata.get(key)
+                if isinstance(raw, str) and raw.strip():
+                    return raw.strip()
+            return None
+
+        model = _registration_scalar("model")
+        equipment_type = _registration_scalar("equipment_type", "equipmentType")
+        manufacturer = _registration_scalar("manufacturer")
+        if model:
+            meta["model"] = model
+        if equipment_type:
+            meta["equipment_type"] = equipment_type
+        if manufacturer:
+            meta["manufacturer"] = manufacturer
         return meta
 
     async def _ensure_enterprise_metadata(

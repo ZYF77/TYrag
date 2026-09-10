@@ -165,6 +165,13 @@
         "review_required",
         "rejected"
       ]
+    },
+    "equipment_type": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 128
     }
   }
 }

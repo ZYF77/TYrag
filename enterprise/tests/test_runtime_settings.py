@@ -43,6 +43,7 @@ def _settings_payload() -> dict:
             "transientAttachmentMaxMiB": 8,
         },
         "diagnostics": {"enabled": True},
+        "retrievalScope": {"policy": "legacy_device"},
     }
 
 
@@ -94,8 +95,10 @@ async def test_runtime_settings_manager_bootstraps_and_persists(gateway_db):
 @pytest.mark.asyncio
 async def test_runtime_settings_manager_backfills_diagnostics_for_existing_row(gateway_db, monkeypatch):
     monkeypatch.setenv("ENTERPRISE_RAG_DIAGNOSTICS_ENABLED", "false")
+    monkeypatch.delenv("ENTERPRISE_RETRIEVAL_SCOPE_POLICY", raising=False)
     legacy = _settings_payload()
     legacy.pop("diagnostics")
+    legacy.pop("retrievalScope")
     async with gateway_db.transaction(write=True) as conn:
         await exec_sql(
             conn,
@@ -109,13 +112,16 @@ async def test_runtime_settings_manager_backfills_diagnostics_for_existing_row(g
     await manager.ensure_loaded()
 
     assert manager.snapshot().rag_diagnostics_enabled is False
+    assert manager.snapshot().retrieval_scope_policy == "legacy_device"
     async with gateway_db.transaction() as conn:
         row = await fetchone(
             conn,
             "SELECT settings_json FROM gateway_runtime_settings WHERE id=?",
             (1,),
         )
-    assert json.loads(row["settings_json"])["diagnostics"] == {"enabled": False}
+    stored = json.loads(row["settings_json"])
+    assert stored["diagnostics"] == {"enabled": False}
+    assert stored["retrievalScope"] == {"policy": "legacy_device"}
     config.clear_runtime_settings()
 
 
@@ -127,6 +133,7 @@ def test_runtime_limits_are_read_by_source_adapters_without_restart():
         assert S3SourceAdapter(max_size_bytes=None).max_size_bytes == 80 * 1024 * 1024
         assert attachment_max_size_bytes() == 8 * 1024 * 1024
         assert config.rag_diagnostics_enabled is True
+        assert config.retrieval_scope_policy == "legacy_device"
     finally:
         config.clear_runtime_settings()
 
@@ -159,3 +166,33 @@ async def test_outbox_loop_reads_enabled_and_interval_each_cycle(monkeypatch):
     assert runs == 1
     assert sleeps == [7.0]
     config.clear_runtime_settings()
+
+
+def test_runtime_retrieval_scope_policy_falls_back_and_applies_hot():
+    payload = _settings_payload()
+    payload["retrievalScope"]["policy"] = "authorized_context"
+    settings = parse_runtime_settings(payload)
+    assert settings.retrieval_scope_policy == "authorized_context"
+
+    payload = _settings_payload()
+    payload["retrievalScope"]["policy"] = "unknown_policy"
+    settings = parse_runtime_settings(payload)
+    assert settings.retrieval_scope_policy == "legacy_device"
+
+    config.clear_runtime_settings()
+    try:
+        config.apply_runtime_settings(
+            parse_runtime_settings(
+                {
+                    **_settings_payload(),
+                    "retrievalScope": {"policy": "authorized_context"},
+                }
+            )
+        )
+        assert config.retrieval_scope_policy == "authorized_context"
+        from enterprise.gateway.query import v2_router
+
+        assert v2_router._current_retrieval_scope_policy() == "authorized_context"
+    finally:
+        config.clear_runtime_settings()
+        assert config.retrieval_scope_policy == "legacy_device"

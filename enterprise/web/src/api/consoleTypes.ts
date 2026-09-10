@@ -100,6 +100,12 @@ export interface RuntimeDiagnosticsSettings {
   enabled: boolean;
 }
 
+export type RetrievalScopePolicy = 'legacy_device' | 'authorized_context';
+
+export interface RuntimeRetrievalScopeSettings {
+  policy: RetrievalScopePolicy;
+}
+
 export interface GatewayRuntimeSettings {
   outbox: RuntimeWorkerSettings;
   statusReconciler: RuntimeWorkerSettings;
@@ -109,6 +115,7 @@ export interface GatewayRuntimeSettings {
   callbackDelivery: RuntimeWorkerSettings;
   limits: RuntimeLimitsSettings;
   diagnostics: RuntimeDiagnosticsSettings;
+  retrievalScope: RuntimeRetrievalScopeSettings;
 }
 
 export interface GatewayRuntimeSettingsState {

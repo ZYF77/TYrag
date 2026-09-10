@@ -2,6 +2,10 @@
 
 Structured tags only: ``<think>...</think>`` pairs, or a trailing ``</think>``
 from RAGFlow ``decorate_answer``. Untagged planning text is left in ``answer``.
+
+Also repairs damaged empty-name wrappers (``<>...</>``) and defensively strips
+grounding lightbulb timeline HTML (``think-stage`` / structured safe timeline)
+out of the user-visible answer into ``reasoning``.
 """
 from __future__ import annotations
 
@@ -12,6 +16,25 @@ _OPEN = "<think>"
 _CLOSE = "</think>"
 _PAIR_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
 _TAG_RE = re.compile(r"</?think>", re.IGNORECASE)
+# Damaged wrappers seen when "<think>" was truncated/corrupted to "<>".
+_DAMAGED_PAIR_RE = re.compile(r"<>(.*?)</>", re.DOTALL)
+
+_TIMELINE_HINT_RE = re.compile(
+    r"think-stage|Structured safe execution timeline",
+    re.IGNORECASE,
+)
+# Leading timeline blob: optional damaged/open think tag, intro <p><em>..., then
+# one or more <details class="think-stage">...</details> blocks.
+_TIMELINE_PREFIX_RE = re.compile(
+    r"""
+    \A\s*
+    (?:<\s*think\s*>|<>)?\s*
+    (?:<p>\s*<em>\s*Structured\s+safe\s+execution\s+timeline[\s\S]*?</em>\s*</p>\s*)?
+    (?:<details\b[^>]*class=["']think-stage["'][^>]*>[\s\S]*?</details>\s*)+
+    (?:</\s*think\s*>|</>)?
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
 
 
 @dataclass(frozen=True)
@@ -20,21 +43,124 @@ class SplitOutput:
     reasoning: str
 
 
+def _join_reasoning(*parts: str) -> str:
+    return "\n".join(p.strip() for p in parts if p and p.strip())
+
+
+def _repair_damaged_think_tags(text: str) -> str:
+    """Map ``<>...</>`` wrappers back to ``<think>...</think>`` when present."""
+    if "<>" not in text and "</>" not in text:
+        return text
+    repaired = _DAMAGED_PAIR_RE.sub(
+        lambda m: f"{_OPEN}{m.group(1)}{_CLOSE}",
+        text,
+    )
+    # Orphan opener/closer still used around timeline HTML.
+    if "<>" in repaired or "</>" in repaired:
+        if repaired.lstrip().startswith("<>"):
+            lead = len(repaired) - len(repaired.lstrip())
+            repaired = repaired[:lead] + _OPEN + repaired.lstrip()[2:]
+        if "</>" in repaired:
+            # Replace closers that are not already part of a repaired think pair.
+            repaired = repaired.replace("</>", _CLOSE)
+        repaired = repaired.replace("<>", _OPEN)
+    return repaired
+
+
+def _strip_timeline_html(answer: str) -> tuple[str, str]:
+    """Move grounding timeline HTML from answer into reasoning if still present."""
+    text = answer or ""
+    if not text or not _TIMELINE_HINT_RE.search(text):
+        return text, ""
+    match = _TIMELINE_PREFIX_RE.search(text)
+    if match:
+        timeline = match.group(0)
+        rest = text[match.end() :]
+        timeline = _TAG_RE.sub("", timeline)
+        timeline = timeline.replace("<>", "").replace("</>", "")
+        return rest.strip(), timeline.strip()
+    hint = _TIMELINE_HINT_RE.search(text)
+    assert hint is not None
+    start = hint.start()
+    prefix = text[:start]
+    open_suffix = re.search(r"(?:<\s*think\s*>|<>)\s*$", prefix, re.IGNORECASE)
+    if open_suffix:
+        start = open_suffix.start()
+    last_details = None
+    for m in re.finditer(
+        r"<details\b[^>]*class=[\"']think-stage[\"'][^>]*>[\s\S]*?</details>",
+        text,
+        re.IGNORECASE,
+    ):
+        last_details = m
+    if last_details and last_details.end() > start:
+        end = last_details.end()
+        after = text[end:]
+        close = re.match(r"\s*(?:</\s*think\s*>|</>)", after, re.IGNORECASE)
+        if close:
+            end = end + close.end()
+        timeline = _TAG_RE.sub("", text[start:end])
+        timeline = timeline.replace("<>", "").replace("</>", "")
+        return text[end:].strip(), timeline.strip()
+    return text, ""
+
+
 def split_assistant_output(raw: str | None) -> SplitOutput:
-    text = raw or ""
+    text = _repair_damaged_think_tags(raw or "")
     if not text:
         return SplitOutput("", "")
     blocks = _PAIR_RE.findall(text)
     if blocks:
         reasoning = "\n".join(item.strip() for item in blocks if item.strip())
         answer = _PAIR_RE.sub("", text)
-        return SplitOutput(answer.strip(), reasoning)
+        answer, timeline = _strip_timeline_html(answer.strip())
+        return SplitOutput(answer.strip(), _join_reasoning(reasoning, timeline))
     close_at = text.lower().rfind(_CLOSE)
     if close_at >= 0:
         reasoning = _TAG_RE.sub("", text[:close_at]).strip()
         answer = text[close_at + len(_CLOSE) :].strip()
-        return SplitOutput(answer, reasoning)
+        answer, timeline = _strip_timeline_html(answer)
+        return SplitOutput(answer.strip(), _join_reasoning(reasoning, timeline))
+    answer, timeline = _strip_timeline_html(text)
+    if timeline:
+        return SplitOutput(answer.strip(), timeline)
     return SplitOutput(text, "")
+
+
+def finalize_streamed_output(
+    accumulated_answer: str | None,
+    accumulated_reasoning: str | None = None,
+    final_delta: str | None = None,
+) -> SplitOutput:
+    """Post-stream safety net before persist / outbound answer.delta.
+
+    Re-splits the full buffers even when mid-stream flags/tags were missing or
+    damaged (``<>``), so timeline HTML cannot remain in user-visible answer.
+    """
+    answer = accumulated_answer or ""
+    reasoning = accumulated_reasoning or ""
+    final_text = final_delta or ""
+
+    use_final = bool(final_text) and (
+        (not answer and not reasoning)
+        or bool(_TIMELINE_HINT_RE.search(final_text))
+        or bool(_PAIR_RE.search(final_text))
+        or "<>" in final_text
+        or "<think>" in final_text.lower()
+    )
+    if use_final:
+        split = split_assistant_output(final_text)
+        # Prefer final reasoning when present; otherwise keep prior stream reasoning.
+        return SplitOutput(
+            split.answer,
+            _join_reasoning("" if split.reasoning else reasoning, split.reasoning),
+        )
+
+    if reasoning:
+        combined = f"{_OPEN}{reasoning}{_CLOSE}{answer}"
+    else:
+        combined = answer
+    return split_assistant_output(combined)
 
 
 def public_reasoning(text: str | None) -> str | None:

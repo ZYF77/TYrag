@@ -634,6 +634,8 @@ async def test_authorized_context_policy_uses_acl_scope_and_forwards_soft_contex
         )
 
     assert response.status_code == 200, response.text
+    # authorized_context: retrieve within authorized set G; device is soft context only.
+    # Even with device focus, doc_ids must be full G (available), not device subset F.
     assert _stub_doc_ids(runtime) == {"doc-auth-a", "doc-auth-b"}
     assert runtime.stub._last_completion_body["doc_scope_mode"] == "restrict"
     assert runtime.stub._last_completion_body["business_context"] == {
@@ -653,6 +655,89 @@ async def test_authorized_context_policy_uses_acl_scope_and_forwards_soft_contex
     assert retrieval_context["policy"] == "authorized_context"
     assert retrieval_context["doc_scope_mode"] == "restrict"
     assert retrieval_context["business_context"]["model"] == "MODEL-A"
+
+
+@pytest.mark.asyncio
+async def test_authorized_context_open_mode_uses_full_g(runtime, monkeypatch):
+    """Open / no-device under authorized_context uses full ACL ceiling G."""
+    monkeypatch.setattr(
+        v2_router.config, "retrieval_scope_policy", "authorized_context"
+    )
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-OPEN-A",
+        ragflow_id="doc-open-a",
+        equipment_id="EQ-OPEN-A",
+        fixed_asset_no="FA-OPEN-A",
+    )
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-OPEN-B",
+        ragflow_id="doc-open-b",
+        equipment_id="EQ-OPEN-B",
+        fixed_asset_no="FA-OPEN-B",
+    )
+
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(client)
+        response = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={
+                "clientMessageId": "authorized-open-1",
+                "question": "有哪些维护要点？",
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    assert _stub_doc_ids(runtime) == {"doc-open-a", "doc-open-b"}
+    assert runtime.stub._last_completion_body["doc_scope_mode"] == "restrict"
+
+
+@pytest.mark.asyncio
+async def test_authorized_context_unresolved_does_not_expand_to_full_g(
+    runtime, monkeypatch
+):
+    """Non-Open unresolved must fail closed — never silently expand to full G."""
+    monkeypatch.setattr(
+        v2_router.config, "retrieval_scope_policy", "authorized_context"
+    )
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-UNRES-A",
+        ragflow_id="doc-unres-a",
+        equipment_id="EQ-UNRES-A",
+        fixed_asset_no="FA-UNRES-A",
+    )
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-UNRES-B",
+        ragflow_id="doc-unres-b",
+        equipment_id="EQ-UNRES-B",
+        fixed_asset_no="FA-UNRES-B",
+    )
+
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(
+            client, equipmentId="EQ-UNRES-A"
+        )
+        response = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={
+                "clientMessageId": "authorized-unresolved-1",
+                "question": "请查询 EQ-DOES-NOT-EXIST 的资料",
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "无可靠依据"
+    snapshot = await gw_read(
+        runtime.db,
+        fetchone,
+        "SELECT allowed_doc_ids_json FROM ext_v2_message_run "
+        "WHERE client_message_id=?",
+        ("authorized-unresolved-1",),
+    )
+    assert json.loads(snapshot["allowed_doc_ids_json"]) == []
 
 
 @pytest.mark.asyncio

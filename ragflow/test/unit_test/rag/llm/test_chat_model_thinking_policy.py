@@ -188,3 +188,67 @@ def test_litellm_provider_body_fields_preserve_existing_extra_body():
 
     assert completion_args["extra_body"] == {"seed": 1, "enable_thinking": False}
     assert "enable_thinking" not in completion_args
+
+
+def test_ark_thinking_maps_to_extra_body_when_enabled():
+    """Volc/Base (Ark/Doubao) path: llm_setting.thinking -> extra_body.thinking."""
+    gen_conf, kwargs = _apply_model_family_policies(
+        "ep-ark-doubao-pro",
+        backend="base",
+        gen_conf={"thinking": "enabled", "temperature": 0.3},
+        request_kwargs={"extra_body": {"seed": 7}},
+    )
+
+    assert gen_conf == {"temperature": 0.3}
+    assert "thinking" not in gen_conf
+    assert kwargs["extra_body"] == {"seed": 7, "thinking": {"type": "enabled"}}
+
+
+def test_ark_thinking_maps_to_extra_body_when_disabled():
+    gen_conf, kwargs = _apply_model_family_policies(
+        "doubao-seed-1.6",
+        backend="base",
+        gen_conf={"thinking": "disabled"},
+        request_kwargs={},
+    )
+
+    assert gen_conf == {}
+    assert kwargs["extra_body"]["thinking"] == {"type": "disabled"}
+
+
+def test_ark_thinking_bool_maps_to_extra_body():
+    gen_conf, kwargs = _apply_model_family_policies(
+        "ep-ark-1",
+        backend="base",
+        gen_conf={"thinking": True},
+        request_kwargs={},
+    )
+
+    assert "thinking" not in gen_conf
+    assert kwargs["extra_body"]["thinking"] == {"type": "enabled"}
+
+
+def test_ark_keeps_vendor_default_when_thinking_unset():
+    gen_conf, kwargs = _apply_model_family_policies(
+        "ep-ark-doubao-pro",
+        backend="base",
+        gen_conf={"temperature": 0.1},
+        request_kwargs={},
+    )
+
+    assert gen_conf == {"temperature": 0.1}
+    assert "extra_body" not in kwargs or "thinking" not in (kwargs.get("extra_body") or {})
+
+
+def test_base_clean_conf_preserves_thinking_for_policy():
+    from rag.llm.chat_model import Base
+
+    class _ConcreteBase(Base):
+        pass
+
+    inst = _ConcreteBase.__new__(_ConcreteBase)
+    inst.model_name = "ep-ark-1"
+    cleaned = inst._clean_conf({"temperature": 0.2, "thinking": "enabled", "model_type": "chat"})
+    assert cleaned["thinking"] == "enabled"
+    assert cleaned["temperature"] == 0.2
+    assert "model_type" not in cleaned

@@ -577,6 +577,7 @@ class TestIntegrations:
             "transientAttachmentMaxFiles": 5,
         }
         assert data["runtime"]["settings"]["diagnostics"]["enabled"] is False
+        assert data["runtime"]["settings"]["retrievalScope"]["policy"] == "legacy_device"
         assert data["runtime"]["hotReload"] is True
 
     async def test_runtime_settings_can_be_saved_and_reloaded(
@@ -591,6 +592,7 @@ class TestIntegrations:
             payload["statusReconciler"]["enabled"] = False
             payload["limits"]["fileShareMaxMiB"] = 96
             payload["diagnostics"]["enabled"] = True
+            payload["retrievalScope"]["policy"] = "authorized_context"
             saved = await client.put(
                 f"{BASE}/runtime-settings",
                 headers=_auth(token),
@@ -601,7 +603,9 @@ class TestIntegrations:
         assert saved.json()["settings"]["outbox"]["pollSeconds"] == 5
         assert saved.json()["settings"]["statusReconciler"]["enabled"] is False
         assert saved.json()["settings"]["diagnostics"]["enabled"] is True
+        assert saved.json()["settings"]["retrievalScope"]["policy"] == "authorized_context"
         assert config.rag_diagnostics_enabled is True
+        assert config.retrieval_scope_policy == "authorized_context"
         assert reread.status_code == 200
         assert reread.json()["runtime"]["settings"]["limits"]["fileShareMaxMiB"] == 96
 

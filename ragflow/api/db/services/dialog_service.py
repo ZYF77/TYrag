@@ -2428,6 +2428,13 @@ def _append_public_think_trace(answer: str, stages: list[str] | None = None) -> 
     visible = _extract_visible_answer(answer)
     # Idempotent: fuse-retry decorate may call this again on the same request.
     if 'class="think-stage"' in visible:
+        # Repair damaged empty-name wrappers so Gateway split and the
+        # Thinking lightbulb still see intact think tags.
+        if visible.lstrip().startswith('<>'):
+            lead = len(visible) - len(visible.lstrip())
+            visible = visible[:lead] + '<think>' + visible.lstrip()[2:]
+        if '</>' in visible and '</think>' not in visible:
+            visible = visible.replace('</>', '</think>', 1)
         return visible
     entries = snapshot_think_timeline()
     if not entries and stages:

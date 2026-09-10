@@ -45,6 +45,7 @@ from enterprise.gateway.query.citation_file import (
 )
 from enterprise.gateway.query.answer_split import (
     StreamThinkSplitter,
+    finalize_streamed_output,
     public_reasoning,
     split_assistant_output,
 )
@@ -1090,7 +1091,7 @@ async def _resolve_turn_scope(
     """
     _scope, available = await _available_context_scope(db, principal, conversation)
     recognition = await _gw_read(
-        db, get_recognition_settings, principal.tenant_id, write=False
+        db, get_recognition_settings, principal.tenant_id
     )
     explicit, unresolved = _explicit_equipment_ids(
         question,
@@ -1183,9 +1184,15 @@ async def _resolve_turn_scope(
         entity_ids = []
         selected = available
 
-    # The rollout policy changes only the default device narrowing decision.
-    # ACL, readiness and the current turn's entity resolution remain Gateway-owned.
-    if not unresolved and _current_retrieval_scope_policy() == "authorized_context":
+    # authorized_context: G = available (ACL ceiling). When NOT unresolved,
+    # restore selected = available (full G). Device/model are soft context only;
+    # do NOT hard-narrow doc_ids to device subset F (no G∩F).
+    # Unresolved stays fail-closed (empty selected). restrict + business_context unchanged.
+    # legacy_device keeps device-narrowed selected from the branches above.
+    if (
+        _current_retrieval_scope_policy() == "authorized_context"
+        and not unresolved
+    ):
         selected = available
 
     if persist and (
@@ -2049,6 +2056,7 @@ async def _stream_run_events(
     )
     accumulated = ""
     accumulated_reasoning = ""
+    final_delta: str | None = None
     chunks: list[dict] = []
     citations: list[dict] = []
     upstream_status: str | None = None
@@ -2196,10 +2204,18 @@ async def _stream_run_events(
                                 "content": chunk,
                             },
                         )
-                elif delta and not accumulated and not accumulated_reasoning:
-                    split = split_assistant_output(str(delta))
-                    accumulated = split.answer
-                    accumulated_reasoning = split.reasoning
+                elif delta:
+                    # Final frame may carry think timeline wrappers (or damaged
+                    # empty tags). Capture it; finalize_streamed_output splits later.
+                    final_delta = str(delta)
+
+            # Safety net: strip timeline / think wrappers even if stream flags or
+            # tags were missing/corrupted before persist + outbound answer.delta.
+            finalized = finalize_streamed_output(
+                accumulated, accumulated_reasoning, final_delta
+            )
+            accumulated = finalized.answer
+            accumulated_reasoning = finalized.reasoning
 
             conversation["ragflow_chat_id"] = chat_id
             conversation["ragflow_session_id"] = session_id

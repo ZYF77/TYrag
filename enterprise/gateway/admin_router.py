@@ -29,6 +29,8 @@ from urllib.parse import urlparse
 import httpx
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt
 
 from enterprise.gateway.auth.middleware import require_capability
@@ -136,6 +138,10 @@ class RuntimeDiagnosticsSettings(_RuntimeSettingsModel):
     enabled: StrictBool
 
 
+class RuntimeRetrievalScopeSettings(_RuntimeSettingsModel):
+    policy: Literal["legacy_device", "authorized_context"]
+
+
 class RuntimeSettingsRequest(_RuntimeSettingsModel):
     outbox: RuntimeWorkerSettings
     statusReconciler: RuntimeWorkerSettings
@@ -145,6 +151,7 @@ class RuntimeSettingsRequest(_RuntimeSettingsModel):
     callbackDelivery: RuntimeWorkerSettings
     limits: RuntimeLimitsSettings
     diagnostics: RuntimeDiagnosticsSettings
+    retrievalScope: RuntimeRetrievalScopeSettings
 
 
 async def _runtime_manager(gateway):

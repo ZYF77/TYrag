@@ -96,7 +96,9 @@ def _build_scope_identity_knowledge_block(
             f"{scope_hint}"
             f"{context_hint}"
             "软业务上下文不是授权条件或证据；每份资料的设备事实以 "
-            "document_metadata.equipment_id / fixed_asset_no 为准。"
+            "document_metadata.equipment_id / fixed_asset_no 为准。\n"
+            "已检索到资料片段时，必须依据 Content 回答型号、出厂编号等事实；"
+            "禁止写「无法按该编号匹配」「正文未找到该设备号」等空喊拒答。"
         )
     if not ids:
         return None
