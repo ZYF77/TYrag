@@ -85,6 +85,7 @@ def start_trace(
     query: str,
     reasoning_mode: str,
     stream: bool,
+    request_started: float | None = None,
 ) -> dict[str, Any]:
     trace: dict[str, Any] = {
         "version": 1,
@@ -110,6 +111,17 @@ def start_trace(
             "stream": stream,
         },
     )
+    if request_started is not None:
+        record_timed_event(
+            trace,
+            "gateway_prepare",
+            request_started,
+            {
+                "source": "gateway",
+                "stage": "gateway_prepare",
+                "status": "success",
+            },
+        )
     return trace
 
 

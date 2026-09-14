@@ -30,6 +30,7 @@ model (no tool schema is bound onto it) and its ``async_chat*`` calls take
 the fast non-tool-calling path.
 """
 
+import inspect
 import json
 import logging
 import re
@@ -148,6 +149,7 @@ class RAGTools:
         # the same question is never retrieved twice within one turn (e.g.
         # pre_search vs. an identical claim search in orchestrator_loop).
         self.search_cache: dict = {}
+        self.stream_callback = None
 
         # The two tools the outer LLM may bind. They are NOT auto-bound here —
         # the agentic-search flow drives the graph directly — but callers that
@@ -740,12 +742,19 @@ class RAGTools:
 
         messages = [{"role": "user", "content": question}] if question else []
         final = ""
+        streamed = False
+        callback = self.stream_callback
         async for delta in _strip_think_stream(run_agentic_rag(self, messages)):
             if isinstance(delta, str):
                 final += delta
+                if callback and delta:
+                    result = callback(delta)
+                    if inspect.isawaitable(result):
+                        await result
+                    streamed = True
         for p, r in [(r"\(\**(ID:\d)\**\)", "[\1]")]:
             final = re.sub(p, r, final)
-        return final
+        return "" if streamed else final
 
     @tool
     async def summarize_document(self, doc_id: str) -> list[str]:

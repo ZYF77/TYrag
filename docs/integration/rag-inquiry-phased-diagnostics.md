@@ -35,7 +35,12 @@ Each event has:
 | `attachment_understand` | Upload + image Understand total; **skipped** when no attachments |
 | `chat_session` | Session ensure/reuse; `binding=warmup_hit\|ensure_fallback` |
 | `upstream_request` / `ragflow_request` | Full RAGFlow completion/stream call |
-| `stream_first_token` | SSE: first streamed token/think marker (TTFT). JSON: derived from upstream `llm.ttftMs` when present (`status=derived_from_upstream_llm`) |
+| `gateway_prepare` | From ASGI request receipt to the trace opening; covers request parsing, lock/scope preparation and run reservation when a run is created |
+| `run_started` | Server emits the `run.started` event; its duration is measured from request receipt |
+| `stream_first_reasoning` | First non-empty `reasoning.delta`; absent when no reasoning is emitted |
+| `stream_first_answer` | First non-empty `answer.delta`; this is the first useful answer-body wait point |
+| `http_response` | Response headers and first non-empty response body send times when available; these are server send times, not browser receive times |
+| `stream_first_token` | Compatibility metric: first streamed token or think marker (TTFT). Prefer `stream_first_reasoning` / `stream_first_answer` to distinguish the two |
 | `citation_projection` | `_project_citations` (download tickets / public shape) |
 | `outcome` | Final business outcome |
 
@@ -60,6 +65,6 @@ Never put prompt / knowledge / chunk body / tool args / tool results into the tr
 
 ## Gaps
 
-- JSON true HTTP first-byte is not instrumented at the transport layer; TTFT uses upstream `llm.ttftMs` when available.
+- `http_response` is populated in the run trace when the response has started before the run is finalized; the audit record remains the source for transport timing when a JSON response is finalized before its body is sent.
 - Per-tool full timelines beyond harness `ResearchToolSession` / text fallback are aggregate-oriented (`toolCallCount`, `toolDurationMsTotal`); tool args/results intentionally omitted.
 - List-messages / single-citation projection is not part of the ask-path phase trace.

@@ -561,12 +561,27 @@ def _attachment_observation_texts(
 
 
 _REASONING_MODE_TO_INT = {
+    "simple": 0,
     "low": 1,
     "medium": 2,
     "high": 3,
     "ultra": 4,
 }
 ReasoningMode = Literal["simple", "low", "medium", "high", "ultra"]
+_JWT_REASONING_MODES = {"simple", "medium", "high"}
+
+
+class _ReasoningModeDenied(ValueError):
+    """Raised before attachment bytes or a message run are persisted."""
+
+
+def _validate_reasoning_mode_access(
+    principal: UserPrincipal, reasoning_mode: ReasoningMode
+) -> None:
+    """Restrict externally authenticated callers without trusting body labels."""
+    auth_source = getattr(principal, "auth_source", "jwt")
+    if auth_source != "console" and reasoning_mode not in _JWT_REASONING_MODES:
+        raise _ReasoningModeDenied(reasoning_mode)
 
 
 def _v2_completion_kwargs(
@@ -598,9 +613,7 @@ def _v2_completion_kwargs(
         kwargs["files"] = files
     if internet:
         kwargs["internet"] = True
-    mapped = _REASONING_MODE_TO_INT.get(reasoning_mode)
-    if mapped is not None:
-        kwargs["reasoning"] = mapped
+    kwargs["reasoning"] = _REASONING_MODE_TO_INT[reasoning_mode]
     if (
         isinstance(retrieval_context, dict)
         and retrieval_context.get("doc_scope_mode") == "restrict"
@@ -1392,6 +1405,26 @@ def _record_json_first_byte_from_upstream(trace: dict | None) -> None:
     )
 
 
+def _record_http_response_timing(trace: dict | None, request: Request | None) -> None:
+    if not isinstance(trace, dict) or request is None:
+        return
+    try:
+        timing = getattr(request.state, "gateway_http_timing", None)
+        if not isinstance(timing, dict) or not timing:
+            return
+        record_event(
+            trace,
+            "http_response",
+            {
+                "source": "gateway",
+                "stage": "http_response",
+                **timing,
+            },
+        )
+    except Exception:
+        return
+
+
 async def _ensure_ragflow_session(
     db,
     principal: UserPrincipal,
@@ -1672,6 +1705,14 @@ async def _prepare_message_run(
     pending: list[PendingAttachment] | None = None,
 ) -> tuple[dict, str, dict | None, JSONResponse | None]:
     pending = pending or []
+    try:
+        _validate_reasoning_mode_access(principal, req.reasoningMode)
+    except _ReasoningModeDenied:
+        return conversation, "", None, _error(
+            403,
+            "REASONING_MODE_NOT_ALLOWED",
+            "This authentication source cannot use the selected reasoning mode",
+        )
     replay, response = await _replay_or_pending(db, principal, conversation, req, pending)
     if replay is not None or response is not None:
         return conversation, "", replay, response
@@ -1729,6 +1770,7 @@ async def _save_failed_run(
     code: str,
     status_code: int,
     message: str,
+    request: Request | None = None,
 ) -> JSONResponse:
     await _gw_write(db, v2_store.add_message,
         message_id=assistant_message_id,
@@ -1747,6 +1789,7 @@ async def _save_failed_run(
             "body": json.loads(error_response.body),
         }
     }
+    _record_http_response_timing(run.get("_diagnostics"), request)
     diagnostics = finish_trace(
         run.get("_diagnostics"), outcome="failed", error_code=code
     )
@@ -1819,6 +1862,11 @@ async def _execute_json_run(
                 query=question,
                 reasoning_mode=req.reasoningMode,
                 stream=False,
+                request_started=(
+                    getattr(request.state, "gateway_request_started", None)
+                    if request is not None
+                    else None
+                ),
             )
         except Exception:
             run["_diagnostics"] = None
@@ -1928,6 +1976,7 @@ async def _execute_json_run(
                         code="RAGFLOW_TOOL_PROTOCOL_INVALID",
                         status_code=502,
                         message=_TOOL_PROTOCOL_ERROR_MESSAGE,
+                        request=request,
                     )
                 split = split_assistant_output(raw_answer)
                 if _contains_tool_protocol_artifact(split.answer) or _contains_tool_protocol_artifact(
@@ -1943,6 +1992,7 @@ async def _execute_json_run(
                         code="RAGFLOW_TOOL_PROTOCOL_INVALID",
                         status_code=502,
                         message=_TOOL_PROTOCOL_ERROR_MESSAGE,
+                        request=request,
                     )
                 mapped = _mapped_llm_provider_failure(split.answer)
                 if mapped is not None:
@@ -1950,6 +2000,7 @@ async def _execute_json_run(
                     return None, await _save_failed_run(
                         db, principal, conversation, req, run, assistant_message_id,
                         code=code, status_code=status_code, message=message,
+                        request=request,
                     )
                 answer = sanitize_citation_markers(split.answer)
                 reasoning = public_reasoning(split.reasoning)
@@ -2057,12 +2108,14 @@ async def _execute_json_run(
             return None, await _save_failed_run(
                 db, principal, conversation, req, run, assistant_message_id,
                 code=code, status_code=status_code, message=message,
+                request=request,
             )
         except Exception as exc:
             logger.exception("json message run failed err_type=%s", type(exc).__name__)
             return None, await _save_failed_run(
                 db, principal, conversation, req, run, assistant_message_id,
                 code="INTERNAL_ERROR", status_code=500, message="Message run failed",
+                request=request,
             )
     finally:
         await cleanup_ragflow_files(pending, client, db)
@@ -2087,9 +2140,30 @@ async def _stream_run_events(
                 query=question,
                 reasoning_mode=req.reasoningMode,
                 stream=True,
+                request_started=(
+                    getattr(request.state, "gateway_request_started", None)
+                    if request is not None
+                    else None
+                ),
             )
         except Exception:
             run["_diagnostics"] = None
+    request_started = (
+        getattr(request.state, "gateway_request_started", None)
+        if request is not None
+        else None
+    )
+    if request_started is not None:
+        record_timed_event(
+            run.get("_diagnostics"),
+            "run_started",
+            request_started,
+            {
+                "source": "gateway",
+                "stage": "run_started_emit",
+                "status": "success",
+            },
+        )
     yield _sse(
         "run.started",
         {
@@ -2115,6 +2189,8 @@ async def _stream_run_events(
     live_streamed = False
     emitted_answer = ""
     first_stream_output_recorded = False
+    first_reasoning_recorded = False
+    first_answer_recorded = False
     try:
         question, client, observations = await _retrieval_question(
             db,
@@ -2234,9 +2310,33 @@ async def _stream_run_events(
                         end_to_think=bool(data.get("end_to_think")),
                     ):
                         if kind == "reasoning":
+                            if chunk and not first_reasoning_recorded:
+                                record_timed_event(
+                                    run.get("_diagnostics"),
+                                    "stream_first_reasoning",
+                                    upstream_started,
+                                    {
+                                        "source": "gateway",
+                                        "stage": "stream_first_reasoning",
+                                        "status": "success",
+                                    },
+                                )
+                                first_reasoning_recorded = True
                             accumulated_reasoning += chunk
                             event = "reasoning.delta"
                         else:
+                            if chunk and not first_answer_recorded:
+                                record_timed_event(
+                                    run.get("_diagnostics"),
+                                    "stream_first_answer",
+                                    upstream_started,
+                                    {
+                                        "source": "gateway",
+                                        "stage": "stream_first_answer",
+                                        "status": "success",
+                                    },
+                                )
+                                first_answer_recorded = True
                             accumulated += chunk
                             emitted_answer += chunk
                             event = "answer.delta"
@@ -2277,6 +2377,7 @@ async def _stream_run_events(
                     code="RAGFLOW_TOOL_PROTOCOL_INVALID",
                     status_code=502,
                     message=_TOOL_PROTOCOL_ERROR_MESSAGE,
+                    request=request,
                 )
                 if live_streamed and emitted_answer:
                     yield _sse(
@@ -2306,6 +2407,7 @@ async def _stream_run_events(
                 await _save_failed_run(
                     db, principal, conversation, req, run, assistant_message_id,
                     code=code, status_code=status_code, message=message,
+                    request=request,
                 )
                 if live_streamed and emitted_answer:
                     yield _sse(
@@ -2409,6 +2511,7 @@ async def _stream_run_events(
             result["_public_citations"] = public_citations
         else:
             public_citations = citations
+        _record_http_response_timing(run.get("_diagnostics"), request)
         diagnostics = finish_trace(run.get("_diagnostics"), outcome=status)
         if diagnostics:
             result["_diagnostics"] = diagnostics
@@ -2458,6 +2561,7 @@ async def _stream_run_events(
             db, principal, conversation, req, run, assistant_message_id,
             code="RUN_INTERRUPTED", status_code=503,
             message="Message run was interrupted before completion",
+            request=request,
         )
         raise
     except (RAGFlowAPIError, _FormalQueryError) as exc:
@@ -2480,6 +2584,7 @@ async def _stream_run_events(
         await _save_failed_run(
             db, principal, conversation, req, run, assistant_message_id,
             code=code, status_code=status_code, message=message,
+            request=request,
         )
         if live_streamed and emitted_answer:
             yield _sse(
@@ -2504,6 +2609,7 @@ async def _stream_run_events(
             db, principal, conversation, req, run, assistant_message_id,
             code="RAGFLOW_UNAVAILABLE", status_code=503,
             message="Query engine unavailable",
+            request=request,
         )
         if live_streamed and emitted_answer:
             yield _sse(
@@ -2528,6 +2634,7 @@ async def _stream_run_events(
         await _save_failed_run(
             db, principal, conversation, req, run, assistant_message_id,
             code="INTERNAL_ERROR", status_code=500, message="Message run failed",
+            request=request,
         )
         if live_streamed and emitted_answer:
             yield _sse(
@@ -2650,6 +2757,7 @@ async def _read_upload_bytes(upload, max_bytes: int) -> bytes:
 
 async def _parse_multipart_message(
     request: Request,
+    principal: UserPrincipal,
 ) -> tuple[CreateMessageRequest, list[PendingAttachment]]:
     form = await request.form()
     try:
@@ -2659,6 +2767,7 @@ async def _parse_multipart_message(
         if hasattr(raw_meta, "read"):
             raw_meta = (await raw_meta.read()).decode("utf-8", "replace")
         meta = MessageAttachmentMetadata.model_validate(json.loads(str(raw_meta)))
+        _validate_reasoning_mode_access(principal, meta.reasoningMode)
         if meta.suggestionId is not None or meta.contextVersion is not None:
             raise ValueError("Suggestions cannot include files")
         uploads = [item for item in form.getlist("files") if item not in (None, "")]
@@ -2737,9 +2846,15 @@ async def create_message(
                 503, "ATTACHMENT_STORAGE_UNAVAILABLE", ATTACHMENT_DISABLED_MESSAGE
             )
         try:
-            req, pending = await _parse_multipart_message(request)
+            req, pending = await _parse_multipart_message(request, principal)
         except TransientAttachmentError as exc:
             return _error(exc.status_code, exc.code, exc.message)
+        except _ReasoningModeDenied:
+            return _error(
+                403,
+                "REASONING_MODE_NOT_ALLOWED",
+                "This authentication source cannot use the selected reasoning mode",
+            )
         except (ValidationError, json.JSONDecodeError, ValueError):
             return _error(422, "VALIDATION_ERROR", "Invalid multipart message")
         request.state.inquiry_audit_body = _inquiry_audit_body(req, pending)
@@ -2752,6 +2867,14 @@ async def create_message(
             req = CreateMessageRequest.model_validate(payload)
         except ValidationError as exc:
             raise RequestValidationError(exc.errors()) from exc
+        try:
+            _validate_reasoning_mode_access(principal, req.reasoningMode)
+        except _ReasoningModeDenied:
+            return _error(
+                403,
+                "REASONING_MODE_NOT_ALLOWED",
+                "This authentication source cannot use the selected reasoning mode",
+            )
 
     lock = await _conversation_lock(conversation_id)
     async with lock:

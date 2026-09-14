@@ -354,7 +354,7 @@ def build_agentic_graph(tools, token_queue: asyncio.Queue, gen_conf: dict | None
                 token_queue.put_nowait(tok)
         except Exception:
             _LOG.exception("formalize_answer: stream failed")
-            token_queue.put_nowait("I'm sorry, I encountered an error while composing the answer.")
+            raise
 
         return {"final_answer": ""}
 
@@ -398,23 +398,30 @@ async def run_agentic_rag(tools, messages: list, max_loops: int = 3, gen_conf: d
                 {"messages": messages},
                 {"recursion_limit": max(25, max_loops * 8)},
             )
-        except Exception:
+        except Exception as exc:
             logging.exception("run_agentic_rag: graph execution failed")
-            holder["error"] = True
+            holder["error"] = exc
         finally:
             token_queue.put_nowait(_SENTINEL)
 
     task = asyncio.create_task(_drive())
-    produced = False
     try:
         while True:
             item = await token_queue.get()
             if item is _SENTINEL:
                 break
-            produced = True
             yield item
     finally:
-        await task
+        if not task.done():
+            task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    error = holder.get("error")
+    if error is not None:
+        raise RuntimeError("Agentic RAG graph execution failed") from error
 
     state = holder.get("state") or {}
     final_kb = state.get("kbinfos")
@@ -424,6 +431,3 @@ async def run_agentic_rag(tools, messages: list, max_loops: int = 3, gen_conf: d
         tools.kbinfos = final_kb
 
     _LOG.info("[Agentic RAG] Research complete — %d passage(s) gathered after %d round(s).", len((state.get("kbinfos") or {}).get("chunks", [])), state.get("loop", 0))
-
-    if not produced and holder.get("error"):
-        yield "I couldn't complete the search due to an internal error."

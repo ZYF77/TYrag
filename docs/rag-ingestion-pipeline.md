@@ -1,6 +1,6 @@
 # 适配当前设备资料的 ingestion pipeline
 
-日期：2026-09-08。本文是基于当前源码、接口及非敏感样本类型形成的配置与验收方案，不是已部署流水线。配套：[聊天五档流程与配置说明](rag-current-guide.md)。
+日期：2026-09-12，按 HEAD bce11900 及当前工作区复核。本文是基于当前源码、接口及非敏感样本类型形成的配置与验收方案，不是已部署流水线。配套：[聊天五档流程与配置说明](rag-current-guide.md)、[部署与持久化复核](rag-architecture-deployment-review.md)。
 
 ## 1. 面向哪些内容
 
@@ -15,7 +15,7 @@
 | 参数、备件、检查表 | 哪个工况对应哪个值 | 表标题、表头、单位、行内容、脚注 |
 | 流程图/示意图 | 分支如何走、部件在哪里 | 图片、标签、条件分支、标题和原页 |
 
-设备身份使用 Gateway 权威 metadata/Scope，不要求每个正文块都有设备号，也不让 OCR/LLM 猜测后覆盖身份。设备主档与每份附件各用自己的逻辑文档 ID，通过设备关系进入允许范围。
+设备身份以每份文档的可信 metadata 为准，不要求正文块都含设备号。legacy_device 按设备选择；authorized_context 中会话设备/型号只是软上下文，不能覆盖证据设备，也不能代替权限。当前 ACL 为同租户开放的联调策略，正式细粒度授权尚未落实。设备主档与每份附件保持各自逻辑文档 ID。
 
 ## 2. 推荐整体流程
 
@@ -72,7 +72,7 @@ flowchart LR
 
 传统配置用 chunk_token_num/delimiter/children_delimiter；可视化节点用 chunk_token_size/delimiters/children_delimiters，不能原样互抄。Embedding 使用有效模型配置，本文不指定未核验的模型名称或服务地址。
 
-JSON 首轮继续使用已实现的 naive → JsonParser，不套 PDF Parser 配置。改为自定义 JSON Pipeline 时需另外验证输入输出与字段组保留。
+JSON 首轮继续使用已实现的 naive → JsonParser，不套 PDF Parser 配置。JsonParser 内部按序列化字符数分组并将传入大小乘 2，之后 naive 还有合并步骤；所以 512 是传入配置值，不能宣称每个 JSON 块严格 512 tokens。改为自定义 JSON Pipeline 时需另外验证输入输出与字段组保留。
 
 ## 4. 按文档类型给出配置起点
 
@@ -80,7 +80,7 @@ JSON 首轮继续使用已实现的 naive → JsonParser，不套 PDF Parser 配
 
 | 内容组 | 基线路线与大小 | 重点约束 | 何时调整 |
 |---|---|---|---|
-| 主档 JSON | naive/JsonParser，512 tokens，重叠 0 | 短对象尽量完整，字段名、值、单位同块；关键词/问题生成先关 | 大对象召回不准时比较 256/512 或按已有字段组组织源 JSON，不硬截断键值 |
+| 主档 JSON | naive/JsonParser，chunk_token_num=512 起点，重叠 0 | 短对象尽量完整，字段名、值、单位同块；关键词/问题生成先关 | 大对象召回不准时比较 256/512 或按已有字段组组织源 JSON，不硬截断键值 |
 | 单条维修/点检记录 | 256–512 tokens，重叠 0 | 保留日期、现象、措施、结果；按逻辑记录组织 | 太长才按有意义小节分块，不把不同工单随机拼接 |
 | 操作规程 | DeepDOC+naive，512 tokens，10% 重叠 | 段落分隔，步骤、前提和警告在同一可见上下文 | 跨块丢条件时试 768 或父子切片 |
 | 长手册 | 同上 | 先保留原文基础块 | 章节定位差时试 TOC；上下文不足时试 768–1024 父块加段落子块 |
@@ -132,6 +132,8 @@ JSON 首轮继续使用已实现的 naive → JsonParser，不套 PDF Parser 配
 
 当前 readiness 检查要求 current_version、active、sync ready、RAGFlow ID 齐全；受管理 Feed 还要求 pipeline DONE、event completed、source AVAILABLE 和质量通过，ACL 单独判断。RAGFlow DONE 或 chunks 非空不是完整发布证明。
 
+临时聊天附件的字节在 S3 兼容对象存储，元数据在 Gateway PostgreSQL，不等于已存入永久知识库；生产模板目前没有完整列出 S3_ENDPOINT、凭据和附件 bucket，新环境需补齐，详见部署复核。
+
 技术失败复用现有一次技术解析重试等机制；业务质量失败复核，不无限重试同一坏结果。新版本质量未通过时，验证旧有效版本继续可用；通过后再验证版本提升及重复回调幂等。
 
 ## 7. 质量门与验收
@@ -151,7 +153,7 @@ JSON 首轮继续使用已实现的 naive → JsonParser，不套 PDF Parser 配
 | 成本/延迟 | 块数、解析耗时、模型调用、聊天耗时 | 按业务时延选择策略，不默认 ultra |
 | 生命周期 | 重复投喂、新版失败与成功、重复回调 | 不重复建立逻辑知识，不发布失败版本 |
 
-先固定 embedding、simple 检索设置，比较 512/10% 基线与一个候选方案。索引证据通过后再比较五档聊天，避免混淆入库与推理效果。Recall@k 目标需结合标注和业务要求确定，本文不伪造效果百分比。
+先固定 embedding、simple 检索设置，比较 512/10% 基线与一个候选方案。索引证据通过后再比较外部 JWT 的 simple/medium/high；low/ultra 使用 Console 或内部评测路径，避免混淆入库与推理效果。Recall@k 目标需结合标注和业务要求确定，本文不伪造效果百分比。
 
 ### 现有工具入口
 

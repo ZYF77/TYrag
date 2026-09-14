@@ -27,6 +27,10 @@ class UserPrincipal:
     token_expires_at: int = 0
     mapping_status: str = "active"
     capabilities: tuple[str, ...] = ()
+    # Authentication provenance is server-derived and intentionally omitted
+    # from public identity payloads. It is used for policy decisions that must
+    # not trust request-body caller labels.
+    auth_source: str = "jwt"
 
     @classmethod
     def from_validated_claims(

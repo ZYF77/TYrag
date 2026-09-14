@@ -38,7 +38,12 @@ from api.db.joint_services.tenant_model_service import (
 )
 from api.db.services.chunk_feedback_service import ChunkFeedbackService
 from api.db.services.conversation_service import ConversationService, structure_answer
-from api.db.services.dialog_service import DialogService, gen_mindmap, rag_agent
+from api.db.services.dialog_service import (
+    DialogService,
+    _normalize_reasoning_value,
+    gen_mindmap,
+    rag_agent,
+)
 from api.db.services.knowledgebase_service import KnowledgebaseService, validate_dataset_embedding_models
 from api.db.services.llm_service import LLMBundle
 from api.db.services.search_service import SearchService
@@ -1252,6 +1257,12 @@ async def session_completion(chat_id_in_arg=""):
     request_messages, request_msg = normalized
     diagnostics_query = str(request_msg[-1].get("content") or "")
     diagnostics_reasoning = req.get("reasoning")
+    try:
+        normalized_reasoning = _normalize_reasoning_value(diagnostics_reasoning)
+    except ValueError as exc:
+        return get_data_error_result(code=RetCode.ARGUMENT_ERROR, message=str(exc))
+    if normalized_reasoning is not None:
+        req["reasoning"] = normalized_reasoning
     pass_all_history_messages = _get_bool_request_flag(req, "pass_all_history_messages", "pass_all_history", default=False)
     store_history_messages = _get_bool_request_flag(req, "store_history_messages", "store_history", default=True)
     if not store_history_messages and not pass_all_history_messages:

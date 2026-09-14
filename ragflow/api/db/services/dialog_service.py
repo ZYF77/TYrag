@@ -154,8 +154,39 @@ def _buffer_candidate_tokens(grounding_enabled: bool) -> bool:
     return bool(grounding_enabled and _IDENTIFIER_NUMERIC_FUSE_ENABLED)
 
 
+def _normalize_reasoning_value(value):
+    """Normalize the public reasoning value without treating zero as missing."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        normalized = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            normalized = int(value.strip())
+        except ValueError as exc:
+            raise ValueError("reasoning must be an integer from 0 to 4") from exc
+    else:
+        raise ValueError("reasoning must be an integer from 0 to 4")
+    if normalized not in range(5):
+        raise ValueError("reasoning must be an integer from 0 to 4")
+    return normalized
+
+
+def _requested_reasoning(kwargs):
+    if "reasoning" not in kwargs or kwargs.get("reasoning") is None:
+        return None
+    normalized = _normalize_reasoning_value(kwargs.get("reasoning"))
+    kwargs["reasoning"] = normalized
+    return normalized
+
+
 def _use_simple_chat(prompt_config, kwargs) -> bool:
-    return not prompt_config.get("reasoning", 0) and not kwargs.get("reasoning")
+    requested = _requested_reasoning(kwargs)
+    if requested is not None:
+        return requested == 0
+    return not prompt_config.get("reasoning", 0)
 
 
 def _log_grounding_guard(result, *, abstain: bool) -> None:
@@ -2771,6 +2802,7 @@ async def gen_mindmap(question, kb_ids, tenant_id, search_config={}):
 async def rag_agent(dialog, messages, stream=True, **kwargs):
     prompt_config = dialog.prompt_config or {}
     assert messages[-1]["role"] == "user", "The last content of this conversation is not from user."
+    requested_reasoning = _requested_reasoning(kwargs)
     grounding_enabled = _grounding_requested(kwargs.get("grounding_version"))
     if grounding_enabled:
         try:
@@ -2806,16 +2838,18 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
     use_web_search = _should_use_web_search(prompt_config, kwargs.get("internet"))
     logging.debug("web_search kb=%s configured=%s internet=%r enabled=%s", bool(dialog.kb_ids), has_web_search_provider(prompt_config), kwargs.get("internet"), use_web_search)
     tenant_ids = list(set([kb.tenant_id for kb in kbs]))
-    # "reasoning" arrives as "1".."4" mapping to the ordered THINKING_MODES
-    # (low, medium, high, ultra); fall back to "medium" on anything else.
+    # "reasoning" arrives as 1..4 mapping to the ordered THINKING_MODES
+    # (low, medium, high, ultra). A missing value keeps the existing session
+    # default; an explicit value is authoritative, including zero.
     from rag.advanced_rag.harness.config import THINKING_MODES
 
     _mode_labels = list(THINKING_MODES.keys())
-    try:
-        _n = int(str(kwargs.get("reasoning")).strip())
-        thinking_mode = _mode_labels[_n - 1] if 1 <= _n <= len(_mode_labels) else "medium"
-    except (TypeError, ValueError):
-        thinking_mode = "medium"
+    _n = requested_reasoning
+    thinking_mode = (
+        _mode_labels[_n - 1]
+        if _n is not None and 1 <= _n <= len(_mode_labels)
+        else "medium"
+    )
 
     gen_conf = dialog.llm_setting or {}
     doc_scope = None
@@ -2922,6 +2956,7 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
     # small models mangle or drop, so the client receives nothing.
     if getattr(chat_mdl, "mdl", None) is not None:
         chat_mdl.mdl.terminal_tools = {"rag"}
+        chat_mdl.mdl.terminal_tool_errors_fatal = True
     if stream:
         # Surface the agentic pipeline's bracket-tagged progress logs to the
         # client as <think> content, interleaved with the real token stream.
@@ -2935,6 +2970,11 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
         install_think_log_handler()
         event_queue: asyncio.Queue = asyncio.Queue()
         loop = asyncio.get_running_loop()
+
+        async def _emit_rag_stream(value: str):
+            event_queue.put_nowait(("rag_stream", value))
+
+        rag_tools.stream_callback = _emit_rag_stream
         think_stages: list[str] = []
         think_stages_seen: set[str] = set()
 
@@ -2965,9 +3005,10 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
                     stream_iter = chat_mdl.async_chat_streamly_delta(rag_tools.sys_prompt(), messages, gen_conf)
                     async for kind, value, state in _stream_with_think_delta(stream_iter):
                         event_queue.put_nowait(("stream", kind, value, state))
-            except Exception:
+            except Exception as exc:
                 generation_status = "failed"
                 logging.exception("rag_agent: agentic stream failed")
+                event_queue.put_nowait(("stream_error", exc))
             finally:
                 record_timed_rag_stage(
                     "answer_generation",
@@ -2980,6 +3021,7 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
         token = set_think_log_sink(_log_sink, redact_content=grounding_enabled)
         drive = asyncio.create_task(_drive_stream())
         last_state = None
+        rag_stream_answer = ""
         log_think_open = False
         hold_tokens = _buffer_candidate_tokens(grounding_enabled)
         try:
@@ -2993,8 +3035,22 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
                         log_think_open = True
                     yield {"answer": item[1] + "\n", "reference": {}, "audio_binary": None, "final": False}
                     continue
+                if item[0] == "stream_error":
+                    raise item[1]
                 if item[0] == "stream_done":
                     break
+                if item[0] == "rag_stream":
+                    value = str(item[1] or "")
+                    if not value:
+                        continue
+                    rag_stream_answer += value
+                    if hold_tokens:
+                        continue
+                    if log_think_open:
+                        yield {"answer": "", "reference": {}, "audio_binary": None, "final": False, "end_to_think": True}
+                        log_think_open = False
+                    yield {"answer": value, "reference": {}, "audio_binary": tts(tts_mdl, value), "final": False}
+                    continue
                 _, kind, value, state = item
                 if state is not None:
                     last_state = state
@@ -3014,6 +3070,7 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
                 log_think_open = False
         finally:
             reset_think_log_sink(token)
+            rag_tools.stream_callback = None
             if not drive.done():
                 drive.cancel()
             try:
@@ -3023,7 +3080,7 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
             except Exception:
                 logging.exception("rag_agent: drive task error")
 
-        full_answer = last_state.full_text if last_state else ""
+        full_answer = rag_stream_answer or (last_state.full_text if last_state else "")
         if full_answer:
             # Grounding: decorate_answer attaches the structured timeline once.
             # Non-grounding: keep the flat sanitized stage prepend for the lightbulb.

@@ -24,4 +24,6 @@ False abstain means the knowledge base has relevant chunks but the answer used t
 
 Re-enable Identifier Guard only if this eval still shows fabricated IDs. Do not restore Numeric Guard from this table alone.
 
-Runner: `python enterprise/scripts/eval_reasoning_modes.py` (needs a live Gateway + EAM JWT; dry-run prints the matrix without calling LLM).
+Runner: `python enterprise/scripts/eval_reasoning_modes.py`. The EAM JWT path
+can run medium/high; ultra requires a Gateway Console session or an internal
+evaluation path. Dry-run prints the matrix without calling LLM.

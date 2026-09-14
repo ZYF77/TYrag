@@ -35,6 +35,11 @@ const STAGE_LABELS: Record<string, string> = {
   rerank: 'Rerank 重排序',
   sql_generation: 'SQL 查询',
   stream_first_token: '首个流式输出',
+  stream_first_reasoning: '首个思考输出',
+  stream_first_answer: '首段正文输出',
+  run_started: 'run.started 发送',
+  gateway_prepare: 'Gateway 请求准备',
+  http_response: 'HTTP 首响应',
   toc_enhance: '目录增强',
   web_search: '联网检索',
 };
@@ -56,6 +61,27 @@ function eventDurationMs(event: RagDiagnosticsPanelEvent): number | null {
   const topLevel = numberValue(event.durationMs);
   if (topLevel !== null) return topLevel;
   return numberValue(event.data.durationMs);
+}
+
+function eventAtMs(events: RagDiagnosticTraceDetail['diagnostics']['events'], type: string): number | null {
+  const event = events.find((item) => item.type === type);
+  return event ? numberValue(event.atMs) : null;
+}
+
+function eventDurationByType(events: RagDiagnosticTraceDetail['diagnostics']['events'], type: string): number | null {
+  const event = events.find((item) => item.type === type);
+  return event ? eventDurationMs(event) : null;
+}
+
+function eventElapsedFromRequest(events: RagDiagnosticTraceDetail['diagnostics']['events'], type: string): number | null {
+  const atMs = eventAtMs(events, type);
+  if (atMs === null) return null;
+  return atMs + (eventDurationByType(events, 'gateway_prepare') ?? 0);
+}
+
+function eventDurationByStage(events: RagDiagnosticTraceDetail['diagnostics']['events'], stage: string): number | null {
+  const event = events.find((item) => item.data.stage === stage);
+  return event ? eventDurationMs(event) : null;
 }
 
 function eventLabel(event: RagDiagnosticsPanelEvent): string {
@@ -270,6 +296,14 @@ export function RagDiagnosticsPanel() {
                 <div><span>总耗时</span><strong>{detail.data?.diagnostics.durationMs == null ? '未计时' : `${Math.round(detail.data.diagnostics.durationMs)}ms`}</strong></div>
                 <div><span>记录时间</span><strong>{detail.data ? formatTime(detail.data.createdAt) : '—'}</strong></div>
               </div>
+              {detail.data && (
+                <div className="rag-diagnostics-timing-summary">
+                  <div><span>run.started</span><strong>{eventDurationByType(detail.data.diagnostics.events, 'run_started') == null ? '未记录' : String(Math.round(eventDurationByType(detail.data.diagnostics.events, 'run_started')!)) + 'ms'}</strong></div>
+                  <div><span>首个思考</span><strong>{eventElapsedFromRequest(detail.data.diagnostics.events, 'stream_first_reasoning') == null ? '未记录' : String(Math.round(eventElapsedFromRequest(detail.data.diagnostics.events, 'stream_first_reasoning')!)) + 'ms'}</strong></div>
+                  <div><span>首段正文</span><strong>{eventElapsedFromRequest(detail.data.diagnostics.events, 'stream_first_answer') == null ? '未记录' : String(Math.round(eventElapsedFromRequest(detail.data.diagnostics.events, 'stream_first_answer')!)) + 'ms'}</strong></div>
+                  <div><span>正文输出阶段</span><strong>{eventDurationByStage(detail.data.diagnostics.events, 'answer_generation') == null ? '未记录' : String(Math.round(eventDurationByStage(detail.data.diagnostics.events, 'answer_generation')!)) + 'ms'}</strong></div>
+                </div>
+              )}
 
               {detail.error && <PanelError error={detail.error} onRetry={() => void loadDetail(runId)} />}
               {detail.status === 'processing' && <p className="console-empty">正在读取诊断记录…</p>}

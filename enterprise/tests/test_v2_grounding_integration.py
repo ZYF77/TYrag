@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from enterprise.gateway.auth.user_principal import UserPrincipal
 from enterprise.gateway.query import v2_router
 from enterprise.gateway.query.citation_select import ABSTAIN_PHRASE
 from enterprise.tests.test_v2_conversation_contract import (
@@ -441,7 +442,7 @@ async def test_v2_unrelated_fault_code_abstain_from_ragflow(runtime):
 @pytest.mark.parametrize(
     ("reasoning_mode", "expected"),
     [
-        ("simple", None),
+        ("simple", 0),
         ("low", 1),
         ("medium", 2),
         ("high", 3),
@@ -472,10 +473,7 @@ async def test_v2_reasoning_mode_maps_into_completion_body(
         )
         assert response.status_code == 200
         assert runtime.stub._last_completion_body["grounding_version"] == 1
-    if expected is None:
-        assert "reasoning" not in runtime.stub._last_completion_body
-    else:
-        assert runtime.stub._last_completion_body["reasoning"] == expected
+    assert runtime.stub._last_completion_body["reasoning"] == expected
 
 
 @pytest.mark.asyncio
@@ -500,6 +498,44 @@ async def test_v2_reasoning_mode_rejects_unknown_value(runtime):
             },
         )
     assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reasoning_mode", ["low", "ultra"])
+async def test_jwt_reasoning_mode_restriction_rejects_low_and_ultra(
+    runtime, reasoning_mode
+):
+    await _insert_document(
+        runtime.db,
+        external_id=f"DOC-REASONING-DENIED-{reasoning_mode}",
+        ragflow_id=f"doc-reasoning-denied-{reasoning_mode}",
+        equipment_id=f"EQ-REASONING-DENIED-{reasoning_mode}",
+        fixed_asset_no=f"FA-REASONING-DENIED-{reasoning_mode}",
+    )
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(
+            client, equipmentId=f"EQ-REASONING-DENIED-{reasoning_mode}"
+        )
+        response = await client.post(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            json={
+                "clientMessageId": f"mode-denied-{reasoning_mode}",
+                "question": "问题",
+                "reasoningMode": reasoning_mode,
+            },
+        )
+    assert response.status_code == 403
+    assert response.json()["code"] == "REASONING_MODE_NOT_ALLOWED"
+
+
+def test_console_principal_can_use_all_reasoning_modes():
+    principal = UserPrincipal(
+        tenant_id="tenant-console",
+        business_user_id="console",
+        subject="console:console",
+        auth_source="console",
+    )
+    v2_router._validate_reasoning_mode_access(principal, "ultra")
 
 
 @pytest.mark.asyncio

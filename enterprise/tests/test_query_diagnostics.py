@@ -252,3 +252,31 @@ def test_blocked_keys_stripped_from_phased_payloads():
     assert "prompt" not in event["data"]
     assert "knowledge" not in event["data"]
     assert event["data"]["attachmentCount"] == 0
+
+def test_trace_records_request_prepare_and_http_response_timing():
+    request_started = perf_counter() - 0.005
+    trace = start_trace(
+        "run-request-timing",
+        query="safe",
+        reasoning_mode="high",
+        stream=True,
+        request_started=request_started,
+    )
+    record_event(
+        trace,
+        "http_response",
+        {
+            "source": "gateway",
+            "stage": "http_response",
+            "responseHeadersMs": 6.0,
+            "responseFirstBodyMs": 7.5,
+        },
+    )
+
+    result = finish_trace(trace, outcome="completed")
+    prepare = next(event for event in result["events"] if event["type"] == "gateway_prepare")
+    response = next(event for event in result["events"] if event["type"] == "http_response")
+
+    assert prepare["durationMs"] >= 0
+    assert response["data"]["responseHeadersMs"] == 6.0
+    assert response["data"]["responseFirstBodyMs"] == 7.5

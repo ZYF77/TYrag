@@ -49,21 +49,21 @@ from rag.advanced_rag.harness.tools.inspector import open_context, compare_sourc
 
 register_tool(
     "inspector_open_context",
-    _inspector_schema("open_context", "Expand the original context around a chunk", {"chunk_id": {"type": "string"}, "width": {"type": "integer", "description": "Number of characters to expand"}}),
+    _inspector_schema("inspector_open_context", "Expand the original context around a chunk", {"chunk_id": {"type": "string"}, "width": {"type": "integer", "description": "Number of characters to expand"}}),
     open_context,
 )
 register_tool(
     "inspector_compare",
-    _inspector_schema("compare_sources", "Compare multiple chunks to find common points and contradictions", {"chunk_ids": {"type": "array", "items": {"type": "string"}}}),
+    _inspector_schema("inspector_compare", "Compare multiple chunks to find common points and contradictions", {"chunk_ids": {"type": "array", "items": {"type": "string"}}}),
     compare_sources,
 )
 register_tool(
-    "inspector_grep_within", _inspector_schema("grep_within", "Search for an exact keyword or pattern within a document", {"doc_id": {"type": "string"}, "pattern": {"type": "string"}}), grep_within
+    "inspector_grep_within", _inspector_schema("inspector_grep_within", "Search for an exact keyword or pattern within a document", {"doc_id": {"type": "string"}, "pattern": {"type": "string"}}), grep_within
 )
 register_tool(
     "inspector_request_adjacent",
     _inspector_schema(
-        "request_adjacent", "Get adjacent entries before or after a chunk", {"chunk_id": {"type": "string"}, "direction": {"type": "string", "enum": ["prev", "next"]}, "count": {"type": "integer"}}
+        "inspector_request_adjacent", "Get adjacent entries before or after a chunk", {"chunk_id": {"type": "string"}, "direction": {"type": "string", "enum": ["prev", "next"]}, "count": {"type": "integer"}}
     ),
     request_adjacent,
 )

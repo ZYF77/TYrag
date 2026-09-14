@@ -499,7 +499,9 @@ run.started
 - 业务字段（`status` / `citations`）以最终完成事件或后续 GET 历史为准，规则与 JSON 模式相同
 - `reasoning.delta` 是思考过程；`answer.delta` 只含用户正文。不接 SSE 时用 JSON 的 `reasoning` 字段即可
 - 若出现 `answer.replaced`，用其 `content` 整体替换本轮已拼装的正文。回放只有合并单帧，不发 `answer.replaced`
-- 提问可带 `reasoningMode`（`simple|low|medium|high|ultra`，默认 `simple`）。增量说明见 [`eam-inquiry-streaming-reasoning-mode-notice.md`](./eam-inquiry-streaming-reasoning-mode-notice.md)
+- 提问可带 `reasoningMode`（`simple|medium|high`，默认 `simple`）。外部 JWT 的
+  `low` / `ultra` 由 Gateway 拒绝；这两档仅供 Console session 或内部评估。
+  增量说明见 [`eam-inquiry-streaming-reasoning-mode-notice.md`](./eam-inquiry-streaming-reasoning-mode-notice.md)
 
 **建议给 EAM 的产品决策：** 第一阶段 JSON；第二阶段按体验需要增量接 SSE，不影响会话模型与 `conversationId`。
 

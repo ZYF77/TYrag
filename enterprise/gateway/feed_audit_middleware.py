@@ -132,10 +132,12 @@ class FeedRegisterAuditMiddleware:
             return
 
         headers = _header_map(scope)
+        started = time.perf_counter()
         register = _is_register(method, path)
         inquiry = _is_inquiry(path)
         capture_body = register or _should_capture_body(headers)
         scope.setdefault("state", {})
+        scope["state"]["gateway_request_started"] = started
 
         queued: list[dict] = []
         chunks: list[bytes] = []
@@ -168,27 +170,52 @@ class FeedRegisterAuditMiddleware:
         content_type = ""
         response_chunks: list[bytes] = []
         response_captured = 0
+        response_headers_ms: float | None = None
+        response_first_body_ms: float | None = None
 
         async def send_wrapper(message):
             nonlocal status_code, content_type, response_captured
+            nonlocal response_headers_ms, response_first_body_ms
             if message.get("type") == "http.response.start":
                 status_code = int(message.get("status") or 0)
+                if response_headers_ms is None:
+                    response_headers_ms = round((time.perf_counter() - started) * 1000, 3)
+                scope["state"]["gateway_http_timing"] = {
+                    "responseHeadersMs": response_headers_ms,
+                }
                 raw_headers = message.get("headers") or []
                 for key, value in raw_headers:
                     if key.decode("latin1").lower() == "content-type":
                         content_type = value.decode("latin1")
             elif message.get("type") == "http.response.body":
                 part = message.get("body") or b""
+                if response_first_body_ms is None and part:
+                    response_first_body_ms = round((time.perf_counter() - started) * 1000, 3)
+                scope["state"]["gateway_http_timing"] = {
+                    key: value
+                    for key, value in {
+                        "responseHeadersMs": response_headers_ms,
+                        "responseFirstBodyMs": response_first_body_ms,
+                    }.items()
+                    if value is not None
+                }
                 if response_captured < _BODY_CAPTURE_LIMIT:
                     take = part[: _BODY_CAPTURE_LIMIT - response_captured]
                     response_chunks.append(take)
                     response_captured += len(take)
             await send(message)
 
-        started = time.perf_counter()
         try:
             await self.app(scope, inbound_receive, send_wrapper)
         finally:
+            scope["state"]["gateway_http_timing"] = {
+                key: value
+                for key, value in {
+                    "responseHeadersMs": response_headers_ms,
+                    "responseFirstBodyMs": response_first_body_ms,
+                }.items()
+                if value is not None
+            }
             duration_ms = int((time.perf_counter() - started) * 1000)
             query = (scope.get("query_string") or b"").decode("latin1")
             request_body = b"".join(chunks) if capture_body else None
@@ -240,5 +267,6 @@ class FeedRegisterAuditMiddleware:
                     "body": parsed_request_body,
                     "response_body": response_body,
                     "streamed": streamed,
+                    "timing": scope["state"].get("gateway_http_timing") or {},
                 }
             )

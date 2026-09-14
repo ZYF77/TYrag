@@ -64,6 +64,12 @@ class ReActMode(StrEnum):
 
 ERROR_PREFIX = "**ERROR**"
 _TOOL_PROTOCOL_ERROR = f"{ERROR_PREFIX}: RAGFLOW_TOOL_PROTOCOL_INVALID"
+
+
+class _FatalTerminalToolError(RuntimeError):
+    """Keep terminal Agentic tool failures out of ordinary answer fallback."""
+
+
 _TEXT_TOOL_PROTOCOL_MAX_BYTES = 32 * 1024
 LENGTH_NOTIFICATION_CN = "······\n由于大模型的上下文窗口大小限制，回答已经被大模型截断。"
 LENGTH_NOTIFICATION_EN = "...\nThe answer is truncated by your chosen LLM due to its limitation on context length."
@@ -411,6 +417,8 @@ class Base(ABC):
         return msg
 
     async def _exceptions_async(self, e, attempt):
+        if isinstance(e, _FatalTerminalToolError):
+            raise e
         logging.exception("OpenAI async completion")
         error_code = self._classify_error(e)
         if attempt == self.max_retries:
@@ -441,6 +449,14 @@ class Base(ABC):
     def _parse_text_tool_calls(self, text: str) -> list:
         del text
         return []
+
+    def _raise_fatal_terminal_tool_error(self, results):
+        if not getattr(self, "terminal_tool_errors_fatal", False):
+            return
+        terminal = set(getattr(self, "terminal_tools", None) or ())
+        for _tc, name, _args, _result, error in results:
+            if name in terminal and error:
+                raise _FatalTerminalToolError(f"Terminal tool {name} failed") from error
 
     def _append_history(self, hist, tool_call, tool_res):
         hist.append(
@@ -592,6 +608,7 @@ class Base(ABC):
 
                     logging.info(f"Response tool_calls={response.choices[0].message.tool_calls}")
                     results = await asyncio.gather(*[_exec_tool(tc) for tc in response.choices[0].message.tool_calls])
+                    self._raise_fatal_terminal_tool_error(results)
                     history = self._append_history_batch(history, results)
                     for tc, name, args, result, err in results:
                         ans += self._verbose_tool_use(name, args, err if err else result)
@@ -822,6 +839,7 @@ class Base(ABC):
                             args = {}
                         yield f"<think>Running the {tc.function.name} tool...</think>"
                     results = await asyncio.gather(*[_exec_tool(tc) for tc in tcs])
+                    self._raise_fatal_terminal_tool_error(results)
 
                     # Terminal-tool short-circuit: stream a terminal tool's
                     # result (already the final answer) and stop the loop.
@@ -2141,6 +2159,8 @@ class LiteLLMBase(ABC):
         return error_code in self._retryable_errors
 
     async def _exceptions_async(self, e, attempt):
+        if isinstance(e, _FatalTerminalToolError):
+            raise e
         logging.exception("LiteLLMBase async completion")
         error_code = self._classify_error(e)
         if attempt == self.max_retries:
@@ -2169,6 +2189,14 @@ class LiteLLMBase(ABC):
             )
             + "</tool_call>"
         )
+
+    def _raise_fatal_terminal_tool_error(self, results):
+        if not getattr(self, "terminal_tool_errors_fatal", False):
+            return
+        terminal = set(getattr(self, "terminal_tools", None) or ())
+        for _tc, name, _args, _result, error in results:
+            if name in terminal and error:
+                raise _FatalTerminalToolError(f"Terminal tool {name} failed") from error
 
     def _append_history(self, hist, tool_call, tool_res, reasoning_content=None):
         assistant_msg = {
@@ -2327,6 +2355,7 @@ class LiteLLMBase(ABC):
 
                     logging.info(f"Response tool_calls={message.tool_calls}")
                     results = await asyncio.gather(*[_exec_tool(tc) for tc in message.tool_calls])
+                    self._raise_fatal_terminal_tool_error(results)
                     history = self._append_history_batch(
                         history,
                         results,
@@ -2496,6 +2525,7 @@ class LiteLLMBase(ABC):
                             args = {}
                         yield f"<think>Running the {tc.function.name} tool...</think>"
                     results = await asyncio.gather(*[_exec_tool(tc) for tc in tcs])
+                    self._raise_fatal_terminal_tool_error(results)
 
                     # Terminal-tool short-circuit: a terminal tool already
                     # produces the final answer, so stream its result and stop

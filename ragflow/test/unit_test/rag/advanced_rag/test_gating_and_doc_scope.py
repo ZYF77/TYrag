@@ -1,9 +1,11 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 import rag.advanced_rag.harness.tools  # noqa: F401  populate TOOL_REGISTRY
 from rag.advanced_rag.agentic_rag import RAGTools
 from rag.advanced_rag.harness.config import THINKING_MODES
+from rag.advanced_rag.harness.agent import _fmt_tool_result, execute_with_fallback
 from rag.advanced_rag.harness.planner import planner_node
 from rag.advanced_rag.harness.tools.gating import get_gated_tools
 from rag.advanced_rag.harness.tools.navigation import (
@@ -48,6 +50,117 @@ def test_high_explore_keeps_web_search_when_enabled():
         web_enabled=True,
     )
     assert "web_search" in _tool_names(defs)
+
+
+def test_high_profile_does_not_allow_standalone_bm25_or_wiki():
+    available = set(THINKING_MODES["high"].available_tools)
+    assert "bm25_search" not in available
+    assert "wiki_query" not in available
+
+
+@pytest.mark.asyncio
+async def test_high_empty_hybrid_does_not_escape_to_bm25_or_wiki():
+    class Pipeline:
+        tools = SimpleNamespace(doc_scope_mode=None, doc_scope=["doc-1"])
+
+        def __init__(self):
+            self.calls = []
+
+        async def execute(self, name, **kwargs):
+            self.calls.append((name, kwargs))
+            from rag.advanced_rag.harness.types import ToolResult
+
+            return ToolResult()
+
+    pipeline = Pipeline()
+    result = await execute_with_fallback(
+        pipeline,
+        "hybrid_search",
+        "explore",
+        allowed_tools={"hybrid_search"},
+        query="equipment",
+    )
+
+    assert result.chunks == []
+    assert [name for name, _ in pipeline.calls] == ["hybrid_search"]
+
+
+@pytest.mark.asyncio
+async def test_allowed_hybrid_fallback_uses_bm25_once_with_shared_arguments():
+    class Pipeline:
+        tools = SimpleNamespace(doc_scope_mode=None, doc_scope=["doc-1"])
+
+        def __init__(self):
+            self.calls = []
+
+        async def execute(self, name, **kwargs):
+            self.calls.append((name, kwargs))
+            from rag.advanced_rag.harness.types import ToolResult
+
+            return ToolResult(
+                chunks=[{"chunk_id": "bm25"}] if name == "bm25_search" else []
+            )
+
+    pipeline = Pipeline()
+    result = await execute_with_fallback(
+        pipeline,
+        "hybrid_search",
+        "explore",
+        allowed_tools={"hybrid_search", "bm25_search"},
+        query="equipment",
+        keywords="model",
+    )
+
+    assert [name for name, _ in pipeline.calls] == ["hybrid_search", "bm25_search"]
+    assert pipeline.calls[1][1] == {"query": "equipment", "keywords": "model"}
+    assert result.metadata["fallback_from"] == "hybrid_search"
+
+
+@pytest.mark.asyncio
+async def test_navigation_docs_are_payload_and_topic_is_not_sent_to_hybrid():
+    class Pipeline:
+        tools = SimpleNamespace(doc_scope_mode=None, doc_scope=["doc-1"])
+
+        def __init__(self):
+            self.calls = []
+
+        async def execute(self, name, **kwargs):
+            self.calls.append((name, kwargs))
+            from rag.advanced_rag.harness.types import ToolResult
+
+            return ToolResult(docs=["doc-1"])
+
+    pipeline = Pipeline()
+    result = await execute_with_fallback(
+        pipeline,
+        "dataset_navigation_by_tree",
+        "locate",
+        allowed_tools={"dataset_navigation_by_tree", "hybrid_search"},
+        topic="equipment",
+    )
+
+    assert [name for name, _ in pipeline.calls] == ["dataset_navigation_by_tree"]
+    assert "located documents: doc-1" in _fmt_tool_result(result)
+
+
+def test_tool_argument_validation_rejects_cross_tool_parameter_names():
+    class Pipeline:
+        tools = SimpleNamespace(doc_scope_mode=None, doc_scope=["doc-1"])
+
+    import asyncio
+
+    result = asyncio.run(
+        execute_with_fallback(
+            Pipeline(),
+            "hybrid_search",
+            "locate",
+            allowed_tools={"hybrid_search"},
+            query="equipment",
+            topic="equipment",
+        )
+    )
+
+    assert result.error and "unsupported arguments" in result.error
 
 
 def test_scoped_doc_ids_intersects_hard_filter():
@@ -178,3 +291,79 @@ async def test_planner_falls_back_when_model_returns_json_array():
     )
     result = await planner_node({"route": route, "seed_chunks": []}, Tools())
     assert result["plan"].plan_type == "direct"
+@pytest.mark.asyncio
+async def test_rag_stream_callback_emits_visible_chunks_and_suppresses_tool_result(monkeypatch):
+    from rag.advanced_rag import agentic_rag_graph
+
+    async def fake_run(_tools, _messages):
+        yield "<think>planning</think>"
+        yield "first answer chunk"
+        yield "second answer chunk"
+
+    monkeypatch.setattr(agentic_rag_graph, "run_agentic_rag", fake_run)
+    tools = RAGTools.__new__(RAGTools)
+    emitted = []
+
+    async def callback(value):
+        emitted.append(value)
+
+    tools.stream_callback = callback
+
+    result = await tools.rag("question")
+
+    assert emitted == ["first answer chunk", "second answer chunk"]
+    assert result == ""
+
+
+@pytest.mark.asyncio
+async def test_agentic_graph_failure_raises_instead_of_yielding_success_text(monkeypatch):
+    from rag.advanced_rag import agentic_rag_graph
+
+    class FailingGraph:
+        async def ainvoke(self, *_args, **_kwargs):
+            raise ValueError("controlled graph failure")
+
+    monkeypatch.setattr(
+        agentic_rag_graph,
+        "build_agentic_graph",
+        lambda *_args, **_kwargs: FailingGraph(),
+    )
+
+    with pytest.raises(RuntimeError, match="Agentic RAG graph execution failed"):
+        async for _ in agentic_rag_graph.run_agentic_rag(
+            SimpleNamespace(), [{"role": "user", "content": "question"}]
+        ):
+            pass
+@pytest.mark.asyncio
+async def test_agentic_graph_cancellation_cancels_running_graph(monkeypatch):
+    from rag.advanced_rag import agentic_rag_graph
+
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    class SlowGraph:
+        async def ainvoke(self, *_args, **_kwargs):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+    monkeypatch.setattr(
+        agentic_rag_graph,
+        "build_agentic_graph",
+        lambda *_args, **_kwargs: SlowGraph(),
+    )
+
+    stream = agentic_rag_graph.run_agentic_rag(
+        SimpleNamespace(), [{"role": "user", "content": "question"}]
+    )
+    next_item = asyncio.create_task(stream.__anext__())
+    await started.wait()
+    next_item.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await next_item
+    await asyncio.wait_for(cancelled.wait(), timeout=1)
+    await stream.aclose()

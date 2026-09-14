@@ -51,6 +51,20 @@ def test_grounding_request_flag_rejects_non_int_one():
     assert dialog_service._grounding_requested(1) is True
 
 
+def test_explicit_reasoning_zero_overrides_session_reasoning():
+    assert dialog_service._normalize_reasoning_value("0") == 0
+    assert dialog_service._use_simple_chat({"reasoning": True}, {"reasoning": 0}) is True
+    assert dialog_service._use_simple_chat({"reasoning": True}, {"reasoning": "0"}) is True
+    assert dialog_service._use_simple_chat({"reasoning": True}, {"reasoning": 1}) is False
+
+
+def test_reasoning_value_rejects_out_of_range_input():
+    with pytest.raises(ValueError):
+        dialog_service._normalize_reasoning_value("5")
+    with pytest.raises(ValueError):
+        dialog_service._normalize_reasoning_value("medium")
+
+
 def test_completion_status_is_exact_match_only():
     assert dialog_service._completion_status("设备 EQ-104 压力 2 MPa") == "completed"
     assert dialog_service._completion_status(STANDARD_ABSTAIN_ANSWER) == "no_reliable_evidence"

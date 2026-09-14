@@ -45,6 +45,9 @@ errors:
   - code: ACL_DENIED
     http_status: 403
     retryable: false
+  - code: REASONING_MODE_NOT_ALLOWED
+    http_status: 403
+    retryable: false
   - code: DOCUMENT_EVENT_DUPLICATE
     http_status: 202
     retryable: false

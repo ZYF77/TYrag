@@ -1,12 +1,12 @@
 # 当前聊天推理、解析切片与 RAG 配置指南
 
-核对日期：2026-09-08。依据当前工作区源码（包含已有未提交改动），不是服务器运行配置快照。Query 契约为 `integration-openapi-v2.yaml` 2.9.0；Document Feed 为 `document-feed-v3.2.yaml` 3.2.0，兼容 FILE_SHARE 3.1.0。仓库以 RAGFlow v0.26.4 为基础，但已包含扩展，不能直接用网上同版本说明替代本地实现。
+核对日期：2026-09-12，基于 HEAD bce11900 及当前未提交实现。依据当前工作区源码（包含已有未提交改动），不是服务器运行配置快照。Query 契约为 `integration-openapi-v2.yaml` 2.9.0；Document Feed 为 `document-feed-v3.2.yaml` 3.2.0，兼容 FILE_SHARE 3.1.0。仓库以 RAGFlow v0.26.4 为基础，但已包含扩展，不能直接用网上同版本说明替代本地实现。
 
-配套：[适配设备文档的 ingestion pipeline](rag-ingestion-pipeline.md)。
+配套：[适配设备文档的 ingestion pipeline](rag-ingestion-pipeline.md)、[架构、性能、部署与持久化复核](rag-architecture-deployment-review.md)。本次纠正重点见复核报告第 2 节。
 
 ## 1. 先把整体关系串起来
 
-入库阶段把文件变成可检索证据；聊天阶段在当前设备及权限范围内找到证据，再组织回答。提高推理档位改变的是聊天检索与研究策略，不会重新 OCR、重切片或自动创建知识图谱。
+入库阶段把文件变成可检索证据；聊天阶段按选定的授权范围策略找到证据，再组织回答。提高推理档位改变的是聊天检索与研究策略，不会重新 OCR、重切片或自动创建知识图谱。
 
 ```mermaid
 flowchart LR
@@ -14,7 +14,7 @@ flowchart LR
   B --> C[RAGFlow 解析与切片]
   C --> D[全文索引与 Embedding 向量索引]
   D --> E[质量门与当前可检索版本]
-  Q[用户问题与本轮设备 Scope] --> F[权限及可用文档过滤]
+  Q[用户问题与本轮授权范围策略] --> F[权限及可用文档过滤]
   E --> F
   F --> G[按推理档位检索证据]
   G --> H[模型基于上下文生成]
@@ -40,39 +40,37 @@ flowchart LR
 
 ## 2. 五档共用入口与边界
 
-Gateway 的 simple 是省略请求 reasoning 字段；其余依次映射为 reasoning=1/2/3/4。RAGFlow _use_simple_chat 还检查已保存的 prompt_config.reasoning，若该旧开关为真，省略字段仍可能进入 Agentic 并回退 medium。要得到本文 simple 流程，需确认旧开关关闭。这不是模型 API 的 reasoning_effort，不自动切换模型，也不保证档位越高越准确。
+Gateway 当前始终显式传 reasoning：simple=0、low=1、medium=2、high=3、ultra=4。RAGFlow 明确把请求值 0 当作普通聊天，不再被已保存的 prompt_config.reasoning 覆盖。只有原生调用省略 reasoning 时才使用聊天旧开关。外部 JWT 只允许 simple/medium/high，Console 会话允许五档；不允许的档位在附件或消息 run 持久化前返回 REASONING_MODE_NOT_ALLOWED。这不是模型 API 的 reasoning_effort，也不自动切换模型。
 
-正式 v2 路径先确定本轮设备 Scope、可检索文档与 ACL，随后把文档 ID 范围传给 RAGFlow。Agentic 的 metadata 过滤与工具范围必须和该范围取交集，最后组装证据时再次执行 `enforce_doc_scope`。引用为空与否不能决定 `completed / no_reliable_evidence / failed`。
+正式 v2 先形成候选集合 G，再持久化本轮 doc_ids 与策略快照。legacy_device（默认）继续按活动设备/明确设备线索收窄；authorized_context 使用全部通过 ACL、readiness 和质量门的候选，设备/型号/制造商只作为软上下文。后者传 doc_scope_mode=restrict，RAGFlow 先理解问题、后做 metadata 过滤，结果只能在 G 内；空集合不得恢复成全库。当前 ACL 实现仍为 test-tenant-open-1，同租户 active 即允许，不能将 G 宣称为已落实部门/密级/群组权限的生产授权集。引用为空与否仍不能决定 completed / no_reliable_evidence / failed。
 
-Agentic 入口 `rag_agent` 先给外层聊天模型绑定 `rag`、`summarize_document`。通常问题调用 `rag` 后进入下述图；明确的单文档摘要可以走 `summarize_document`，模型也可能直接回答。因此下面四张 Agentic 图描述 **调用 rag 后的检索主路径**，并非保证每条消息都完整执行。`rag` 是终止工具，避免外层再次转述而丢失引用。图内部使用流式生成接口，但 RAGTools.rag 会收集图输出并返回字符串，不能据此保证图 token 逐个即时到浏览器。外层模型看到历史，图实际接收由 rag(question) 构造的单条消息，追问补全依赖外层传入的独立问题。
+Agentic 入口 rag_agent 先给外层模型绑定 rag 和 summarize_document。下述四张 Agentic 图描述调用 rag 后的主路径；明确的单文档摘要可以走 summarize_document。流式路径现在设置 stream_callback：RAGTools.rag 将图的正文 delta 实时发到 rag_stream 队列，工具自身返回空串，避免重复转述；没有回调的非流式路径仍累计为字符串。最终图或终止工具异常会向上抛出，Gateway 另拒绝未处理的工具协议残留，不能当成功回答保存。外层模型看到历史，图接收 rag(question) 构造的单条问题；formalize 整理问题后执行 metadata 过滤。
 
 ### 2.1 simple：常规混合检索
 
 ```mermaid
 flowchart TD
-  A[问题 / 历史 / 已授权文档范围] --> B[绑定聊天、向量及可选 rerank 模型]
-  B --> C[处理附件与 metadata 范围]
-  C --> S{结构化知识库可用且 SQL 路径返回结果?}
-  S -->|是| O[返回结构化查询回答与证据]
-  S -->|否| D[按开关补全多轮问题、跨语言扩展、关键词扩展]
-  D --> E[按聊天 top_n / top_k / 相似度 / 权重混合检索]
-  E --> F[可选 rerank、TOC 补充、父子上下文回填]
-  F --> G[按开关补充网页 / KG 证据]
-  G --> H{有可用证据?}
-  H -->|有| I[装配知识与 Prompt、按预算裁剪]
-  H -->|无| J[执行空结果 / grounding 处理]
-  I --> K[聊天模型流式生成、修复引用格式]
-  K --> O
-  J --> O
+  A[Gateway 已授权文档范围与 reasoning 0] --> B[绑定模型、处理附件、保留硬范围]
+  B --> C[restrict 必做问题重写；其他路径按多轮开关]
+  C --> D[可选跨语言扩展]
+  D --> E[对重写问题做 metadata 过滤并与 G 求交]
+  E --> F{restrict 且范围为空?}
+  F -->|是| N[无证据处理，不恢复全库检索]
+  F -->|否| G[可选关键词扩展与混合检索]
+  G --> H[聊天 top_n、top_k、阈值、权重和可选 rerank]
+  H --> I[可选 TOC、父子回填、联网与 KG；最终范围校验]
+  I --> J[组装 Prompt、上下文预算与证据]
+  J --> K[流式正文、引用和显式业务状态]
+  N --> K
 ```
 
-适合单点查事实、操作步骤和普通追问。`simple` 也可以启用 rerank、TOC、KG；“常规”不等于只做向量检索。没有进入下述研究 Agent 循环。
+适合单点查事实、操作步骤和普通追问。`simple` 也可以启用 rerank、TOC、KG；“常规”不等于只做向量检索。没有进入下述研究 Agent 循环。原生普通聊天在 field_map 存在且非 grounding 时另有 SQL 分支；Gateway v2 固定 grounding_version=1，不能把该 SQL 分支画成正式 v2 的必经能力。
 
-### 2.2 low：一次检索主调用
+### 2.2 low：一次检索主调用（Console 专用）
 
 ```mermaid
 flowchart TD
-  A[外层模型调用 rag] --> B[formalize：整理传入的独立问题与关键词]
+  A[外层模型调用 rag] --> B[formalize：整理问题与关键词，然后 metadata 过滤]
   B --> C[route：分析问题类型]
   C --> D[跳过预检索与问题分解，创建直接计划]
   D --> E[direct_search：hybrid_search 一次主调用]
@@ -90,7 +88,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  A[外层模型调用 rag] --> B[formalize 与 route]
+  A[外层模型调用 rag] --> B[formalize、metadata 过滤与 route]
   B --> C{route 要求分解?}
   C -->|是| D[预检索 seed_chunks，给 planner 提供背景]
   D --> E[planner 分解为待回答的 claims]
@@ -115,7 +113,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  A[外层模型调用 rag] --> B[formalize、route、可选预检索与 planner]
+  A[外层模型调用 rag] --> B[formalize、metadata 过滤、route、可选预检索与 planner]
   B --> C[编排器分配尚未验证的 claims]
   C --> D[每批最多 2 个 research agents]
   D --> E[每个 Agent 最多 2 个研究周期]
@@ -132,11 +130,11 @@ flowchart TD
 
 适合跨章节、多证据核对。不会动态新增 claims，也不执行重新规划。每项 claim 的研究有 180 秒超时；这不是整条消息 180 秒总上限。图中的 2 个 Agent 周期是配置预算：文本回退路径有显式循环；原生工具模型只有适配器暴露 max_rounds 时才能由此设置内部循环上限。
 
-### 2.5 ultra：允许扩展问题与重新规划
+### 2.5 ultra：允许扩展问题与重新规划（Console 专用）
 
 ```mermaid
 flowchart TD
-  A[外层模型调用 rag] --> B[formalize、route、可选预检索与 planner]
+  A[外层模型调用 rag] --> B[formalize、metadata 过滤、route、可选预检索与 planner]
   B --> C[编排器分配 claims：最多 4 轮]
   C --> D[每批最多 3 个 Agent，各最多 2 个周期]
   D --> E[按条件选择搜索 / 编译导航 / 检查工具]
@@ -177,15 +175,15 @@ A 是 AgentResult 已验证比例，C 是代码交叉检查通过比例；不是
 |---|---|---|---|
 | `reasoningMode` | 请求级检索编排策略 | 常规路径 | 映射到 1–4，选择 harness 模式 |
 | `dataset_ids` / `kb_ids` | 知识来源 | 选择检索库 | 选择工具可见知识库 |
-| `doc_ids`、本轮设备 Scope | 授权后的文档限制 | 检索过滤 | 工具过滤、metadata 交集、最终证据校验 |
-| `meta_data_filter` | 按型号、类型等 metadata 过滤 | 生效 | 生效；不能扩大已授权范围 |
+| `doc_ids`、本轮范围策略 | legacy_device 或 authorized_context 形成硬范围 | 检索过滤 | 工具过滤、metadata 交集、最终证据校验 |
+| `meta_data_filter` | 按型号、类型等 metadata 过滤 | 在重写后执行；restrict 的 loader/pushdown/fallback 都受 G 限定 | 在 formalize 内对重写问题执行；restrict 空集立即保留为空 |
 | `top_n` | 返回证据数量，增大可能增加噪声与上下文占用 | 传入 retriever | 基础 hybrid_search 默认 12，不继承聊天 top_n |
 | `top_k` | 底层召回候选预算，不是最终引用数 | 传入 retriever 的 top | 基础 hybrid_search 未传聊天 top_k，使用底层默认 |
 | `similarity_threshold` | 去掉低相关候选；过高易漏召回 | 聊天实例值 | 基础 hybrid_search 固定传 0.2 |
 | `vector_similarity_weight` | 向量/词项信号混合；向量擅长语义，词项有利编号等精确文本 | 聊天实例值 | 有 embedding 时 0.3，否则 0 |
 | `rerank_id` | 重排候选，提高顺序相关性，增加调用成本 | 传入检索器 | rag_agent 会绑定模型，但未将 rerank 传给基础 hybrid_search，不能视为已重排 |
 | `prompt_config.keyword` | 查询关键词扩展 | 开启时调用关键词提取 | 不沿用此开关；formalize 自己生成关键词 |
-| `refine_multiturn` | 将追问改写成独立检索问题 | 有多轮且开关打开时执行 | 外层模型读历史并传 question；图内 formalize 处理该单条问题，不沿用此开关 |
+| `refine_multiturn` | 将追问改写成独立检索问题 | restrict 必做，即使开关关或只有一轮；其他路径按多轮开关 | 外层模型读历史并传 question；图内 formalize 处理该单条问题，不沿用此开关 |
 | `cross_languages` | 将查询扩展到指定语言 | 按配置执行 | 未看到沿用此配置的分支 |
 | `toc_enhance` | 查询时按目录补上下文 | 按配置执行 | 由工具及编译产物处理，不直接照搬该开关 |
 | `use_kg` | 查询时增加图谱证据 | 按配置执行 | 导航工具或 low 的编译扩展，需要相应产物 |
@@ -204,7 +202,7 @@ A 是 AgentResult 已验证比例，C 是代码交叉检查通过比例；不是
 | `grounding_version=1` | 企业接入的证据/输出保护约定 | Gateway 传递 | 同样传递，不负责决定推理档位 |
 | 诊断开关 | 观测阶段耗时与计数 | 记录执行证据 | 记录执行证据，不提升召回质量 |
 
-注意：当前 Agentic 最终生成的 `gen_conf` 缺省为 `temperature=0.3`；`RAGTools.rag` 调 `run_agentic_rag(self, messages)` 未传聊天的生成配置。不要把聊天 temperature/max_tokens 视为一定控制最终图回答的参数。界面的旧布尔 `prompt_config.reasoning` 也不能当作正式 v2 五档枚举。
+注意：当前 Agentic 最终生成的 `gen_conf` 缺省为 `temperature=0.3`；`RAGTools.rag` 调 `run_agentic_rag(self, messages)` 未传聊天的生成配置。不要把聊天 temperature/max_tokens 视为一定控制最终图回答的参数。界面的旧布尔 `prompt_config.reasoning` 仅在请求未显式传 reasoning 时决定分流，不能当作正式 v2 五档枚举。
 
 临时附件走会话附件处理，并不因为在聊天框上传就自动成为永久设备知识库。消息回放需保留持久化状态；流式正文被最终结果替换时按 `answer.replaced` 处理。
 
@@ -241,7 +239,7 @@ flowchart TD
 | `layout_recognize=DeepDOC` | 版面感知 OCR/解析 | 提取扫描文字、版面、表格和位置，较纯文本路线复杂 | 当前 PDF profile；具体已保存文档需回读 |
 | PlainText / Naive 解析路线 | 原生文字提取 | 简单数字 PDF 可试，扫描/复杂表格会丢内容 | 与 chunk_method=naive 是不同维度 |
 | MinerU / Docling / OpenDataLoader / 其他 OCR Provider | 外部或可选解析器 | 改善特定复杂版面有可能，需安装、模型/服务配置及评测 | 本地源码有适配，不表示已部署或自动回退 |
-| `chunk_token_num` | Chunk size | 大块保留上下文但噪声多；小块更精确但可能拆开条件和结论 | token 不是中文字数；界面缺省 512，部分代码缺字段回退 128，必须明确保存 |
+| `chunk_token_num` | Chunk size | 大块保留上下文但噪声多；小块更精确但可能拆开条件和结论 | 通用合并使用 token 预算，但 JsonParser 先按序列化字符数分组（内部 max_chunk_size 乘 2），不能承诺 JSON 每块严格 512 tokens；界面缺省 512，部分代码缺字段回退 128 |
 | `delimiter` | 文本边界 | 优先以段落/标点形成片段，再按大小合并 | 不保证仅靠分隔符就能识别完整业务步骤 |
 | `overlapped_percent` | Sliding overlap | 相邻块重复一部分内容以保护边界，增加索引和重复证据 | 当前 normalize 兼容 0–1 小数比例并限到 0–90；建议用明确整数百分数，如 10 |
 | `children_delimiter` / `parent_child` | Parent-child retrieval | 用更细粒度片段检索，再返回父级上下文 | UI 会转换字段；naive 实际消费顶层 children_delimiter，不能只看 enable_children |
@@ -280,7 +278,7 @@ flowchart TD
 | `inspector_request_adjacent` | 扩展相邻上下文 | ultra | 已有证据且阶段允许 |
 | `summarize_document` | 指定文档摘要 | Agentic 外层工具 | 明确文档 ID、Scope 允许；不等于任意全库总结 |
 
-给模型绑定的工具经过 locate / explore / verify / cross_domain 阶段排序与数量限制。注意 execute_with_fallback 在空结果时沿阶段优先列表继续调用，并没有再次按档位 available_tools 过滤，所以该配置只是模型可见工具列表的限制，不是所有实际调用的严格上限。low 的 `use_compiled=True` 可在混合检索后扩展已存在编译产物，也不能简单说“只有 ultra 会用知识图谱”。Text-to-SQL 面向 RAGFlow 结构化知识库，不能据此认定已连接 EAM 实时业务库。
+给模型绑定的工具经过 locate / explore / verify / cross_domain 阶段排序与数量限制。当前 execute_with_fallback 已校验本阶段 allowed_tools 与参数，只允许有授权的 hybrid_search 空结果再尝试一次 bm25_search，restrict 空范围不触发回退；不会再无条件沿阶段列表调用其他工具。low 的 `use_compiled=True` 可在混合检索后扩展已存在编译产物，也不能简单说“只有 ultra 会用知识图谱”。Text-to-SQL 面向 RAGFlow 结构化知识库，不能据此认定已连接 EAM 实时业务库。
 
 研究 Agent 另有 think_tool（无检索副作用的控制步骤）与 generate_report（捕获结构化研究报告）；它们不是新的知识来源。原生 tool-calling 与不支持工具模型的文本回退都由 harness/agent.py 实现。初始 planner 的提示预算分别是 low 1、medium 3、high 5、ultra 8 个 claims；这不是代码强制截断上限，ultra 还允许动态增加。
 
@@ -306,4 +304,4 @@ flowchart TD
 
 本次仅新增文档，不修改上游、契约、运行配置、数据库或部署。未读取客户文档正文或凭据。代码分支存在、UI 可见、配置已保存、线上实际执行，是四种不同证据，后续联调应分别核对。
 
-文档验证记录（2026-09-08）：两份文档的 9 张 Mermaid 图经仓库现有 Mermaid + jsdom 成功解析；本地链接均存在，JSON 示例解析通过，UTF-8 无替换字符。另按入口分流、各档调度、检索参数、解析字段和质量发布门交叉核对源码。未运行模型评测、入库或真实 HTTP E2E。
+2026-09-08 的 Mermaid/链接检查只证明当时文档结构有效，不证明当时所有源码解读正确。本轮验证范围与结果统一记录于 [复核报告](rag-architecture-deployment-review.md)，不作为真实业务 E2E 或部署验收。

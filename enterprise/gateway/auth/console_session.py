@@ -291,6 +291,7 @@ def console_principal(session: dict[str, Any]) -> UserPrincipal:
         token_issued_at=int(session["issuedAt"]),
         token_expires_at=int(session["expiresAt"]),
         capabilities=_CONSOLE_CAPABILITIES,
+        auth_source="console",
     )
 
 

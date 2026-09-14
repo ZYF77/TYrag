@@ -920,9 +920,11 @@ components:
       default: simple
       description: >-
         RAGFlow thinking depth for this turn. `simple` is one-round chat and
-        omits the internal `reasoning` parameter. `low`/`medium`/`high`/`ultra`
+        selects ordinary chat without Agentic research. `low`/`medium`/`high`/`ultra`
         map to RAGFlow reasoning 1–4. Higher modes cost more tokens and latency.
-        `high`/`ultra` only bind web_search when `internetEnabled` is true.
+        External JWT callers may use `simple`/`medium`/`high`; `low` and
+        `ultra` are reserved for the Gateway Console session. `high`/`ultra`
+        only bind web_search when `internetEnabled` is true.
     QuestionMessageRequest:
       type: object
       additionalProperties: false

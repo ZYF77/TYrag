@@ -178,3 +178,37 @@ async def test_base_provider_keeps_standard_tool_call_path():
 def test_text_protocol_is_disabled_for_base_path():
     assert Base._supports_text_tool_protocol(object()) is False
     assert VolcEngineChat._supports_text_tool_protocol(object()) is True
+@pytest.mark.asyncio
+async def test_terminal_tool_error_is_fatal_only_when_enabled():
+    @tool
+    async def rag(question: str) -> str:
+        raise RuntimeError(f"failed: {question}")
+
+    tool_call = SimpleNamespace(
+        index=0,
+        id="call-error",
+        function=SimpleNamespace(
+            name="rag", arguments='{"question":"question"}'
+        ),
+    )
+    delta = SimpleNamespace(
+        content=None,
+        tool_calls=[tool_call],
+        reasoning_content=None,
+        reasoning=None,
+    )
+    endpoint = _CompletionEndpoint(
+        [_AsyncStream([SimpleNamespace(choices=[SimpleNamespace(delta=delta)])])]
+    )
+    model = _base_model(endpoint)
+    model.bind_tools(tools=[rag])
+    model.terminal_tools = {"rag"}
+    model.terminal_tool_errors_fatal = True
+
+    with pytest.raises(RuntimeError, match="Terminal tool rag failed"):
+        [
+            event
+            async for event in model.async_chat_streamly_with_tools(
+                "", [{"role": "user", "content": "question"}], {}
+            )
+        ]

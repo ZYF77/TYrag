@@ -85,6 +85,36 @@
     margin-bottom: 14px;
 }
 
+.rag-diagnostics-timing-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.rag-diagnostics-timing-summary > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  border: 1px solid rgba(24, 27, 33, 0.06);
+  border-radius: 14px;
+  background: rgba(248, 249, 251, 0.9);
+  padding: 10px 12px;
+}
+
+.rag-diagnostics-timing-summary span {
+  color: var(--text-3);
+  font-size: 11px;
+}
+
+.rag-diagnostics-timing-summary strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+}
 .rag-diagnostics-detail-summary > div {
   display: grid;
     gap: 4px;
@@ -318,7 +348,8 @@
   padding-inline: 16px;
 }
 
-  .rag-diagnostics-detail-summary {
+  .rag-diagnostics-detail-summary,
+  .rag-diagnostics-timing-summary {
   grid-template-columns: 1fr;
 }
 

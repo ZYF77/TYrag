@@ -24,7 +24,11 @@ from rag.advanced_rag.harness.tools.gating import (
     determine_current_phase,
     SEARCH_PHASES,
 )
-from rag.advanced_rag.harness.tools.registry import _generate_report_schema, _think_schema
+from rag.advanced_rag.harness.tools.registry import (
+    TOOL_REGISTRY,
+    _generate_report_schema,
+    _think_schema,
+)
 from rag.advanced_rag.harness.prompts.research_agent_prompt import (
     RESEARCH_AGENT_PROMPT,
     RESEARCH_AGENT_TEXT_PROMPT,
@@ -38,6 +42,62 @@ _LOG = logging.getLogger(__name__)
 _NAV_CHUNK_TOOLS = {"ontology_navigate", "mindmap_navigate"}
 
 
+def _tool_schema_name(definition: dict) -> str:
+    function = definition.get("function", definition)
+    return str(function.get("name") or "") if isinstance(function, dict) else ""
+
+
+def _validate_tool_call(
+    tool_name: str,
+    arguments: dict,
+    allowed_tools: set[str] | None,
+) -> str | None:
+    if allowed_tools is not None and tool_name not in allowed_tools:
+        return f"Tool {tool_name} is not available in the current research phase."
+    definition = TOOL_REGISTRY.get(tool_name, {}).get("function_schema")
+    if not isinstance(definition, dict):
+        return f"Tool {tool_name} is not registered."
+    function = definition.get("function", definition)
+    parameters = function.get("parameters", {}) if isinstance(function, dict) else {}
+    properties = parameters.get("properties", {}) if isinstance(parameters, dict) else {}
+    required = parameters.get("required", []) if isinstance(parameters, dict) else []
+    if not isinstance(arguments, dict):
+        return f"Tool {tool_name} arguments must be an object."
+    missing = [name for name in required if name not in arguments]
+    if missing:
+        return f"Tool {tool_name} is missing required arguments: {', '.join(missing)}."
+    unknown = sorted(set(arguments) - set(properties))
+    if unknown:
+        return f"Tool {tool_name} received unsupported arguments: {', '.join(unknown)}."
+    for name, value in arguments.items():
+        expected = properties.get(name, {}).get("type")
+        valid = (
+            (expected == "string" and isinstance(value, str))
+            or (expected == "array" and isinstance(value, list))
+            or (expected == "integer" and isinstance(value, int) and not isinstance(value, bool))
+            or (expected == "number" and isinstance(value, (int, float)) and not isinstance(value, bool))
+            or (expected == "boolean" and isinstance(value, bool))
+            or expected in (None, "object")
+        )
+        if not valid:
+            return f"Tool {tool_name} argument {name} has an invalid type."
+    return None
+
+
+def _has_tool_payload(result: ToolResult) -> bool:
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    return bool(result.chunks or result.docs or str(metadata.get("answer") or "").strip())
+
+
+def _fallback_arguments(arguments: dict) -> dict:
+    """Keep only arguments shared by the hybrid and BM25 schemas."""
+    return {
+        key: arguments[key]
+        for key in ("query", "kb_ids", "top_n", "keywords", "doc_scope")
+        if key in arguments
+    }
+
+
 class ResearchToolSession:
     """ToolCallSession adapter routing native tool calls to the harness pipeline.
 
@@ -47,10 +107,17 @@ class ResearchToolSession:
       return its structured arguments as the claim result.
     """
 
-    def __init__(self, pipeline: Pipeline, phase: str, claim: ClaimTarget | None = None):
+    def __init__(
+        self,
+        pipeline: Pipeline,
+        phase: str,
+        claim: ClaimTarget | None = None,
+        allowed_tools: set[str] | None = None,
+    ):
         self.pipeline = pipeline
         self.phase = phase
         self.claim = claim
+        self.allowed_tools = allowed_tools
         self.report: dict | None = None
         self.got_evidence = False
         self.evidence_ids: list[int] = []
@@ -58,7 +125,9 @@ class ResearchToolSession:
         self._tool_call_count = 0
         self._tool_duration_ms = 0.0
 
-    def _record_tool_diag(self, name: str, started: float, status: str = "success") -> None:
+    def _record_tool_diag(
+        self, name: str, started: float, status: str = "success", **payload
+    ) -> None:
         try:
             elapsed_ms = max(0.0, (perf_counter() - started) * 1000)
             self._tool_call_count += 1
@@ -70,6 +139,7 @@ class ResearchToolSession:
                 toolCallCount=self._tool_call_count,
                 toolDurationMsTotal=round(self._tool_duration_ms, 3),
                 status=status,
+                **payload,
             )
         except Exception:
             pass
@@ -84,14 +154,32 @@ class ResearchToolSession:
         if name == "think_tool":
             self._record_tool_diag(name, tool_started)
             return "Noted. Proceed with the next tool call."
+        validation_error = _validate_tool_call(name, arguments, self.allowed_tools)
+        if validation_error:
+            self._record_tool_diag(name, tool_started, status="rejected")
+            return f"[tool error] {validation_error}"
         status = "success"
         try:
-            result = await execute_with_fallback(self.pipeline, name, self.phase, **arguments)
+            result = await execute_with_fallback(
+                self.pipeline,
+                name,
+                self.phase,
+                allowed_tools=self.allowed_tools,
+                **arguments,
+            )
         except Exception:
             status = "failed"
             self._record_tool_diag(name, tool_started, status=status)
             raise
-        self._record_tool_diag(name, tool_started, status=status)
+        fallback_from = (result.metadata or {}).get("fallback_from")
+        self._record_tool_diag(
+            name,
+            tool_started,
+            status="failed" if result.error else status,
+            fallbackFrom=fallback_from,
+            chunkCount=len(result.chunks),
+            routedDocumentCount=len(result.docs or []),
+        )
         if result.chunks:
             self.got_evidence = True
             self._record_evidence_ids(result.chunks)
@@ -191,14 +279,35 @@ async def research_agent_loop(
         has_routed_scope=bool(getattr(pipeline, "_routed_docs", None)),
         web_enabled=bool(getattr(tools, "has_web", lambda: False)()),
     )
+    allowed_tool_names = {
+        name for name in (_tool_schema_name(definition) for definition in gated_defs) if name
+    }
 
     # Clone so binding tools never leaks onto the shared chat model.
     agent_mdl = tools.chat_mdl.clone()
     if getattr(agent_mdl, "is_tools", False):
-        return await _research_native(claim, agent_mdl, pipeline, phase, phase_config, gated_defs, mode)
+        return await _research_native(
+            claim,
+            agent_mdl,
+            pipeline,
+            phase,
+            phase_config,
+            gated_defs,
+            mode,
+            allowed_tool_names,
+        )
 
     _LOG.info("research_agent: model lacks native tool support; falling back to text-based tool selection")
-    return await _research_text(claim, tools, pipeline, phase, phase_config, gated_defs, mode)
+    return await _research_text(
+        claim,
+        tools,
+        pipeline,
+        phase,
+        phase_config,
+        gated_defs,
+        mode,
+        allowed_tool_names,
+    )
 
 
 async def _research_native(
@@ -209,10 +318,11 @@ async def _research_native(
     phase_config: dict,
     gated_defs: list[dict],
     mode: ExecutionStrategy,
+    allowed_tool_names: set[str],
 ) -> dict:
     """Bind tools onto ``agent_mdl`` and let its native tool loop drive research."""
     schemas = _build_tool_schemas(gated_defs)
-    session = ResearchToolSession(pipeline, phase, claim)
+    session = ResearchToolSession(pipeline, phase, claim, allowed_tool_names)
     agent_mdl.bind_tools(session, schemas)
     # Bound the model's internal tool loop to the mode's agent-cycle budget.
     if hasattr(agent_mdl, "mdl") and hasattr(agent_mdl.mdl, "max_rounds"):
@@ -258,6 +368,7 @@ async def _research_text(
     phase_config: dict,
     gated_defs: list[dict],
     mode: ExecutionStrategy,
+    allowed_tool_names: set[str],
 ) -> dict:
     """Fallback: prompt-based tool selection for models without native tools."""
     system = RESEARCH_AGENT_TEXT_PROMPT.format(
@@ -272,7 +383,9 @@ async def _research_text(
     tool_call_count = 0
     tool_duration_ms = 0.0
 
-    def _record_text_tool(name: str, started: float, status: str = "success") -> None:
+    def _record_text_tool(
+        name: str, started: float, status: str = "success", **payload
+    ) -> None:
         nonlocal tool_call_count, tool_duration_ms
         try:
             elapsed_ms = max(0.0, (perf_counter() - started) * 1000)
@@ -285,6 +398,7 @@ async def _research_text(
                 toolCallCount=tool_call_count,
                 toolDurationMsTotal=round(tool_duration_ms, 3),
                 status=status,
+                **payload,
             )
         except Exception:
             pass
@@ -314,16 +428,31 @@ async def _research_text(
             history.append({"role": "user", "content": "[continue]"})
             continue
 
-        args = tool_call.get("arguments", {})
+        args = tool_call.get("arguments") or {}
+        if not isinstance(args, dict):
+            args = {}
         tool_started = perf_counter()
         status = "success"
         try:
-            result = await execute_with_fallback(pipeline, tool_call["name"], phase, **args)
+            result = await execute_with_fallback(
+                pipeline,
+                tool_call["name"],
+                phase,
+                allowed_tools=allowed_tool_names,
+                **args,
+            )
         except Exception:
             status = "failed"
             _record_text_tool(str(tool_call.get("name") or "tool"), tool_started, status=status)
             raise
-        _record_text_tool(str(tool_call.get("name") or "tool"), tool_started, status=status)
+        _record_text_tool(
+            str(tool_call.get("name") or "tool"),
+            tool_started,
+            status="failed" if result.error else status,
+            fallbackFrom=(result.metadata or {}).get("fallback_from"),
+            chunkCount=len(result.chunks),
+            routedDocumentCount=len(result.docs or []),
+        )
         history.append({"role": "user", "content": _fmt_tool_result(result)})
 
     return await _force_generate_report(history, tools, claim.claim_id)
@@ -361,29 +490,46 @@ async def execute_with_fallback(
     pipeline: Pipeline,
     tool_name: str,
     phase: str,
+    *,
+    allowed_tools: set[str] | None = None,
     **kwargs,
 ) -> ToolResult:
-    """Execute tool; if empty, fall back along phase priority."""
+    """Execute a gated tool with one explicitly compatible search fallback."""
+    validation_error = _validate_tool_call(tool_name, kwargs, allowed_tools)
+    if validation_error:
+        return ToolResult(chunks=[], metadata={}, error=validation_error)
     result = await pipeline.execute(tool_name, **kwargs)
 
-    if result.chunks or result.error:
+    if result.error or _has_tool_payload(result):
         return result
 
-    phase_config = SEARCH_PHASES.get(phase, {})
-    priority = phase_config.get("tools_priority", [])
-    current_idx = next(
-        (i for i, t in enumerate(priority) if t == tool_name),
-        -1,
+    rag_tools = getattr(pipeline, "tools", None)
+    if (
+        tool_name != "hybrid_search"
+        or allowed_tools is None
+        or "bm25_search" not in allowed_tools
+        or (
+            getattr(rag_tools, "doc_scope_mode", None) == "restrict"
+            and not getattr(rag_tools, "doc_scope", None)
+        )
+    ):
+        return result
+
+    fallback_result = await pipeline.execute(
+        "bm25_search", **_fallback_arguments(kwargs)
     )
-    for fallback_name in priority[current_idx + 1 :]:
-        fallback_result = await pipeline.execute(fallback_name, **kwargs)
-        if fallback_result.chunks:
-            _LOG.info("fallback: %s empty → %s found %d chunks", tool_name, fallback_name, len(fallback_result.chunks))
-            fallback_result.metadata["was_fallback"] = True
-            fallback_result.metadata["fallback_from"] = tool_name
-            return fallback_result
-        if fallback_result.error:
-            break
+    if fallback_result.error:
+        return fallback_result
+    if _has_tool_payload(fallback_result):
+        _LOG.info(
+            "fallback: %s empty -> %s found %d chunks",
+            tool_name,
+            "bm25_search",
+            len(fallback_result.chunks),
+        )
+        fallback_result.metadata["was_fallback"] = True
+        fallback_result.metadata["fallback_from"] = tool_name
+        return fallback_result
     return result
 
 
@@ -440,6 +586,9 @@ def _fmt_tool_result(result: ToolResult) -> str:
     answer = (result.metadata or {}).get("answer") if isinstance(result.metadata, dict) else ""
     if answer:
         parts.append(f"Answer: {answer}")
+    if result.docs:
+        located = ", ".join(str(doc)[:128] for doc in result.docs[:32])
+        parts.append(f"[located documents: {located}]")
     parts.extend(c.get("content_with_weight", c.get("text", ""))[:300] for c in result.chunks[:3])
     if not parts:
         return "[no results found]"

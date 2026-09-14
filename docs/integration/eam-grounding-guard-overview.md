@@ -32,7 +32,7 @@ Grounding Guard 的目标是**降低编造**：在 EAM 正式问询（`/enterpri
 |------|--------|----------|------|
 | **Prompt 标记 / 日志脱敏 / 无证据拒答 / Langfuse 抑制** | Gateway 固定传 `grounding_version=1` | **开** | 知识段边界标记、`effectiveKnowledge` 内部提取、无检索/ prompt 装不下时拒答、敏感日志与 Langfuse 输出抑制 |
 | **候选 token 缓冲** | RAGFlow `_IDENTIFIER_NUMERIC_FUSE_ENABLED` | **关** | Fuse 开启时才缓冲流式 token；关闭则真流式 |
-| **简单 chat vs 档位推理** | EAM 每条消息的 `reasoningMode` → RAGFlow `reasoning` 1–4 | **simple** | `simple` 走 `async_chat`；`low`/`medium`/`high`/`ultra` 走 Agentic `rag_agent` |
+| **简单 chat vs 档位推理** | EAM 每条消息的 `reasoningMode` → RAGFlow `reasoning` 0–4 | **simple** | `simple` 显式选择 0 并走 `async_chat`；其余允许档位走 Agentic `rag_agent` |
 
 Gateway 每次问询固定组装（`_v2_completion_kwargs`）：
 
@@ -41,7 +41,7 @@ Gateway 每次问询固定组装（`_v2_completion_kwargs`）：
   "grounding_version": 1,
   "allowed_identifiers": [...],      # 绑定设备号 + 本轮问题
   "attachment_observations": [...],  # 附件观察文本（若有）
-  "reasoning": 1..4,                 # 仅非 simple 档位
+  "reasoning": 0..4,                 # simple=0；显式选择档位
   "session_id": "...",
   "doc_ids": [...],                  # ACL + 设备硬筛后的文档集
   "internet": true/false,
@@ -240,7 +240,9 @@ Fuse 词法规则（`rag/grounding/guard.py`）：
 
 ## 7. 与 EAM 的接口要点
 
-- **每条消息**可传 `reasoningMode`（非会话级）；`simple` 不传 RAGFlow `reasoning` 键。
+- **每条消息**可传 `reasoningMode`（非会话级）；`simple` 显式传 RAGFlow
+  `reasoning=0` 作为普通聊天选择器。外部 EAM JWT 不允许 `low` / `ultra`；
+  Console session 保留五档。
 - SSE 须处理 `answer.replaced`：收到后用 `content` **整段替换**已展示正文。
 - `answer.completed` **不含** `reasoning`；推理内容仅 via `reasoning.delta` 或 JSON 字段 `reasoning`。
 - `status` 与 `citations` 独立：可能出现 `no_reliable_evidence` 且 citations 为空，或 `completed` 但 citations 经清洗后较少。

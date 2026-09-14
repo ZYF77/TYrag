@@ -31,13 +31,16 @@
 
 | 值 | 含义 | 成本/时延 |
 |---|---|---|
-| `simple`（默认） | 一轮普通 chat，不传 RAGFlow `reasoning` | 最低 |
-| `low` | RAGFlow reasoning=1 | 较低 |
+| `simple`（默认） | 一轮普通 chat，不进入 Agentic research | 最低 |
+| `low` | RAGFlow reasoning=1；当前 EAM JWT 不允许 | 较低 |
 | `medium` | RAGFlow reasoning=2 | 中 |
 | `high` | RAGFlow reasoning=3 | 高 |
-| `ultra` | RAGFlow reasoning=4 | 最高 |
+| `ultra` | RAGFlow reasoning=4；当前 EAM JWT 不允许 | 最高 |
 
-非法值返回 **422**。省略字段等于 `simple`。旧客户端不传该字段，继续走 `simple`，**不用改请求**。
+非法值返回 **422**。EAM 使用外部 JWT 时，`low` / `ultra` 返回 **403**
+和 `REASONING_MODE_NOT_ALLOWED`，不会静默降档。Gateway Console 使用本地
+Console session 时保留五档。省略字段等于 `simple`。旧客户端不传该字段，
+继续走 `simple`，**不用改请求**。
 
 ```json
 {
@@ -47,9 +50,12 @@
 }
 ```
 
-`high` / `ultra` 只有在本轮 `internetEnabled=true` 且聊天已配置联网检索时才会绑定 `web_search`。默认不要开联网。
+`high` 只有在本轮 `internetEnabled=true` 且聊天已配置联网检索时才会绑定
+`web_search`。默认不要开联网。
 
-档位主要提升理解与综合证据的能力，**不能保证不幻觉**。先在同一批真实问题上比较 `medium` / `high` / `ultra` 再固定生产默认值。
+档位主要提升理解与综合证据的能力，**不能保证不幻觉**。EAM 先在同一批
+真实问题上比较 `medium` / `high` 再固定生产默认值；`ultra` 只在
+Gateway Console 或内部评估中使用。
 
 ---
 
@@ -65,6 +71,8 @@ run.started
   → 0..n × citation
   → answer.completed  或  run.failed
 ```
+
+客户端状态按事件推进，不等待某个模型思考文本：点击发送后立即显示“正在提交”；收到 `run.started` 后显示“处理中”；`reasoning.delta` 单独放入思考区域；首个非空 `answer.delta` 到达后进入回答输出状态。`answer.replaced` 整体替换已经显示的正文，`answer.completed` 或 `run.failed` 结束等待状态。服务端不会生成虚构的思考文本；若 EAM 有后端转发层，必须逐段转发 SSE，不能等完整响应后再解析。
 
 思考与正文现在是真流式，不再等整段生成完才推一帧。EAM 已接 SSE 时必须按上面顺序消费，**不能再假设只有一个 `answer.delta`**。
 
