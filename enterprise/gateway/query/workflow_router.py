@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import uuid
+from time import perf_counter
 from typing import Any, AsyncIterator
 
 from fastapi import APIRouter, Depends, Request
@@ -258,6 +259,110 @@ def _workflow_finish_trace(
     return v2.finish_trace(run.get("_diagnostics"), outcome=outcome)
 
 
+def _workflow_diagnostics_return_trace() -> bool:
+    """Ask Agent API for upstream ``_diagnostics`` when Gateway diagnostics are on."""
+    return bool(getattr(config, "rag_diagnostics_enabled", False))
+
+
+def _workflow_record_run_started(run: dict, request: Request) -> None:
+    """Record Chat-aligned ``run_started`` (SSE emit or JSON-path milestone)."""
+    request_started = getattr(request.state, "gateway_request_started", None)
+    started = (
+        request_started if request_started is not None else perf_counter()
+    )
+    v2.record_timed_event(
+        run.get("_diagnostics"),
+        "run_started",
+        started,
+        {
+            "source": "gateway",
+            "stage": "run_started_emit",
+            "status": "success",
+        },
+    )
+
+
+def _workflow_merge_upstream_diagnostics(
+    run: dict, *candidates: Any
+) -> None:
+    """Merge Agent/Canvas ``_diagnostics`` when present (caps/redaction in diagnostics.py)."""
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        upstream = candidate.get("_diagnostics")
+        if isinstance(upstream, dict):
+            v2.merge_upstream(run.get("_diagnostics"), upstream)
+
+
+def _workflow_record_stream_first_packets(
+    run: dict,
+    *,
+    upstream_started: float,
+    data: dict[str, Any],
+    content: str,
+    first_flags: dict[str, bool],
+    splitter: Any,
+) -> list[tuple[str, str]]:
+    """Derive Chat-isomorphic first-packet events from RF message frames.
+
+    Mutates ``first_flags`` keys: stream_output / reasoning / answer.
+    Returns splitter pieces for the caller to accumulate / emit.
+    """
+    if (
+        not first_flags.get("stream_output")
+        and (
+            content
+            or data.get("start_to_think")
+            or data.get("end_to_think")
+        )
+    ):
+        v2.record_timed_event(
+            run.get("_diagnostics"),
+            "stream_first_token",
+            upstream_started,
+            {
+                "source": "gateway",
+                "stage": "stream_first_token",
+                "status": "success",
+            },
+        )
+        first_flags["stream_output"] = True
+
+    pieces = splitter.feed(
+        content,
+        start_to_think=bool(data.get("start_to_think")),
+        end_to_think=bool(data.get("end_to_think")),
+    )
+    for kind, chunk in pieces:
+        if not chunk:
+            continue
+        if kind == "reasoning" and not first_flags.get("reasoning"):
+            v2.record_timed_event(
+                run.get("_diagnostics"),
+                "stream_first_reasoning",
+                upstream_started,
+                {
+                    "source": "gateway",
+                    "stage": "stream_first_reasoning",
+                    "status": "success",
+                },
+            )
+            first_flags["reasoning"] = True
+        elif kind == "answer" and not first_flags.get("answer"):
+            v2.record_timed_event(
+                run.get("_diagnostics"),
+                "stream_first_answer",
+                upstream_started,
+                {
+                    "source": "gateway",
+                    "stage": "stream_first_answer",
+                    "status": "success",
+                },
+            )
+            first_flags["answer"] = True
+    return pieces
+
+
 def _soft_business_context(conversation: dict) -> dict:
     """Merge durable conversation identity into soft business_context.
 
@@ -412,6 +517,7 @@ async def _workflow_run_result(
 
     client = None
     _workflow_start_trace(run, request, question, req, stream=False)
+    _workflow_record_run_started(run, request)
     try:
         question, client, observations = await v2._retrieval_question(
             db,
@@ -450,8 +556,10 @@ async def _workflow_run_result(
                 inputs=inputs,
                 files=files,
                 request_id=run["run_id"],
+                return_trace=_workflow_diagnostics_return_trace(),
             )
             event, data, returned_session = _workflow_frame(payload)
+            _workflow_merge_upstream_diagnostics(run, data, payload)
             workflow_session_id = returned_session or workflow_session_id
             raw_answer = str(data.get("content") or data.get("answer") or "")
             split = v2.split_assistant_output(raw_answer)
@@ -616,6 +724,22 @@ async def _workflow_stream(
         yield v2._sse("run.failed", {"code": "WORKFLOW_NOT_CONFIGURED", "message": "Agent Workflow test runtime is not configured"})
         return
     agent_id, version = config_values
+    client = None
+    accumulated = ""
+    accumulated_reasoning = ""
+    final_delta: str | None = None
+    reference: dict = {"chunks": [], "doc_aggs": []}
+    explicit_status: Any = None
+    workflow_session_id = str(conversation.get("workflow_session_id") or "").strip() or None
+    splitter = v2.StreamThinkSplitter()
+    emitted_answer = ""
+    first_flags = {
+        "stream_output": False,
+        "reasoning": False,
+        "answer": False,
+    }
+    _workflow_start_trace(run, request, question, req, stream=True)
+    _workflow_record_run_started(run, request)
     yield v2._sse(
         "run.started",
         {
@@ -626,16 +750,6 @@ async def _workflow_stream(
             "replayed": False,
         },
     )
-    client = None
-    accumulated = ""
-    accumulated_reasoning = ""
-    final_delta: str | None = None
-    reference: dict = {"chunks": [], "doc_aggs": []}
-    explicit_status: Any = None
-    workflow_session_id = str(conversation.get("workflow_session_id") or "").strip() or None
-    splitter = v2.StreamThinkSplitter()
-    emitted_answer = ""
-    _workflow_start_trace(run, request, question, req, stream=True)
     try:
         question, client, observations = await v2._retrieval_question(
             db,
@@ -656,6 +770,7 @@ async def _workflow_stream(
                 if isinstance(item.ragflow_file, dict)
             ]
             workflow = _workflow_client()
+            upstream_started = perf_counter()
             async for payload in workflow.stream(
                 agent_id=agent_id,
                 question=question,
@@ -664,16 +779,22 @@ async def _workflow_stream(
                 inputs=_workflow_inputs(conversation, scope, user_memory, req, version),
                 files=files,
                 request_id=run["run_id"],
+                return_trace=_workflow_diagnostics_return_trace(),
             ):
                 event, data, returned_session = _workflow_frame(payload)
+                _workflow_merge_upstream_diagnostics(run, data, payload)
                 workflow_session_id = returned_session or workflow_session_id
                 if event == "message":
                     content = str(data.get("content") or data.get("answer") or "")
-                    for kind, chunk in splitter.feed(
-                        content,
-                        start_to_think=bool(data.get("start_to_think")),
-                        end_to_think=bool(data.get("end_to_think")),
-                    ):
+                    pieces = _workflow_record_stream_first_packets(
+                        run,
+                        upstream_started=upstream_started,
+                        data=data,
+                        content=content,
+                        first_flags=first_flags,
+                        splitter=splitter,
+                    )
+                    for kind, chunk in pieces:
                         if kind == "reasoning":
                             accumulated_reasoning = (
                                 accumulated_reasoning + chunk

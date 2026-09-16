@@ -280,3 +280,158 @@ def test_trace_records_request_prepare_and_http_response_timing():
     assert prepare["durationMs"] >= 0
     assert response["data"]["responseHeadersMs"] == 6.0
     assert response["data"]["responseFirstBodyMs"] == 7.5
+
+
+def test_workflow_stream_first_packet_accounting():
+    """WF streaming records Chat-aligned first-packet milestones from RF flags."""
+    from enterprise.gateway.query import workflow_router
+    from enterprise.gateway.query.answer_split import StreamThinkSplitter
+
+    request_started = perf_counter() - 0.01
+    trace = start_trace(
+        "wf-stream-1",
+        query="safe",
+        reasoning_mode="simple",
+        stream=True,
+        request_started=request_started,
+    )
+    run = {"run_id": "wf-stream-1", "_diagnostics": trace}
+
+    class _Req:
+        class state:
+            gateway_request_started = request_started
+
+    workflow_router._workflow_record_run_started(run, _Req())
+
+    first_flags = {"stream_output": False, "reasoning": False, "answer": False}
+    splitter = StreamThinkSplitter()
+    upstream_started = perf_counter() - 0.005
+
+    # Think-start flag with reasoning body (not exposed on SSE, still timed).
+    pieces = workflow_router._workflow_record_stream_first_packets(
+        run,
+        upstream_started=upstream_started,
+        data={"start_to_think": True},
+        content="think-a",
+        first_flags=first_flags,
+        splitter=splitter,
+    )
+    assert pieces and pieces[0][0] == "reasoning"
+    assert first_flags["stream_output"] is True
+    assert first_flags["reasoning"] is True
+    assert first_flags["answer"] is False
+
+    # Close think on its own frame (flag applies after feed split).
+    workflow_router._workflow_record_stream_first_packets(
+        run,
+        upstream_started=upstream_started,
+        data={"end_to_think": True},
+        content="",
+        first_flags=first_flags,
+        splitter=splitter,
+    )
+
+    # Answer body frame -> stream_first_answer once.
+    pieces = workflow_router._workflow_record_stream_first_packets(
+        run,
+        upstream_started=upstream_started,
+        data={},
+        content="answer-body",
+        first_flags=first_flags,
+        splitter=splitter,
+    )
+    assert any(kind == "answer" for kind, _ in pieces)
+    assert first_flags["answer"] is True
+
+    # Idempotent: second answer chunk must not duplicate first-packet events.
+    before = len(trace["events"])
+    workflow_router._workflow_record_stream_first_packets(
+        run,
+        upstream_started=upstream_started,
+        data={},
+        content=" more",
+        first_flags=first_flags,
+        splitter=splitter,
+    )
+    types = [e["type"] for e in trace["events"][before:]]
+    assert "stream_first_token" not in types
+    assert "stream_first_reasoning" not in types
+    assert "stream_first_answer" not in types
+
+    # Upstream answer_generation arrives via merge_upstream (Chat parity).
+    merge_upstream(
+        trace,
+        {
+            "runId": "wf-stream-1",
+            "durationMs": 40,
+            "events": [
+                {
+                    "type": "stage",
+                    "atMs": 20,
+                    "durationMs": 5,
+                    "data": {"stage": "answer_generation", "source": "ragflow"},
+                }
+            ],
+        },
+    )
+    workflow_router._workflow_merge_upstream_diagnostics(
+        run,
+        {
+            "_diagnostics": {
+                "runId": "wf-stream-1",
+                "durationMs": 10,
+                "events": [
+                    {
+                        "type": "stage",
+                        "atMs": 1,
+                        "durationMs": 1,
+                        "data": {"stage": "embedding", "source": "ragflow"},
+                    }
+                ],
+            }
+        },
+    )
+
+    finished = finish_trace(trace, outcome="completed")
+    types = {e["type"] for e in finished["events"]}
+    stages = {
+        (e.get("data") or {}).get("stage")
+        for e in finished["events"]
+        if isinstance(e.get("data"), dict)
+    }
+    assert "run_started" in types
+    assert "stream_first_token" in types
+    assert "stream_first_reasoning" in types
+    assert "stream_first_answer" in types
+    assert "answer_generation" in stages
+    assert "embedding" in stages
+    run_started = next(e for e in finished["events"] if e["type"] == "run_started")
+    assert run_started["data"]["stage"] == "run_started_emit"
+    assert run_started["durationMs"] >= 0
+
+
+def test_workflow_nonstream_records_run_started_not_stream_first():
+    """JSON WF path records run_started; must not invent stream_first_*."""
+    from enterprise.gateway.query import workflow_router
+
+    request_started = perf_counter() - 0.002
+    trace = start_trace(
+        "wf-json-1",
+        query="safe",
+        reasoning_mode="simple",
+        stream=False,
+        request_started=request_started,
+    )
+    run = {"run_id": "wf-json-1", "_diagnostics": trace}
+
+    class _Req:
+        class state:
+            gateway_request_started = request_started
+
+    workflow_router._workflow_record_run_started(run, _Req())
+    finished = finish_trace(trace, outcome="completed")
+    types = {e["type"] for e in finished["events"]}
+    assert "run_started" in types
+    assert "stream_first_token" not in types
+    assert "stream_first_reasoning" not in types
+    assert "stream_first_answer" not in types
