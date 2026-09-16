@@ -153,10 +153,22 @@ def select_cited_chunk_refs(
     del status  # Citation evidence is independent from the message business state.
     indexes = cited_chunk_indexes(answer)
     selected: list[tuple[dict, int | None]] = []
+    citation_map: dict[int, dict] = {}
+    has_explicit_ids = any("citation_id" in chunk for chunk in chunks)
+    for chunk in chunks:
+        try:
+            citation_map[int(chunk["citation_id"])] = chunk
+        except (KeyError, TypeError, ValueError):
+            continue
     for index in indexes:
-        if 0 <= index < len(chunks):
+        if has_explicit_ids:
+            # Workflow IDs are sparse hashes. Never fall back to list position:
+            # a missing ID 1 must not silently cite the second unrelated chunk.
+            if index in citation_map:
+                selected.append((citation_map[index], index))
+        elif 0 <= index < len(chunks):
             selected.append((chunks[index], index))
-    if selected:
+    if selected or has_explicit_ids:
         return selected
     if indexes and chunks and not answer_signals_abstain(answer):
         overlapped = [

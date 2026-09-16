@@ -1,9 +1,11 @@
 """Citation chunks match answer markers independently from business status."""
 
 from enterprise.gateway.query.citation_select import (
+    ABSTAIN_PHRASE,
     select_cited_chunk_refs,
     select_cited_chunks,
 )
+from enterprise.gateway.query.workflow_router import _workflow_chunks
 
 
 CHUNKS = [
@@ -133,3 +135,118 @@ def test_no_reliable_evidence_keeps_prose_id_citations():
     )
 
     assert [item["id"] for item in selected] == ["invoice", "repair"]
+
+
+# --- REPORT discrete citation_id regressions (Workflow vs Chat) ---
+
+DISCRETE_CHUNKS = [
+    {
+        "id": "459",
+        "citation_id": "459",
+        "content": "root cause valve packing leak on pump A",
+    },
+    {
+        "id": "66",
+        "citation_id": "66",
+        "content": "maintenance history for gearbox oil seal",
+    },
+]
+
+
+def test_workflow_chunks_preserves_discrete_citation_ids_from_map_keys():
+    chunks = _workflow_chunks(
+        {
+            "459": {"doc_id": "d1", "content": "root cause valve packing leak on pump A"},
+            "66": {"doc_id": "d2", "content": "maintenance history for gearbox oil seal"},
+        }
+    )
+
+    assert [c["citation_id"] for c in chunks] == ["459", "66"]
+    assert [c["id"] for c in chunks] == ["459", "66"]
+
+
+def test_discrete_citation_ids_match_exact_markers_not_list_order():
+    selected = select_cited_chunk_refs(
+        "依据 [ID:66] 与 [ID:459]",
+        DISCRETE_CHUNKS,
+        status="completed",
+    )
+
+    assert [(item["id"], ref) for item, ref in selected] == [
+        ("66", 66),
+        ("459", 459),
+    ]
+
+
+def test_discrete_citation_id_does_not_fall_back_to_list_position():
+    # List position 0 is chunk 459; citing [ID:0] must not bind that chunk.
+    selected = select_cited_chunk_refs(
+        "错误序号 [ID:0] 不应命中；正确是 [ID:66]",
+        DISCRETE_CHUNKS,
+        status="completed",
+    )
+
+    assert [(item["id"], ref) for item, ref in selected] == [("66", 66)]
+
+
+def test_unknown_discrete_citation_id_returns_empty_without_index_fallback():
+    selected = select_cited_chunk_refs(
+        "未知引用 [ID:1]",
+        DISCRETE_CHUNKS,
+        status="completed",
+    )
+
+    assert selected == []
+
+
+def test_unknown_discrete_id_skips_overlap_fallback_even_without_abstain():
+    # Explicit citation_id mode must not silently overlap-fallback to list[1].
+    chunks = [
+        {"id": "459", "citation_id": "459", "content": "unrelated alpha text"},
+        {
+            "id": "66",
+            "citation_id": "66",
+            "content": "leak repair work order already handled for this asset",
+        },
+    ]
+    answer = "leak repair work order already handled for this asset. [ID:1]"
+    selected = select_cited_chunk_refs(answer, chunks, status="completed")
+
+    assert selected == []
+
+
+def test_discrete_cites_with_partial_abstain_keep_exact_matches_only():
+    selected = select_cited_chunk_refs(
+        f"{ABSTAIN_PHRASE} 但可见片段 [ID:66]。未知 [ID:1]。",
+        DISCRETE_CHUNKS,
+        status="no_reliable_evidence",
+    )
+
+    assert [(item["id"], ref) for item, ref in selected] == [("66", 66)]
+
+
+def test_chat_path_without_citation_id_keeps_sequential_indexes():
+    # Ordinary Chat chunks lack citation_id; preserve list-index binding.
+    selected = select_cited_chunk_refs(
+        "手册 [ID:2] 与工单 [ID:1]",
+        CHUNKS,
+        status="completed",
+    )
+
+    assert [(item["id"], ref) for item, ref in selected] == [
+        ("manual", 2),
+        ("repair", 1),
+    ]
+
+
+def test_chat_path_without_citation_id_still_allows_overlap_fallback():
+    answer = "leak repair work order already handled for this asset."
+    selected = select_cited_chunk_refs(
+        f"{answer} [ID:99]",
+        CHUNKS,
+        status="completed",
+    )
+
+    assert len(selected) == 1
+    assert selected[0][0]["id"] == "repair"
+    assert selected[0][1] is None
