@@ -423,6 +423,323 @@ def _workflow_record_canvas_node_events(
     v2.record_event(run.get("_diagnostics"), mapped, payload)
 
 
+# RF canvas tool component_type values (agent/tools). Retrieval is a first-class
+# pipeline node on the v1.7 canvas, so it is intentionally excluded here — it already
+# appears as wf_node_*; counting it as a tool call would hide empty-tool production runs.
+_WF_TOOL_COMPONENT_TYPES = frozenset(
+    {
+        "AkShare",
+        "ArXiv",
+        "BGPT",
+        "CodeExec",
+        "Crawler",
+        "DeepL",
+        "DuckDuckGo",
+        "Email",
+        "ExeSQL",
+        "GitHub",
+        "Google",
+        "GoogleScholar",
+        "Jin10",
+        "KeenableSearch",
+        "PubMed",
+        "QWeather",
+        "QueritSearch",
+        "SearXNG",
+        "TavilyExtract",
+        "TavilySearch",
+        "TuShare",
+        "WenCai",
+        "Wikipedia",
+        "YahooFinance",
+    }
+)
+_WF_TOOL_SSE_EVENTS = frozenset({"tool_call", "mcp_call", "tool_use"})
+_WF_TOOL_STR_LIMIT = _WF_NODE_STR_LIMIT
+
+
+def _workflow_tool_agg(run: dict) -> dict[str, dict[str, Any]]:
+    agg = run.get("_wf_tool_agg")
+    if not isinstance(agg, dict):
+        agg = {}
+        run["_wf_tool_agg"] = agg
+    return agg
+
+
+def _workflow_truncate_tool_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return text[:_WF_TOOL_STR_LIMIT]
+
+
+def _workflow_tool_duration_ms(data: dict[str, Any]) -> float | None:
+    for key in ("durationMs", "duration_ms", "toolDurationMs", "tool_duration_ms"):
+        raw = data.get(key)
+        if isinstance(raw, (int, float)) and raw >= 0:
+            return round(float(raw), 3)
+    elapsed = data.get("elapsed_time")
+    if isinstance(elapsed, (int, float)) and elapsed >= 0:
+        return round(float(elapsed) * 1000.0, 3)
+    return None
+
+
+def _workflow_tool_status(data: dict[str, Any]) -> tuple[str, str | None]:
+    error = data.get("error")
+    if error not in (None, ""):
+        return "error", _workflow_truncate_tool_str(error)
+    status = str(data.get("status") or "").lower()
+    if status in {"error", "failed", "failure"}:
+        return "error", _workflow_truncate_tool_str(data.get("error") or status)
+    if status in {"ok", "success", "succeeded", "completed"}:
+        return "success", None
+    return "success", None
+
+
+def _workflow_infer_tool_source(data: dict[str, Any], *, component_type: str) -> str:
+    for key in ("toolSource", "tool_source", "callSource", "call_source"):
+        raw = str(data.get(key) or "").strip().lower()
+        if raw in {"tool", "mcp"}:
+            return raw
+    if data.get("mcp_id") or data.get("mcpId") or data.get("mcp"):
+        return "mcp"
+    ctype = component_type.lower()
+    if "mcp" in ctype:
+        return "mcp"
+    src = str(data.get("source") or "").strip().lower()
+    if src == "mcp":
+        return "mcp"
+    return "tool"
+
+
+def _workflow_is_tool_component_type(component_type: str) -> bool:
+    if not component_type:
+        return False
+    if component_type in _WF_TOOL_COMPONENT_TYPES:
+        return True
+    lowered = component_type.lower()
+    if lowered in {t.lower() for t in _WF_TOOL_COMPONENT_TYPES}:
+        return True
+    if "mcp" in lowered:
+        return True
+    return False
+
+
+def _workflow_extract_tool_calls(
+    data: dict[str, Any], *, event: str
+) -> list[dict[str, Any]]:
+    """Return panel-safe tool/MCP call summaries (never args/results)."""
+    if not isinstance(data, dict):
+        return []
+    calls: list[dict[str, Any]] = []
+    component_type = str(
+        data.get("component_type") or data.get("componentType") or ""
+    ).strip()
+    tool_name = (
+        data.get("tool_name")
+        or data.get("toolName")
+        or data.get("function_name")
+        or data.get("functionName")
+    )
+    sse_tool = str(event or "") in _WF_TOOL_SSE_EVENTS
+    if sse_tool and not tool_name:
+        tool_name = data.get("name")
+    tool_id = data.get("tool_id") or data.get("toolId") or data.get("component_id")
+    explicit_tool = bool(tool_name) or bool(
+        data.get("mcp_id") or data.get("mcpId") or data.get("mcp")
+    )
+    type_tool = _workflow_is_tool_component_type(component_type)
+
+    # Prefer finished/call frames; ignore bare node_started unless explicit tool SSE.
+    if str(event or "") == "node_started" and not (sse_tool or explicit_tool):
+        return []
+
+    if type_tool or explicit_tool or sse_tool:
+        name = _workflow_truncate_tool_str(
+            tool_name or component_type or data.get("component_name") or "unknown_tool"
+        )
+        if name:
+            status, error = _workflow_tool_status(data)
+            entry: dict[str, Any] = {
+                "name": name,
+                "toolSource": _workflow_infer_tool_source(
+                    data, component_type=component_type
+                ),
+                "count": 1,
+                "status": status,
+            }
+            tid = _workflow_truncate_tool_str(tool_id)
+            if tid:
+                entry["toolId"] = tid
+            if component_type:
+                entry["componentType"] = _workflow_truncate_tool_str(component_type)
+            duration = _workflow_tool_duration_ms(data)
+            if duration is not None:
+                entry["durationMs"] = duration
+            if error:
+                entry["error"] = error
+            calls.append(entry)
+
+    # Shallow scan of RF tool_use_callback-shaped trace rows (name/latency only).
+    for key in ("trace", "tool_calls", "toolCalls", "tools"):
+        rows = data.get(key)
+        if not isinstance(rows, list):
+            continue
+        for row in rows[:128]:
+            if not isinstance(row, dict):
+                continue
+            nested = row.get("trace")
+            candidates = nested if isinstance(nested, list) else [row]
+            for item in candidates[:128]:
+                if not isinstance(item, dict):
+                    continue
+                tname = item.get("tool_name") or item.get("toolName")
+                if not tname:
+                    continue
+                status, error = _workflow_tool_status(item)
+                entry = {
+                    "name": _workflow_truncate_tool_str(tname) or "unknown_tool",
+                    "toolSource": _workflow_infer_tool_source(
+                        item, component_type=str(item.get("component_type") or "")
+                    ),
+                    "count": 1,
+                    "status": status,
+                }
+                tid = _workflow_truncate_tool_str(
+                    item.get("tool_id")
+                    or item.get("toolId")
+                    or row.get("component_id")
+                    or data.get("component_id")
+                )
+                if tid:
+                    entry["toolId"] = tid
+                duration = _workflow_tool_duration_ms(item)
+                if duration is not None:
+                    entry["durationMs"] = duration
+                if error:
+                    entry["error"] = error
+                calls.append(entry)
+    return calls
+
+
+def _workflow_accumulate_tool_call(run: dict, call: dict[str, Any]) -> None:
+    agg = _workflow_tool_agg(run)
+    name = str(call.get("name") or "unknown_tool")
+    tool_source = str(call.get("toolSource") or "tool")
+    key = f"{tool_source}:{name}"
+    bucket = agg.get(key)
+    if not isinstance(bucket, dict):
+        bucket = {
+            "name": name,
+            "toolSource": tool_source,
+            "count": 0,
+            "durationMs": 0.0,
+            "ok": 0,
+            "error": 0,
+        }
+        tid = call.get("toolId")
+        if tid:
+            bucket["toolId"] = tid
+        agg[key] = bucket
+    bucket["count"] = int(bucket.get("count") or 0) + int(call.get("count") or 1)
+    duration = call.get("durationMs")
+    if isinstance(duration, (int, float)) and duration >= 0:
+        bucket["durationMs"] = round(
+            float(bucket.get("durationMs") or 0.0) + float(duration), 3
+        )
+    if str(call.get("status") or "") == "error":
+        bucket["error"] = int(bucket.get("error") or 0) + 1
+    else:
+        bucket["ok"] = int(bucket.get("ok") or 0) + 1
+
+
+def _workflow_record_canvas_tool_events(
+    run: dict,
+    *,
+    event: str,
+    data: dict[str, Any],
+) -> None:
+    """Record per-call ``wf_tool_call`` from tool-like Canvas SSE frames.
+
+    Default: never store tool args/results (opt-in later). Uses the shared
+    diagnostics scrubber via ``record_event``.
+    """
+    if not isinstance(data, dict):
+        return
+    for call in _workflow_extract_tool_calls(data, event=str(event or "")):
+        payload = {
+            "source": "gateway",
+            "stage": "wf_tool_call",
+            "name": call["name"],
+            "toolSource": call["toolSource"],
+            "count": int(call.get("count") or 1),
+            "status": call.get("status") or "success",
+        }
+        if call.get("toolId"):
+            payload["toolId"] = call["toolId"]
+        if call.get("componentType"):
+            payload["componentType"] = call["componentType"]
+        if isinstance(call.get("durationMs"), (int, float)):
+            payload["durationMs"] = call["durationMs"]
+        if call.get("error"):
+            payload["error"] = call["error"]
+        for blocked in (
+            "inputs",
+            "outputs",
+            "thoughts",
+            "content",
+            "answer",
+            "arguments",
+            "args",
+            "params",
+            "result",
+            "toolArgs",
+            "toolResult",
+        ):
+            payload.pop(blocked, None)
+        v2.record_event(run.get("_diagnostics"), "wf_tool_call", payload)
+        _workflow_accumulate_tool_call(run, call)
+
+
+def _workflow_record_tools_summary(run: dict) -> None:
+    """Emit one aggregated ``wf_tools_summary`` when any tool/MCP calls were seen."""
+    agg = run.get("_wf_tool_agg")
+    if not isinstance(agg, dict) or not agg:
+        return
+    tools = []
+    total = 0
+    for bucket in agg.values():
+        if not isinstance(bucket, dict):
+            continue
+        item = {
+            "name": _workflow_truncate_tool_str(bucket.get("name")) or "unknown_tool",
+            "toolSource": str(bucket.get("toolSource") or "tool"),
+            "count": int(bucket.get("count") or 0),
+            "durationMs": round(float(bucket.get("durationMs") or 0.0), 3),
+            "ok": int(bucket.get("ok") or 0),
+            "error": int(bucket.get("error") or 0),
+        }
+        if bucket.get("toolId"):
+            item["toolId"] = _workflow_truncate_tool_str(bucket.get("toolId"))
+        tools.append(item)
+        total += item["count"]
+    if total <= 0:
+        return
+    tools.sort(key=lambda row: (str(row.get("toolSource") or ""), str(row.get("name") or "")))
+    v2.record_event(
+        run.get("_diagnostics"),
+        "wf_tools_summary",
+        {
+            "source": "gateway",
+            "stage": "wf_tools_summary",
+            "totalCount": total,
+            "tools": tools[:128],
+        },
+    )
+
+
 def _soft_business_context(conversation: dict) -> dict:
     """Merge durable conversation identity into soft business_context.
 
@@ -848,6 +1165,13 @@ async def _workflow_stream(
                     _workflow_record_canvas_node_events(
                         run, event=event, data=data
                     )
+                    _workflow_record_canvas_tool_events(
+                        run, event=event, data=data
+                    )
+                elif event in _WF_TOOL_SSE_EVENTS:
+                    _workflow_record_canvas_tool_events(
+                        run, event=event, data=data
+                    )
                 elif event == "message":
                     content = str(data.get("content") or data.get("answer") or "")
                     pieces = _workflow_record_stream_first_packets(
@@ -883,6 +1207,7 @@ async def _workflow_stream(
                     if data.get("status") is not None:
                         explicit_status = data.get("status")
                 elif event == "workflow_finished":
+                    _workflow_record_tools_summary(run)
                     explicit_status = data.get("status")
                     if data.get("content"):
                         final_delta = str(data["content"])

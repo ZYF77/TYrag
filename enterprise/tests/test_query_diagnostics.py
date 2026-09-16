@@ -613,3 +613,324 @@ def test_workflow_stream_node_events_coexist_with_p0_milestones():
     assert "stream_first_answer" in types
     assert "Y" * 100 not in str(finished)
 
+
+
+
+def test_workflow_tool_mcp_call_summaries_no_giant_payloads():
+    """P2: synthetic tool/MCP SSE frames -> wf_tool_call + wf_tools_summary."""
+    from enterprise.gateway.query import workflow_router
+
+    request_started = perf_counter() - 0.01
+    trace = start_trace(
+        "wf-tools-1",
+        query="safe",
+        reasoning_mode="simple",
+        stream=True,
+        request_started=request_started,
+    )
+    run = {"run_id": "wf-tools-1", "_diagnostics": trace}
+
+    class _Req:
+        class state:
+            gateway_request_started = request_started
+
+    workflow_router._workflow_record_run_started(run, _Req())
+
+    giant = "Z" * 50_000
+    # Non-tool canvas nodes must not invent tool events (v1.7 production shape).
+    workflow_router._workflow_record_canvas_node_events(
+        run,
+        event="node_finished",
+        data={
+            "component_id": "begin",
+            "component_name": "Begin",
+            "component_type": "Begin",
+            "elapsed_time": 0.01,
+            "outputs": {"content": giant},
+        },
+    )
+    workflow_router._workflow_record_canvas_tool_events(
+        run,
+        event="node_finished",
+        data={
+            "component_id": "begin",
+            "component_name": "Begin",
+            "component_type": "Begin",
+            "elapsed_time": 0.01,
+            "outputs": {"content": giant},
+        },
+    )
+    workflow_router._workflow_record_canvas_tool_events(
+        run,
+        event="node_finished",
+        data={
+            "component_id": "Retrieval:FocusedEvidence",
+            "component_name": "Retrieval",
+            "component_type": "Retrieval",
+            "elapsed_time": 0.2,
+            "outputs": {"chunks": [giant]},
+        },
+    )
+
+    # Synthetic RF tool node finish (live v1.7 canvas has no tool nodes).
+    workflow_router._workflow_record_canvas_node_events(
+        run,
+        event="node_finished",
+        data={
+            "component_id": "TavilySearch:web",
+            "component_name": "Web search",
+            "component_type": "TavilySearch",
+            "elapsed_time": 0.42,
+            "inputs": {"query": giant},
+            "outputs": {"result": giant},
+            "arguments": {"q": giant},
+            "result": giant,
+        },
+    )
+    workflow_router._workflow_record_canvas_tool_events(
+        run,
+        event="node_finished",
+        data={
+            "component_id": "TavilySearch:web",
+            "component_name": "Web search",
+            "component_type": "TavilySearch",
+            "elapsed_time": 0.42,
+            "inputs": {"query": giant},
+            "outputs": {"result": giant},
+            "arguments": {"q": giant},
+            "result": giant,
+        },
+    )
+    # MCP-style explicit fields + dedicated SSE event name.
+    workflow_router._workflow_record_canvas_tool_events(
+        run,
+        event="mcp_call",
+        data={
+            "tool_name": "get_equipment_status",
+            "tool_id": "mcp-equip-1",
+            "mcp_id": "mcp-server-9",
+            "elapsed_time": 0.11,
+            "arguments": {"id": giant},
+            "result": {"raw": giant},
+            "error": None,
+        },
+    )
+    # Error path still omits args/result.
+    workflow_router._workflow_record_canvas_tool_events(
+        run,
+        event="tool_call",
+        data={
+            "toolName": "Wikipedia",
+            "toolId": "wiki-1",
+            "elapsed_time": 1.25,
+            "error": "timeout-" + giant[:100],
+            "params": {"q": giant},
+            "toolResult": giant,
+        },
+    )
+    # tool_use_callback-shaped nested rows (name/latency only).
+    workflow_router._workflow_record_canvas_tool_events(
+        run,
+        event="node_finished",
+        data={
+            "component_id": "Agent:FocusedAnswer",
+            "component_name": "Answer",
+            "component_type": "Agent",
+            "elapsed_time": 3.0,
+            "outputs": {"content": giant},
+            "trace": [
+                {
+                    "component_id": "Agent:FocusedAnswer",
+                    "trace": [
+                        {
+                            "tool_name": "ExeSQL",
+                            "arguments": {"sql": giant},
+                            "result": giant,
+                            "elapsed_time": 0.05,
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+    workflow_router._workflow_record_tools_summary(run)
+    finished = finish_trace(trace, outcome="completed")
+    types = [e["type"] for e in finished["events"]]
+    assert "run_started" in types
+    assert types.count("wf_tool_call") == 4
+    assert types.count("wf_tools_summary") == 1
+    assert giant not in str(finished)
+    blob = str(finished)
+    assert "arguments" not in blob.lower() or '"arguments"' not in blob
+    assert "toolresult" not in blob.lower()
+    assert '"result"' not in blob
+
+    calls = [e for e in finished["events"] if e["type"] == "wf_tool_call"]
+    by_name = {(e["data"].get("name"), e["data"].get("toolSource")): e for e in calls}
+    assert ("TavilySearch", "tool") in by_name or any(
+        e["data"].get("name") == "TavilySearch" for e in calls
+    )
+    tavily = next(e for e in calls if e["data"].get("name") == "TavilySearch")
+    assert tavily["data"]["toolSource"] == "tool"
+    assert tavily["data"]["status"] == "success"
+    assert tavily["durationMs"] == 420.0
+    assert tavily["data"]["toolId"] == "TavilySearch:web"
+    assert "inputs" not in tavily["data"]
+    assert "outputs" not in tavily["data"]
+    assert "arguments" not in tavily["data"]
+    assert "result" not in tavily["data"]
+
+    mcp = next(e for e in calls if e["data"].get("name") == "get_equipment_status")
+    assert mcp["data"]["toolSource"] == "mcp"
+    assert mcp["data"]["status"] == "success"
+    assert mcp["durationMs"] == 110.0
+
+    wiki = next(e for e in calls if e["data"].get("name") == "Wikipedia")
+    assert wiki["data"]["status"] == "error"
+    assert str(wiki["data"]["error"]).startswith("timeout-")
+    assert len(str(wiki["data"]["error"])) <= 256
+
+    sql = next(e for e in calls if e["data"].get("name") == "ExeSQL")
+    assert sql["data"]["toolSource"] == "tool"
+    assert sql["durationMs"] == 50.0
+
+    summary = next(e for e in finished["events"] if e["type"] == "wf_tools_summary")
+    assert summary["data"]["totalCount"] == 4
+    assert len(summary["data"]["tools"]) == 4
+    names = {row["name"] for row in summary["data"]["tools"]}
+    assert names == {"TavilySearch", "get_equipment_status", "Wikipedia", "ExeSQL"}
+    wiki_row = next(r for r in summary["data"]["tools"] if r["name"] == "Wikipedia")
+    assert wiki_row["error"] == 1
+    assert wiki_row["ok"] == 0
+
+
+def test_workflow_stream_tool_frames_coexist_with_p0_p1():
+    """Simulated stream: P0 milestones + P1 nodes + P2 tool summary stay green."""
+    from enterprise.gateway.query import workflow_router
+    from enterprise.gateway.query.answer_split import StreamThinkSplitter
+
+    request_started = perf_counter() - 0.01
+    trace = start_trace(
+        "wf-tools-stream-1",
+        query="safe",
+        reasoning_mode="simple",
+        stream=True,
+        request_started=request_started,
+    )
+    run = {"run_id": "wf-tools-stream-1", "_diagnostics": trace}
+
+    class _Req:
+        class state:
+            gateway_request_started = request_started
+
+    workflow_router._workflow_record_run_started(run, _Req())
+    first_flags = {"stream_output": False, "reasoning": False, "answer": False}
+    splitter = StreamThinkSplitter()
+    upstream_started = perf_counter() - 0.005
+    giant = "Q" * 20_000
+
+    frames = [
+        (
+            "node_started",
+            {
+                "component_id": "begin",
+                "component_name": "Begin",
+                "component_type": "Begin",
+            },
+        ),
+        (
+            "node_finished",
+            {
+                "component_id": "begin",
+                "component_name": "Begin",
+                "component_type": "Begin",
+                "elapsed_time": 0.01,
+            },
+        ),
+        (
+            "node_finished",
+            {
+                "component_id": "Wikipedia:1",
+                "component_name": "Wiki",
+                "component_type": "Wikipedia",
+                "elapsed_time": 0.2,
+                "outputs": {"content": giant},
+            },
+        ),
+        (
+            "mcp_call",
+            {
+                "tool_name": "lookup",
+                "mcp_id": "m1",
+                "elapsed_time": 0.03,
+                "arguments": {"x": giant},
+                "result": giant,
+            },
+        ),
+        ("message", {"content": "hello answer"}),
+        ("workflow_finished", {"status": "completed"}),
+    ]
+    for event, data in frames:
+        if event in ("node_started", "node_finished"):
+            workflow_router._workflow_record_canvas_node_events(
+                run, event=event, data=data
+            )
+            workflow_router._workflow_record_canvas_tool_events(
+                run, event=event, data=data
+            )
+        elif event in workflow_router._WF_TOOL_SSE_EVENTS:
+            workflow_router._workflow_record_canvas_tool_events(
+                run, event=event, data=data
+            )
+        elif event == "message":
+            workflow_router._workflow_record_stream_first_packets(
+                run,
+                upstream_started=upstream_started,
+                data=data,
+                content=str(data.get("content") or ""),
+                first_flags=first_flags,
+                splitter=splitter,
+            )
+        elif event == "workflow_finished":
+            workflow_router._workflow_record_tools_summary(run)
+
+    finished = finish_trace(trace, outcome="completed")
+    types = {e["type"] for e in finished["events"]}
+    assert "run_started" in types
+    assert "wf_node_started" in types
+    assert "wf_node_finished" in types
+    assert "stream_first_token" in types
+    assert "stream_first_answer" in types
+    assert "wf_tool_call" in types
+    assert "wf_tools_summary" in types
+    assert giant not in str(finished)
+    assert "Q" * 100 not in str(finished)
+
+
+def test_workflow_tools_summary_absent_when_no_tool_frames():
+    """Production canvas without tool nodes yields empty tool diagnostics."""
+    from enterprise.gateway.query import workflow_router
+
+    trace = start_trace(
+        "wf-tools-empty",
+        query="safe",
+        reasoning_mode="simple",
+        stream=True,
+    )
+    run = {"run_id": "wf-tools-empty", "_diagnostics": trace}
+    workflow_router._workflow_record_canvas_tool_events(
+        run,
+        event="node_finished",
+        data={
+            "component_id": "Agent:FocusedAnswer",
+            "component_name": "Answer",
+            "component_type": "Agent",
+            "elapsed_time": 1.0,
+        },
+    )
+    workflow_router._workflow_record_tools_summary(run)
+    finished = finish_trace(trace, outcome="completed")
+    types = {e["type"] for e in finished["events"]}
+    assert "wf_tool_call" not in types
+    assert "wf_tools_summary" not in types
