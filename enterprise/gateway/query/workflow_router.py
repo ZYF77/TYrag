@@ -363,6 +363,66 @@ def _workflow_record_stream_first_packets(
     return pieces
 
 
+
+_WF_NODE_STR_LIMIT = 256
+_WF_NODE_EVENT_MAP = {
+    "node_started": "wf_node_started",
+    "node_finished": "wf_node_finished",
+}
+
+
+def _workflow_canvas_node_summary(
+    data: dict[str, Any], *, event: str
+) -> dict[str, Any]:
+    """Panel-safe node fields only — never store inputs/outputs payloads."""
+    summary: dict[str, Any] = {
+        "source": "gateway",
+        "componentId": data.get("component_id"),
+        "componentName": data.get("component_name"),
+        "componentType": data.get("component_type"),
+    }
+    error = data.get("error")
+    if error not in (None, ""):
+        summary["error"] = str(error)[:_WF_NODE_STR_LIMIT]
+        summary["status"] = "error"
+    elif event == "node_started":
+        summary["status"] = "running"
+    else:
+        summary["status"] = "success"
+    elapsed = data.get("elapsed_time")
+    if isinstance(elapsed, (int, float)) and elapsed >= 0:
+        summary["elapsedSec"] = round(float(elapsed), 6)
+        summary["durationMs"] = round(float(elapsed) * 1000.0, 3)
+    # Drop empties so Console timeline stays compact.
+    return {
+        key: (
+            value[:_WF_NODE_STR_LIMIT]
+            if isinstance(value, str) and key != "status"
+            else value
+        )
+        for key, value in summary.items()
+        if value is not None and value != ""
+    }
+
+
+def _workflow_record_canvas_node_events(
+    run: dict,
+    *,
+    event: str,
+    data: dict[str, Any],
+) -> None:
+    """Record ``wf_node_started`` / ``wf_node_finished`` from RF Canvas SSE frames."""
+    mapped = _WF_NODE_EVENT_MAP.get(str(event or ""))
+    if not mapped or not isinstance(data, dict):
+        return
+    payload = _workflow_canvas_node_summary(data, event=str(event or ""))
+    payload["stage"] = mapped
+    # Explicitly refuse giant Canvas payloads even if callers pass them through.
+    for blocked in ("inputs", "outputs", "thoughts", "content", "answer"):
+        payload.pop(blocked, None)
+    v2.record_event(run.get("_diagnostics"), mapped, payload)
+
+
 def _soft_business_context(conversation: dict) -> dict:
     """Merge durable conversation identity into soft business_context.
 
@@ -784,7 +844,11 @@ async def _workflow_stream(
                 event, data, returned_session = _workflow_frame(payload)
                 _workflow_merge_upstream_diagnostics(run, data, payload)
                 workflow_session_id = returned_session or workflow_session_id
-                if event == "message":
+                if event in ("node_started", "node_finished"):
+                    _workflow_record_canvas_node_events(
+                        run, event=event, data=data
+                    )
+                elif event == "message":
                     content = str(data.get("content") or data.get("answer") or "")
                     pieces = _workflow_record_stream_first_packets(
                         run,

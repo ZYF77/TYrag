@@ -435,3 +435,181 @@ def test_workflow_nonstream_records_run_started_not_stream_first():
     assert "stream_first_token" not in types
     assert "stream_first_reasoning" not in types
     assert "stream_first_answer" not in types
+
+def test_workflow_canvas_node_start_finish_summaries_no_giant_outputs():
+    """P1: RF node_started/finished -> compact wf_node_* events (no payloads)."""
+    from enterprise.gateway.query import workflow_router
+
+    request_started = perf_counter() - 0.01
+    trace = start_trace(
+        "wf-nodes-1",
+        query="safe",
+        reasoning_mode="simple",
+        stream=True,
+        request_started=request_started,
+    )
+    run = {"run_id": "wf-nodes-1", "_diagnostics": trace}
+
+    class _Req:
+        class state:
+            gateway_request_started = request_started
+
+    workflow_router._workflow_record_run_started(run, _Req())
+
+    giant = "X" * 50_000
+    workflow_router._workflow_record_canvas_node_events(
+        run,
+        event="node_started",
+        data={
+            "component_id": "retrieval_0",
+            "component_name": "Retrieve docs",
+            "component_type": "Retrieval",
+            "inputs": None,
+            "thoughts": giant,
+        },
+    )
+    workflow_router._workflow_record_canvas_node_events(
+        run,
+        event="node_finished",
+        data={
+            "component_id": "retrieval_0",
+            "component_name": "Retrieve docs",
+            "component_type": "Retrieval",
+            "inputs": {"query": giant},
+            "outputs": {"chunks": [giant], "content": giant},
+            "error": None,
+            "elapsed_time": 0.125,
+        },
+    )
+    # Error path: status/error recorded; still no outputs.
+    workflow_router._workflow_record_canvas_node_events(
+        run,
+        event="node_finished",
+        data={
+            "component_id": "generate_0",
+            "component_name": "Generate",
+            "component_type": "Generate",
+            "outputs": {"content": giant},
+            "error": "boom-" + giant[:200],
+            "elapsed_time": 1.5,
+        },
+    )
+    # Unknown / non-node events ignored.
+    before = len(trace["events"])
+    workflow_router._workflow_record_canvas_node_events(
+        run, event="message", data={"content": giant}
+    )
+    assert len(trace["events"]) == before
+
+    finished = finish_trace(trace, outcome="completed")
+    types = [e["type"] for e in finished["events"]]
+    assert types.count("wf_node_started") == 1
+    assert types.count("wf_node_finished") == 2
+    # P0 milestones still present when recorded on same trace.
+    assert "run_started" in types
+
+    started = next(e for e in finished["events"] if e["type"] == "wf_node_started")
+    assert started["data"]["componentId"] == "retrieval_0"
+    assert started["data"]["componentName"] == "Retrieve docs"
+    assert started["data"]["componentType"] == "Retrieval"
+    assert started["data"]["status"] == "running"
+    assert "inputs" not in started["data"]
+    assert "outputs" not in started["data"]
+    assert "thoughts" not in started["data"]
+    assert giant not in str(started)
+
+    ok_finish = next(
+        e
+        for e in finished["events"]
+        if e["type"] == "wf_node_finished"
+        and (e.get("data") or {}).get("componentId") == "retrieval_0"
+    )
+    assert ok_finish["data"]["status"] == "success"
+    assert ok_finish["data"]["elapsedSec"] == 0.125
+    assert ok_finish["durationMs"] == 125.0
+    assert "outputs" not in ok_finish["data"]
+    assert "inputs" not in ok_finish["data"]
+    assert giant not in str(ok_finish)
+
+    err_finish = next(
+        e
+        for e in finished["events"]
+        if e["type"] == "wf_node_finished"
+        and (e.get("data") or {}).get("componentId") == "generate_0"
+    )
+    assert err_finish["data"]["status"] == "error"
+    assert str(err_finish["data"]["error"]).startswith("boom-")
+    assert len(str(err_finish["data"]["error"])) <= 256
+    assert "outputs" not in err_finish["data"]
+    assert giant not in str(finished)
+
+
+def test_workflow_stream_node_events_coexist_with_p0_milestones():
+    """Simulated stream frames: node summaries + stream_first_* stay green."""
+    from enterprise.gateway.query import workflow_router
+    from enterprise.gateway.query.answer_split import StreamThinkSplitter
+
+    request_started = perf_counter() - 0.01
+    trace = start_trace(
+        "wf-nodes-stream-1",
+        query="safe",
+        reasoning_mode="simple",
+        stream=True,
+        request_started=request_started,
+    )
+    run = {"run_id": "wf-nodes-stream-1", "_diagnostics": trace}
+
+    class _Req:
+        class state:
+            gateway_request_started = request_started
+
+    workflow_router._workflow_record_run_started(run, _Req())
+    first_flags = {"stream_output": False, "reasoning": False, "answer": False}
+    splitter = StreamThinkSplitter()
+    upstream_started = perf_counter() - 0.005
+
+    frames = [
+        (
+            "node_started",
+            {
+                "component_id": "begin",
+                "component_name": "Begin",
+                "component_type": "Begin",
+            },
+        ),
+        (
+            "node_finished",
+            {
+                "component_id": "begin",
+                "component_name": "Begin",
+                "component_type": "Begin",
+                "elapsed_time": 0.01,
+                "outputs": {"content": "Y" * 20_000},
+            },
+        ),
+        ("message", {"content": "hello answer"}),
+    ]
+    for event, data in frames:
+        if event in ("node_started", "node_finished"):
+            workflow_router._workflow_record_canvas_node_events(
+                run, event=event, data=data
+            )
+        elif event == "message":
+            workflow_router._workflow_record_stream_first_packets(
+                run,
+                upstream_started=upstream_started,
+                data=data,
+                content=str(data.get("content") or ""),
+                first_flags=first_flags,
+                splitter=splitter,
+            )
+
+    finished = finish_trace(trace, outcome="completed")
+    types = {e["type"] for e in finished["events"]}
+    assert "run_started" in types
+    assert "wf_node_started" in types
+    assert "wf_node_finished" in types
+    assert "stream_first_token" in types
+    assert "stream_first_answer" in types
+    assert "Y" * 100 not in str(finished)
+
