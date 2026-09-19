@@ -1067,7 +1067,20 @@ class SyncService:
                 "retry parsing",
             )
         except RAGFlowAPIError as exc:
-            raise self._ragflow_error(exc) from exc
+            # Best-effort technical retry must not block terminal FAIL handling.
+            # RF may reject with code=102 ("currently being processed") or other
+            # transient errors (e.g. historical code=100). Fall through so callers
+            # can advance to failed (and optionally emit terminal callback on the
+            # live path). Do not use this as a mass historical-FAIL EAM backfill.
+            logger.warning(
+                "RAGFlow technical parse retry failed; falling through "
+                "to terminal handling document=%s version=%s reason=%s error=%s",
+                doc.external_document_id,
+                doc.source_version_id,
+                reason,
+                exc,
+            )
+            return False
         target_status = (
             "queued"
             if transition_allowed(doc.sync_status, "queued", "document")

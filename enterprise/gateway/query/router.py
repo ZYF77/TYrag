@@ -71,7 +71,9 @@ def _demo_pdf_max_bytes() -> int:
         min(_configured_demo_limit, DEFAULT_DOCUMENT_FEED_MAX_SIZE_MB * 1024 * 1024),
     )
 _query_stub: RAGFlowQueryStub | None = None
-NO_RELIABLE_EVIDENCE_ANSWER = "未找到可靠依据，无法回答。"
+from enterprise.gateway.query.citation_select import ABSTAIN_PHRASE
+
+NO_RELIABLE_EVIDENCE_ANSWER = ABSTAIN_PHRASE
 
 
 async def get_db():

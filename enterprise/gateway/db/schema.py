@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from enterprise.gateway.db.dialect import add_column_if_missing, exec_sql
 from enterprise.gateway.db.tables import metadata
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 def _quote_identifier(value: str) -> str:
@@ -204,6 +204,13 @@ async def _upgrade_v6_to_v7(conn) -> None:
     )
 
 
+async def _upgrade_v7_to_v8(conn) -> None:
+    """Persist the independently bound Agent Workflow test session."""
+    await add_column_if_missing(conn, "ext_v2_conversation", "workflow_agent_id", "TEXT")
+    await add_column_if_missing(conn, "ext_v2_conversation", "workflow_version", "TEXT")
+    await add_column_if_missing(conn, "ext_v2_conversation", "workflow_session_id", "TEXT")
+
+
 async def initialize_schema(engine: AsyncEngine, *, schema: str = "public") -> None:
     """Create or upgrade the Gateway schema and reject unknown versions."""
     if not schema.replace("_", "").isalnum() or not schema[0].isalpha():
@@ -289,10 +296,13 @@ async def initialize_schema(engine: AsyncEngine, *, schema: str = "public") -> N
         if values == [6]:
             await _upgrade_v6_to_v7(conn)
             values = [7]
+        if values == [7]:
+            await _upgrade_v7_to_v8(conn)
+            values = [8]
         elif values not in ([], [SCHEMA_VERSION]):
             raise RuntimeError(
                 f"unsupported Gateway schema version: {values!r}; "
-                f"expected [1], [2], [3], [4], [5], [6], or [{SCHEMA_VERSION}]"
+                f"expected [1], [2], [3], [4], [5], [6], [7], or [{SCHEMA_VERSION}]"
             )
         await conn.execute(text("DELETE FROM gateway_schema_version"))
         await conn.execute(

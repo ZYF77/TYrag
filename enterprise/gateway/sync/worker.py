@@ -135,7 +135,15 @@ class StatusReconciler:
         updated = 0
         for doc in to_refresh:
             before = doc.sync_status
-            await self.service.refresh_status(doc)
+            try:
+                await self.service.refresh_status(doc)
+            except Exception:
+                logger.exception(
+                    "Status reconciler refresh failed document=%s version=%s",
+                    doc.external_document_id,
+                    doc.source_version_id,
+                )
+                continue
             if doc.sync_status != before:
                 updated += 1
         updated += await self.service.reconcile_missing_ragflow_documents()

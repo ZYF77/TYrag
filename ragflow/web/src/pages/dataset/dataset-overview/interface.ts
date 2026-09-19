@@ -21,10 +21,21 @@ export interface FileLogsTableProps {
 }
 
 export interface IOverviewTotal {
-  cancelled: number;
-  failed: number;
-  finished: number;
+  /** status.unstart_count — pending-parse big number */
+  pending: number;
+  /** doc_num — ingested / file list total for pending-card success */
+  ingested: number;
+  /** pending-card fail; fixed 0 (no download-fail from source_type) */
+  pendingFailed: number;
+  /** status.running_count */
   processing: number;
+  /** status.done_count */
+  finished: number;
+  /** status.fail_count */
+  failed: number;
+  /** status.cancel_count */
+  cancelled: number;
+  /** compat alias of pending (legacy field name) */
   downloaded: number;
 }
 

@@ -2025,7 +2025,7 @@ async def test_v2_stream_no_reliable_evidence_clears_citations_defensively(
     assert response.status_code == 200
     assert '"status": "无可靠依据"' in response.text
     assert "event: answer.replaced" in response.text
-    assert '"content": "未找到可靠依据，无法回答。"' in response.text
+    assert '"content": "当前检索结果中没有找到可靠依据"' in response.text
     assert "event: citation" not in response.text
 
 
@@ -2476,7 +2476,7 @@ async def test_v2_no_reliable_evidence_clears_citations_defensively(runtime):
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["status"] == "无可靠依据"
-    assert body["answer"] == "未找到可靠依据，无法回答。"
+    assert body["answer"] == "当前检索结果中没有找到可靠依据"
     assert body["citations"] == []
 
 

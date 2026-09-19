@@ -143,13 +143,14 @@ const FileLogsPage: FC = () => {
       return {
         ...prev,
         downloads: {
-          ...prev.downloads,
-          success: topData?.downloaded || 0,
+          value: topData?.pending ?? 0,
+          success: topData?.ingested ?? 0,
+          failed: topData?.pendingFailed ?? 0,
         },
         processing: {
-          value: topData?.processing || 0,
-          success: topData?.finished || 0,
-          failed: topData?.failed || 0,
+          value: topData?.processing ?? 0,
+          success: topData?.finished ?? 0,
+          failed: topData?.failed ?? 0,
         },
       };
     });

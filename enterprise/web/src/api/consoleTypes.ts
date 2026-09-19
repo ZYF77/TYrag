@@ -106,6 +106,31 @@ export interface RuntimeRetrievalScopeSettings {
   policy: RetrievalScopePolicy;
 }
 
+export interface RuntimeRagflowStatusWebhookSettings {
+  enabled: boolean;
+  /** True when a secret is configured; plaintext is never returned. */
+  secretConfigured: boolean;
+  ignoreCancel: boolean;
+  /** Write-only; omit or leave empty to keep the existing secret. */
+  secret?: string;
+}
+
+export interface RuntimeUserMemorySettings {
+  enabled: boolean;
+  memoryId: string;
+  topN: number;
+  timeoutSeconds: number;
+}
+
+export interface RuntimeWorkflowSettings {
+  enabled: boolean;
+  /** Production v1.2 example: 9d6f54beb0b911f1ad1c8d8c8b7d5b0e */
+  agentId: string;
+  /** Suggested default/example: enterprise-qa-agent-v1.2 */
+  version: string;
+  timeoutSeconds: number;
+}
+
 export interface GatewayRuntimeSettings {
   outbox: RuntimeWorkerSettings;
   statusReconciler: RuntimeWorkerSettings;
@@ -116,6 +141,9 @@ export interface GatewayRuntimeSettings {
   limits: RuntimeLimitsSettings;
   diagnostics: RuntimeDiagnosticsSettings;
   retrievalScope: RuntimeRetrievalScopeSettings;
+  ragflowStatusWebhook: RuntimeRagflowStatusWebhookSettings;
+  userMemory: RuntimeUserMemorySettings;
+  workflow: RuntimeWorkflowSettings;
 }
 
 export interface GatewayRuntimeSettingsState {

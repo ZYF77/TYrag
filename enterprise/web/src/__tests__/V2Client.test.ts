@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
+import { http, HttpResponse } from 'msw';
 import { MESSAGE_FILE_LIMITS, V2ApiError, v2Api } from '../api/v2Client';
+import { server } from '../test-setup';
 
 const command = {
   eventId: 'test-event-v2',
@@ -122,6 +124,33 @@ describe('v2 API client', () => {
     await replayStream.promise;
     expect(replay[0].event).toBe('run.started');
     expect(JSON.parse(replay[0].data).replayed).toBe(true);
+  });
+
+  it('uses the Gateway Agent Workflow proxy when the workflow mode is selected', async () => {
+    const conversation = await v2Api.createConversation({ equipmentId: 'EQ-WORKFLOW' });
+    const events: Array<{ event: string; data: string }> = [];
+    server.use(
+      http.post('/enterprise/api/v1/workflow/conversations/:conversationId/messages', () => {
+        const payload = [
+          `event: run.started\ndata: ${JSON.stringify({ runId: 'workflow-run', workflowVersion: 'enterprise-qa-agent-v1' })}\n\n`,
+          `event: answer.delta\ndata: ${JSON.stringify({ content: 'Workflow answer' })}\n\n`,
+          `event: answer.completed\ndata: ${JSON.stringify({ status: '已完成', citations: [] })}\n\n`,
+        ].join('');
+        return new HttpResponse(payload, {
+          headers: { 'Content-Type': 'text/event-stream' },
+        });
+      }),
+    );
+    const stream = v2Api.streamMessage(
+      conversation.conversationId,
+      { clientMessageId: 'client-workflow-v1', question: 'workflow question' },
+      (event) => events.push(event),
+      [],
+      'workflow',
+    );
+    await stream.promise;
+    expect(events.some((event) => event.event === 'answer.delta')).toBe(true);
+    expect(events.find((event) => event.event === 'answer.delta')?.data).toContain('Workflow answer');
   });
 
   it('replays persisted business status and citations without deriving one from the other', async () => {

@@ -43,10 +43,15 @@ from enterprise.gateway.query.answer_split import (
     split_assistant_output,
 )
 from enterprise.gateway.query.citation_select import (
+    ABSTAIN_PHRASE,
     select_cited_chunks,
 )
 from enterprise.gateway.query.enterprise_prompt import (
     enterprise_prompt_config_for_api,
+)
+from enterprise.gateway.query.user_memory import (
+    fetch_user_memory_text,
+    schedule_memory_candidate,
 )
 from enterprise.gateway.query.ragflow_client import (
     RAGFlowAPIError,
@@ -64,7 +69,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/enterprise/api/v1", tags=["query"])
 
-NO_RELIABLE_EVIDENCE_ANSWER = "未找到可靠依据，无法回答。"
+NO_RELIABLE_EVIDENCE_ANSWER = ABSTAIN_PHRASE
 
 
 def _query_source_system() -> str | None:
@@ -811,11 +816,15 @@ async def _run_ask(
     client = _query_client()
     try:
         chat_id = await _ensure_chat(client, principal, scope)
+        user_memory = await fetch_user_memory_text(
+            principal, req.question, request_id=request_id
+        )
         completion = await client.chat_completion(
             chat_id,
             req.question,
             session_id=conversation.get("ragflow_session_id"),
             doc_ids=list(scope.document_ids),
+            user_memory=user_memory,
         )
     except (RAGFlowAPIError, _FormalQueryError) as e:
         if isinstance(e, RAGFlowAPIError):
@@ -919,6 +928,15 @@ async def _run_ask(
             citations=[],
         )
         raise
+    if status == "completed":
+        schedule_memory_candidate(
+            principal,
+            chat_id=chat_id,
+            session_id=ragflow_session_id or conversation.get("ragflow_session_id"),
+            user_input=req.question,
+            agent_response=answer,
+            request_id=request_id,
+        )
     return AskJsonResponse(
         conversationId=conversation["conversation_id"],
         messageId=assistant_message_id,
@@ -975,11 +993,15 @@ async def _stream_ask_events(
     try:
         client = _query_client()
         chat_id = await _ensure_chat(client, principal, scope)
+        user_memory = await fetch_user_memory_text(
+            principal, req.question, request_id=request_id
+        )
         async for payload in client.chat_completion_stream(
             chat_id,
             req.question,
             session_id=ragflow_session_id,
             doc_ids=list(scope.document_ids),
+            user_memory=user_memory,
         ):
             data = payload.get("data") if isinstance(payload, dict) else None
             if data is True:
@@ -1064,6 +1086,15 @@ async def _stream_ask_events(
         if status == "completed":
             for citation in citations:
                 yield _sse("citation", citation)
+        if status == "completed":
+            schedule_memory_candidate(
+                principal,
+                chat_id=chat_id,
+                session_id=ragflow_session_id,
+                user_input=req.question,
+                agent_response=answer,
+                request_id=request_id,
+            )
         yield _sse(
             "answer.completed",
             {

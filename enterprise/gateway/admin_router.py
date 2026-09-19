@@ -50,6 +50,12 @@ from enterprise.gateway.runtime_settings import (
     TTL_MAX_SECONDS,
     TTL_MIN_SECONDS,
     parse_runtime_settings,
+    USER_MEMORY_TIMEOUT_MAX_SECONDS,
+    USER_MEMORY_TIMEOUT_MIN_SECONDS,
+    USER_MEMORY_TOP_N_MAX,
+    USER_MEMORY_TOP_N_MIN,
+    WORKFLOW_TIMEOUT_MAX_SECONDS,
+    WORKFLOW_TIMEOUT_MIN_SECONDS,
 )
 from enterprise.gateway.sync.models import utc_now
 from enterprise.gateway.sync.ragflow_document_client import RAGFlowAPIError
@@ -142,6 +148,41 @@ class RuntimeRetrievalScopeSettings(_RuntimeSettingsModel):
     policy: Literal["legacy_device", "authorized_context"]
 
 
+class RuntimeRagflowStatusWebhookSettings(_RuntimeSettingsModel):
+    """Inbound RF→Gateway document-run-terminal webhook (≠ outbound EAM callback)."""
+
+    enabled: StrictBool
+    ignoreCancel: StrictBool
+    # Write-only; empty/omitted keeps the previously configured secret.
+    secret: str | None = None
+    # Echoed on GET; ignored on PUT so Console can round-trip the draft.
+    secretConfigured: StrictBool | None = None
+
+
+class RuntimeUserMemorySettings(_RuntimeSettingsModel):
+    """EAM user long-term Memory (Gateway prefetch inject; hot-reloadable)."""
+
+    enabled: StrictBool
+    memoryId: str = ""
+    topN: StrictInt = Field(ge=USER_MEMORY_TOP_N_MIN, le=USER_MEMORY_TOP_N_MAX)
+    timeoutSeconds: float = Field(
+        ge=USER_MEMORY_TIMEOUT_MIN_SECONDS,
+        le=USER_MEMORY_TIMEOUT_MAX_SECONDS,
+    )
+
+
+class RuntimeWorkflowSettings(_RuntimeSettingsModel):
+    """Agent Workflow second entry (Harness tab; hot-reloadable; default off)."""
+
+    enabled: StrictBool
+    agentId: str = ""
+    version: str = ""
+    timeoutSeconds: float = Field(
+        ge=WORKFLOW_TIMEOUT_MIN_SECONDS,
+        le=WORKFLOW_TIMEOUT_MAX_SECONDS,
+    )
+
+
 class RuntimeSettingsRequest(_RuntimeSettingsModel):
     outbox: RuntimeWorkerSettings
     statusReconciler: RuntimeWorkerSettings
@@ -152,6 +193,9 @@ class RuntimeSettingsRequest(_RuntimeSettingsModel):
     limits: RuntimeLimitsSettings
     diagnostics: RuntimeDiagnosticsSettings
     retrievalScope: RuntimeRetrievalScopeSettings
+    ragflowStatusWebhook: RuntimeRagflowStatusWebhookSettings
+    userMemory: RuntimeUserMemorySettings
+    workflow: RuntimeWorkflowSettings
 
 
 async def _runtime_manager(gateway):
@@ -302,11 +346,14 @@ async def update_runtime_settings(
     principal: UserPrincipal = Depends(require_capability("admin")),
 ):
     """Persist allow-listed Gateway settings and publish them immediately."""
+    manager = await _runtime_manager(gateway)
     try:
-        settings = parse_runtime_settings(payload.model_dump(mode="json"))
+        settings = parse_runtime_settings(
+            payload.model_dump(mode="json"),
+            previous_secret=manager.snapshot().ragflow_status_webhook_secret,
+        )
     except RuntimeSettingsError:
         return _error(422, "VALIDATION_ERROR", str(uuid.uuid4()))
-    manager = await _runtime_manager(gateway)
     await manager.update(settings, updated_by=principal.subject)
     return manager.response()
 

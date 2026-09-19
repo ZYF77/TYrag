@@ -74,7 +74,7 @@ export function UseGraphRagFormField({
     <FormField
       control={form.control}
       name="parser_config.graphrag.use_graphrag"
-      render={() => (
+      render={({ field }) => (
         <FormItem defaultChecked={false} className=" items-center space-y-0 ">
           <div className="flex items-center gap-1">
             <FormLabel
@@ -83,20 +83,21 @@ export function UseGraphRagFormField({
             >
               {t('useGraphRag')}
             </FormLabel>
-            <div className="w-3/4">
+            <div className="w-3/4 flex items-center gap-3">
               <FormControl>
-                {/* <Switch
-                  checked={field.value}
+                <Switch
+                  checked={!!field.value}
                   onCheckedChange={field.onChange}
-                ></Switch> */}
-                <GenerateLogButton
-                  {...data}
-                  onDelete={onDelete}
-                  className="w-full text-text-secondary"
-                  status={1}
-                  type={GenerateType.KnowledgeGraph}
+                  data-testid="ds-settings-graph-switch"
                 />
               </FormControl>
+              <GenerateLogButton
+                {...data}
+                onDelete={onDelete}
+                className="flex-1 text-text-secondary"
+                status={1}
+                type={GenerateType.KnowledgeGraph}
+              />
             </div>
           </div>
           <div className="flex pt-1">

@@ -42,7 +42,7 @@ from api.db.services.tenant_model_service import TenantModelService
 from common import settings
 from common.constants import LLMType
 from common.misc_utils import get_uuid, thread_pool_exec
-from deepdoc.parser import ExcelParser, HtmlParser, TxtParser
+from deepdoc.parser import ExcelParser, HtmlParser, JsonParser, TxtParser
 from deepdoc.parser.docling_parser import DoclingParser
 from deepdoc.parser.pdf_parser import PlainParser, RAGFlowPdfParser, VisionParser
 from deepdoc.parser.tcadp_parser import TCADPParser
@@ -75,6 +75,9 @@ class ParserParam(ProcessParamBase):
             "pdf": [
                 "json",
                 "markdown",
+            ],
+            "json": [
+                "json",
             ],
             "spreadsheet": [
                 "json",
@@ -131,6 +134,14 @@ class ParserParam(ProcessParamBase):
                 "suffix": [
                     "pdf",
                 ],
+                "output_format": "json",
+            },
+            # JSON is a first-class ingestion input in TYrag. Keep object/list
+            # boundaries from JsonParser instead of treating the payload as a
+            # generic text blob.
+            "json": {
+                "chunk_token_num": 2000,
+                "suffix": ["json", "jsonl", "ldjson"],
                 "output_format": "json",
             },
             "spreadsheet": {
@@ -1120,6 +1131,22 @@ class Parser(ProcessBase):
             texts.extend(table[0][1] for table in tables if table and table[0] and table[0][1])
             self.set_output("text", "\n".join(texts))
 
+    def _json(self, name, blob, **kwargs):
+        """Parse JSON/JSONL while preserving structured record boundaries."""
+        del name, kwargs
+        conf = self._param.setups["json"]
+        self.callback(random.randint(1, 5) / 100.0, "Start to work on a JSON file.")
+        sections = JsonParser(int(conf.get("chunk_token_num", 2000)))(blob)
+        self.set_output("output_format", "json")
+        self.set_output(
+            "json",
+            [
+                {"text": section, "doc_type_kwd": "text"}
+                for section in sections
+                if str(section or "").strip()
+            ],
+        )
+
     def _code(self, name, blob, **kwargs):
         """Parse text and source code files as plain text chunks."""
         self.callback(random.randint(1, 5) / 100.0, "Start to work on a text or code file.")
@@ -1389,6 +1416,7 @@ class Parser(ProcessBase):
         """Dispatch the current file to the matching parser branch by suffix."""
         function_map = {
             "pdf": self._pdf,
+            "json": self._json,
             "markdown": self._markdown,
             "text&code": self._code,
             "html": self._html,

@@ -14,7 +14,18 @@ from enterprise.gateway.config import (
     RETRIEVAL_SCOPE_POLICIES,
     GatewayRuntimeSettings,
     config,
+    ragflow_status_webhook_enabled_from_env,
+    ragflow_status_webhook_ignore_cancel_from_env,
+    ragflow_status_webhook_secret_from_env,
     retrieval_scope_policy_from_env,
+    user_memory_enabled_from_env,
+    user_memory_id_from_env,
+    user_memory_timeout_seconds_from_env,
+    user_memory_top_n_from_env,
+    workflow_agent_id_from_env,
+    workflow_enabled_from_env,
+    workflow_timeout_seconds_from_env,
+    workflow_version_from_env,
 )
 from enterprise.gateway.db.database import GatewayDatabase
 from enterprise.gateway.db.dialect import exec_sql, fetchone
@@ -28,6 +39,12 @@ QUALITY_TIMEOUT_MIN_SECONDS = 60
 QUALITY_TIMEOUT_MAX_SECONDS = 7 * 24 * 60 * 60
 DOCUMENT_MAX_MIB = 128
 ATTACHMENT_MAX_MIB = 10
+USER_MEMORY_TOP_N_MIN = 1
+USER_MEMORY_TOP_N_MAX = 20
+USER_MEMORY_TIMEOUT_MIN_SECONDS = 0.5
+USER_MEMORY_TIMEOUT_MAX_SECONDS = 120.0
+WORKFLOW_TIMEOUT_MIN_SECONDS = 1.0
+WORKFLOW_TIMEOUT_MAX_SECONDS = 600.0
 
 
 class RuntimeSettingsError(ValueError):
@@ -68,7 +85,46 @@ def _int(value: Any, name: str, minimum: int, maximum: int) -> int:
     return parsed
 
 
-def parse_runtime_settings(payload: Mapping[str, Any]) -> GatewayRuntimeSettings:
+def _str(value: Any, name: str) -> str:
+    if not isinstance(value, str):
+        raise RuntimeSettingsError(f"invalid runtime setting: {name}")
+    return value
+
+
+
+def _parse_ragflow_status_webhook(
+    payload: Mapping[str, Any],
+    *,
+    previous_secret: str | None = None,
+) -> tuple[bool, str, bool]:
+    """Parse inbound RF status webhook section.
+
+    Public GET shape uses ``secretConfigured`` (never plaintext). PUT may send
+    write-only ``secret``; empty/omitted keeps ``previous_secret``.
+    """
+    value = payload.get("ragflowStatusWebhook")
+    if not isinstance(value, Mapping):
+        raise RuntimeSettingsError("invalid runtime settings section: ragflowStatusWebhook")
+    allowed = {"enabled", "ignoreCancel", "secret", "secretConfigured"}
+    if not set(value) <= allowed or "enabled" not in value or "ignoreCancel" not in value:
+        raise RuntimeSettingsError("invalid runtime settings section: ragflowStatusWebhook")
+    enabled = _bool(value["enabled"], "ragflowStatusWebhook.enabled")
+    ignore_cancel = _bool(value["ignoreCancel"], "ragflowStatusWebhook.ignoreCancel")
+    secret = previous_secret or ""
+    if "secret" in value and value["secret"] is not None:
+        if not isinstance(value["secret"], str):
+            raise RuntimeSettingsError("invalid runtime setting: ragflowStatusWebhook.secret")
+        # Non-empty write updates; empty string keeps the previous secret.
+        if value["secret"]:
+            secret = value["secret"]
+    return enabled, secret, ignore_cancel
+
+
+def parse_runtime_settings(
+    payload: Mapping[str, Any],
+    *,
+    previous_secret: str | None = None,
+) -> GatewayRuntimeSettings:
     """Parse the public camelCase representation into the flat runtime model."""
     if not isinstance(payload, Mapping):
         raise RuntimeSettingsError("runtime settings must be an object")
@@ -82,6 +138,9 @@ def parse_runtime_settings(payload: Mapping[str, Any]) -> GatewayRuntimeSettings
         "limits",
         "diagnostics",
         "retrievalScope",
+        "ragflowStatusWebhook",
+        "userMemory",
+        "workflow",
     }
     if set(payload) != expected:
         raise RuntimeSettingsError("runtime settings contain unknown or missing fields")
@@ -114,6 +173,19 @@ def parse_runtime_settings(payload: Mapping[str, Any]) -> GatewayRuntimeSettings
     if policy not in RETRIEVAL_SCOPE_POLICIES:
         # Match env/config: illegal values fall back to the safe default.
         policy = "legacy_device"
+    webhook_enabled, webhook_secret, webhook_ignore_cancel = _parse_ragflow_status_webhook(
+        payload, previous_secret=previous_secret
+    )
+    user_memory = _section(
+        payload,
+        "userMemory",
+        {"enabled", "memoryId", "topN", "timeoutSeconds"},
+    )
+    workflow = _section(
+        payload,
+        "workflow",
+        {"enabled", "agentId", "version", "timeoutSeconds"},
+    )
     return GatewayRuntimeSettings(
         outbox_enabled=_bool(outbox["enabled"], "outbox.enabled"),
         outbox_poll_seconds=_float(
@@ -195,6 +267,32 @@ def parse_runtime_settings(payload: Mapping[str, Any]) -> GatewayRuntimeSettings
         ),
         rag_diagnostics_enabled=_bool(diagnostics["enabled"], "diagnostics.enabled"),
         retrieval_scope_policy=policy,
+        ragflow_status_webhook_enabled=webhook_enabled,
+        ragflow_status_webhook_secret=webhook_secret,
+        ragflow_status_webhook_ignore_cancel=webhook_ignore_cancel,
+        user_memory_enabled=_bool(user_memory["enabled"], "userMemory.enabled"),
+        user_memory_id=_str(user_memory["memoryId"], "userMemory.memoryId").strip(),
+        user_memory_top_n=_int(
+            user_memory["topN"],
+            "userMemory.topN",
+            USER_MEMORY_TOP_N_MIN,
+            USER_MEMORY_TOP_N_MAX,
+        ),
+        user_memory_timeout_seconds=_float(
+            user_memory["timeoutSeconds"],
+            "userMemory.timeoutSeconds",
+            USER_MEMORY_TIMEOUT_MIN_SECONDS,
+            USER_MEMORY_TIMEOUT_MAX_SECONDS,
+        ),
+        workflow_enabled=_bool(workflow["enabled"], "workflow.enabled"),
+        workflow_agent_id=_str(workflow["agentId"], "workflow.agentId").strip(),
+        workflow_version=_str(workflow["version"], "workflow.version").strip(),
+        workflow_timeout_seconds=_float(
+            workflow["timeoutSeconds"],
+            "workflow.timeoutSeconds",
+            WORKFLOW_TIMEOUT_MIN_SECONDS,
+            WORKFLOW_TIMEOUT_MAX_SECONDS,
+        ),
     )
 
 
@@ -236,6 +334,23 @@ def normalize_runtime_settings(settings: GatewayRuntimeSettings) -> GatewayRunti
         transient_attachment_max_size_mb=max(
             1, min(int(settings.transient_attachment_max_size_mb), ATTACHMENT_MAX_MIB)
         ),
+        user_memory_top_n=max(
+            USER_MEMORY_TOP_N_MIN,
+            min(int(settings.user_memory_top_n), USER_MEMORY_TOP_N_MAX),
+        ),
+        user_memory_timeout_seconds=max(
+            USER_MEMORY_TIMEOUT_MIN_SECONDS,
+            min(float(settings.user_memory_timeout_seconds), USER_MEMORY_TIMEOUT_MAX_SECONDS),
+        ),
+        user_memory_id=str(settings.user_memory_id or "").strip(),
+        user_memory_enabled=bool(settings.user_memory_enabled),
+        workflow_enabled=bool(settings.workflow_enabled),
+        workflow_agent_id=str(settings.workflow_agent_id or "").strip(),
+        workflow_version=str(settings.workflow_version or "").strip(),
+        workflow_timeout_seconds=max(
+            WORKFLOW_TIMEOUT_MIN_SECONDS,
+            min(float(settings.workflow_timeout_seconds), WORKFLOW_TIMEOUT_MAX_SECONDS),
+        ),
     )
 
 
@@ -274,7 +389,7 @@ class RuntimeSettingsManager:
                         "(id, settings_json, updated_at, updated_by) VALUES (?, ?, ?, NULL)",
                         (
                             RUNTIME_SETTINGS_ROW_ID,
-                            json.dumps(settings.to_api(), ensure_ascii=False, sort_keys=True),
+                            json.dumps(settings.to_storage(), ensure_ascii=False, sort_keys=True),
                             now,
                         ),
                     )
@@ -300,6 +415,29 @@ class RuntimeSettingsManager:
                                     "policy": retrieval_scope_policy_from_env(),
                                 }
                                 mutated = True
+                            if "ragflowStatusWebhook" not in stored:
+                                stored["ragflowStatusWebhook"] = {
+                                    "enabled": ragflow_status_webhook_enabled_from_env(),
+                                    "secret": ragflow_status_webhook_secret_from_env(),
+                                    "ignoreCancel": ragflow_status_webhook_ignore_cancel_from_env(),
+                                }
+                                mutated = True
+                            if "userMemory" not in stored:
+                                stored["userMemory"] = {
+                                    "enabled": user_memory_enabled_from_env(),
+                                    "memoryId": user_memory_id_from_env(),
+                                    "topN": user_memory_top_n_from_env(),
+                                    "timeoutSeconds": user_memory_timeout_seconds_from_env(),
+                                }
+                                mutated = True
+                            if "workflow" not in stored:
+                                stored["workflow"] = {
+                                    "enabled": workflow_enabled_from_env(),
+                                    "agentId": workflow_agent_id_from_env(),
+                                    "version": workflow_version_from_env(),
+                                    "timeoutSeconds": workflow_timeout_seconds_from_env(),
+                                }
+                                mutated = True
                             if mutated:
                                 await exec_sql(
                                     conn,
@@ -312,7 +450,18 @@ class RuntimeSettingsManager:
                                         RUNTIME_SETTINGS_ROW_ID,
                                     ),
                                 )
-                        settings = parse_runtime_settings(stored)
+                        # Storage may include plaintext secret; public shape uses
+                        # secretConfigured only — fall back to env secret when absent.
+                        stored_webhook = stored.get("ragflowStatusWebhook") if isinstance(stored, dict) else None
+                        prior_secret = None
+                        if isinstance(stored_webhook, dict) and isinstance(stored_webhook.get("secret"), str):
+                            prior_secret = stored_webhook.get("secret")
+                        settings = parse_runtime_settings(
+                            stored,
+                            previous_secret=prior_secret
+                            if prior_secret is not None
+                            else ragflow_status_webhook_secret_from_env(),
+                        )
                     except (TypeError, ValueError, json.JSONDecodeError) as exc:
                         raise RuntimeSettingsError(
                             "stored Gateway runtime settings are invalid"
@@ -327,7 +476,8 @@ class RuntimeSettingsManager:
         *,
         updated_by: str | None = None,
     ) -> None:
-        settings = parse_runtime_settings(settings.to_api())
+        # Validate via storage shape so the write-only secret survives round-trip.
+        settings = parse_runtime_settings(settings.to_storage())
         await self.ensure_loaded()
         async with self._lock:
             now = datetime.now(timezone.utc).isoformat()
@@ -340,7 +490,7 @@ class RuntimeSettingsManager:
                     "updated_at=excluded.updated_at, updated_by=excluded.updated_by",
                     (
                         RUNTIME_SETTINGS_ROW_ID,
-                        json.dumps(settings.to_api(), ensure_ascii=False, sort_keys=True),
+                        json.dumps(settings.to_storage(), ensure_ascii=False, sort_keys=True),
                         now,
                         (updated_by or "")[:128] or None,
                     ),
@@ -379,6 +529,12 @@ __all__ = [
     "POLL_MIN_SECONDS",
     "QUALITY_TIMEOUT_MAX_SECONDS",
     "QUALITY_TIMEOUT_MIN_SECONDS",
+    "USER_MEMORY_TIMEOUT_MAX_SECONDS",
+    "USER_MEMORY_TIMEOUT_MIN_SECONDS",
+    "USER_MEMORY_TOP_N_MAX",
+    "USER_MEMORY_TOP_N_MIN",
+    "WORKFLOW_TIMEOUT_MAX_SECONDS",
+    "WORKFLOW_TIMEOUT_MIN_SECONDS",
     "RuntimeSettingsError",
     "RuntimeSettingsManager",
     "TTL_MAX_SECONDS",

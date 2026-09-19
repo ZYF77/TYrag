@@ -348,6 +348,9 @@ ext_v2_conversation = Table(
     Column("status", Text, nullable=False, server_default="active"),
     Column("ragflow_chat_id", Text),
     Column("ragflow_session_id", Text),
+    Column("workflow_agent_id", Text),
+    Column("workflow_version", Text),
+    Column("workflow_session_id", Text),
     # Deprecated: formerly used by context_compress (removed). Kept to avoid schema migration.
     Column("context_summary", Text),
     Column("summary_updated_at", Text),

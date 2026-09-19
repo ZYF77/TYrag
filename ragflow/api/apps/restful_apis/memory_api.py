@@ -20,7 +20,7 @@ import time
 from quart import request, g
 from common.constants import RetCode
 from common.exceptions import ArgumentException, NotFoundException
-from api.apps import login_required, current_user
+from api.apps import AUTH_API, login_required, current_user
 from api.utils.api_utils import validate_request, get_request_json, get_error_argument_result, get_json_result
 from api.apps.services import memory_api_service
 from api.db.joint_services.tenant_model_service import ensure_tenant_model_ids_for_params
@@ -195,8 +195,13 @@ async def add_message():
     memory_ids = req["memory_id"]
 
     # JWT / session users cannot spoof attribution; API-key callers may supply an external subject id.
+    # Python auth sets g.auth_type=AUTH_API (never auth_via_api_token). Keep the Go-style
+    # auth_via_api_token flag as optional compatibility if a middleware ever sets it.
     try:
-        trust_client_subject = bool(getattr(g, "auth_via_api_token", False))
+        trust_client_subject = (
+            getattr(g, "auth_type", None) == AUTH_API
+            or bool(getattr(g, "auth_via_api_token", False))
+        )
     except RuntimeError:
         trust_client_subject = False
     if trust_client_subject:

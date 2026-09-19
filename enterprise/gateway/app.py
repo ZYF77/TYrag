@@ -65,6 +65,7 @@ from enterprise.gateway.callback_delivery import CallbackDeliveryWorker
 from enterprise.gateway.config import config, require_ragflow_api_key
 from enterprise.gateway.feed_audit_middleware import FeedRegisterAuditMiddleware
 from enterprise.gateway.runtime_settings import RuntimeSettingsManager
+from enterprise.gateway.query.citation_select import ABSTAIN_PHRASE
 
 logger = logging.getLogger(__name__)
 
@@ -426,7 +427,7 @@ SAFE_ERROR_MESSAGES = {
     ),
     "LLM_PROVIDER_BILLING": "模型服务欠费或配额不足，请联系运维处理。",
     "LLM_PROVIDER_REJECTED": "模型服务拒绝了本次请求，请稍后重试或联系运维。",
-    "NO_RELIABLE_EVIDENCE": "未找到可靠依据，无法回答。",
+    "NO_RELIABLE_EVIDENCE": ABSTAIN_PHRASE,
     "VALIDATION_ERROR": "请求内容不符合要求，请检查后重试。",
     "INTERNAL_ERROR": "服务开小差了，请稍后重试。",
     "REQUEST_FAILED": "请求无法完成。",
@@ -858,6 +859,15 @@ app.include_router(formal_query_router)
 # Frozen external v2 conversation API. It keeps v1 wire compatibility intact.
 from enterprise.gateway.query.v2_router import router as v2_query_router
 app.include_router(v2_query_router)
+
+# Opt-in Agent Workflow test entry point. The regular v2 Chat route remains the
+# production baseline; this proxy is enabled only when a deployment configures a
+# fixed Workflow agent id and applied version.
+from enterprise.gateway.query.workflow_router import router as workflow_query_router
+app.include_router(workflow_query_router)
+
+from enterprise.gateway.query.memory_router import router as user_memory_router
+app.include_router(user_memory_router)
 
 # Frozen external v2 document API; v1 routes above remain wire compatible.
 from enterprise.gateway.sync.v2_router import router as v2_document_router

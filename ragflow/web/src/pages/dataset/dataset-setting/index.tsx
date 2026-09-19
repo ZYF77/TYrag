@@ -1,4 +1,11 @@
 import { DataFlowSelect } from '@/components/data-pipeline-select';
+import { IGenerateLogButtonProps } from '@/components/generate-log-button';
+import GraphRagItems, {
+  showGraphRagItems,
+} from '@/components/parse-configuration/graph-rag-form-fields';
+import RaptorFormFields, {
+  showRaptorParseConfiguration,
+} from '@/components/parse-configuration/raptor-form-fields';
 import { Button } from '@/components/ui/button';
 import {
   Card,
@@ -10,7 +17,7 @@ import {
 import Divider from '@/components/ui/divider';
 import { Form } from '@/components/ui/form';
 import { FormLayout } from '@/constants/form';
-import { DocumentParserType, ParseType } from '@/constants/knowledge';
+import { DocumentParserType, GenerateType, ParseType } from '@/constants/knowledge';
 import { PermissionRole } from '@/constants/permission';
 import { IConnector, IDataset } from '@/interfaces/database/dataset';
 import { useDataSourceInfo } from '@/pages/user-setting/data-source/constant';
@@ -84,7 +91,7 @@ export default function DatasetSettings() {
         mineru_table_enable: true,
         mineru_lang: 'English',
         raptor: {
-          use_raptor: true,
+          use_raptor: false,
           max_token: 256,
           threshold: 0.1,
           max_cluster: 64,
@@ -95,7 +102,7 @@ export default function DatasetSettings() {
           prompt: t('knowledgeConfiguration.promptText'),
         },
         graphrag: {
-          use_graphrag: true,
+          use_graphrag: false,
           entity_types: initialEntityTypes,
           method: MethodValue.Light,
           batch_chunk_token_size: 4096,
@@ -120,6 +127,10 @@ export default function DatasetSettings() {
     useFetchKnowledgeConfigurationOnMount(form);
   // const [pipelineData, setPipelineData] = useState<IDataPipelineNodeProps>();
   const [sourceData, setSourceData] = useState<IDataSourceNodeProps[]>();
+  const [graphRagGenerateData, setGraphRagGenerateData] =
+    useState<IGenerateLogButtonProps>();
+  const [raptorGenerateData, setRaptorGenerateData] =
+    useState<IGenerateLogButtonProps>();
 
   useEffect(() => {
     if (knowledgeDetails) {
@@ -143,6 +154,15 @@ export default function DatasetSettings() {
       });
 
       setSourceData(source_data);
+
+      setGraphRagGenerateData({
+        finish_at: knowledgeDetails.graphrag_task_finish_at,
+        task_id: knowledgeDetails.graphrag_task_id,
+      } as IGenerateLogButtonProps);
+      setRaptorGenerateData({
+        finish_at: knowledgeDetails.raptor_task_finish_at,
+        task_id: knowledgeDetails.raptor_task_id,
+      } as IGenerateLogButtonProps);
 
       form.setValue(
         'parse_type',
@@ -170,6 +190,20 @@ export default function DatasetSettings() {
   //     // form.setValue('pipeline_avatar', data.avatar || '');
   //   }
   // };
+
+  const handleDeletePipelineTask = (type: GenerateType) => {
+    if (type === GenerateType.KnowledgeGraph) {
+      setGraphRagGenerateData({
+        finish_at: '',
+        task_id: '',
+      } as IGenerateLogButtonProps);
+    } else if (type === GenerateType.Raptor) {
+      setRaptorGenerateData({
+        finish_at: '',
+        task_id: '',
+      } as IGenerateLogButtonProps);
+    }
+  };
 
   const handleLinkOrEditSubmit = (data: IConnector[] | undefined) => {
     if (data) {
@@ -200,6 +234,11 @@ export default function DatasetSettings() {
     name: 'chunk_method',
     control: form.control,
   });
+  const showGraph = showGraphRagItems(selectedTag as DocumentParserType);
+  const showRaptor = showRaptorParseConfiguration(
+    selectedTag as DocumentParserType,
+  );
+  const showGlobalIndex = showGraph || showRaptor;
 
   useEffect(() => {
     if (parseType === ParseType.BuiltIn) {
@@ -309,6 +348,36 @@ export default function DatasetSettings() {
                       unbindFunc={unbindFunc}
                       handleAutoParse={handleAutoParse}
                     />
+                    {showGlobalIndex && (
+                      <>
+                        <Divider />
+                        <div className="text-base font-medium text-text-primary">
+                          {t('knowledgeConfiguration.globalIndex')}
+                        </div>
+                        {showGraph && (
+                          <GraphRagItems
+                            className="border-none p-0"
+                            data={
+                              graphRagGenerateData as IGenerateLogButtonProps
+                            }
+                            onDelete={() =>
+                              handleDeletePipelineTask(
+                                GenerateType.KnowledgeGraph,
+                              )
+                            }
+                          ></GraphRagItems>
+                        )}
+                        {showGraph && showRaptor && <Divider />}
+                        {showRaptor && (
+                          <RaptorFormFields
+                            data={raptorGenerateData as IGenerateLogButtonProps}
+                            onDelete={() =>
+                              handleDeletePipelineTask(GenerateType.Raptor)
+                            }
+                          ></RaptorFormFields>
+                        )}
+                      </>
+                    )}
                   </MainContainer>
                 </div>
 

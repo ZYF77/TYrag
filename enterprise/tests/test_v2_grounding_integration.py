@@ -130,7 +130,7 @@ async def test_v2_guard_failure_from_ragflow_is_safe_json(runtime):
             json={"clientMessageId": "grounding-json-fail", "question": "问题"},
         )
 
-    expected = "未找到可靠依据，无法回答。"
+    expected = ABSTAIN_PHRASE
     assert response.status_code == 200
     assert response.json()["answer"] == expected
     assert response.json()["status"] == "无可靠依据"
@@ -371,7 +371,7 @@ async def test_v2_inventory_question_fail_closed_without_catalog_rescue(runtime)
     body = response.json()
     assert response.status_code == 200
     assert body["status"] == "无可靠依据"
-    assert body["answer"] == "未找到可靠依据，无法回答。"
+    assert body["answer"] == ABSTAIN_PHRASE
     assert body["citations"] == []
     assert "当前知识库中该设备已有以下资料" not in body["answer"]
     assert "GTBOCLJY" not in body["answer"]
@@ -430,7 +430,7 @@ async def test_v2_unrelated_fault_code_abstain_from_ragflow(runtime):
             },
         )
 
-    expected = "未找到可靠依据，无法回答。"
+    expected = ABSTAIN_PHRASE
     body = response.json()
     assert response.status_code == 200
     assert body["status"] == "无可靠依据"

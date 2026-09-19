@@ -250,3 +250,124 @@ def test_intranet_allow_private_ip(webhook_env):
     req.client.host = "10.1.2.3"
     req.headers = {}
     assert_intranet_client(req)
+
+
+
+def test_handler_reads_effective_runtime_webhook_settings(monkeypatch):
+    """Handler helper must follow apply_runtime_settings, not boot-only frozen fields."""
+    from dataclasses import replace
+
+    import enterprise.gateway.config as config_module
+    from enterprise.gateway.config import GatewayConfig, GatewayRuntimeSettings
+    from enterprise.gateway.sync.ragflow_status_webhook import _effective_webhook_settings
+
+    monkeypatch.setenv("ENTERPRISE_TEST_MODE", "1")
+    monkeypatch.setenv("ENTERPRISE_RAGFLOW_STATUS_WEBHOOK_ENABLED", "true")
+    monkeypatch.setenv("ENTERPRISE_RAGFLOW_STATUS_WEBHOOK_SECRET", "boot-secret")
+    config_module.config = GatewayConfig()
+    config_module.config.clear_runtime_settings()
+    assert _effective_webhook_settings()[0] is True
+    assert _effective_webhook_settings()[1] == "boot-secret"
+
+    base = GatewayRuntimeSettings.from_config(config_module.config)
+    config_module.config.apply_runtime_settings(
+        replace(
+            base,
+            ragflow_status_webhook_enabled=False,
+            ragflow_status_webhook_secret="runtime-secret",
+            ragflow_status_webhook_ignore_cancel=False,
+        )
+    )
+    enabled, secret, ignore_cancel = _effective_webhook_settings()
+    assert enabled is False
+    assert secret == "runtime-secret"
+    assert ignore_cancel is False
+    # Direct config fields stay in sync for legacy readers
+    assert config_module.config.ragflow_status_webhook_enabled is False
+    assert config_module.config.ragflow_status_webhook_secret == "runtime-secret"
+
+    config_module.config.clear_runtime_settings()
+    assert config_module.config.ragflow_status_webhook_enabled is True
+    assert config_module.config.ragflow_status_webhook_secret == "boot-secret"
+
+
+def test_env_falls_back_to_enterprise_status_webhook_names(monkeypatch):
+    """Compose/RF uses ENTERPRISE_STATUS_WEBHOOK_*; Gateway prefers RAGFLOW_* then falls back."""
+    monkeypatch.delenv("ENTERPRISE_RAGFLOW_STATUS_WEBHOOK_ENABLED", raising=False)
+    monkeypatch.delenv("ENTERPRISE_RAGFLOW_STATUS_WEBHOOK_SECRET", raising=False)
+    monkeypatch.delenv("ENTERPRISE_RAGFLOW_STATUS_WEBHOOK_IGNORE_CANCEL", raising=False)
+    monkeypatch.delenv("ENTERPRISE_RAGFLOW_STATUS_WEBHOOK_TRUSTED_CIDRS", raising=False)
+    monkeypatch.setenv("ENTERPRISE_STATUS_WEBHOOK_ENABLED", "true")
+    monkeypatch.setenv("ENTERPRISE_STATUS_WEBHOOK_SECRET", "legacy-secret")
+    monkeypatch.setenv("ENTERPRISE_STATUS_WEBHOOK_IGNORE_CANCEL", "false")
+    monkeypatch.setenv("ENTERPRISE_STATUS_WEBHOOK_TRUSTED_CIDRS", "10.0.0.0/8")
+    cfg = GatewayConfig()
+    assert cfg.ragflow_status_webhook_enabled is True
+    assert cfg.ragflow_status_webhook_secret == "legacy-secret"
+    assert cfg.ragflow_status_webhook_ignore_cancel is False
+    assert cfg.ragflow_status_webhook_trusted_cidrs == "10.0.0.0/8"
+
+    # Prefer RAGFLOW_* when both are set
+    monkeypatch.setenv("ENTERPRISE_RAGFLOW_STATUS_WEBHOOK_ENABLED", "false")
+    monkeypatch.setenv("ENTERPRISE_RAGFLOW_STATUS_WEBHOOK_SECRET", "new-secret")
+    cfg2 = GatewayConfig()
+    assert cfg2.ragflow_status_webhook_enabled is False
+    assert cfg2.ragflow_status_webhook_secret == "new-secret"
+
+
+@pytest.mark.asyncio
+async def test_runtime_toggle_disables_without_restart(webhook_env, isolated_gateway_db):
+    """Hot-reload enabled=false must 503; re-enable returns to signature path (not disabled)."""
+    from dataclasses import replace
+
+    from enterprise.gateway.app import app
+    from enterprise.gateway.config import GatewayRuntimeSettings
+    import enterprise.gateway.config as config_module
+
+    gateway, _ = isolated_gateway_db
+    body = json.dumps(_envelope(event_id="evt-runtime-toggle")).encode("utf-8")
+    headers = _signed_headers(body)
+    transport = ASGITransport(app=app)
+
+    base = GatewayRuntimeSettings.from_config(config_module.config)
+    config_module.config.apply_runtime_settings(
+        replace(base, ragflow_status_webhook_enabled=False)
+    )
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            disabled = await client.post(
+                "/enterprise/api/v1/internal/ragflow/document-run-terminal",
+                content=body,
+                headers=headers,
+            )
+            assert disabled.status_code == 503
+            assert disabled.json().get("reason") == "disabled"
+
+            config_module.config.apply_runtime_settings(
+                replace(
+                    base,
+                    ragflow_status_webhook_enabled=True,
+                    ragflow_status_webhook_secret=SECRET,
+                )
+            )
+            # Bad signature -> 401 proves we left the disabled path
+            bad_headers = dict(headers)
+            bad_headers["X-Enterprise-Signature"] = "sha256=" + ("cd" * 32)
+            bad = await client.post(
+                "/enterprise/api/v1/internal/ragflow/document-run-terminal",
+                content=body,
+                headers=bad_headers,
+            )
+            assert bad.status_code == 401
+
+            ok = await client.post(
+                "/enterprise/api/v1/internal/ragflow/document-run-terminal",
+                content=body,
+                headers=headers,
+            )
+            assert ok.status_code == 200
+            assert ok.json().get("accepted") is True
+    finally:
+        config_module.config.clear_runtime_settings()
+        # Restore webhook_env boot values after clear
+        config_module.config = GatewayConfig()

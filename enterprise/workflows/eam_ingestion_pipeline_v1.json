@@ -1,0 +1,81 @@
+{
+  "name": "TYrag EAM Ingestion Pipeline v1",
+  "description": "Multi-format parser pipeline for PDF, JSON/JSONL, Office, images and text. Quality and publication remain Gateway responsibilities.",
+  "canvas_type": "Data Flow",
+  "dsl": {
+    "components": {
+      "File": {
+        "downstream": ["Parser:EnterpriseFormats"],
+        "upstream": [],
+        "obj": {"component_name": "File", "params": {}}
+      },
+      "Parser:EnterpriseFormats": {
+        "downstream": ["TokenChunker:EnterpriseChunks"],
+        "upstream": ["File"],
+        "obj": {
+          "component_name": "Parser",
+          "params": {
+            "outputs": {
+              "html": {"type": "string", "value": ""},
+              "json": {"type": "Array<object>", "value": []},
+              "markdown": {"type": "string", "value": ""},
+              "text": {"type": "string", "value": ""}
+            },
+            "pdf": {
+              "parse_method": "deepdoc",
+              "lang": "Chinese",
+              "flatten_media_to_text": false,
+              "remove_toc": false,
+              "remove_header_footer": false,
+              "suffix": ["pdf"],
+              "output_format": "json"
+            },
+            "json": {
+              "chunk_token_num": 2000,
+              "suffix": ["json", "jsonl", "ldjson"],
+              "output_format": "json"
+            },
+            "spreadsheet": {
+              "parse_method": "deepdoc",
+              "suffix": ["xls", "xlsx", "csv"],
+              "output_format": "html"
+            },
+            "doc": {"suffix": ["doc"], "output_format": "json"},
+            "docx": {"suffix": ["docx"], "output_format": "json"},
+            "slides": {"parse_method": "deepdoc", "suffix": ["pptx", "ppt"], "output_format": "json"},
+            "image": {"parse_method": "ocr", "lang": "Chinese", "suffix": ["jpg", "jpeg", "png", "gif"], "output_format": "json"},
+            "markdown": {"suffix": ["md", "markdown", "mdx"], "output_format": "json"},
+            "text&code": {"suffix": ["txt", "py", "js", "java", "c", "cpp", "h", "go", "ts", "sql"], "output_format": "json"},
+            "html": {"suffix": ["htm", "html"], "output_format": "json"},
+            "email": {"suffix": ["eml", "msg"], "output_format": "json"},
+            "epub": {"suffix": ["epub"], "output_format": "json"},
+            "audio": {"suffix": ["wav", "mp3", "aac", "flac", "ogg"], "output_format": "text"},
+            "video": {"suffix": ["mp4", "avi", "mkv"], "output_format": "text"}
+          }
+        }
+      },
+      "TokenChunker:EnterpriseChunks": {
+        "downstream": ["Tokenizer:EnterpriseIndexInput"],
+        "upstream": ["Parser:EnterpriseFormats"],
+        "obj": {
+          "component_name": "TokenChunker",
+          "params": {
+            "chunk_token_size": 512,
+            "delimiters": [],
+            "overlapped_percent": 0.1,
+            "children_delimiters": [],
+            "table_context_size": 0,
+            "image_context_size": 0,
+            "outputs": {"chunks": {"type": "Array<Object>", "value": []}}
+          }
+        }
+      },
+      "Tokenizer:EnterpriseIndexInput": {
+        "downstream": [],
+        "upstream": ["TokenChunker:EnterpriseChunks"],
+        "obj": {"component_name": "Tokenizer", "params": {}}
+      }
+    },
+    "path": []
+  }
+}

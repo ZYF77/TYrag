@@ -24,7 +24,8 @@ def test_enterprise_prompt_has_knowledge_and_two_tier_relevance():
     system = cfg["system"]
 
     assert "{knowledge}" in system
-    assert ENTERPRISE_PROMPT_MARKER == "enterprise_identity_metadata_v13"
+    assert "{user_memory}" in system
+    assert ENTERPRISE_PROMPT_MARKER == "enterprise_identity_metadata_v14"
     assert ENTERPRISE_PROMPT_MARKER in system
     assert "document_metadata" in system
     assert "equipment_id" in system
@@ -87,6 +88,7 @@ def test_needs_enterprise_prompt_upgrade_detects_default_chat():
         "enterprise_identity_metadata_v10",
         "enterprise_identity_metadata_v11",
         "enterprise_identity_metadata_v12",
+        "enterprise_identity_metadata_v13",
     ):
         legacy = build_enterprise_prompt_config()
         legacy["system"] = legacy["system"].replace(

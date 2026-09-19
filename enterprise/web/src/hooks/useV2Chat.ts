@@ -8,6 +8,7 @@ import type {
   HarnessUserMessage,
   Message,
   MessageStatus,
+  MessageExecutionMode,
   ReasoningMode,
   SseEvent,
 } from '../api/v2Types';
@@ -19,6 +20,7 @@ interface RetryRequest {
   files?: File[];
   internetEnabled: boolean;
   reasoningMode: ReasoningMode;
+  executionMode: MessageExecutionMode;
 }
 
 const MAX_REASONING_CHARS = 12_000;
@@ -111,6 +113,7 @@ function eventError(data: Record<string, unknown>): DisplayError {
 export interface V2ChatOptions {
   internetEnabled?: boolean;
   reasoningMode?: ReasoningMode;
+  executionMode?: MessageExecutionMode;
 }
 
 export function useV2Chat(
@@ -119,6 +122,7 @@ export function useV2Chat(
 ) {
   const internetEnabled = options.internetEnabled ?? false;
   const reasoningMode = options.reasoningMode ?? 'simple';
+  const executionMode = options.executionMode ?? 'chat';
   const [messages, setMessages] = useState<HarnessMessage[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState<DisplayError | null>(null);
@@ -254,6 +258,7 @@ export function useV2Chat(
         },
         handleEvent,
         request.files ?? [],
+        request.executionMode,
       );
       controllerRef.current = stream.controller;
       void stream.promise
@@ -299,7 +304,7 @@ export function useV2Chat(
       cancelled = true;
       controllerRef.current?.abort();
     };
-  }, [conversationId]);
+  }, [conversationId, executionMode]);
 
   const sendMessage = useCallback(
     (question: string, files: File[] = []): boolean => {
@@ -350,11 +355,12 @@ export function useV2Chat(
         question,
         internetEnabled,
         reasoningMode,
+        executionMode,
         ...(files.length > 0 ? { files } : {}),
       });
       return true;
     },
-    [conversationId, internetEnabled, isStreaming, reasoningMode, startStream],
+    [conversationId, executionMode, internetEnabled, isStreaming, reasoningMode, startStream],
   );
 
   const retry = useCallback(() => {

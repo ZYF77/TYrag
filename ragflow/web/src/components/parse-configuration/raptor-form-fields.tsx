@@ -19,6 +19,7 @@ import {
 } from '../ui/form';
 import { ExpandedInput } from '../ui/input';
 import { Radio } from '../ui/radio';
+import { Switch } from '../ui/switch';
 import { Textarea } from '../ui/textarea';
 
 export const excludedParseMethods = [
@@ -107,7 +108,7 @@ const RaptorFormFields = ({
       <FormField
         control={form.control}
         name={UseRaptorField}
-        render={() => {
+        render={({ field }) => {
           return (
             <FormItem
               defaultChecked={false}
@@ -120,16 +121,21 @@ const RaptorFormFields = ({
                 >
                   {t('useRaptor')}
                 </FormLabel>
-                <div className="w-3/4">
+                <div className="w-3/4 flex items-center gap-3">
                   <FormControl>
-                    <GenerateLogButton
-                      {...data}
-                      onDelete={onDelete}
-                      className="w-full text-text-secondary"
-                      status={1}
-                      type={GenerateType.Raptor}
+                    <Switch
+                      checked={!!field.value}
+                      onCheckedChange={field.onChange}
+                      data-testid="ds-settings-raptor-switch"
                     />
                   </FormControl>
+                  <GenerateLogButton
+                    {...data}
+                    onDelete={onDelete}
+                    className="flex-1 text-text-secondary"
+                    status={1}
+                    type={GenerateType.Raptor}
+                  />
                 </div>
               </div>
               <div className="flex pt-1">

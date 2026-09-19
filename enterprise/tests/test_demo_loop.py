@@ -367,7 +367,7 @@ class TestAsk:
             assert body["code"] == "NO_RELIABLE_EVIDENCE"
             assert body["status"] == "no_reliable_evidence"
             assert body["retryable"] is False
-            assert body["answer"] == "未找到可靠依据，无法回答。"
+            assert body["answer"] == "当前检索结果中没有找到可靠依据"
             assert body["citations"] == []
 
             async with isolated_demo_db.transaction(write=False) as conn:

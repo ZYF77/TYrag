@@ -178,6 +178,34 @@ enterprise/ext_document_map.db*
 /tmp/
 /output/
 
+# Local scratch, screenshots, and packaged test outputs
+/=
+.codex-remote-env.patch
+*-local-bak
+*.bak
+*.orig
+*.rej
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.bmp
+*.tif
+*.tiff
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+*.rar
+*.whl
+*.egg
+*.deb
+*.rpm
+*.dmg
+*.iso
+
 # Local pytest scratch artifacts (hyphen and underscore basetemp dirs)
 .pytest-tmp/
 .pytest_tmp/

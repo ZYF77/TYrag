@@ -77,16 +77,21 @@ async def test_gateway_schema_upgrade_is_idempotent_for_v1_marker():
                          AND column_name='processing_round')
                         OR (table_name='ext_v2_conversation'
                             AND column_name='business_context_json')
+                        OR (table_name='ext_v2_conversation'
+                            AND column_name IN ('workflow_agent_id', 'workflow_version', 'workflow_session_id'))
                         OR (table_name='ext_v2_message_run'
                             AND column_name='retrieval_context_json')
                       )""",
             )
-        assert version == {"version": 7}
+        assert version == {"version": 8}
         assert {(row["table_name"], row["column_name"]) for row in columns} == {
             ("ext_document_map", "processing_round"),
             ("sync_outbox", "processing_round"),
             ("callback_delivery", "processing_round"),
             ("ext_v2_conversation", "business_context_json"),
+            ("ext_v2_conversation", "workflow_agent_id"),
+            ("ext_v2_conversation", "workflow_version"),
+            ("ext_v2_conversation", "workflow_session_id"),
             ("ext_v2_message_run", "retrieval_context_json"),
         }
     finally:

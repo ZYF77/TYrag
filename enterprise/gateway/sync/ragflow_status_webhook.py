@@ -101,12 +101,25 @@ def _sync_service(gateway: GatewayDatabase) -> SyncService:
     return app_module._sync_service(gateway)
 
 
+
+def _effective_webhook_settings() -> tuple[bool, str, bool]:
+    """Read post-runtime effective inbound webhook controls (not frozen boot-only)."""
+    cfg = gateway_config.config
+    settings = cfg.runtime_settings()
+    return (
+        bool(settings.ragflow_status_webhook_enabled),
+        str(settings.ragflow_status_webhook_secret or ""),
+        bool(settings.ragflow_status_webhook_ignore_cancel),
+    )
+
+
 @router.post("/document-run-terminal")
 async def document_run_terminal(
     request: Request,
     gateway: GatewayDatabase = Depends(get_db),
 ) -> JSONResponse:
-    if not gateway_config.config.ragflow_status_webhook_enabled:
+    enabled, secret, ignore_cancel = _effective_webhook_settings()
+    if not enabled:
         return JSONResponse({"accepted": False, "reason": "disabled"}, status_code=503)
 
     try:
@@ -116,7 +129,6 @@ async def document_run_terminal(
         return JSONResponse({"error": "forbidden"}, status_code=403)
 
     raw = await request.body()
-    secret = gateway_config.config.ragflow_status_webhook_secret
     timestamp_raw = request.headers.get("X-Enterprise-Timestamp", "")
     signature = request.headers.get("X-Enterprise-Signature", "")
     try:
@@ -148,10 +160,7 @@ async def document_run_terminal(
     trigger = str(payload.get("trigger") or "webhook")
     occurred_at = str(body.get("occurredAt") or "")
 
-    if (
-        gateway_config.config.ragflow_status_webhook_ignore_cancel
-        and run.upper() in {"CANCEL", "2"}
-    ):
+    if ignore_cancel and run.upper() in {"CANCEL", "2"}:
         async with gateway.transaction(write=True) as conn:
             inserted = await insert_ragflow_status_inbox(
                 conn,

@@ -18,6 +18,8 @@ import type {
   MessagePage,
   MessageRunResult,
   MessageRunPending,
+  MessageExecutionMode,
+  WorkflowStatus,
   PatchConversationContextRequest,
   SseEvent,
   SuggestionPage,
@@ -337,11 +339,14 @@ export function streamMessage(
   body: CreateMessageRequest,
   onEvent: (event: SseEvent) => void,
   files: File[] = [],
+  executionMode: MessageExecutionMode = 'chat',
 ): StreamHandle {
   const controller = new AbortController();
   const signal = compatibleSignal(controller);
   const promise = (async () => {
-    const url = `${BASE}/conversations/${encodeURIComponent(conversationId)}/messages`;
+    const url = executionMode === 'workflow'
+      ? `${V1_BASE}/workflow/conversations/${encodeURIComponent(conversationId)}/messages`
+      : `${BASE}/conversations/${encodeURIComponent(conversationId)}/messages`;
     const headers: Record<string, string> = {
       Accept: 'text/event-stream',
       ...authHeaders(),
@@ -447,6 +452,10 @@ export const v2Api = {
 
   getHealth(): Promise<GatewayHealth> {
     return request<GatewayHealth>('/health', {}, V1_BASE);
+  },
+
+  getWorkflowStatus(): Promise<WorkflowStatus> {
+    return request<WorkflowStatus>('/workflow/status', {}, V1_BASE);
   },
 
   listHttpLog(limit = 100): Promise<GatewayHttpLogPage> {

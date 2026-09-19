@@ -66,6 +66,10 @@ const integrationsBody = {
       callbackDelivery: { enabled: true, pollSeconds: 2 },
       limits: { fileShareMaxMiB: 128, s3MaxMiB: 128, transientAttachmentMaxMiB: 10 },
       diagnostics: { enabled: false },
+      retrievalScope: { policy: 'legacy_device' },
+      ragflowStatusWebhook: { enabled: false, secretConfigured: false, ignoreCancel: true },
+      userMemory: { enabled: false, memoryId: '', topN: 5, timeoutSeconds: 5 },
+      workflow: { enabled: false, agentId: '', version: '', timeoutSeconds: 120 },
     },
     source: 'environment',
     updatedAt: null,
@@ -619,6 +623,92 @@ describe('SystemSettingsPanels (admin system settings)', () => {
     expect((saved?.diagnostics as { enabled: boolean }).enabled).toBe(true);
     expect(card.textContent).toContain('96 MiB');
   });
+
+
+
+  it('edits userMemory runtime section and saves hot reload', async () => {
+    let saved: Record<string, unknown> | undefined;
+    server.use(
+      ...adminScenario(),
+      integrationsHandler(),
+      http.put(`${V1}/admin/system/runtime-settings`, async ({ request }) => {
+        saved = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({
+          settings: saved,
+          source: 'database',
+          updatedAt: '2026-09-01T08:00:00.000Z',
+          hotReload: true,
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    render(<EnterpriseConsolePage />);
+
+    await openSystemSettings(user);
+    await user.click(await screen.findByRole('button', { name: '接口配置' }));
+    await user.click(screen.getByRole('tab', { name: /Gateway 运行/ }));
+    const card = await screen.findByTestId('console-processing-card');
+    const section = await screen.findByTestId('runtime-user-memory');
+    expect(section.textContent).toContain('用户长期记忆');
+    const saveButton = within(card).getByRole('button', { name: '保存并热生效' }) as HTMLButtonElement;
+    expect(saveButton.disabled).toBe(true);
+    await user.click(within(section).getByRole('checkbox', { name: '用户长期记忆' }));
+    const memoryId = within(section).getByLabelText('Memory ID');
+    await user.clear(memoryId);
+    await user.type(memoryId, 'mem-console-1');
+    const topN = within(section).getByRole('spinbutton', { name: 'TopN' });
+    await user.clear(topN);
+    await user.type(topN, '7');
+    expect(saveButton.disabled).toBe(false);
+    await user.click(saveButton);
+    await screen.findByText('已保存，下一轮循环生效。');
+    expect((saved?.userMemory as { enabled: boolean; memoryId: string; topN: number }).enabled).toBe(true);
+    expect((saved?.userMemory as { memoryId: string }).memoryId).toBe('mem-console-1');
+    expect((saved?.userMemory as { topN: number }).topN).toBe(7);
+  });
+
+
+  it('edits workflow runtime section and saves hot reload', async () => {
+    let saved: Record<string, unknown> | undefined;
+    server.use(
+      ...adminScenario(),
+      integrationsHandler(),
+      http.put(`${V1}/admin/system/runtime-settings`, async ({ request }) => {
+        saved = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({
+          settings: saved,
+          source: 'database',
+          updatedAt: '2026-09-01T08:00:00.000Z',
+          hotReload: true,
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    render(<EnterpriseConsolePage />);
+
+    await openSystemSettings(user);
+    await user.click(await screen.findByRole('button', { name: '接口配置' }));
+    await user.click(screen.getByRole('tab', { name: /Gateway 运行/ }));
+    const card = await screen.findByTestId('console-processing-card');
+    const section = await screen.findByTestId('runtime-workflow');
+    expect(section.textContent).toContain('Agent Workflow');
+    const saveButton = within(card).getByRole('button', { name: '保存并热生效' }) as HTMLButtonElement;
+    expect(saveButton.disabled).toBe(true);
+    await user.click(within(section).getByRole('checkbox', { name: 'Agent Workflow' }));
+    const agentId = within(section).getByLabelText('Agent ID');
+    await user.clear(agentId);
+    await user.type(agentId, '9d6f54beb0b911f1ad1c8d8c8b7d5b0e');
+    const version = within(section).getByLabelText('Version');
+    await user.clear(version);
+    await user.type(version, 'enterprise-qa-agent-v1.2');
+    expect(saveButton.disabled).toBe(false);
+    await user.click(saveButton);
+    await screen.findByText('已保存，下一轮循环生效。');
+    expect((saved?.workflow as { enabled: boolean }).enabled).toBe(true);
+    expect((saved?.workflow as { agentId: string }).agentId).toBe('9d6f54beb0b911f1ad1c8d8c8b7d5b0e');
+    expect((saved?.workflow as { version: string }).version).toBe('enterprise-qa-agent-v1.2');
+  });
+
 
   it('surfaces probe HTTP errors like unknown binding per row', async () => {
     server.use(...adminScenario(), integrationsHandler());

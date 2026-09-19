@@ -159,3 +159,16 @@ patches:
       - "enterprise/tests/test_ragflow_client.py"
       - "enterprise/tests/test_v2_conversation_contract.py"
     upgrade_notes: "Build a new RAGFlow image. Keep the official metadata helper's default extend behavior; only Gateway requests carrying doc_scope_mode=restrict use the bounded G intersection. Upgrade Gateway schema to v7, keep ENTERPRISE_RETRIEVAL_SCOPE_POLICY=legacy_device by default, and verify empty-set and cross-tenant negatives before enabling authorized_context. Rollback uses the previous image and legacy_device; do not treat this change as a server-30 deployment."
+  - id: RF-PATCH-012
+    reason: "Agent Workflow Retrieval accepts a Gateway-injected restricted document scope, and the ingestion Parser exposes the existing JsonParser for JSON/JSONL pipeline inputs"
+    upstream_files:
+      - ragflow/agent/tools/retrieval.py
+      - ragflow/rag/flow/parser/parser.py
+    adr: "decisions/ADR-021-Agent-Workflow受控范围与多格式Pipeline.md"
+    change_request: "patches/CHANGE-REQUEST-RF-PATCH-012-WORKFLOW-SCOPE-JSON-PIPELINE.md"
+    introduced_in: "agent-workflow-v1"
+    tests:
+      - "enterprise/tests/test_workflow_artifacts.py"
+      - "ragflow/test/unit_test/agent/tools/test_retrieval_scope.py"
+      - "ragflow/test/unit_test/rag/flow/test_parser_json_setup.py"
+    upgrade_notes: "Replay only the Retrieval doc_scope_ids/doc_scope_mode handling and Parser json/jsonl setup/function map. Restricted scope must return empty on missing or empty Gateway input; JSON parsing must reuse JsonParser and preserve record boundaries. Do not change ordinary Retrieval or Parser defaults. Build a new RAGFlow image before enabling the Workflow route."

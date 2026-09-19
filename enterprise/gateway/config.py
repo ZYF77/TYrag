@@ -82,6 +82,71 @@ def retrieval_scope_policy_from_env() -> str:
     return value if value in RETRIEVAL_SCOPE_POLICIES else "legacy_device"
 
 
+
+def _env_first(*names: str, default: str = "") -> str:
+    """Return the first defined env var among *names*, else *default*."""
+    for name in names:
+        if name in os.environ:
+            return os.environ[name]
+    return default
+
+
+def ragflow_status_webhook_enabled_from_env() -> bool:
+    """Prefer ENTERPRISE_RAGFLOW_STATUS_WEBHOOK_*; fall back to ENTERPRISE_STATUS_WEBHOOK_*."""
+    raw = _env_first(
+        "ENTERPRISE_RAGFLOW_STATUS_WEBHOOK_ENABLED",
+        "ENTERPRISE_STATUS_WEBHOOK_ENABLED",
+        default="false",
+    )
+    return raw.lower() in ("1", "true", "yes", "on")
+
+
+def ragflow_status_webhook_secret_from_env() -> str:
+    return _env_first(
+        "ENTERPRISE_RAGFLOW_STATUS_WEBHOOK_SECRET",
+        "ENTERPRISE_STATUS_WEBHOOK_SECRET",
+        default="",
+    )
+
+
+def ragflow_status_webhook_ignore_cancel_from_env() -> bool:
+    raw = _env_first(
+        "ENTERPRISE_RAGFLOW_STATUS_WEBHOOK_IGNORE_CANCEL",
+        "ENTERPRISE_STATUS_WEBHOOK_IGNORE_CANCEL",
+        default="true",
+    )
+    return raw.lower() in ("1", "true", "yes", "on")
+
+
+def ragflow_status_webhook_trusted_cidrs_from_env() -> str:
+    return _env_first(
+        "ENTERPRISE_RAGFLOW_STATUS_WEBHOOK_TRUSTED_CIDRS",
+        "ENTERPRISE_STATUS_WEBHOOK_TRUSTED_CIDRS",
+        default=(
+            "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,::1/128,fc00::/7"
+        ),
+    )
+
+def user_memory_enabled_from_env() -> bool:
+    """Opt-in EAM user long-term Memory; missing/invalid stays false."""
+    return _env_flag("ENTERPRISE_USER_MEMORY_ENABLED", "false")
+
+
+def user_memory_id_from_env() -> str:
+    return os.getenv("ENTERPRISE_MEMORY_ID", "").strip()
+
+
+def user_memory_top_n_from_env() -> int:
+    return _bounded_int(
+        os.getenv("ENTERPRISE_USER_MEMORY_TOP_N", "5"),
+        5,
+        minimum=1,
+        maximum=20,
+    )
+
+
+
+
 @dataclass(frozen=True)
 class GatewayRuntimeSettings:
     """Mutable-at-runtime Gateway controls persisted by the admin API."""
@@ -105,6 +170,17 @@ class GatewayRuntimeSettings:
     transient_attachment_max_size_mb: int
     rag_diagnostics_enabled: bool
     retrieval_scope_policy: str
+    ragflow_status_webhook_enabled: bool
+    ragflow_status_webhook_secret: str
+    ragflow_status_webhook_ignore_cancel: bool
+    user_memory_enabled: bool
+    user_memory_id: str
+    user_memory_top_n: int
+    user_memory_timeout_seconds: float
+    workflow_enabled: bool
+    workflow_agent_id: str
+    workflow_version: str
+    workflow_timeout_seconds: float
 
     @classmethod
     def from_config(cls, source: "GatewayConfig") -> "GatewayRuntimeSettings":
@@ -137,6 +213,21 @@ class GatewayRuntimeSettings:
             retrieval_scope_policy=source.retrieval_scope_policy
             if source.retrieval_scope_policy in RETRIEVAL_SCOPE_POLICIES
             else "legacy_device",
+            ragflow_status_webhook_enabled=source.ragflow_status_webhook_enabled,
+            ragflow_status_webhook_secret=source.ragflow_status_webhook_secret,
+            ragflow_status_webhook_ignore_cancel=source.ragflow_status_webhook_ignore_cancel,
+            user_memory_enabled=bool(source.user_memory_enabled),
+            user_memory_id=str(source.enterprise_memory_id or "").strip(),
+            user_memory_top_n=max(1, min(int(source.user_memory_top_n), 20)),
+            user_memory_timeout_seconds=max(
+                0.5, min(float(source.user_memory_timeout), 120.0)
+            ),
+            workflow_enabled=bool(source.workflow_enabled),
+            workflow_agent_id=str(source.workflow_agent_id or "").strip(),
+            workflow_version=str(source.workflow_version or "").strip(),
+            workflow_timeout_seconds=max(
+                1.0, min(float(source.workflow_timeout), 600.0)
+            ),
         )
 
     def to_api(self) -> dict[str, Any]:
@@ -180,7 +271,35 @@ class GatewayRuntimeSettings:
                 if self.retrieval_scope_policy in RETRIEVAL_SCOPE_POLICIES
                 else "legacy_device",
             },
+            "ragflowStatusWebhook": {
+                "enabled": self.ragflow_status_webhook_enabled,
+                "secretConfigured": bool(self.ragflow_status_webhook_secret),
+                "ignoreCancel": self.ragflow_status_webhook_ignore_cancel,
+            },
+            "userMemory": {
+                "enabled": self.user_memory_enabled,
+                "memoryId": self.user_memory_id,
+                "topN": self.user_memory_top_n,
+                "timeoutSeconds": self.user_memory_timeout_seconds,
+            },
+            "workflow": {
+                "enabled": self.workflow_enabled,
+                "agentId": self.workflow_agent_id,
+                "version": self.workflow_version,
+                "timeoutSeconds": self.workflow_timeout_seconds,
+            },
         }
+
+
+    def to_storage(self) -> dict[str, Any]:
+        """Persistable snapshot; includes webhook secret (never returned by to_api)."""
+        payload = self.to_api()
+        payload["ragflowStatusWebhook"] = {
+            "enabled": self.ragflow_status_webhook_enabled,
+            "secret": self.ragflow_status_webhook_secret,
+            "ignoreCancel": self.ragflow_status_webhook_ignore_cancel,
+        }
+        return payload
 
 
 def _safe_env_float(name: str, default: float) -> float:
@@ -188,6 +307,30 @@ def _safe_env_float(name: str, default: float) -> float:
         return float(os.getenv(name, str(default)))
     except (TypeError, ValueError):
         return default
+
+
+def user_memory_timeout_seconds_from_env() -> float:
+    value = _safe_env_float("ENTERPRISE_USER_MEMORY_TIMEOUT", 5.0)
+    return max(0.5, min(float(value), 120.0))
+
+
+
+def workflow_enabled_from_env() -> bool:
+    """Opt-in Agent Workflow test runtime; missing/invalid stays false."""
+    return _env_flag("ENTERPRISE_WORKFLOW_ENABLED", "false")
+
+
+def workflow_agent_id_from_env() -> str:
+    return os.getenv("ENTERPRISE_WORKFLOW_AGENT_ID", "").strip()
+
+
+def workflow_version_from_env() -> str:
+    return os.getenv("ENTERPRISE_WORKFLOW_VERSION", "").strip()
+
+
+def workflow_timeout_seconds_from_env() -> float:
+    value = _safe_env_float("ENTERPRISE_WORKFLOW_TIMEOUT", 120.0)
+    return max(1.0, min(float(value), 600.0))
 
 
 def _safe_env_int(name: str, default: int) -> int:
@@ -239,6 +382,45 @@ class GatewayConfig:
     )
     ragflow_api_version: str = field(
         default_factory=lambda: os.getenv("RAGFLOW_API_VERSION", "v1")
+    )
+
+    # --- Agent Workflow test runtime (opt-in; the regular Query route is unchanged) ---
+    # The agent id and applied version are deployment-owned values. They are never
+    # accepted from an EAM request body, so a caller cannot select another canvas.
+    workflow_enabled: bool = field(
+        default_factory=lambda: _env_flag("ENTERPRISE_WORKFLOW_ENABLED", "false")
+    )
+    workflow_agent_id: str = field(
+        default_factory=lambda: os.getenv("ENTERPRISE_WORKFLOW_AGENT_ID", "").strip()
+    )
+    workflow_version: str = field(
+        default_factory=lambda: os.getenv("ENTERPRISE_WORKFLOW_VERSION", "").strip()
+    )
+    workflow_timeout: float = field(
+        default_factory=lambda: _safe_env_float("ENTERPRISE_WORKFLOW_TIMEOUT", 120.0)
+    )
+
+    # --- EAM user long-term Memory (RF Memory pool; default off) ---
+    # ENTERPRISE_USER_MEMORY_ENABLED default false: missing/invalid keeps Q&A unchanged.
+    # When true, ENTERPRISE_MEMORY_ID must point at a fixed SEMANTIC Memory pool.
+    user_memory_enabled: bool = field(
+        default_factory=lambda: _env_flag("ENTERPRISE_USER_MEMORY_ENABLED", "false")
+    )
+    enterprise_memory_id: str = field(
+        default_factory=lambda: os.getenv("ENTERPRISE_MEMORY_ID", "").strip()
+    )
+    user_memory_top_n: int = field(
+        default_factory=lambda: _bounded_int(
+            os.getenv("ENTERPRISE_USER_MEMORY_TOP_N", "5"),
+            5,
+            minimum=1,
+            maximum=20,
+        )
+    )
+    user_memory_timeout: float = field(
+        default_factory=lambda: _safe_env_float(
+            "ENTERPRISE_USER_MEMORY_TIMEOUT", 5.0
+        )
     )
 
     # --- Attachment image pre-understand (vision/OCR bridge) ---
@@ -437,28 +619,20 @@ class GatewayConfig:
 
 
     # --- RAGFlow → Gateway document-run terminal webhook (inbound) ---
+    # Boot defaults: prefer ENTERPRISE_RAGFLOW_STATUS_WEBHOOK_*; fall back to
+    # ENTERPRISE_STATUS_WEBHOOK_* (RF/compose naming). Runtime may override
+    # enabled/secret/ignoreCancel via GatewayRuntimeSettings.
     ragflow_status_webhook_enabled: bool = field(
-        default_factory=lambda: os.getenv(
-            "ENTERPRISE_RAGFLOW_STATUS_WEBHOOK_ENABLED", "false"
-        ).lower()
-        in ("1", "true", "yes", "on")
+        default_factory=ragflow_status_webhook_enabled_from_env
     )
     ragflow_status_webhook_secret: str = field(
-        default_factory=lambda: os.getenv(
-            "ENTERPRISE_RAGFLOW_STATUS_WEBHOOK_SECRET", ""
-        )
+        default_factory=ragflow_status_webhook_secret_from_env
     )
     ragflow_status_webhook_ignore_cancel: bool = field(
-        default_factory=lambda: os.getenv(
-            "ENTERPRISE_RAGFLOW_STATUS_WEBHOOK_IGNORE_CANCEL", "true"
-        ).lower()
-        in ("1", "true", "yes", "on")
+        default_factory=ragflow_status_webhook_ignore_cancel_from_env
     )
     ragflow_status_webhook_trusted_cidrs: str = field(
-        default_factory=lambda: os.getenv(
-            "ENTERPRISE_RAGFLOW_STATUS_WEBHOOK_TRUSTED_CIDRS",
-            "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,::1/128,fc00::/7",
-        )
+        default_factory=ragflow_status_webhook_trusted_cidrs_from_env
     )
 
     _runtime_settings: GatewayRuntimeSettings | None = field(
@@ -473,13 +647,30 @@ class GatewayConfig:
 
     def apply_runtime_settings(self, settings: GatewayRuntimeSettings) -> None:
         self._runtime_settings = settings
-        # Keep legacy callers that read this feature flag directly in sync
+        # Keep legacy callers that read these feature flags directly in sync
         # with the persisted runtime snapshot.
         self.rag_diagnostics_enabled = settings.rag_diagnostics_enabled
         self.retrieval_scope_policy = (
             settings.retrieval_scope_policy
             if settings.retrieval_scope_policy in RETRIEVAL_SCOPE_POLICIES
             else "legacy_device"
+        )
+        self.ragflow_status_webhook_enabled = settings.ragflow_status_webhook_enabled
+        self.ragflow_status_webhook_secret = settings.ragflow_status_webhook_secret
+        self.ragflow_status_webhook_ignore_cancel = (
+            settings.ragflow_status_webhook_ignore_cancel
+        )
+        self.user_memory_enabled = bool(settings.user_memory_enabled)
+        self.enterprise_memory_id = str(settings.user_memory_id or "").strip()
+        self.user_memory_top_n = max(1, min(int(settings.user_memory_top_n), 20))
+        self.user_memory_timeout = max(
+            0.5, min(float(settings.user_memory_timeout_seconds), 120.0)
+        )
+        self.workflow_enabled = bool(settings.workflow_enabled)
+        self.workflow_agent_id = str(settings.workflow_agent_id or "").strip()
+        self.workflow_version = str(settings.workflow_version or "").strip()
+        self.workflow_timeout = max(
+            1.0, min(float(settings.workflow_timeout_seconds), 600.0)
         )
 
     def clear_runtime_settings(self) -> None:
@@ -488,6 +679,19 @@ class GatewayConfig:
             "ENTERPRISE_RAG_DIAGNOSTICS_ENABLED", "false"
         ).lower() in ("1", "true", "yes", "on")
         self.retrieval_scope_policy = retrieval_scope_policy_from_env()
+        self.ragflow_status_webhook_enabled = ragflow_status_webhook_enabled_from_env()
+        self.ragflow_status_webhook_secret = ragflow_status_webhook_secret_from_env()
+        self.ragflow_status_webhook_ignore_cancel = (
+            ragflow_status_webhook_ignore_cancel_from_env()
+        )
+        self.user_memory_enabled = user_memory_enabled_from_env()
+        self.enterprise_memory_id = user_memory_id_from_env()
+        self.user_memory_top_n = user_memory_top_n_from_env()
+        self.user_memory_timeout = user_memory_timeout_seconds_from_env()
+        self.workflow_enabled = workflow_enabled_from_env()
+        self.workflow_agent_id = workflow_agent_id_from_env()
+        self.workflow_version = workflow_version_from_env()
+        self.workflow_timeout = workflow_timeout_seconds_from_env()
 
     @property
     def demo_routes_enabled(self) -> bool:

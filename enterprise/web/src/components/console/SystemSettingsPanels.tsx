@@ -283,7 +283,19 @@ export function IntegrationsPanel() {
     setRuntimeSaveState('saving');
     setRuntimeSaveError(null);
     try {
-      const result = await v2Api.updateRuntimeSettings(runtimeDraft);
+      const { ragflowStatusWebhook, ...rest } = runtimeDraft;
+      const webhookPayload = {
+        enabled: ragflowStatusWebhook.enabled,
+        ignoreCancel: ragflowStatusWebhook.ignoreCancel,
+        secretConfigured: ragflowStatusWebhook.secretConfigured,
+        ...(ragflowStatusWebhook.secret
+          ? { secret: ragflowStatusWebhook.secret }
+          : {}),
+      };
+      const result = await v2Api.updateRuntimeSettings({
+        ...rest,
+        ragflowStatusWebhook: webhookPayload,
+      });
       setRuntimeDraft(result.settings);
       setRuntimeBaseline(runtimeSettingsKey(result.settings));
       setState((current) => current.data
@@ -608,7 +620,148 @@ export function IntegrationsPanel() {
                     <RuntimeEffectBadge />
                   </div>
                 </div>
+                <div className="runtime-setting-row" data-testid="runtime-ragflow-status-webhook">
+                  <RuntimeSettingLabel
+                    title="RAGFlow 状态入站 Webhook"
+                    variable="ENTERPRISE_RAGFLOW_STATUS_WEBHOOK_*"
+                    description="接收 RAGFlow document-run-terminal 入站通知（≠「回调接口」出站到 EAM）。可热更新启用状态与 HMAC 密钥；密钥只写不回显。"
+                  />
+                  <div className="runtime-setting-controls">
+                    <ToggleSwitch
+                      checked={runtimeDraft.ragflowStatusWebhook.enabled}
+                      label="RAGFlow 状态入站 Webhook"
+                      onChange={(enabled) => patchRuntimeSection('ragflowStatusWebhook', { enabled })}
+                    />
+                    <ToggleSwitch
+                      checked={runtimeDraft.ragflowStatusWebhook.ignoreCancel}
+                      label="忽略 CANCEL"
+                      onChange={(ignoreCancel) => patchRuntimeSection('ragflowStatusWebhook', { ignoreCancel })}
+                    />
+                    <label className="runtime-select-label" htmlFor="runtime-ragflow-status-webhook-secret">
+                      HMAC 密钥
+                      <input
+                        id="runtime-ragflow-status-webhook-secret"
+                        className="runtime-select"
+                        type="password"
+                        autoComplete="new-password"
+                        placeholder={
+                          runtimeDraft.ragflowStatusWebhook.secretConfigured
+                            ? '已配置（留空保持不变）'
+                            : '未配置（输入后保存）'
+                        }
+                        value={runtimeDraft.ragflowStatusWebhook.secret ?? ''}
+                        onChange={(event) => patchRuntimeSection('ragflowStatusWebhook', {
+                          secret: event.target.value,
+                        })}
+                      />
+                    </label>
+                    <span className="console-hint">
+                      {runtimeDraft.ragflowStatusWebhook.secretConfigured ? '密钥：已配置' : '密钥：未配置'}
+                      {' · '}
+                      与「回调接口（出站到 EAM）」无关
+                    </span>
+                    <RuntimeEffectBadge />
+                  </div>
+                </div>
               </div>
+              <div className="runtime-setting-row" data-testid="runtime-user-memory">
+                  <RuntimeSettingLabel
+                    title="用户长期记忆"
+                    variable="ENTERPRISE_USER_MEMORY_*"
+                    description="Gateway 预取注入 Chat；subject 仅来自 Token。enabled=true 且 Memory ID 为空时 Search/Write no-op，不阻塞问答。热更载，无需重启。"
+                  />
+                  <div className="runtime-setting-controls">
+                    <ToggleSwitch
+                      checked={runtimeDraft.userMemory.enabled}
+                      label="用户长期记忆"
+                      onChange={(enabled) => patchRuntimeSection('userMemory', { enabled })}
+                    />
+                    <label className="runtime-select-label" htmlFor="runtime-user-memory-id">
+                      Memory ID
+                      <input
+                        id="runtime-user-memory-id"
+                        className="runtime-select"
+                        type="text"
+                        autoComplete="off"
+                        placeholder="ENTERPRISE_MEMORY_ID"
+                        value={runtimeDraft.userMemory.memoryId}
+                        onChange={(event) => patchRuntimeSection('userMemory', {
+                          memoryId: event.target.value,
+                        })}
+                      />
+                    </label>
+                    <RuntimeRangeField
+                      label="TopN"
+                      value={runtimeDraft.userMemory.topN}
+                      min={1}
+                      max={20}
+                      unit="条"
+                      onChange={(topN) => patchRuntimeSection('userMemory', { topN })}
+                    />
+                    <RuntimeRangeField
+                      label="Timeout"
+                      value={runtimeDraft.userMemory.timeoutSeconds}
+                      min={0.5}
+                      max={120}
+                      step={0.5}
+                      unit="秒"
+                      onChange={(timeoutSeconds) => patchRuntimeSection('userMemory', { timeoutSeconds })}
+                    />
+                    <RuntimeEffectBadge />
+                  </div>
+                </div>
+              <div className="runtime-setting-row" data-testid="runtime-workflow">
+                  <RuntimeSettingLabel
+                    title="Agent Workflow"
+                    variable="ENTERPRISE_WORKFLOW_*"
+                    description="第二测试入口（Harness「Agent Workflow」页签）。默认关闭；enabled=true 但缺少 agentId/version 时返回 WORKFLOW_NOT_CONFIGURED，不会静默回退到 Chat。生产环境保持关闭。"
+                  />
+                  <div className="runtime-setting-controls">
+                    <ToggleSwitch
+                      checked={runtimeDraft.workflow.enabled}
+                      label="Agent Workflow"
+                      onChange={(enabled) => patchRuntimeSection('workflow', { enabled })}
+                    />
+                    <label className="runtime-select-label" htmlFor="runtime-workflow-agent-id">
+                      Agent ID
+                      <input
+                        id="runtime-workflow-agent-id"
+                        className="runtime-select"
+                        type="text"
+                        autoComplete="off"
+                        placeholder="9d6f54beb0b911f1ad1c8d8c8b7d5b0e"
+                        value={runtimeDraft.workflow.agentId}
+                        onChange={(event) => patchRuntimeSection('workflow', {
+                          agentId: event.target.value,
+                        })}
+                      />
+                    </label>
+                    <label className="runtime-select-label" htmlFor="runtime-workflow-version">
+                      Version
+                      <input
+                        id="runtime-workflow-version"
+                        className="runtime-select"
+                        type="text"
+                        autoComplete="off"
+                        placeholder="enterprise-qa-agent-v1.2"
+                        value={runtimeDraft.workflow.version}
+                        onChange={(event) => patchRuntimeSection('workflow', {
+                          version: event.target.value,
+                        })}
+                      />
+                    </label>
+                    <RuntimeRangeField
+                      label="Timeout"
+                      value={runtimeDraft.workflow.timeoutSeconds}
+                      min={1}
+                      max={600}
+                      step={1}
+                      unit="秒"
+                      onChange={(timeoutSeconds) => patchRuntimeSection('workflow', { timeoutSeconds })}
+                    />
+                    <RuntimeEffectBadge />
+                  </div>
+                </div>
               <div className="runtime-section-heading runtime-section-heading--editable runtime-section-heading--limits">
                 <div>
                   <strong>文件大小上限</strong>
@@ -670,7 +823,7 @@ export function IntegrationsPanel() {
     <PanelCard
       eyebrow="回调"
       title="回调接口配置"
-      description="注册的接口用于接收文档投喂终态和状态变更通知；检测联通只发起一次探测请求。"
+      description="Gateway→外部系统的出站回调（含 EAM），≠「RAGFlow 状态入站 Webhook」。注册的接口用于通知文档投喂终态和状态变更；检测联通只发起一次探测请求。"
       status={state.status}
       testId="console-callbacks-card"
     >

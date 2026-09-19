@@ -344,6 +344,7 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
         enterprise_diagnostics: bool = False,
         doc_scope_mode: str | None = None,
         business_context: dict[str, Any] | None = None,
+        user_memory: str | None = None,
         llm_id: str | None = None,
         timeout: float | None = None,
     ) -> dict:
@@ -396,6 +397,9 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
             body["doc_scope_mode"] = str(doc_scope_mode)
         if business_context is not None:
             body["business_context"] = dict(business_context)
+        if user_memory is not None:
+            # Passed as dialog_service prompt parameter / kwargs (optional).
+            body["user_memory"] = str(user_memory)
         if llm_id:
             body["llm_id"] = str(llm_id)
         _trace_doc_ids(rid, doc_ids)
@@ -568,6 +572,7 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
         enterprise_diagnostics: bool = False,
         doc_scope_mode: str | None = None,
         business_context: dict[str, Any] | None = None,
+        user_memory: str | None = None,
     ):
         """Stream RAGFlow chat completion over the public SSE API.
 
@@ -620,6 +625,8 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
             body["doc_scope_mode"] = str(doc_scope_mode)
         if business_context is not None:
             body["business_context"] = dict(business_context)
+        if user_memory is not None:
+            body["user_memory"] = str(user_memory)
         _trace_doc_ids(rid, doc_ids)
         timeout = httpx.Timeout(self.timeout, connect=self.timeout)
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -993,6 +1000,7 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         enterprise_diagnostics: bool = False,
         doc_scope_mode: str | None = None,
         business_context: dict[str, Any] | None = None,
+        user_memory: str | None = None,
         llm_id: str | None = None,
         timeout: float | None = None,
     ) -> dict:
@@ -1027,6 +1035,8 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
             self._last_completion_body["doc_scope_mode"] = str(doc_scope_mode)
         if business_context is not None:
             self._last_completion_body["business_context"] = dict(business_context)
+        if user_memory is not None:
+            self._last_completion_body["user_memory"] = str(user_memory)
         if reasoning is not None:
             self._last_completion_body["reasoning"] = int(reasoning)
         if enterprise_diagnostics:
@@ -1206,6 +1216,7 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         enterprise_diagnostics: bool = False,
         doc_scope_mode: str | None = None,
         business_context: dict[str, Any] | None = None,
+        user_memory: str | None = None,
     ):
         if self._stream_fail_after == 0:
             completion = await self.chat_completion(
@@ -1227,6 +1238,7 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
                 enterprise_diagnostics=enterprise_diagnostics,
                 doc_scope_mode=doc_scope_mode,
                 business_context=business_context,
+                user_memory=user_memory,
             )
             data = completion.get("data", {})
             stream_id = None if self._omit_stream_id else (

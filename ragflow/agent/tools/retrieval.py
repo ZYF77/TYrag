@@ -69,6 +69,11 @@ class RetrievalParam(ToolParamBase):
         self.cross_languages = []
         self.toc_enhance = False
         self.meta_data_filter = {}
+        # Optional enterprise hard scope. Values may be literal document ids or
+        # a canvas reference such as ``begin@authorized_doc_ids``. The latter is
+        # injected by the Gateway and is never chosen by the model.
+        self.doc_scope_ids = []
+        self.doc_scope_mode = None
 
     def check(self):
         self.check_decimal_float(self.similarity_threshold, "[Retrieval] Similarity threshold")
@@ -86,6 +91,60 @@ class Retrieval(ToolBase, ABC):
     def _dataset_ids(self):
         """Get dataset IDs with backward compatibility for kb_ids."""
         return self._param.dataset_ids or getattr(self._param, "kb_ids", None) or []
+
+    def _resolved_doc_scope_ids(self) -> list[str] | None:
+        """Resolve the Gateway-provided document ceiling for this run."""
+        raw_scope = getattr(self._param, "doc_scope_ids", None)
+        if raw_scope is None:
+            return None
+        values = raw_scope if isinstance(raw_scope, list) else [raw_scope]
+        resolved: list[str] = []
+        for value in values:
+            if isinstance(value, str) and "@" in value:
+                value = self._canvas.get_variable_value(value)
+            nested = value if isinstance(value, (list, tuple, set)) else [value]
+            for item in nested:
+                text = str(item or "").strip()
+                if text and text != "-999" and text not in resolved:
+                    resolved.append(text)
+        return resolved
+
+    @staticmethod
+    def _filter_kbinfos_to_scope(kbinfos: dict, allowed: list[str]) -> dict:
+        """Keep every Retrieval output inside the Gateway document ceiling.
+
+        The normal retriever receives ``doc_ids`` already, but TOC and child
+        expansion are separate lookups and can add chunks after that call.
+        Apply a final deny-by-default filter before the canvas stores a
+        reference or formats prompt content so an expansion cannot widen the
+        authorized set.
+        """
+        allowed_set = {str(item).strip() for item in allowed if str(item).strip()}
+
+        def document_id(chunk: dict) -> str:
+            return str(
+                chunk.get("document_id")
+                or chunk.get("doc_id")
+                or chunk.get("doc_id_kwd")
+                or ""
+            ).strip()
+
+        chunks = [
+            chunk
+            for chunk in (kbinfos.get("chunks", []) or [])
+            if isinstance(chunk, dict) and document_id(chunk) in allowed_set
+        ]
+        doc_aggs = [
+            agg
+            for agg in (kbinfos.get("doc_aggs", []) or [])
+            if isinstance(agg, dict)
+            and str(agg.get("doc_id") or agg.get("document_id") or "").strip()
+            in allowed_set
+        ]
+        scoped = dict(kbinfos)
+        scoped["chunks"] = chunks
+        scoped["doc_aggs"] = doc_aggs
+        return scoped
 
     async def _retrieve_kb(self, query_text: str):
         kb_ids: list[str] = []
@@ -107,6 +166,12 @@ class Retrieval(ToolBase, ABC):
         filtered_kb_ids: list[str] = list(set([kb_id for kb_id in kb_ids if kb_id]))
 
         kbs = KnowledgebaseService.get_by_ids(filtered_kb_ids)
+        doc_scope_ids = self._resolved_doc_scope_ids()
+        strict_scope = getattr(self._param, "doc_scope_mode", None) == "restrict"
+        if strict_scope and not doc_scope_ids:
+            self.set_output("formalized_content", self._param.empty_response)
+            self.set_output("json", [])
+            return
         if not kbs:
             raise Exception("No dataset is selected.")
 
@@ -128,7 +193,9 @@ class Retrieval(ToolBase, ABC):
         vars = {k: o["value"] for k, o in vars.items()}
         query = self.string_format(query_text, vars)
 
-        doc_ids = []
+        # A configured scope is a ceiling even when no metadata filter is set.
+        # Metadata filtering may narrow it further, but never expand it.
+        doc_ids = list(doc_scope_ids or [])
         if self._param.meta_data_filter != {}:
             # Defer the (potentially expensive) metadata table load — manual
             # filters served by ES push-down never need it. The loader is
@@ -186,6 +253,7 @@ class Retrieval(ToolBase, ABC):
                 _resolve_manual_filter if self._param.meta_data_filter.get("method") == "manual" else None,
                 kb_ids=kb_ids,
                 metas_loader=_load_metas,
+                doc_scope_mode="restrict" if strict_scope else None,
             )
 
         if self._param.cross_languages:
@@ -221,7 +289,7 @@ class Retrieval(ToolBase, ABC):
                 if cks:
                     kbinfos["chunks"] = cks
             kbinfos["chunks"] = settings.retriever.retrieval_by_children(kbinfos["chunks"], [kb.tenant_id for kb in kbs])
-            if self._param.use_kg:
+            if self._param.use_kg and not strict_scope:
                 tenant_id = self._canvas.get_tenant_id()
                 chat_model_config = get_tenant_default_model_by_type(tenant_id, LLMType.CHAT)
                 ck = await settings.kg_retriever.retrieval(query, [kb.tenant_id for kb in kbs], kb_ids, embd_mdl, LLMBundle(tenant_id, chat_model_config))
@@ -232,7 +300,7 @@ class Retrieval(ToolBase, ABC):
         else:
             kbinfos = {"chunks": [], "doc_aggs": []}
 
-        if self._param.use_kg and kbs:
+        if self._param.use_kg and kbs and not strict_scope:
             chat_model_config = get_tenant_default_model_by_type(kbs[0].tenant_id, LLMType.CHAT)
             ck = await settings.kg_retriever.retrieval(query, [kb.tenant_id for kb in kbs], filtered_kb_ids, embd_mdl, LLMBundle(kbs[0].tenant_id, chat_model_config))
             if self.check_if_canceled("Retrieval processing"):
@@ -241,6 +309,12 @@ class Retrieval(ToolBase, ABC):
                 ck["content"] = ck["content_with_weight"]
                 del ck["content_with_weight"]
                 kbinfos["chunks"].insert(0, ck)
+
+        if strict_scope:
+            # Child/TOC/KG expansion happens after the scoped retrieval call;
+            # enforce the same ceiling on the complete result before exposing
+            # it through Canvas references or the prompt.
+            kbinfos = self._filter_kbinfos_to_scope(kbinfos, doc_scope_ids or [])
 
         for ck in kbinfos["chunks"]:
             if "vector" in ck:

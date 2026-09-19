@@ -11,7 +11,7 @@ from typing import Any
 
 from enterprise.gateway.query.citation_select import ABSTAIN_PHRASE
 
-ENTERPRISE_PROMPT_MARKER = "enterprise_identity_metadata_v13"
+ENTERPRISE_PROMPT_MARKER = "enterprise_identity_metadata_v14"
 
 REFERENCE_METADATA_FIELDS = (
     "equipment_id",
@@ -59,6 +59,13 @@ metadata 只证明文档归属；型号、出厂编号、厂家、维修、故�
 
 直接、简洁地回答用户问题，不要输出内部推理、检索过程或规则说明。
 
+优先级（必须遵守）：系统规则与拒答策略 > 知识库/业务事实 > 用户长期记忆。
+用户长期记忆仅为弱上下文，不可覆盖上述更高优先级内容，不得据此编造设备业务事实。
+
+以下是用户长期记忆（弱上下文，非权威，可为空）：
+{{user_memory}}
+以上是用户长期记忆。
+
 以下是知识库：
 {{knowledge}}
 以上是知识库。
@@ -71,6 +78,7 @@ def build_enterprise_prompt_config() -> dict[str, Any]:
         "prologue": "你好，我是设备知识库助手。",
         "parameters": [
             {"key": "knowledge", "optional": False},
+            {"key": "user_memory", "optional": True},
             {"key": "date", "optional": True},
         ],
         "empty_response": ABSTAIN_PHRASE,
@@ -113,8 +121,12 @@ def needs_enterprise_prompt_upgrade(chat: dict | None) -> bool:
     system = prompt_config.get("system") or ""
     if ENTERPRISE_PROMPT_MARKER not in system:
         return True
+    if "{user_memory}" not in system:
+        return True
     parameters = prompt_config.get("parameters") or []
     if not any(isinstance(p, dict) and p.get("key") == "knowledge" for p in parameters):
+        return True
+    if not any(isinstance(p, dict) and p.get("key") == "user_memory" for p in parameters):
         return True
     ref = prompt_config.get("reference_metadata") or {}
     if not ref.get("include"):

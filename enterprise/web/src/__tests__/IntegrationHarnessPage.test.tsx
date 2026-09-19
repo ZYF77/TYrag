@@ -32,6 +32,7 @@ describe('IntegrationHarnessPage', () => {
     expect(layout.className).toContain('harness-layout');
     expect(screen.getByLabelText('功能菜单')).toBeTruthy();
     expect(screen.getByRole('button', { name: '问答会话' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Agent Workflow 测试' })).toBeTruthy();
     await userEvent.setup().click(screen.getByRole('button', { name: '运行' }));
     expect(screen.getByRole('button', { name: 'HTTP 日志' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: '临时附件' })).toBeNull();
@@ -378,4 +379,16 @@ describe('IntegrationHarnessPage', () => {
     expect(await screen.findByText('/runtime/20')).toBeTruthy();
     expect(screen.queryByText('/runtime/0')).toBeNull();
   });
+
+  it('exposes the Agent Workflow test entry beside the Chat harness', async () => {
+    const user = userEvent.setup();
+    render(<IntegrationHarnessPage />);
+
+    expect(screen.getByRole('button', { name: 'Agent Workflow 测试' })).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Agent Workflow 测试' }));
+    expect(
+      screen.getByText(/Agent Workflow 测试入口/, { exact: false }),
+    ).toBeTruthy();
+  });
+
 });

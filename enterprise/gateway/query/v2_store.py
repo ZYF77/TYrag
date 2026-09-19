@@ -264,6 +264,38 @@ async def update_conversation_mapping(
     )
 
 
+async def set_workflow_session(
+    conn,
+    *,
+    conversation_id: str,
+    tenant_id: str,
+    business_user_id: str,
+    agent_id: str,
+    version: str,
+    session_id: str,
+) -> None:
+    """Bind one conversation to the configured Workflow agent/session.
+
+    The binding is deliberately separate from the Chat ``ragflow_session_id``
+    column. A test run can therefore switch between the two entry points without
+    accidentally continuing the other runtime's conversation.
+    """
+    await exec_sql(
+        conn,
+        """UPDATE ext_v2_conversation
+           SET workflow_agent_id=?, workflow_version=?, workflow_session_id=?
+           WHERE conversation_id=? AND tenant_id=? AND business_user_id=?""",
+        (
+            agent_id,
+            version,
+            session_id,
+            conversation_id,
+            tenant_id,
+            business_user_id,
+        ),
+    )
+
+
 async def list_conversations(
     conn,
     *,

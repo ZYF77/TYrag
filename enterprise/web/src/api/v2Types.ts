@@ -187,6 +187,15 @@ export interface QuestionMessageRequest {
 /** Gateway reasoning levels: 0/simple through 4/ultra. */
 export type ReasoningMode = 'simple' | 'low' | 'medium' | 'high' | 'ultra';
 
+export type MessageExecutionMode = 'chat' | 'workflow';
+
+export interface WorkflowStatus {
+  enabled: boolean;
+  version: string | null;
+  agentConfigured: boolean;
+  runtime: 'ragflow-agent-workflow';
+}
+
 export interface SuggestionMessageRequest {
   clientMessageId: string;
   suggestionId: string;

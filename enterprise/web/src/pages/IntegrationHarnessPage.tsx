@@ -17,6 +17,7 @@ import type {
   DisplayError,
   PatchConversationContextRequest,
   ReasoningMode,
+  WorkflowStatus,
 } from '../api/v2Types';
 import { useV2Chat } from '../hooks/useV2Chat';
 
@@ -34,14 +35,17 @@ function summaryFromDetail(detail: ConversationDetail): ConversationSummary {
   };
 }
 
-const HARNESS_TABS = ['ask', 'runtime'] as const;
+const HARNESS_TABS = ['ask', 'workflow', 'runtime'] as const;
 type HarnessTab = (typeof HARNESS_TABS)[number];
 
 const HARNESS_NAV = [
   {
     id: 'integration',
     label: '联调',
-    items: [{ id: 'ask', label: '问答会话' }],
+    items: [
+      { id: 'ask', label: '问答会话' },
+      { id: 'workflow', label: 'Agent Workflow 测试' },
+    ],
   },
   {
     id: 'ops',
@@ -85,8 +89,15 @@ export function IntegrationHarnessPage() {
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [reasoningMode, setReasoningMode] = useState<ReasoningMode>('simple');
   const [internetEnabled, setInternetEnabled] = useState(false);
+  const [workflowStatus, setWorkflowStatus] = useState<WorkflowStatus | null>(null);
 
-  const chat = useV2Chat(activeId, { reasoningMode, internetEnabled });
+  const executionMode = tab === 'workflow' ? 'workflow' : 'chat';
+  const chat = useV2Chat(activeId, { reasoningMode, internetEnabled, executionMode });
+
+  useEffect(() => {
+    if (tab !== 'workflow') return;
+    void v2Api.getWorkflowStatus().then(setWorkflowStatus).catch(() => setWorkflowStatus(null));
+  }, [tab]);
 
   const loadConversations = useCallback(async (cursor: string | null = null, pageNumber = 1) => {
     setConversationLoading(true);
@@ -295,7 +306,7 @@ export function IntegrationHarnessPage() {
     >
       {visibleError && !showDeviceCreate && <ErrorBanner error={visibleError} onDismiss={() => {}} />}
 
-      {tab === 'ask' && (
+      {(tab === 'ask' || tab === 'workflow') && (
         <div data-testid="harness-layout" className="harness-layout">
           <aside className="harness-stack">
             <section aria-label="会话管理" className="console-card">
@@ -356,6 +367,12 @@ export function IntegrationHarnessPage() {
           </aside>
 
           <div className="harness-conversation-panel">
+            {tab === 'workflow' && (
+              <div className="console-card workflow-test-banner" role="status">
+                Agent Workflow 测试入口：召回、补搜和回答由已应用的 RAGFlow Workflow 版本执行；当前 Chat 入口仍可用于对照。
+                <span className="console-route">版本：{workflowStatus?.version ?? '未配置'}</span>
+              </div>
+            )}
             <HarnessContextBar conversation={activeConversation} saving={contextSaving} error={contextError} onSave={(context) => void saveContext(context)} />
             <HarnessChat
               conversation={activeConversation}

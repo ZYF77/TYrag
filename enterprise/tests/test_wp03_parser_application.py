@@ -1,6 +1,7 @@
 from enterprise.gateway.db.ops import gw_read
 import pytest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from enterprise.gateway.app import make_status_response
 from enterprise.gateway.quality.routing import route_document
@@ -104,6 +105,26 @@ def test_status_response_reports_ragflow_owned_parser_application():
     assert parser_application["readbackMatch"] is True
     assert parser_application["reasonCode"] is None
     assert parser_application["selectedProfile"] is None
+
+
+
+
+class TechnicalRetryRejectStub(RAGFlowDocumentStub):
+    """Allow the initial register parse, then reject technical retry start_parsing."""
+
+    def __init__(self, message: str, status_code: int = 400):
+        super().__init__()
+        self._reject_message = message
+        self._reject_status = status_code
+
+    async def start_parsing(
+        self, dataset_id, document_ids, request_id=None,
+    ):
+        if self._parse_calls:
+            raise RAGFlowAPIError(self._reject_message, self._reject_status)
+        return await super().start_parsing(
+            dataset_id, document_ids, request_id=request_id,
+        )
 
 
 class EmptyChunksStub(RAGFlowDocumentStub):
@@ -241,6 +262,96 @@ async def test_parse_failure_retries_once_then_can_fail():
     assert refreshed.business_status == "review_required"
     assert refreshed.current_version == 0
     assert await service.promote_quality_passed_version(refreshed, "passed") is False
+    await db.dispose()
+
+
+@pytest.mark.parametrize(
+    "reject_message",
+    [
+        "RAGFlow rejected retry parsing (code=102): "
+        "Can't parse document that is currently being processed",
+        "RAGFlow rejected retry parsing (code=100): "
+        "OperationalError closing DB while txn open",
+    ],
+)
+@pytest.mark.asyncio
+async def test_apply_ragflow_run_fail_retry_api_error_falls_through_to_failed(
+    reject_message,
+):
+    """Future/normal path: FAIL + start_parsing error must not raise out of apply.
+
+    Mapping advances to failed and terminal-failed emit runs. This is NOT a
+    historical mass-FAIL EAM backfill; ops will reparse those docs instead.
+    """
+    gateway = await create_gateway(":memory:")
+    db = gateway
+    client = TechnicalRetryRejectStub(reject_message)
+    client.run_status = "RUNNING"
+    service = SyncService(db, SourceStub(b"manual"), client)
+
+    doc, _ = await service.process_event(make_event(b"manual"))
+    assert doc.parse_retry_count == 0
+
+    with patch.object(
+        SyncService, "_emit_terminal_failed_if_no_quality", new_callable=AsyncMock,
+    ) as emit:
+        result = await service.apply_ragflow_run(doc, "FAIL", source="webhook")
+
+    assert result.sync_status == "failed"
+    assert result.pipeline_status == "FAIL"
+    assert result.parse_retry_count == 0
+    assert result.business_status == "review_required"
+    emit.assert_awaited()
+    await db.dispose()
+
+
+@pytest.mark.asyncio
+async def test_apply_ragflow_run_fail_retry_success_stays_queued_no_failed_emit():
+    """FAIL + successful technical retry keeps queued/RUNNING; no failed callback yet."""
+    gateway = await create_gateway(":memory:")
+    db = gateway
+    client = RAGFlowDocumentStub()
+    client.run_status = "RUNNING"
+    service = SyncService(db, SourceStub(b"manual"), client)
+
+    doc, _ = await service.process_event(make_event(b"manual"))
+    assert doc.parse_retry_count == 0
+
+    with patch.object(
+        SyncService, "_emit_terminal_failed_if_no_quality", new_callable=AsyncMock,
+    ) as emit:
+        result = await service.apply_ragflow_run(doc, "FAIL", source="webhook")
+
+    # From parsing, transition back to queued may be disallowed; keep in-progress.
+    assert result.sync_status in {"queued", "parsing"}
+    assert result.pipeline_status == "RUNNING"
+    assert result.parse_retry_count == 1
+    emit.assert_not_awaited()
+    await db.dispose()
+
+
+@pytest.mark.asyncio
+async def test_status_reconciler_continues_when_one_doc_refresh_raises():
+    gateway = await create_gateway(":memory:")
+    db = gateway
+    from enterprise.gateway.sync.worker import StatusReconciler
+
+    client = RAGFlowDocumentStub()
+    client.run_status = "RUNNING"
+    service = SyncService(db, SourceStub(b"manual"), client)
+    doc, _ = await service.process_event(make_event(b"manual"))
+
+    async def boom(_doc):
+        raise RetryableDocumentSyncError("RAGFLOW_UNAVAILABLE", "boom")
+
+    service.refresh_status = boom  # type: ignore[method-assign]
+    # Must not raise; single-doc failure is isolated.
+    updated = await StatusReconciler(service).run_once()
+    assert updated == 0
+    current = await gw_read(db, get_mapping, "tenant-1", "EAM", "DOC-1", "v1")
+    assert current is not None
+    # boom isolated: mapping left unchanged (still in-progress, not failed)
+    assert current.sync_status == doc.sync_status
     await db.dispose()
 
 

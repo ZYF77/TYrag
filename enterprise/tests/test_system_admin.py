@@ -543,8 +543,15 @@ class TestIntegrations:
         assert scada["credentialConfigured"] is True
 
         # No credential material anywhere in the response.
+        # Boolean configured flags (credentialConfigured / secretConfigured) are
+        # not plaintext secret echoes - strip those field names before scanning.
+        scrubbed = (
+            resp.text.lower()
+            .replace("credentialconfigured", "")
+            .replace("secretconfigured", "")
+        )
         assert "SUPER-SECRET-VALUE" not in resp.text
-        assert "secret" not in resp.text.lower().replace("credentialconfigured", "")
+        assert "secret" not in scrubbed
 
     async def test_ragflow_card_shape(self, isolated_gateway_db, jwt_env, monkeypatch):
         monkeypatch.setattr(config, "callback_enabled", False, raising=False)
@@ -578,6 +585,24 @@ class TestIntegrations:
         }
         assert data["runtime"]["settings"]["diagnostics"]["enabled"] is False
         assert data["runtime"]["settings"]["retrievalScope"]["policy"] == "legacy_device"
+        assert data["runtime"]["settings"]["ragflowStatusWebhook"] == {
+            "enabled": False,
+            "secretConfigured": False,
+            "ignoreCancel": True,
+        }
+        assert "secret" not in data["runtime"]["settings"]["ragflowStatusWebhook"]
+        assert data["runtime"]["settings"]["userMemory"] == {
+            "enabled": False,
+            "memoryId": "",
+            "topN": 5,
+            "timeoutSeconds": 5.0,
+        }
+        assert data["runtime"]["settings"]["workflow"] == {
+            "enabled": False,
+            "agentId": "",
+            "version": "",
+            "timeoutSeconds": 120.0,
+        }
         assert data["runtime"]["hotReload"] is True
 
     async def test_runtime_settings_can_be_saved_and_reloaded(
@@ -593,6 +618,17 @@ class TestIntegrations:
             payload["limits"]["fileShareMaxMiB"] = 96
             payload["diagnostics"]["enabled"] = True
             payload["retrievalScope"]["policy"] = "authorized_context"
+            payload["ragflowStatusWebhook"]["enabled"] = True
+            payload["ragflowStatusWebhook"]["ignoreCancel"] = False
+            payload["ragflowStatusWebhook"]["secret"] = "admin-runtime-secret"
+            payload["userMemory"]["enabled"] = True
+            payload["userMemory"]["memoryId"] = "mem-admin-1"
+            payload["userMemory"]["topN"] = 6
+            payload["userMemory"]["timeoutSeconds"] = 8.0
+            payload["workflow"]["enabled"] = True
+            payload["workflow"]["agentId"] = "9d6f54beb0b911f1ad1c8d8c8b7d5b0e"
+            payload["workflow"]["version"] = "enterprise-qa-agent-v1.2"
+            payload["workflow"]["timeoutSeconds"] = 90.0
             saved = await client.put(
                 f"{BASE}/runtime-settings",
                 headers=_auth(token),
@@ -604,8 +640,34 @@ class TestIntegrations:
         assert saved.json()["settings"]["statusReconciler"]["enabled"] is False
         assert saved.json()["settings"]["diagnostics"]["enabled"] is True
         assert saved.json()["settings"]["retrievalScope"]["policy"] == "authorized_context"
+        assert saved.json()["settings"]["ragflowStatusWebhook"] == {
+            "enabled": True,
+            "secretConfigured": True,
+            "ignoreCancel": False,
+        }
+        assert "secret" not in saved.json()["settings"]["ragflowStatusWebhook"]
+        assert saved.json()["settings"]["userMemory"] == {
+            "enabled": True,
+            "memoryId": "mem-admin-1",
+            "topN": 6,
+            "timeoutSeconds": 8.0,
+        }
+        assert saved.json()["settings"]["workflow"] == {
+            "enabled": True,
+            "agentId": "9d6f54beb0b911f1ad1c8d8c8b7d5b0e",
+            "version": "enterprise-qa-agent-v1.2",
+            "timeoutSeconds": 90.0,
+        }
+        assert config.workflow_enabled is True
+        assert config.workflow_agent_id == "9d6f54beb0b911f1ad1c8d8c8b7d5b0e"
         assert config.rag_diagnostics_enabled is True
         assert config.retrieval_scope_policy == "authorized_context"
+        assert config.ragflow_status_webhook_enabled is True
+        assert config.ragflow_status_webhook_secret == "admin-runtime-secret"
+        assert config.user_memory_enabled is True
+        assert config.enterprise_memory_id == "mem-admin-1"
+        assert config.user_memory_top_n == 6
+        assert config.user_memory_timeout == 8.0
         assert reread.status_code == 200
         assert reread.json()["runtime"]["settings"]["limits"]["fileShareMaxMiB"] == 96
 

@@ -73,6 +73,10 @@ from enterprise.gateway.query.formal_router import (
     _query_client,
     _sse,
 )
+from enterprise.gateway.query.user_memory import (
+    fetch_user_memory_text,
+    schedule_memory_candidate,
+)
 from enterprise.gateway.query.llm_provider_errors import classify_llm_provider_error
 from enterprise.gateway.query.ragflow_client import RAGFlowAPIError
 from enterprise.gateway.query.source_access import source_response
@@ -594,6 +598,7 @@ def _v2_completion_kwargs(
     session_id: str | None = None,
     reasoning_mode: str = "simple",
     retrieval_context: dict | None = None,
+    user_memory: str | None = None,
 ) -> dict[str, Any]:
     # scope_identifiers mirrors allowed_identifiers so RAGFlow can inject a
     # generation-side identity block without mistaking the user question for a
@@ -628,6 +633,8 @@ def _v2_completion_kwargs(
         }
     if config.rag_diagnostics_enabled:
         kwargs["enterprise_diagnostics"] = True
+    if user_memory is not None:
+        kwargs["user_memory"] = str(user_memory)
     return kwargs
 
 
@@ -1916,6 +1923,9 @@ async def _execute_json_run(
                 files = completion_files(
                     pending, vision=chat_is_vision_capable(chat)
                 )
+                user_memory = await fetch_user_memory_text(
+                    principal, question, request_id=run["run_id"]
+                )
                 completion_kwargs = _v2_completion_kwargs(
                     conversation,
                     question,
@@ -1925,6 +1935,7 @@ async def _execute_json_run(
                     session_id=session_id,
                     reasoning_mode=req.reasoningMode,
                     retrieval_context=retrieval_context,
+                    user_memory=user_memory,
                 )
                 upstream_started = perf_counter()
                 upstream_status = "success"
@@ -2020,6 +2031,14 @@ async def _execute_json_run(
                 )
                 if status == "completed":
                     answer = _with_equipment_hint(conversation, answer, status)
+                    schedule_memory_candidate(
+                        principal,
+                        chat_id=chat_id,
+                        session_id=session_id,
+                        user_input=question,
+                        agent_response=answer,
+                        request_id=run["run_id"],
+                    )
                 else:
                     # Defensive: a contract-violating upstream that reports
                     # no_reliable_evidence/failed together with cited markers
@@ -2232,6 +2251,9 @@ async def _stream_run_events(
             files = completion_files(
                 pending, vision=chat_is_vision_capable(chat)
             )
+            user_memory = await fetch_user_memory_text(
+                principal, question, request_id=run["run_id"]
+            )
             stream_kwargs = _v2_completion_kwargs(
                 conversation,
                 question,
@@ -2241,6 +2263,7 @@ async def _stream_run_events(
                 session_id=session_id,
                 reasoning_mode=req.reasoningMode,
                 retrieval_context=retrieval_context,
+                user_memory=user_memory,
             )
             upstream_started = perf_counter()
             async def iter_upstream():
@@ -2452,6 +2475,14 @@ async def _stream_run_events(
             )
             if status == "completed":
                 answer = _with_equipment_hint(conversation, accumulated, status)
+                schedule_memory_candidate(
+                    principal,
+                    chat_id=chat_id,
+                    session_id=session_id,
+                    user_input=question,
+                    agent_response=answer,
+                    request_id=run["run_id"],
+                )
             else:
                 # Defensive: never stream/persist citations next to the
                 # replaced standard abstain answer (mirrors the v1 router).
