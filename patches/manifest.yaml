@@ -170,8 +170,10 @@ patches:
     tests:
       - "enterprise/tests/test_workflow_artifacts.py"
       - "ragflow/test/unit_test/agent/tools/test_retrieval_scope.py"
+      - "ragflow/test/unit_test/common/test_restricted_metadata_scope.py"
       - "ragflow/test/unit_test/rag/flow/test_parser_json_setup.py"
-    upgrade_notes: "Replay only the Retrieval doc_scope_ids/doc_scope_mode handling and Parser json/jsonl setup/function map. Restricted scope must return empty on missing or empty Gateway input; JSON parsing must reuse JsonParser and preserve record boundaries. Do not change ordinary Retrieval or Parser defaults. Build a new RAGFlow image before enabling the Workflow route."
+      - "docs/reviews/2026-09-20-audit-probes.py"
+    upgrade_notes: "Replay only the Retrieval doc_scope_ids/doc_scope_mode handling and Parser json/jsonl setup/function map. Restricted scope must return empty on missing, empty Gateway input, or zero metadata matches; non-restrict metadata behavior stays unchanged. JSON parsing must reuse JsonParser and preserve record boundaries. Do not change ordinary Retrieval or Parser defaults. Build a new RAGFlow image before enabling the Workflow route."
   - id: RF-PATCH-013
     reason: "generic Workflow node/tool execution spans correlated with existing private RAG diagnostics"
     upstream_files:

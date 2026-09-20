@@ -118,6 +118,42 @@ async def test_restrict_auto_zero_result_returns_empty_list():
 
 
 @pytest.mark.asyncio
+async def test_restrict_manual_zero_result_returns_empty_list():
+    with patch(
+        "api.db.services.doc_metadata_service.DocMetadataService.filter_doc_ids_by_meta_pushdown",
+        return_value=[],
+    ):
+        result = await apply_meta_data_filter(
+            {
+                "method": "manual",
+                "manual": [{"key": "equipment_id", "op": "in", "value": "missing"}],
+            },
+            base_doc_ids=["doc-in"],
+            kb_ids=["kb-1"],
+            doc_scope_mode="restrict",
+        )
+
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_restrict_auto_without_generated_conditions_keeps_scope():
+    with patch(
+        "rag.prompts.generator.gen_meta_filter",
+        new_callable=AsyncMock,
+        return_value={"conditions": [], "logic": "and"},
+    ):
+        result = await apply_meta_data_filter(
+            {"method": "auto"},
+            base_doc_ids=["doc-in"],
+            kb_ids=["kb-1"],
+            doc_scope_mode="restrict",
+        )
+
+    assert result == ["doc-in"]
+
+
+@pytest.mark.asyncio
 async def test_default_metadata_filter_keeps_legacy_union_behavior():
     result = await apply_meta_data_filter(
         {

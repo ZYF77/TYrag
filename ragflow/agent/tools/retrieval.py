@@ -172,6 +172,7 @@ class Retrieval(ToolBase, ABC):
             self.set_output("formalized_content", self._param.empty_response)
             self.set_output("json", [])
             return
+        effective_doc_scope_ids = list(doc_scope_ids or []) if strict_scope else None
         if not kbs:
             raise Exception("No dataset is selected.")
 
@@ -256,6 +257,29 @@ class Retrieval(ToolBase, ABC):
                 doc_scope_mode="restrict" if strict_scope else None,
             )
 
+            if strict_scope:
+                # Metadata is allowed to narrow the Gateway ceiling, never to
+                # remove the hard bound or silently turn an empty result into
+                # an unrestricted retrieval. Normalize and intersect again at
+                # this boundary so a backend returning None, a sentinel, or an
+                # out-of-scope id fails closed.
+                gateway_scope = set(doc_scope_ids or [])
+                effective_doc_scope_ids = list(
+                    dict.fromkeys(
+                        str(doc_id).strip()
+                        for doc_id in (doc_ids or [])
+                        if doc_id is not None and str(doc_id).strip() and str(doc_id) != "-999"
+                    )
+                )
+                effective_doc_scope_ids = [
+                    doc_id for doc_id in effective_doc_scope_ids if doc_id in gateway_scope
+                ]
+                if not effective_doc_scope_ids:
+                    self.set_output("formalized_content", self._param.empty_response)
+                    self.set_output("json", [])
+                    return
+                doc_ids = effective_doc_scope_ids
+
         if self._param.cross_languages:
             query = await cross_languages(kbs[0].tenant_id, None, query, self._param.cross_languages)
 
@@ -314,7 +338,7 @@ class Retrieval(ToolBase, ABC):
             # Child/TOC/KG expansion happens after the scoped retrieval call;
             # enforce the same ceiling on the complete result before exposing
             # it through Canvas references or the prompt.
-            kbinfos = self._filter_kbinfos_to_scope(kbinfos, doc_scope_ids or [])
+            kbinfos = self._filter_kbinfos_to_scope(kbinfos, effective_doc_scope_ids or [])
 
         for ck in kbinfos["chunks"]:
             if "vector" in ck:
@@ -324,6 +348,7 @@ class Retrieval(ToolBase, ABC):
 
         if not kbinfos["chunks"]:
             self.set_output("formalized_content", self._param.empty_response)
+            self.set_output("json", [])
             return
 
         # Format the chunks for JSON output (similar to how other tools do it)
