@@ -340,8 +340,13 @@ async def completion(tenant_id, agent_id, session_id=None, **kwargs):
     if chat_template_kwargs is not None:
         run_kwargs["chat_template_kwargs"] = chat_template_kwargs
 
+    from rag.workflow_diagnostics import diagnosed_canvas_events
+
     try:
-        async for ans in canvas.run(**run_kwargs):
+        async for ans in diagnosed_canvas_events(
+            canvas, run_kwargs, enabled=kwargs.get("return_trace") is True,
+            run_id=kwargs.get("_diagnostics_run_id", ""),
+        ):
             ans["session_id"] = session_id
             if ans["event"] == "message":
                 txt += ans["data"]["content"]

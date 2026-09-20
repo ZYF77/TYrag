@@ -45,6 +45,16 @@ const STAGE_LABELS: Record<string, string> = {
 };
 
 const EVENT_LABELS: Record<string, string> = {
+  workflow_node_started: '节点执行开始',
+  workflow_node_finished: '节点执行结束',
+  workflow_node_stream_started: '节点流式生成开始',
+  workflow_node_stream_finished: '节点流式生成结束',
+  workflow_tool_started: '工具调用开始',
+  workflow_tool_finished: '工具调用结束',
+  workflow_error: '工作流执行异常',
+  wf_node_started: 'Canvas 节点开始',
+  wf_node_finished: 'Canvas 节点结束',
+  wf_tool_call: '工具调用摘要',
   context: 'Context',
   llm: 'LLM',
   outcome: '结果',
@@ -85,6 +95,10 @@ function eventDurationByStage(events: RagDiagnosticTraceDetail['diagnostics']['e
 }
 
 function eventLabel(event: RagDiagnosticsPanelEvent): string {
+  if (event.type.startsWith('workflow_') || event.type.startsWith('wf_')) {
+    const name = event.data.toolName || event.data.componentName || event.data.componentType;
+    return `${EVENT_LABELS[event.type] || event.type}${typeof name === 'string' ? ` · ${name}` : ''}`;
+  }
   const stage = typeof event.data.stage === 'string' ? event.data.stage : '';
   const label = STAGE_LABELS[stage] || stage;
   if (event.type === 'llm' && label) return `LLM · ${label}`;
@@ -97,6 +111,28 @@ function eventLabel(event: RagDiagnosticsPanelEvent): string {
 
 type RagDiagnosticsPanelEvent = RagDiagnosticTraceDetail['diagnostics']['events'][number];
 
+const COMPONENT_PURPOSES: Record<string, string> = {
+  Begin: '接收工作流输入', Agent: '模型推理与工具调度', LLM: '模型生成',
+  Retrieval: '知识检索', Message: '输出回答', Categorize: '分类路由',
+  Switch: '条件分支', Iteration: '迭代执行', Loop: '循环执行',
+  Code: '代码执行', Invoke: '外部请求',
+};
+
+function eventSummary(event: RagDiagnosticsPanelEvent): string {
+  const data = event.data;
+  const type = typeof data.componentType === 'string' ? data.componentType : '';
+  return [
+    type && `${type}${COMPONENT_PURPOSES[type] ? `（${COMPONENT_PURPOSES[type]}）` : ''}`,
+    data.componentId && `节点 ${data.componentId}`,
+    data.modelId && `模型 ${data.modelId}`,
+    data.toolType && `工具类型 ${data.toolType}`,
+    data.status && `状态 ${data.status}`,
+    data.spanId && `执行 ${data.spanId}`,
+    data.parentSpanId && `父执行 ${data.parentSpanId}`,
+    data.deferred && '流式生成另行计时',
+  ].filter(Boolean).join(' · ');
+}
+
 function jsonPrimitive(value: unknown): { text: string; tone: string } {
   if (value === null) return { text: 'null', tone: 'null' };
   if (typeof value === 'string') return { text: JSON.stringify(value), tone: 'string' };
@@ -105,6 +141,9 @@ function jsonPrimitive(value: unknown): { text: string; tone: string } {
 }
 
 const JSON_KEY_LABELS: Record<string, string> = {
+  componentId: '节点 ID', componentName: '节点名称', componentType: '节点类型',
+  spanId: '执行 ID', parentSpanId: '父执行 ID', spanKind: '执行类别',
+  toolName: '工具名称', toolKind: '工具来源', errorType: '错误类别',
   query: '规范化查询（RAGFlow 实际检索文本）',
   reasoningMode: '推理模式',
   similarityThreshold: '相似度阈值',
@@ -312,6 +351,7 @@ export function RagDiagnosticsPanel() {
                   <p className="console-help-text rag-diagnostics-detail-help">
                     有明确 durationMs 的阶段显示本步骤耗时；request、scope、context、outcome 等是阶段节点，只显示累计时间。诊断数据默认收起，点击对象或数组节点继续查看下一层。
                   </p>
+                  {detail.data.diagnostics.truncated && <p role="status">诊断已达到采集上限，以下不是完整执行记录。</p>}
                   <div className="rag-diagnostics-event-list">
                     {detail.data.diagnostics.events.map((event, index) => {
                       const duration = eventDurationMs(event);
@@ -323,6 +363,7 @@ export function RagDiagnosticsPanel() {
                               <div>
                                 <h3>{eventLabel(event)}</h3>
                                 <p>{event.type}</p>
+                                {eventSummary(event) && <p>{eventSummary(event)}</p>}
                               </div>
                             </div>
                             <div className="rag-diagnostics-event-timing">

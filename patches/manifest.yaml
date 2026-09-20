@@ -172,3 +172,21 @@ patches:
       - "ragflow/test/unit_test/agent/tools/test_retrieval_scope.py"
       - "ragflow/test/unit_test/rag/flow/test_parser_json_setup.py"
     upgrade_notes: "Replay only the Retrieval doc_scope_ids/doc_scope_mode handling and Parser json/jsonl setup/function map. Restricted scope must return empty on missing or empty Gateway input; JSON parsing must reuse JsonParser and preserve record boundaries. Do not change ordinary Retrieval or Parser defaults. Build a new RAGFlow image before enabling the Workflow route."
+  - id: RF-PATCH-013
+    reason: "generic Workflow node/tool execution spans correlated with existing private RAG diagnostics"
+    upstream_files:
+      - ragflow/rag/diagnostics.py
+      - ragflow/rag/workflow_diagnostics.py
+      - ragflow/agent/canvas.py
+      - ragflow/agent/tools/base.py
+      - ragflow/api/apps/restful_apis/agent_api.py
+      - ragflow/api/db/services/canvas_service.py
+    adr: "decisions/ADR-022-Workflow通用执行诊断.md"
+    change_request: "patches/CHANGE-REQUEST-RF-PATCH-013-WORKFLOW-DIAGNOSTICS.md"
+    introduced_in: "RF-PATCH-013-workflow-diagnostics"
+    tests:
+      - ragflow/test/unit_test/rag/test_workflow_diagnostics.py
+      - ragflow/test/unit_test/rag/test_workflow_diagnostics_contract.py
+      - enterprise/tests/test_query_diagnostics.py
+      - enterprise/web/src/__tests__/WorkflowDiagnostics.test.tsx
+    upgrade_notes: "Replay Canvas dispatch and partial-stream context, unified builtin/MCP tool tracing, Agent API JSON/SSE checkpoints and safe error envelopes. Keep bounded metadata only, Noop when disabled, and existing business status semantics. Rollback removes these hooks without a migration."

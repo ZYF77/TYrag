@@ -15,7 +15,6 @@
 #
 import asyncio
 import base64
-import contextvars
 import datetime
 import inspect
 import json
@@ -549,23 +548,15 @@ class Canvas(Graph):
                 logging.info(msg)
                 raise TaskCanceledException(msg)
 
-            loop = asyncio.get_running_loop()
             tasks = []
             max_concurrency = getattr(self._thread_pool, "_max_workers", 5)
             sem = asyncio.Semaphore(max_concurrency)
 
             async def _invoke_one(cpn_obj, sync_fn, call_kwargs, use_async: bool):
                 async with sem:
-                    if use_async:
-                        await cpn_obj.invoke_async(**(call_kwargs or {}))
-                        return
-                    # run_in_executor does not carry context variables into the worker
-                    # thread; copy the current context so the LLM request context (the
-                    # `user` forwarding), token usage sink, and Langfuse attributes set
-                    # by run() remain visible to sync components.
-                    bound_call = partial(sync_fn, **(call_kwargs or {}))
-                    call_ctx = contextvars.copy_context()
-                    await loop.run_in_executor(self._thread_pool, partial(call_ctx.run, bound_call))
+                    from rag.workflow_diagnostics import invoke_diagnosed_node
+
+                    await invoke_diagnosed_node(self, cpn_obj, sync_fn, call_kwargs, use_async)
 
             i = f
             while i < t:

@@ -182,6 +182,7 @@
 
 .rag-diagnostics-event-title p {
   margin: 3px 0 0;
+    overflow-wrap: anywhere;
     color: var(--text-4);
     font-family: var(--mono);
     font-size: 10px;

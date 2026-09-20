@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from datetime import datetime, timezone
 from typing import Any, Protocol
+from uuid import uuid4
 
 
 _MAX_EVENTS = 256
@@ -164,6 +165,48 @@ _CURRENT_SINK: ContextVar[RagDiagnosticsSink] = ContextVar(
 _CURRENT_STAGE: ContextVar[str | None] = ContextVar(
     "rag_diagnostics_stage", default=None
 )
+_CURRENT_SPAN: ContextVar[dict | None] = ContextVar("rag_diagnostics_span", default=None)
+
+
+def _reset_span(token):
+    # Async-generator finalization may run in a different task on disconnect.
+    try:
+        _CURRENT_SPAN.reset(token)
+    except ValueError:
+        _CURRENT_SPAN.set(None)
+
+
+@contextmanager
+def rag_diagnostics_span(kind: str, **metadata):
+    """Execution identity, inherited by all existing LLM/retrieval emitters.
+
+    Callers supply metadata only, never arguments, results or exception messages.
+    ContextVars keep concurrent branches and repeated invocations independent.
+    """
+    if _CURRENT_SINK.get() is _NOOP:
+        yield {}
+        return
+    parent = _CURRENT_SPAN.get() or {}
+    span = {
+        **parent, **metadata, "spanId": uuid4().hex,
+        "parentSpanId": parent.get("spanId"), "spanKind": kind,
+    }
+    token = _CURRENT_SPAN.set(span)
+    started = time.perf_counter()
+    result = {"status": "success"}
+    record_rag_diagnostics(kind + "_started", {"status": "running"})
+    try:
+        yield result
+    except BaseException as exc:
+        cancelled = isinstance(exc, GeneratorExit) or type(exc).__name__ == "CancelledError"
+        result["status"] = "cancelled" if cancelled else "error"
+        result["errorType"] = type(exc).__name__
+        raise
+    finally:
+        record_rag_diagnostics(kind + "_finished", {
+            **result, "durationMs": round((time.perf_counter() - started) * 1000, 3),
+        })
+        _reset_span(token)
 
 
 def begin_rag_diagnostics(enabled: bool, run_id: str) -> Token:
@@ -204,6 +247,9 @@ def reset_rag_diagnostics(token: Token) -> None:
 
 def record_rag_diagnostics(event_type: str, payload: dict[str, Any]) -> None:
     try:
+        span = _CURRENT_SPAN.get()
+        if span:
+            payload = {**span, **payload}
         if event_type == "llm" and isinstance(payload, dict) and "stage" not in payload:
             stage = current_rag_diagnostics_stage()
             if stage:

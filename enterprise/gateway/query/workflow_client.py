@@ -26,10 +26,13 @@ class RAGFlowAgentClient(RAGFlowDocumentClient):
         if not isinstance(result, dict):
             raise RAGFlowAPIError("RAGFlow Workflow returned a non-object payload", 502)
         if result.get("code") not in (0, None):
-            raise RAGFlowAPIError(
+            error = RAGFlowAPIError(
                 str(result.get("message") or "RAGFlow Workflow returned an error"),
                 200,
             )
+            data = result.get("data")
+            error.diagnostics = data.get("_diagnostics") if isinstance(data, dict) else None
+            raise error
         return result
 
     def __init__(self, base_url: str | None = None, api_key: str | None = None):
@@ -172,11 +175,11 @@ class RAGFlowAgentClient(RAGFlowDocumentClient):
                         if not isinstance(payload, dict):
                             continue
                         if payload.get("code") not in (0, None):
-                            raise RAGFlowAPIError(
-                                str(payload.get("message") or "RAGFlow Workflow failed"),
-                                200,
-                                rid,
-                            )
+                            try:
+                                self._require_ok(payload)
+                            except RAGFlowAPIError as exc:
+                                exc.request_id = rid
+                                raise
                         yield payload
         except httpx.HTTPError as exc:
             raise RAGFlowAPIError("RAGFlow Workflow request failed", 0, rid) from exc

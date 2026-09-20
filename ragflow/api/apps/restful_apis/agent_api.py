@@ -246,6 +246,10 @@ async def _run_workflow_session(
     stream,
     chat_template_kwargs=None,
 ):
+    from rag.workflow_diagnostics import diagnosed_canvas_events
+
+    diagnostics_run_id = str(request.headers.get("X-Request-ID") or "")[:128]
+
     async def commit_runtime_replica():
         commit_ok = CanvasReplicaService.commit_after_run(
             canvas_id=agent_id,
@@ -311,7 +315,7 @@ async def _run_workflow_session(
             nonlocal full_content, reference, final_ans, trace_items, structured_output
             done_sent = False
             try:
-                async for ans in canvas.run(**run_kwargs):
+                async for ans in diagnosed_canvas_events(canvas, run_kwargs, enabled=return_trace, run_id=diagnostics_run_id):
                     ans["session_id"] = session_id
                     if ans.get("event") == "message":
                         full_content += ans.get("data", {}).get("content", "")
@@ -331,7 +335,7 @@ async def _run_workflow_session(
                             trace_items.append(
                                 {
                                     "component_id": data.get("component_id"),
-                                    "trace": [copy.deepcopy(data)],
+                                    "trace": [copy.deepcopy({k: v for k, v in data.items() if k not in {"_diagnostics", "trace"}})],
                                 }
                             )
                     final_ans = ans
@@ -360,9 +364,11 @@ async def _run_workflow_session(
                     yield ("data:" + json.dumps({"session_id": session_id, "data": {}}, ensure_ascii=False) + "\n\n")
                 await persist_workflow_session()
             except Exception as exc:
-                logging.exception(exc)
+                logging.error("Workflow execution failed: %s", type(exc).__name__)
                 canvas.cancel_task()
-                yield ("data:" + json.dumps({"code": 500, "message": str(exc), "data": False}, ensure_ascii=False) + "\n\n")
+                snapshot = getattr(exc, "rag_diagnostics", None)
+                error_data = {"_diagnostics": snapshot} if snapshot else False
+                yield ("data:" + json.dumps({"code": 500, "message": "Workflow execution failed", "data": error_data}, ensure_ascii=False) + "\n\n")
             finally:
                 if not done_sent:
                     done_sent = True
@@ -371,7 +377,7 @@ async def _run_workflow_session(
         return _build_sse_response(sse())
 
     try:
-        async for ans in canvas.run(**run_kwargs):
+        async for ans in diagnosed_canvas_events(canvas, run_kwargs, enabled=return_trace, run_id=diagnostics_run_id):
             ans["session_id"] = session_id
             if ans.get("event") == "message":
                 full_content += ans.get("data", {}).get("content", "")
@@ -391,13 +397,16 @@ async def _run_workflow_session(
                     trace_items.append(
                         {
                             "component_id": data.get("component_id"),
-                            "trace": [copy.deepcopy(data)],
+                            "trace": [copy.deepcopy({k: v for k, v in data.items() if k not in {"_diagnostics", "trace"}})],
                         }
                     )
             final_ans = ans
     except Exception as exc:
-        logging.exception(exc)
+        logging.error("Workflow execution failed: %s", type(exc).__name__)
         canvas.cancel_task()
+        snapshot = getattr(exc, "rag_diagnostics", None)
+        if snapshot:
+            return get_result(code=500, message="Workflow execution failed", data={"_diagnostics": snapshot})
         return get_result(data=f"**ERROR**: {str(exc)}")
 
     if not final_ans:
@@ -594,54 +603,63 @@ async def download_agent_file(tenant_id):
 async def _iter_session_completion_events(tenant_id, agent_id, req, return_trace):
     # Stream and non-stream session completions share the same event parsing and trace injection.
     trace_items = []
-    async for answer in agent_completion(tenant_id=tenant_id, agent_id=agent_id, **req):
-        if isinstance(answer, str):
-            try:
-                ans = json.loads(answer[5:])
-            except Exception:
+    try:
+        async for answer in agent_completion(tenant_id=tenant_id, agent_id=agent_id, **req):
+            if isinstance(answer, str):
+                try:
+                    ans = json.loads(answer[5:])
+                except Exception:
+                    continue
+            else:
+                ans = answer
+
+            event = ans.get("event")
+            if event == "node_finished":
+                if return_trace:
+                    data = ans.get("data", {})
+                    trace_items.append(
+                        {
+                            "component_id": data.get("component_id"),
+                            "trace": [copy.deepcopy({k: v for k, v in data.items() if k not in {"_diagnostics", "trace"}})],
+                        }
+                    )
+                    ans.setdefault("data", {})["trace"] = trace_items
+                yield ans
                 continue
-        else:
-            ans = answer
 
-        event = ans.get("event")
-        if event == "node_finished":
-            if return_trace:
-                data = ans.get("data", {})
-                trace_items.append(
-                    {
-                        "component_id": data.get("component_id"),
-                        "trace": [copy.deepcopy(data)],
-                    }
-                )
-                ans.setdefault("data", {})["trace"] = trace_items
-            yield ans
-            continue
+            if event in ["message", "message_end", "user_inputs", "workflow_diagnostics"]:
+                if event == "user_inputs":
+                    logging.debug(
+                        "Forwarding session completion event: tenant_id=%s agent_id=%s event=%s",
+                        tenant_id,
+                        agent_id,
+                        event,
+                    )
+                yield ans
+                continue
 
-        if event in ["message", "message_end", "user_inputs"]:
-            if event == "user_inputs":
+            if event == "workflow_finished":
+                # Forward only the run-level aggregated token usage, not the whole terminal
+                # payload (inputs/outputs), so the session completion stream surface stays
+                # limited to what the usage contract needs.
                 logging.debug(
                     "Forwarding session completion event: tenant_id=%s agent_id=%s event=%s",
                     tenant_id,
                     agent_id,
                     event,
                 )
-            yield ans
-            continue
-
-        if event == "workflow_finished":
-            # Forward only the run-level aggregated token usage, not the whole terminal
-            # payload (inputs/outputs), so the session completion stream surface stays
-            # limited to what the usage contract needs.
-            logging.debug(
-                "Forwarding session completion event: tenant_id=%s agent_id=%s event=%s",
-                tenant_id,
-                agent_id,
-                event,
-            )
-            usage = ans.get("data", {}).get("usage")
-            if usage is not None:
-                yield {**ans, "data": {"usage": usage}}
-            continue
+                usage = ans.get("data", {}).get("usage")
+                safe_data = {"usage": usage} if usage is not None else {}
+                if ans.get("data", {}).get("_diagnostics"):
+                    safe_data["_diagnostics"] = ans["data"]["_diagnostics"]
+                if safe_data:
+                    yield {**ans, "data": safe_data}
+                continue
+    except Exception as exc:
+        snapshot = getattr(exc, "rag_diagnostics", None)
+        if not snapshot:
+            raise
+        yield {"code": 500, "message": "Workflow execution failed", "data": {"_diagnostics": snapshot}}
 
 
 @manager.route("/agents/templates", methods=["GET"])  # noqa: F821
@@ -1402,6 +1420,7 @@ async def agent_chat_completion(tenant_id, agent_id=None):
     req = dict(req)
     req.pop("agent_id", None)
     req.pop("openai-compatible", None)
+    req["_diagnostics_run_id"] = str(request.headers.get("X-Request-ID") or "")[:128]
     session_id = req.get("session_id")
     workflow_session = False
     workflow_conv = None
@@ -1698,8 +1717,12 @@ async def agent_chat_completion(tenant_id, agent_id=None):
     trace_items = []
     structured_output = {}
     run_usage = None
+    run_diagnostics = None
     async for ans in _iter_session_completion_events(tenant_id, agent_id, req, return_trace):
         try:
+            if ans.get("code") not in (0, None):
+                return get_result(**ans)
+            run_diagnostics = ans.get("data", {}).get("_diagnostics") or run_diagnostics
             if ans["event"] == "message":
                 full_content += ans["data"]["content"]
             if ans.get("data", {}).get("reference", None):
@@ -1714,7 +1737,7 @@ async def agent_chat_completion(tenant_id, agent_id=None):
                     trace_items.append(
                         {
                             "component_id": data.get("component_id"),
-                            "trace": [copy.deepcopy(data)],
+                            "trace": [copy.deepcopy({k: v for k, v in data.items() if k not in {"_diagnostics", "trace"}})],
                         }
                     )
             if ans.get("event") == "workflow_finished":
@@ -1746,6 +1769,8 @@ async def agent_chat_completion(tenant_id, agent_id=None):
         final_ans["data"] = {}
     final_ans["data"]["content"] = full_content
     final_ans["data"]["reference"] = reference
+    if run_diagnostics:
+        final_ans["data"]["_diagnostics"] = run_diagnostics
     if run_usage:
         final_ans["data"]["usage"] = run_usage
     if structured_output:

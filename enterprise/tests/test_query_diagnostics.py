@@ -538,7 +538,8 @@ def test_workflow_canvas_node_start_finish_summaries_no_giant_outputs():
         and (e.get("data") or {}).get("componentId") == "generate_0"
     )
     assert err_finish["data"]["status"] == "error"
-    assert str(err_finish["data"]["error"]).startswith("boom-")
+    assert err_finish["data"]["error"] == "NodeExecutionError"
+    assert "boom-" not in str(err_finish)
     assert len(str(err_finish["data"]["error"])) <= 256
     assert "outputs" not in err_finish["data"]
     assert giant not in str(finished)
@@ -788,7 +789,7 @@ def test_workflow_tool_mcp_call_summaries_no_giant_payloads():
 
     wiki = next(e for e in calls if e["data"].get("name") == "Wikipedia")
     assert wiki["data"]["status"] == "error"
-    assert str(wiki["data"]["error"]).startswith("timeout-")
+    assert wiki["data"]["error"] == "ToolExecutionError"
     assert len(str(wiki["data"]["error"])) <= 256
 
     sql = next(e for e in calls if e["data"].get("name") == "ExeSQL")
@@ -934,3 +935,45 @@ def test_workflow_tools_summary_absent_when_no_tool_frames():
     types = {e["type"] for e in finished["events"]}
     assert "wf_tool_call" not in types
     assert "wf_tools_summary" not in types
+
+
+def test_workflow_failed_response_preserves_safe_private_checkpoint():
+    import pytest
+    from enterprise.gateway.query.workflow_client import RAGFlowAgentClient
+    from enterprise.gateway.sync.ragflow_document_client import RAGFlowAPIError
+
+    upstream = {
+        "runId": "failed-workflow", "durationMs": 12,
+        "events": [{"type": "workflow_tool_finished", "atMs": 10, "durationMs": 8,
+                    "data": {"spanId": "tool-1", "parentSpanId": "node-1", "status": "error"}}],
+    }
+    with pytest.raises(RAGFlowAPIError) as caught:
+        RAGFlowAgentClient._require_ok({"code": 500, "message": "Workflow execution failed", "data": {"_diagnostics": upstream}})
+    trace = start_trace("failed-workflow", query="fixture", reasoning_mode="workflow", stream=False)
+    merge_upstream(trace, caught.value.diagnostics)
+    merge_upstream(trace, caught.value.diagnostics)
+    result = finish_trace(trace, outcome="failed")
+    spans = [e for e in result["events"] if e["type"] == "workflow_tool_finished"]
+    assert len(spans) == 1
+    assert spans[0]["data"]["parentSpanId"] == "node-1"
+    assert spans[0]["durationMs"] == 8
+    other = start_trace("other-run", query="fixture", reasoning_mode="workflow", stream=False)
+    merge_upstream(other, caught.value.diagnostics)
+    assert not any(e["type"] == "workflow_tool_finished" for e in other["events"])
+
+
+def test_workflow_diagnostic_routes_reject_non_admin_capabilities():
+    import asyncio
+    import inspect
+    import pytest
+    from enterprise.gateway import admin_router
+    from enterprise.gateway.auth.user_principal import UserPrincipal
+    from enterprise.gateway.auth.middleware import UserAuthError
+
+    for endpoint in (admin_router.list_rag_diagnostics, admin_router.get_rag_diagnostics):
+        dependency = inspect.signature(endpoint).parameters["principal"].default.dependency
+        for capabilities in ((), ("query",), ("audit",)):
+            principal = UserPrincipal(tenant_id="tenant", business_user_id="user", subject="fixture", capabilities=capabilities)
+            with pytest.raises(UserAuthError) as caught:
+                asyncio.run(dependency(principal=principal))
+            assert caught.value.status_code == 403

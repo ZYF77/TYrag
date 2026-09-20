@@ -383,7 +383,7 @@ def _workflow_canvas_node_summary(
     }
     error = data.get("error")
     if error not in (None, ""):
-        summary["error"] = str(error)[:_WF_NODE_STR_LIMIT]
+        summary["error"] = "NodeExecutionError"
         summary["status"] = "error"
     elif event == "node_started":
         summary["status"] = "running"
@@ -489,10 +489,10 @@ def _workflow_tool_duration_ms(data: dict[str, Any]) -> float | None:
 def _workflow_tool_status(data: dict[str, Any]) -> tuple[str, str | None]:
     error = data.get("error")
     if error not in (None, ""):
-        return "error", _workflow_truncate_tool_str(error)
+        return "error", "ToolExecutionError"
     status = str(data.get("status") or "").lower()
     if status in {"error", "failed", "failure"}:
-        return "error", _workflow_truncate_tool_str(data.get("error") or status)
+        return "error", "ToolExecutionError"
     if status in {"ok", "success", "succeeded", "completed"}:
         return "success", None
     return "success", None
@@ -1066,7 +1066,8 @@ async def _workflow_run_result(
             code=exc.code, status_code=exc.status_code, message=exc.message,
             request=request,
         )
-    except v2.RAGFlowAPIError:
+    except v2.RAGFlowAPIError as exc:
+        v2.merge_upstream(run.get("_diagnostics"), getattr(exc, "diagnostics", None))
         return None, await v2._save_failed_run(
             db, principal, conversation, internal_req, run, assistant_message_id,
             code="RAGFLOW_UNAVAILABLE", status_code=503,
@@ -1345,6 +1346,7 @@ async def _workflow_stream(
         )
         raise
     except (v2.RAGFlowAPIError, v2._FormalQueryError) as exc:
+        v2.merge_upstream(run.get("_diagnostics"), getattr(exc, "diagnostics", None))
         if isinstance(exc, v2._FormalQueryError):
             code, status_code, message = exc.code, exc.status_code, exc.message
         else:

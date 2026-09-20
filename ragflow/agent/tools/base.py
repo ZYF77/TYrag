@@ -56,8 +56,26 @@ class LLMToolPluginCallSession(ToolCallSession):
         return asyncio.run(self.tool_call_async(name, arguments, request_timeout=timeout))
 
     async def tool_call_async(self, name: str, arguments: dict[str, Any], request_timeout: float | int = 10) -> Any:
+        from rag.diagnostics import rag_diagnostics_span
+
+        tool = self.tools_map.get(name)
+        with rag_diagnostics_span(
+            "workflow_tool", toolName=name,
+            toolKind="mcp" if isinstance(tool, (MCPToolBinding, MCPToolCallSession)) else "builtin",
+            toolType=type(tool).__name__,
+        ) as diagnostic:
+            diagnostic["argumentCount"] = len(arguments) if isinstance(arguments, Mapping) else 0
+            result = await self._tool_call_async(name, arguments, request_timeout)
+            diagnostic["resultType"] = type(result).__name__
+            if isinstance(tool, ComponentBase) and tool.error():
+                diagnostic["status"] = "error"
+            if getattr(result, "isError", False) is True or (isinstance(result, dict) and result.get("isError") is True):
+                diagnostic["status"] = "error"
+            return result
+
+    async def _tool_call_async(self, name: str, arguments: dict[str, Any], request_timeout: float | int = 10) -> Any:
         assert name in self.tools_map, f"LLM tool {name} does not exist"
-        logging.info(f"[ToolCall] invoke name={name} arguments={str(arguments)[:200]}")
+        logging.info("[ToolCall] invoke name=%s", name)
         if not isinstance(arguments, Mapping):
             raise TypeError(f"Tool arguments for {name} must be an object, got {type(arguments).__name__}")
         st = timer()
@@ -84,10 +102,10 @@ class LLMToolPluginCallSession(ToolCallSession):
                     f"[ToolCall] resp is None, fallback to output name={name} output_keys={list(fallback_output.keys()) if isinstance(fallback_output, dict) else type(fallback_output).__name__}"
                 )
             except Exception as e:
-                logging.warning(f"[ToolCall] resp is None and output fallback failed name={name} err={e}")
+                logging.warning("[ToolCall] output fallback failed name=%s error_type=%s", name, type(e).__name__)
 
         elapsed = timer() - st
-        logging.info(f"[ToolCall] done name={name} elapsed={elapsed:.2f}s result={str(resp)[:200]}")
+        logging.info("[ToolCall] done name=%s elapsed=%.2fs", name, elapsed)
         self.callback(name, arguments, resp, elapsed_time=elapsed)
         return resp
 
