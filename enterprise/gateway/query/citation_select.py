@@ -4,8 +4,15 @@ from __future__ import annotations
 
 import re
 
-# Same marker grammar as RAGFlow dialog_service.CITATION_MARKER_PATTERN.
-CITATION_MARKER_PATTERN = re.compile(r"\[(?:ID:)?([0-9\u0660-\u0669\u06F0-\u06F9]+)\]")
+# Same marker grammar as RAGFlow dialog_service.CITATION_MARKER_PATTERN, with
+# the legacy ``[n]`` form retained for existing Chat/Workflow answers.  The
+# two capture groups distinguish explicit ID markers from legacy markers whose
+# neighbouring characters need a technical-text boundary check.
+_DIGITS = r"0-9\u0660-\u0669\u06F0-\u06F9"
+CITATION_MARKER_PATTERN = re.compile(
+    rf"\[(?:(?:ID\s*[:：]\s*)([{_DIGITS}]+)|([{_DIGITS}]+))\]",
+    re.IGNORECASE,
+)
 # Model often writes prose "知识库ID:2、ID:5" / "以ID:5的文档为例" instead of [ID:n].
 _PROSE_ID_PATTERN = re.compile(
     r"(?:知识库)?ID[:：]\s*([0-9\u0660-\u0669\u06F0-\u06F9]+)",
@@ -38,75 +45,175 @@ _MARKER_REPAIR_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\[+\s*I\s*:\s*D\s*:\s*(\d+)\s*\]+", re.IGNORECASE), r"[ID:\1]"),
     (re.compile(r"\[\[\s*D\s*\]\s*:\s*(\d+)\s*\]+", re.IGNORECASE), r"[ID:\1]"),
 )
-_TIME_BRACKET_DIGIT_RE = re.compile(r":\[(\d+)\]")
-_TIME_BRACKET_DIGIT_PREFIX_RE = re.compile(r"\[(\d+)\]:")
-_EMPTY_BRACKET_RE = re.compile(r"\[\s*\]")
-_CANONICAL_ID_MARKER_RE = re.compile(r"\[ID:(\d+)\]")
-_PLACEHOLDER_RE = re.compile(r"\x00CITE(\d+)\x00")
-_LOOSE_BRACKET_GROUP_RE = re.compile(r"\[[^\[\]]*\]")
-_DANGLING_ID_OPEN_RE = re.compile(r"\[+\s*ID\s*:?", re.IGNORECASE)
-_MULTI_SPACE_RE = re.compile(r"[ \t]{2,}")
+# Source slices are kept intact: no Markdown reserialization or whitespace cleanup.
+_FENCE = re.compile(r" {0,3}(`{3,}|~{3,})")
+_DEFINITION = re.compile(r" {0,3}\[([^\]\n]+)\]:")
+
+
+def _balanced_end(text: str, start: int, opening: str, closing: str) -> int:
+    depth = 0
+    i = start
+    while i < len(text):
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text[i] == opening:
+            depth += 1
+        elif text[i] == closing:
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return start
+
+
+def _protected_ranges(text: str) -> list[tuple[int, int]]:
+    """Conservative local scanner; mirror citationText.ts and shared fixtures."""
+    blocks: list[tuple[int, int]] = []
+    labels: set[str] = set()
+    fence = None
+    fence_start = offset = 0
+    for line in re.findall(r"[^\n]*\n|[^\n]+$", text):
+        # Container prefixes do not make fenced code safe to rewrite.
+        logical = re.sub(r"^(?: {0,3}>[ \t]?)+", "", line)
+        logical = re.sub(r"^ {0,3}(?:[-+*]|[0-9]+[.)])[ \t]+", "", logical)
+        if fence is not None:
+            if re.fullmatch(r" {0,3}" + re.escape(fence[0]) + "{" + str(len(fence)) + r",}[ \t\r\n]*", logical):
+                blocks.append((fence_start, offset + len(line)))
+                fence = None
+        elif match := _FENCE.match(logical):
+            fence = match.group(1)
+            fence_start = offset
+        elif logical.startswith(("    ", "\t")):
+            blocks.append((offset, offset + len(line)))
+        elif match := _DEFINITION.match(logical):
+            labels.add(" ".join(match.group(1).lower().split()))
+            blocks.append((offset, offset + len(line)))
+        offset += len(line)
+    if fence is not None:
+        blocks.append((fence_start, len(text)))
+    ranges = []
+    block = i = 0
+    while i < len(text):
+        if block < len(blocks) and i >= blocks[block][0]:
+            start, end = blocks[block]
+            ranges.append((start, end))
+            i = end
+            block += 1
+            continue
+        limit = blocks[block][0] if block < len(blocks) else len(text)
+        start = i
+        if text[i] == "\\":
+            if text[i:i + 2] == "\\[":
+                end = re.search(r"\\?\]", text[i + 2:limit])
+                i = i + 2 + end.end() if end else min(i + 2, limit)
+            else:
+                i = min(i + 2, limit)
+            ranges.append((start, i))
+            continue
+        if text[i] == "`":
+            run = re.match(r"`+", text[i:]).group(0)
+            end = re.search(r"(?<!`)" + re.escape(run) + r"(?!`)", text[i + len(run):limit])
+            if end:
+                i += len(run) + end.end()
+                ranges.append((start, i))
+                continue
+            i += len(run)
+            continue
+        if text[i] == "<":
+            link = re.match(r"<(?:[A-Za-z][A-Za-z0-9+.-]*:[^<>\s]*|[^<>\s]+@[^<>\s]+)>", text[i:limit])
+            if link:
+                i += len(link.group(0))
+                ranges.append((start, i))
+                continue
+        if text[i] == "[" or text[i:i + 2] == "![":
+            bracket = i + (text[i] == "!")
+            end = _balanced_end(text, bracket, "[", "]")
+            if end > bracket and end <= limit:
+                label = " ".join(text[bracket + 1:end - 1].lower().split())
+                finish = end if label in labels else start
+                if text[end:end + 1] == "(":
+                    finish = _balanced_end(text, end, "(", ")")
+                    if finish == end:
+                        finish = start
+                elif text[end:end + 1] == "[":
+                    ref_end = _balanced_end(text, end, "[", "]")
+                    if ref_end > end:
+                        ref = " ".join(text[end + 1:ref_end - 1].lower().split()) or label
+                        if ref in labels:
+                            finish = ref_end
+                if finish > start and finish <= limit:
+                    ranges.append((start, finish))
+                    i = finish
+                    continue
+        i += 1
+    return ranges
+
+
+def _prose_segments(text: str):
+    offset = 0
+    for start, end in _protected_ranges(text):
+        if start > offset:
+            yield False, text[offset:start]
+        yield True, text[start:end]
+        offset = end
+    if offset < len(text):
+        yield False, text[offset:]
+
+
+def _marker_allowed(text: str, match: re.Match[str]) -> bool:
+    if match.group(1) is not None:
+        return True
+    previous = text[match.start() - 1:match.start()] if match.start() else ""
+    following = text[match.end():match.end() + 1]
+    return not (
+        previous in (":", "]", "[") or following in (":", "]")
+        or re.fullmatch(r"[A-Za-z0-9_]", previous)
+        or re.fullmatch(r"[A-Za-z0-9_]", following)
+    )
+
+
+def _sanitize_prose(text: str) -> str:
+    # Nested known damage can expose another repair (e.g. [[ID[3]]]).
+    # Reach a fixed point before returning; repairs only remove syntax and
+    # each legacy marker can become canonical at most once.
+    while True:
+        previous = text
+        for pattern, replacement in _MARKER_REPAIR_PATTERNS:
+            text = pattern.sub(replacement, text)
+        text = CITATION_MARKER_PATTERN.sub(
+            lambda match: f"[ID:{int(match.group(1) or match.group(2))}]"
+            if _marker_allowed(text, match) else match.group(0), text,
+        )
+        if text == previous:
+            return text
 
 
 def sanitize_citation_markers(answer: str) -> str:
-    """Repair or drop mangled ``[ID:n]`` markers; keep only canonical forms.
-
-    Does not change non-marker prose. Time-like ``12:[7]:5`` / ``15:02:[1]``
-    lose the brackets around digits. Unrecoverable citation garbage is removed
-    so EAM can bind remaining markers via ``refIndex``.
-    """
-    text = answer or ""
-    if "[" not in text:
-        return text
-
-    # 1) Strip digit brackets that sit in clock/time fragments first.
-    text = _TIME_BRACKET_DIGIT_RE.sub(r":\1", text)
-    text = _TIME_BRACKET_DIGIT_PREFIX_RE.sub(r"\1:", text)
-    text = _EMPTY_BRACKET_RE.sub("", text)
-
-    # 2) Repair known mangled citation spellings.
-    for pattern, repl in _MARKER_REPAIR_PATTERNS:
-        text = pattern.sub(repl, text)
-
-    # 3) Canonicalize remaining valid [n] / [ID:n] → [ID:n].
-    text = CITATION_MARKER_PATTERN.sub(lambda m: f"[ID:{int(m.group(1))}]", text)
-
-    # 4) Protect canonical markers, strip leftover bracket junk, restore.
-    held: list[str] = []
-
-    def _hold(match: re.Match[str]) -> str:
-        held.append(match.group(0))
-        return f"\x00CITE{len(held) - 1}\x00"
-
-    text = _CANONICAL_ID_MARKER_RE.sub(_hold, text)
-    while True:
-        nxt = _LOOSE_BRACKET_GROUP_RE.sub("", text)
-        if nxt == text:
-            break
-        text = nxt
-    text = _DANGLING_ID_OPEN_RE.sub("", text)
-    text = text.replace("[", "").replace("]", "")
-    text = _PLACEHOLDER_RE.sub(lambda m: held[int(m.group(1))], text)
-    text = _MULTI_SPACE_RE.sub(" ", text)
-    return text
-
+    """Repair unambiguous citations while preserving technical source text."""
+    return "".join(
+        part if protected else _sanitize_prose(part)
+        for protected, part in _prose_segments(answer or "")
+    )
 
 
 def cited_chunk_indexes(answer: str) -> list[int]:
-    """Return first-seen chunk indexes cited as [ID:n]/[n] or prose ID:n."""
-    seen: set[int] = set()
+    """Extract only prose citations using the same protection and boundaries."""
     ordered: list[int] = []
-    text = answer or ""
-    for pattern in (CITATION_MARKER_PATTERN, _PROSE_ID_PATTERN):
-        for match in pattern.finditer(text):
-            try:
-                index = int(match.group(1))
-            except ValueError:
-                continue
-            if index in seen:
-                continue
-            seen.add(index)
-            ordered.append(index)
+    for protected, part in _prose_segments(answer or ""):
+        if protected:
+            continue
+        text = _sanitize_prose(part)
+        markers = list(CITATION_MARKER_PATTERN.finditer(text))
+        matches = [(m.start(), int(m.group(1) or m.group(2)))
+                   for m in markers if _marker_allowed(text, m)]
+        # Bare ID:n compatibility must not rescan a bracket marker that was
+        # rejected or introduce an extra association inside protected text.
+        matches.extend((m.start(), int(m.group(1))) for m in _PROSE_ID_PATTERN.finditer(text)
+                       if not any(a.start() <= m.start() < a.end() for a in markers))
+        for _, index in sorted(matches):
+            if index not in ordered:
+                ordered.append(index)
     return ordered
 
 

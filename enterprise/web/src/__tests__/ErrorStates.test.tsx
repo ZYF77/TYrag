@@ -54,6 +54,7 @@ describe('Error States in MessageItem', () => {
     expect(screen.getByText(/RAGFLOW_UNAVAILABLE/)).toBeTruthy();
     expect(screen.getByText(/知识库服务暂时不可用/)).toBeTruthy();
     expect(screen.getByText(/req-123/)).toBeTruthy();
+    expect(screen.getByText('回答未完成，不可视为最终答案。')).toBeTruthy();
   });
 
   it('shows streaming state indicator', () => {

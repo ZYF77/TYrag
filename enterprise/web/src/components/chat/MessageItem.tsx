@@ -56,6 +56,12 @@ export function MessageItem({ message, onCitationClick }: MessageItemProps) {
             </span>
           </div>
 
+          {reply.status === 'failed' && (
+            <p className="text-xs text-red-600 mb-2" role="status">
+              回答未完成，不可视为最终答案。
+            </p>
+          )}
+
           {/* Content */}
           {reply.content && (
             <div className="text-sm text-gray-700 leading-relaxed whitespace-pre-wrap">

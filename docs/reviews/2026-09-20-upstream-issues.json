@@ -1,0 +1,217 @@
+{
+  "repository": "infiniflow/ragflow",
+  "checked_at": "2026-09-20T13:14:36+08:00",
+  "selection": "Targeted review of retrieval, workflow, authorization, memory and upgrade issues; not an exhaustive issue census. State verified through official GitHub REST issue endpoints.",
+  "issues": [
+    {
+      "number": 19352,
+      "title": "[Bug]: Metadata filter unions with document_ids instead of intersecting on /retrieval",
+      "url": "https://github.com/infiniflow/ragflow/issues/19352",
+      "state": "open",
+      "created_at": "2026-09-08T04:22:03Z",
+      "updated_at": "2026-09-14T09:38:50Z",
+      "closed_at": null,
+      "comments": 0
+    },
+    {
+      "number": 19350,
+      "title": "[Bug]: Parent chunk IDs collide across datasets in the same Elasticsearch tenant and corrupt source attribution",
+      "url": "https://github.com/infiniflow/ragflow/issues/19350",
+      "state": "open",
+      "created_at": "2026-09-08T04:04:43Z",
+      "updated_at": "2026-09-14T09:38:14Z",
+      "closed_at": null,
+      "comments": 2
+    },
+    {
+      "number": 19879,
+      "title": "[Bug]: Retrieval testing failed to get the correct chunk if the search keyword contained the hyphen \"-\"",
+      "url": "https://github.com/infiniflow/ragflow/issues/19879",
+      "state": "open",
+      "created_at": "2026-09-19T03:17:34Z",
+      "updated_at": "2026-09-19T03:17:58Z",
+      "closed_at": null,
+      "comments": 0
+    },
+    {
+      "number": 19360,
+      "title": "[Bug]: Switch and VariableAssigner read stale outputs when the producer shares their canvas batch window",
+      "url": "https://github.com/infiniflow/ragflow/issues/19360",
+      "state": "open",
+      "created_at": "2026-09-08T05:10:35Z",
+      "updated_at": "2026-09-14T09:38:42Z",
+      "closed_at": null,
+      "comments": 0
+    },
+    {
+      "number": 19697,
+      "title": "[Bug]: DataOperations must reject unconnected query refs; connected edges must not stale-read",
+      "url": "https://github.com/infiniflow/ragflow/issues/19697",
+      "state": "open",
+      "created_at": "2026-09-16T03:22:48Z",
+      "updated_at": "2026-09-16T05:37:17Z",
+      "closed_at": null,
+      "comments": 0
+    },
+    {
+      "number": 18665,
+      "title": "[Bug]: Message node drops the whitespace around every {Component@output} reference (variable_ref_patt swallows adjacent spaces)",
+      "url": "https://github.com/infiniflow/ragflow/issues/18665",
+      "state": "open",
+      "created_at": "2026-08-23T19:10:31Z",
+      "updated_at": "2026-08-31T08:26:17Z",
+      "closed_at": null,
+      "comments": 3
+    },
+    {
+      "number": 19429,
+      "title": "Team member can delete other users' sessions on a shared agent",
+      "url": "https://github.com/infiniflow/ragflow/issues/19429",
+      "state": "open",
+      "created_at": "2026-09-09T05:23:48Z",
+      "updated_at": "2026-09-09T05:23:48Z",
+      "closed_at": null,
+      "comments": 0
+    },
+    {
+      "number": 19569,
+      "title": "[Bug] MySQL in-place upgrade v0.26.4 -> v0.27.2: mysql_migration.py aborts with TypeError (unsupported operand type(s) for &: 'str' and 'int') and is skipped silently, leaving tenant_model.model_type as varchar and tenant_*_id unpopulated",
+      "url": "https://github.com/infiniflow/ragflow/issues/19569",
+      "state": "open",
+      "created_at": "2026-09-13T03:41:10Z",
+      "updated_at": "2026-09-13T03:41:10Z",
+      "closed_at": null,
+      "comments": 0
+    },
+    {
+      "number": 18306,
+      "title": "[Bug]: Pipeline parser component set to Docling, but dataflow ingestion uses DeepDOC",
+      "url": "https://github.com/infiniflow/ragflow/issues/18306",
+      "state": "open",
+      "created_at": "2026-08-14T15:02:15Z",
+      "updated_at": "2026-08-31T07:06:11Z",
+      "closed_at": null,
+      "comments": 14
+    },
+    {
+      "number": 19207,
+      "title": "Memory tasks need durable, resumable execution state",
+      "url": "https://github.com/infiniflow/ragflow/issues/19207",
+      "state": "open",
+      "created_at": "2026-09-03T06:52:51Z",
+      "updated_at": "2026-09-10T22:09:18Z",
+      "closed_at": null,
+      "comments": 1
+    },
+    {
+      "number": 19366,
+      "title": "Retrieval with an empty metadata_condition.conditions list returns zero chunks (Pyt[Bug]:",
+      "url": "https://github.com/infiniflow/ragflow/issues/19366",
+      "state": "open",
+      "created_at": "2026-09-08T05:59:15Z",
+      "updated_at": "2026-09-14T09:38:29Z",
+      "closed_at": null,
+      "comments": 0
+    },
+    {
+      "number": 19767,
+      "title": "[Bug]: Canvas Retrieval use_kg calls kg_retriever twice and duplicates KG chunk",
+      "url": "https://github.com/infiniflow/ragflow/issues/19767",
+      "state": "open",
+      "created_at": "2026-09-17T04:33:44Z",
+      "updated_at": "2026-09-17T04:33:57Z",
+      "closed_at": null,
+      "comments": 0
+    },
+    {
+      "number": 17516,
+      "title": "[Question]: Does the user_id binding to JWT principal (v0.25.3 #14745) apply to API Key callers? It seems to break server-to-server integration scenarios",
+      "url": "https://github.com/infiniflow/ragflow/issues/17516",
+      "state": "open",
+      "created_at": "2026-07-29T06:03:42Z",
+      "updated_at": "2026-07-29T06:23:59Z",
+      "closed_at": null,
+      "comments": 3
+    },
+    {
+      "number": 19738,
+      "title": "Go API `GET /memories` lets any caller list another tenant's team-shared memories via `tenant_id`",
+      "url": "https://github.com/infiniflow/ragflow/issues/19738",
+      "state": "open",
+      "created_at": "2026-09-16T12:26:38Z",
+      "updated_at": "2026-09-16T12:26:38Z",
+      "closed_at": null,
+      "comments": 0
+    },
+    {
+      "number": 19542,
+      "title": "[Bug]: Go API document download route serves any tenant's file bytes without tenant authorization",
+      "url": "https://github.com/infiniflow/ragflow/issues/19542",
+      "state": "open",
+      "created_at": "2026-09-11T10:43:04Z",
+      "updated_at": "2026-09-11T10:43:04Z",
+      "closed_at": null,
+      "comments": 0
+    },
+    {
+      "number": 19544,
+      "title": "[Bug]: Go PinnedHTTPClient follows redirects unchecked and unpinned, bypassing the SSRF guard (MCP test/tool calls, connectors)",
+      "url": "https://github.com/infiniflow/ragflow/issues/19544",
+      "state": "open",
+      "created_at": "2026-09-11T10:54:04Z",
+      "updated_at": "2026-09-11T10:54:04Z",
+      "closed_at": null,
+      "comments": 0
+    },
+    {
+      "number": 18779,
+      "title": "[Bug]: Wiki pages from Knowledge Compilation are never returned by retrieval — missing available_int/doc_id despite include_knowledge_compilation",
+      "url": "https://github.com/infiniflow/ragflow/issues/18779",
+      "state": "open",
+      "created_at": "2026-08-26T05:32:12Z",
+      "updated_at": "2026-09-11T08:03:27Z",
+      "closed_at": null,
+      "comments": 3
+    },
+    {
+      "number": 17945,
+      "title": "Enable the `integration` test tier in CI (currently broken on main)",
+      "url": "https://github.com/infiniflow/ragflow/issues/17945",
+      "state": "open",
+      "created_at": "2026-08-06T09:17:24Z",
+      "updated_at": "2026-08-06T09:17:25Z",
+      "closed_at": null,
+      "comments": 0
+    },
+    {
+      "number": 18280,
+      "title": "Server-Side Request Forgery (SSRF) in the agent \"Invoke\" HTTP component allows any authenticated user to reach internal network services",
+      "url": "https://github.com/infiniflow/ragflow/issues/18280",
+      "state": "open",
+      "created_at": "2026-08-14T08:25:13Z",
+      "updated_at": "2026-08-14T08:26:40Z",
+      "closed_at": null,
+      "comments": 1
+    },
+    {
+      "number": 15437,
+      "title": "SSRF in markdown document parser: uploaded image references trigger server-side requests to internal/metadata endpoints",
+      "url": "https://github.com/infiniflow/ragflow/issues/15437",
+      "state": "open",
+      "created_at": "2026-05-29T22:44:12Z",
+      "updated_at": "2026-05-29T22:44:12Z",
+      "closed_at": null,
+      "comments": 0
+    },
+    {
+      "number": 15171,
+      "title": "[Bug]: SSRF in agent Browser component upload-URL fetch (_prepare_upload_url_file)",
+      "url": "https://github.com/infiniflow/ragflow/issues/15171",
+      "state": "closed",
+      "created_at": "2026-05-23T21:06:39Z",
+      "updated_at": "2026-08-04T11:13:02Z",
+      "closed_at": "2026-08-04T11:13:02Z",
+      "comments": 1
+    }
+  ]
+}

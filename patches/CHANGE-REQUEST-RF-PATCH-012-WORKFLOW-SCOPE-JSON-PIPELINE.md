@@ -26,3 +26,20 @@ Ingestion 还需要在画布 Parser 中使用现有 JsonParser 处理 JSON/JSONL
 
 覆盖空 scope、范围外文档、metadata 缩小、父子块、嵌套 JSON、JSONL、0/false
 值和普通路径回归。禁止用跳过测试或伪造结果通过。
+
+## F02 范围处理修正
+
+`doc_scope_mode=restrict` 下，Metadata Filter 得到空集合时必须在 Retrieval
+调用前短路，并输出空 `formalized_content`/`json=[]`；不得把空 `doc_ids` 传给
+ES 以隐式扩大检索。有效范围始终是 Gateway 集合 G 与 metadata 结果的交集 S。
+没有 metadata 条件时仍使用 G。非 `restrict` 调用保持 RAGFlow 原有的回退行为。
+
+该修正不改变生产 Workflow 的 Research/AuthorizedEvidence 补检索流程。补检索
+仍由工作流显式决定，并且每个补检索工具继续携带同一个 Gateway 文档范围。升级时
+需要验证 Target 零命中不会调用检索，而显式 AuthorizedEvidence 仍能在 G 内检索。
+
+对应回归测试：
+
+- `ragflow/test/unit_test/agent/tools/test_retrieval_scope.py`：manual/auto/semi_auto
+  零命中短路、交集传递、空条件正常检索、重复调用清空旧输出和 legacy 兼容；
+- `docs/reviews/2026-09-20-audit-probes.py`：受限零命中不调用检索器的源码级探针。

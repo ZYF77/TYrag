@@ -16,6 +16,10 @@ from enterprise.gateway.sync.ragflow_document_client import (
     RAGFlowAPIError,
     RAGFlowDocumentClient,
 )
+from enterprise.gateway.query.workflow_events import (
+    WorkflowEventCollector,
+    WorkflowEventError,
+)
 
 
 class RAGFlowAgentClient(RAGFlowDocumentClient):
@@ -100,24 +104,33 @@ class RAGFlowAgentClient(RAGFlowDocumentClient):
         return_trace: bool = False,
     ) -> dict:
         rid = request_id or self._new_request_id()
-        result = await self._run_sync(
-            self._sync_request,
-            "POST",
-            "/api/v1/agents/chat/completions",
-            rid,
-            json_data=self._body(
+        # The Agent API's JSON response is assembled from message_end and can
+        # omit workflow_finished. Consume the same SSE protocol used by the
+        # public streaming route so JSON and SSE share terminal semantics.
+        collector = WorkflowEventCollector()
+        try:
+            async for payload in self.stream(
                 agent_id=agent_id,
                 question=question,
                 session_id=session_id,
                 user_id=user_id,
                 inputs=inputs,
-                files=files or [],
-                stream=False,
+                files=files,
+                request_id=rid,
                 return_trace=return_trace,
-            ),
-            timeout=self.timeout,
-        )
-        return self._require_ok(result)
+            ):
+                collector.consume(payload)
+            # Keep the Agent client's existing JSON envelope while deriving it
+            # from the same collected SSE terminal contract.
+            return {"code": 0, "data": collector.finalize()}
+        except WorkflowEventError as exc:
+            error = RAGFlowAPIError(exc.message, exc.status_code, rid)
+            error.code = exc.code
+            error.workflow_partial = collector.partial()
+            raise error from exc
+        except RAGFlowAPIError as exc:
+            exc.workflow_partial = collector.partial()
+            raise
 
     async def stream(
         self,
@@ -198,18 +211,10 @@ class RAGFlowAgentStub:
 
     async def complete(self, **kwargs: Any) -> dict:
         self.complete_calls.append(dict(kwargs))
-        return {
-            "code": 0,
-            "data": {
-                "event": "workflow_finished",
-                "session_id": self.session_id,
-                "data": {
-                    "content": self.answer,
-                    "reference": self.reference,
-                    "status": self.status,
-                },
-            },
-        }
+        collector = WorkflowEventCollector()
+        async for payload in self.stream(**kwargs):
+            collector.consume(payload)
+        return {"code": 0, "data": collector.finalize()}
 
     async def stream(self, **kwargs: Any) -> AsyncIterator[dict]:
         self.stream_calls.append(dict(kwargs))

@@ -616,12 +616,13 @@ async def mark_expired_run_interrupted(
             },
         }
     }
-    result = await exec_sql(conn,
+    transitioned = await fetchone(conn,
         """UPDATE ext_v2_message_run
            SET status='failed', result_json=?, lease_expires_at=NULL
            WHERE conversation_id=? AND tenant_id=? AND business_user_id=?
              AND client_message_id=? AND status='running'
-             AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?""",
+             AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?
+           RETURNING assistant_message_id""",
         (
             json.dumps(result, ensure_ascii=False, separators=(",", ":")),
             conversation_id,
@@ -631,14 +632,12 @@ async def mark_expired_run_interrupted(
             now,
         ),
     )
-    row = await fetchone(
-        conn,
-        """SELECT assistant_message_id FROM ext_v2_message_run
-           WHERE conversation_id=? AND tenant_id=? AND business_user_id=?
-             AND client_message_id=?""",
-        (conversation_id, tenant_id, business_user_id, client_message_id),
-    )
-    if row and row["assistant_message_id"]:
+    # Only the request that changed the run from expired ``running`` to
+    # ``failed`` may create the replay placeholder.  A live duplicate gets no
+    # write at all, and a concurrent loser observes the already-terminal run
+    # below.  UPDATE ... RETURNING keeps this decision inside the same write
+    # transaction as the placeholder insert.
+    if transitioned and transitioned["assistant_message_id"]:
         result = await exec_sql(conn,
             """INSERT INTO ext_v2_message
                (message_id, conversation_id, tenant_id, business_user_id, role,
@@ -646,7 +645,7 @@ async def mark_expired_run_interrupted(
                VALUES (?, ?, ?, ?, 'assistant', '', 'failed', '[]', ?)
                ON CONFLICT(message_id) DO NOTHING""",
             (
-                row["assistant_message_id"],
+                transitioned["assistant_message_id"],
                 conversation_id,
                 tenant_id,
                 business_user_id,
@@ -732,6 +731,44 @@ async def add_message(
         "reasoning": reasoning if role == "assistant" else None,
         "createdAt": now,
     }
+
+
+async def save_failed_message_run(
+    conn,
+    *,
+    message_id: str,
+    conversation_id: str,
+    tenant_id: str,
+    business_user_id: str,
+    client_message_id: str,
+    result: dict,
+    content: str = "",
+    citations: list[dict] | None = None,
+    reasoning: str | None = None,
+) -> None:
+    """Persist a failed assistant projection and terminal run atomically."""
+    await add_message(
+        conn,
+        message_id=message_id,
+        conversation_id=conversation_id,
+        tenant_id=tenant_id,
+        business_user_id=business_user_id,
+        role="assistant",
+        content=content,
+        status="failed",
+        citations=citations or [],
+        reasoning=reasoning,
+    )
+    await complete_message_run(
+        conn,
+        conversation_id=conversation_id,
+        tenant_id=tenant_id,
+        business_user_id=business_user_id,
+        client_message_id=client_message_id,
+        result=result,
+        status="failed",
+        assistant_message_id=message_id,
+    )
 
 
 async def claim_ragflow_session(

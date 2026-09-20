@@ -5,7 +5,6 @@ from enterprise.gateway.query.citation_select import (
     select_cited_chunk_refs,
     select_cited_chunks,
 )
-from enterprise.gateway.query.workflow_router import _workflow_chunks
 
 
 CHUNKS = [
@@ -154,6 +153,8 @@ DISCRETE_CHUNKS = [
 
 
 def test_workflow_chunks_preserves_discrete_citation_ids_from_map_keys():
+    from enterprise.gateway.query.workflow_router import _workflow_chunks
+
     chunks = _workflow_chunks(
         {
             "459": {"doc_id": "d1", "content": "root cause valve packing leak on pump A"},

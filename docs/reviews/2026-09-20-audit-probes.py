@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import ast
 import asyncio
-import importlib
 import json
 import logging
 from pathlib import Path
@@ -79,69 +78,23 @@ async def retrieval_empty_metadata_probe():
     return {"retriever_not_called_on_restricted_zero_match": True, "empty_outputs_emitted": True}
 
 
-async def workflow_stream_probe(frames):
-    split = importlib.import_module("enterprise.gateway.query.answer_split")
-    cite = importlib.import_module("enterprise.gateway.query.citation_select")
-    writes, failures = [], []
-    class APIError(Exception):
-        def __init__(self, message, status_code=None, *args):
-            super().__init__(message)
-            self.status_code = status_code
-    class FormalError(Exception):
-        def __init__(self, code, status_code, message):
-            self.code, self.status_code, self.message = code, status_code, message
-    async def stream(**kwargs):
+def workflow_event_probe(frames):
+    """Exercise the same collector used by both Gateway JSON and SSE paths."""
+    from enterprise.gateway.query.workflow_events import WorkflowEventCollector, WorkflowEventError
+
+    collector = WorkflowEventCollector()
+    try:
         for frame in frames:
-            yield frame
-    async def scope(*args):
-        return NS(is_empty=False), {"allowed-a": NS()}
-    async def question(*args, **kwargs):
-        return "synthetic question", None, []
-    async def write(db, fn, **kwargs):
-        writes.append({"operation": fn, **kwargs})
-    async def project(db, citations, *args):
-        return citations
-    async def fail(*args, **kwargs):
-        failures.append(kwargs["code"])
-    ns = {"asyncio": asyncio, "uuid": uuid, "json": json, "perf_counter": perf_counter,
-          "logger": logging.getLogger("audit"), "_VALID_STATUSES": {"completed", "no_reliable_evidence", "failed"},
-          "_MAX_WORKFLOW_REASONING_CHARS": 12000, "_WF_TOOL_SSE_EVENTS": set(),
-          "_workflow_configuration": lambda: ("synthetic-agent", "v1"),
-          "_workflow_client": lambda: NS(stream=stream), "_workflow_inputs": lambda *a: {},
-          "_workflow_start_trace": noop, "_workflow_record_run_started": noop,
-          "_workflow_merge_upstream_diagnostics": noop, "_workflow_record_canvas_node_events": noop,
-          "_workflow_record_canvas_tool_events": noop, "_workflow_record_tools_summary": noop,
-          "_workflow_finish_trace": lambda *a, **k: {}, "_workflow_diagnostics_return_trace": lambda: False,
-          "fetch_user_memory_text": noop_async, "schedule_memory_candidate": noop,
-          "cleanup_ragflow_files": noop_async}
-    # Use the real citation selector: no marker means no selected references.
-    ext = {"select_cited_chunk_refs": cite.select_cited_chunk_refs, "_FormalQueryError": FormalError}
-    extract("enterprise/gateway/query/v2_router.py", {"_external_citations"}, ext)
-    ns["v2"] = NS(StreamThinkSplitter=split.StreamThinkSplitter, finalize_streamed_output=split.finalize_streamed_output,
-                  sanitize_citation_markers=cite.sanitize_citation_markers,
-                  _contains_tool_protocol_artifact=lambda value: False,
-                  _mapped_llm_provider_failure=lambda value: None,
-                  _retrieval_question=question, _context_scope=scope,
-                  _external_citations=ext["_external_citations"], _project_citations=project,
-                  _gw_write=write, _save_failed_run=fail,
-                  _sse=lambda event, data: {"event": event, "data": data},
-                  record_timed_event=noop, NO_RELIABLE_EVIDENCE_ANSWER=cite.ABSTAIN_PHRASE,
-                  _FormalQueryError=FormalError, RAGFlowAPIError=APIError, httpx=NS(HTTPError=APIError),
-                  v2_store=NS(add_message="add_message", set_workflow_session="set_session",
-                              complete_message_run="complete_run", public_status=lambda s: s))
-    extract("enterprise/gateway/query/workflow_router.py", {
-        "_workflow_stream", "_workflow_frame", "_workflow_chunks", "_workflow_reference",
-        "_workflow_status_from", "_workflow_attachment_ids", "_workflow_evidence_present",
-        "_public_request_id", "_workflow_record_stream_first_packets"}, ns)
-    req = NS(clientMessageId="synthetic-id", internetEnabled=False)
-    events = [event async for event in ns["_workflow_stream"](
-        None, NS(tenant_id="t", business_user_id="u"), {"conversation_id": "c"},
-        req, req, "synthetic question", {"run_id": "r", "assistant_message_id": "m"}, [], NS())]
-    assert not failures, failures
-    end = events[-1]
-    assert end["event"] == "answer.completed"
-    return {"terminal_event": end["event"], "status": end["data"]["status"],
-            "citations": len(end["data"]["citations"])}
+            collector.consume(frame)
+        result = collector.finalize()
+        return {
+            "terminal_event": result["event"],
+            "status": result["data"]["status"],
+            "content": result["data"]["content"],
+            "node_errors": result["data"]["_workflow_node_errors"],
+        }
+    except WorkflowEventError as exc:
+        return {"error_code": exc.code, "status_code": exc.status_code}
 
 
 async def main():
@@ -151,7 +104,9 @@ async def main():
         statements.append(statement)
         return NS(rowcount=0)  # running lease has NOT expired
     async def fetch(conn, statement, params):
-        return {"assistant_message_id": "synthetic-message"}
+        statements.append(statement)
+        assert "RETURNING assistant_message_id" in statement
+        return None  # conditional UPDATE did not transition a live run
     async def get_run(*args, **kwargs):
         return {"status": "running"}
     ns = {"utc_now": lambda: "2026-09-20T00:00:00Z", "json": json,
@@ -159,33 +114,36 @@ async def main():
     extract("enterprise/gateway/query/v2_store.py", {"mark_expired_run_interrupted"}, ns)
     run = await ns["mark_expired_run_interrupted"](None, conversation_id="c",
         tenant_id="t", business_user_id="u", client_message_id="client")
-    assert run["status"] == "running" and any("INSERT INTO ext_v2_message" in s for s in statements)
-    observations["pending_retry_inserts_failed_message"] = {
-        "lease_expiry_update_rows": 0, "run_status": run["status"], "failed_message_insert_attempted": True}
+    assert run["status"] == "running" and not any("INSERT INTO ext_v2_message" in s for s in statements)
+    observations["pending_retry_preserves_running"] = {
+        "lease_expiry_update_rows": 0, "run_status": run["status"], "failed_message_insert_attempted": False}
     observations["empty_metadata_scope"] = await retrieval_empty_metadata_probe()
-    # Simulate a well-framed HTTP stream ending normally after an intermediate
-    # Message, but without the required workflow terminal event.
+    # A non-empty Message and normal EOF still require workflow_finished.
     message = {"event": "message", "data": {"content": "synthetic partial answer"}}
     reference = {"chunks": [{"doc_id": "allowed-a", "content": "synthetic evidence"}]}
     message_end = {"event": "message_end", "data": {"reference": reference}}
-    observations["missing_workflow_terminal"] = await workflow_stream_probe([message, message_end])
-    assert observations["missing_workflow_terminal"]["status"] == "completed"
-    observations["message_status_overwritten"] = await workflow_stream_probe([
+    observations["workflow_missing_terminal"] = workflow_event_probe([message, message_end])
+    assert observations["workflow_missing_terminal"]["error_code"] == "RUN_INTERRUPTED"
+    observations["workflow_failed_status_monotonic"] = workflow_event_probe([
         message, {"event": "message_end", "data": {"reference": reference, "status": "failed"}},
         {"event": "workflow_finished", "data": {"usage": {}}}])
-    assert observations["message_status_overwritten"]["status"] == "completed"
-    observations["canvas_error_ignored"] = await workflow_stream_probe([
-        message, message_end, {"event": "node_finished", "data": {"error": "synthetic node failure"}}])
-    assert observations["canvas_error_ignored"]["status"] == "completed"
-    observations["abstain_text_with_retrieval"] = await workflow_stream_probe([
-        {"event": "message", "data": {"content": "当前检索结果中没有找到可靠依据"}},
-        message_end, {"event": "workflow_finished", "data": {}}])
-    assert observations["abstain_text_with_retrieval"]["status"] == "completed"
-    observations["unselected_out_of_scope_reference"] = await workflow_stream_probe([
-        message, {"event": "message_end", "data": {"reference": {"chunks": [
-            {"doc_id": "outside-g", "content": "synthetic outside"}]}}},
+    assert observations["workflow_failed_status_monotonic"]["status"] == "failed"
+    observations["workflow_node_error_recovery"] = workflow_event_probe([
+        message, message_end, {"event": "node_finished", "data": {"error": "synthetic node failure"}},
+        {"event": "message_end", "data": {"status": "completed"}},
         {"event": "workflow_finished", "data": {}}])
-    assert observations["unselected_out_of_scope_reference"]["status"] == "completed"
+    assert observations["workflow_node_error_recovery"]["status"] == "completed"
+    assert observations["workflow_node_error_recovery"]["node_errors"] == ["synthetic node failure"]
+    observations["workflow_abstain_status_is_explicit"] = workflow_event_probe([
+        {"event": "message", "data": {"content": "当前检索结果中没有找到可靠依据"}},
+        {"event": "message_end", "data": {"status": "no_reliable_evidence"}},
+        {"event": "workflow_finished", "data": {}}])
+    assert observations["workflow_abstain_status_is_explicit"]["status"] == "no_reliable_evidence"
+    observations["workflow_unselected_reference_does_not_infer_state"] = workflow_event_probe([
+        message, {"event": "message_end", "data": {"reference": {"chunks": [
+            {"doc_id": "outside-g", "content": "synthetic outside"}]}, "status": "completed"}},
+        {"event": "workflow_finished", "data": {}}])
+    assert observations["workflow_unselected_reference_does_not_infer_state"]["status"] == "completed"
     acl_ns = {"AclDecision": NS}
     extract("enterprise/gateway/acl/policy.py", {"_deny", "evaluate_document_acl"}, acl_ns)
     acl = acl_ns["evaluate_document_acl"](NS(tenant_id="t", is_active=True,
@@ -196,8 +154,8 @@ async def main():
     from enterprise.gateway.query.citation_select import sanitize_citation_markers
     original = "检查 [L1] 端子，使用 arr[0]，参见 [手册](https://example.invalid/manual)。"
     changed = sanitize_citation_markers(original)
-    assert "[L1]" not in changed and "[手册]" not in changed and "arr[ID:0]" in changed
-    observations["noncitation_text_corruption"] = {"input": original, "output": changed}
+    assert changed == original
+    observations["noncitation_text_preserved"] = {"input": original, "output": changed}
     from enterprise.gateway.query.answer_split import split_assistant_output, public_reasoning
     raw = public_reasoning(split_assistant_output("<think>synthetic private reasoning</think>answer").reasoning)
     assert raw == "synthetic private reasoning"

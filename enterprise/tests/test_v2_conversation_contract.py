@@ -17,7 +17,7 @@ from httpx import ASGITransport, AsyncClient
 
 from enterprise.gateway.auth.middleware import require_user_principal
 from enterprise.gateway.auth.user_principal import UserPrincipal
-from enterprise.gateway.query import formal_router, v2_router, v2_store
+from enterprise.gateway.query import formal_router, v2_router, v2_store, workflow_router
 from enterprise.gateway.query.citation_file import set_citation_image_fetcher
 from enterprise.gateway.query.ragflow_client import RAGFlowAPIError, RAGFlowQueryStub
 from enterprise.gateway.sync.models import (
@@ -468,21 +468,28 @@ async def test_role_acl_is_open_within_tenant_during_test_stage(runtime):
 
 
 @pytest.mark.asyncio
-async def test_pending_duplicate_returns_same_run_without_second_user_message(runtime):
+@pytest.mark.parametrize("route", ["chat", "workflow"])
+async def test_pending_duplicate_returns_same_run_without_second_user_message(runtime, monkeypatch, route):
+    endpoint = BASE
+    if route == "workflow":
+        runtime.app.include_router(workflow_router.router)
+        monkeypatch.setattr(workflow_router, "_workflow_configuration", lambda: ("synthetic-agent", "v1"))
+        endpoint = "/enterprise/api/v1/workflow"
     await gw_write(runtime.db, exec_sql, "INSERT INTO ext_asset_registry (tenant_id, equipment_id, fixed_asset_no, asset_id) VALUES ('customer-a', 'EQ-PENDING', 'FA-PENDING', 'FA-PENDING')")
     async with _client(runtime) as client:
         conversation = await _create_conversation(client, equipmentId="EQ-PENDING")
         req = v2_router.CreateMessageRequest(
             clientMessageId="pending-1", question="pending"
         )
+        internal_req = workflow_router._internal_request(req) if route == "workflow" else req
         run = await gw_write(
             runtime.db,
             v2_store.reserve_message_run,
             conversation_id=conversation["conversationId"],
             tenant_id="customer-a",
             business_user_id="biz-user-001",
-            client_message_id=req.clientMessageId,
-            request_hash=v2_router._request_hash(req),
+            client_message_id=internal_req.clientMessageId,
+            request_hash=v2_router._request_hash(internal_req),
             run_id="stable-pending-run",
             user_message_id="pending-user-message",
             assistant_message_id="pending-assistant-message",
@@ -490,8 +497,34 @@ async def test_pending_duplicate_returns_same_run_without_second_user_message(ru
             lease_seconds=3600,
         )
         response = await client.post(
-            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            f"{endpoint}/conversations/{conversation['conversationId']}/messages",
             json=req.model_dump(exclude_none=True),
+        )
+        pending_history = await client.get(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages"
+        )
+        completed = {"answer": "done"}
+        await gw_write(
+            runtime.db,
+            v2_store.complete_message_run,
+            conversation_id=conversation["conversationId"],
+            tenant_id="customer-a",
+            business_user_id="biz-user-001",
+            client_message_id=internal_req.clientMessageId,
+            result=completed,
+            assistant_message_id="pending-assistant-message",
+        )
+        await gw_write(
+            runtime.db,
+            v2_store.add_message,
+            message_id="pending-assistant-message",
+            conversation_id=conversation["conversationId"],
+            tenant_id="customer-a",
+            business_user_id="biz-user-001",
+            role="assistant",
+            content="done",
+            status="completed",
+            citations=[],
         )
         history = await client.get(
             f"{BASE}/conversations/{conversation['conversationId']}/messages"
@@ -500,25 +533,40 @@ async def test_pending_duplicate_returns_same_run_without_second_user_message(ru
     assert run["run_id"] == "stable-pending-run"
     assert response.status_code == 202
     assert response.json()["runId"] == "stable-pending-run"
-    assert len([item for item in history.json()["items"] if item["role"] == "user"]) == 1
+    assert len([item for item in pending_history.json()["items"] if item["role"] == "user"]) == 1
+    assert [
+        item for item in pending_history.json()["items"]
+        if item["role"] == "assistant" and item["status"] == "失败"
+    ] == []
+    assert [
+        item for item in history.json()["items"]
+        if item["messageId"] == "pending-assistant-message"
+    ][0]["status"] == "已完成"
 
 
 @pytest.mark.asyncio
-async def test_expired_duplicate_is_stable_run_interrupted(runtime):
+@pytest.mark.parametrize("route", ["chat", "workflow"])
+async def test_expired_duplicate_is_stable_run_interrupted(runtime, monkeypatch, route):
+    endpoint = BASE
+    if route == "workflow":
+        runtime.app.include_router(workflow_router.router)
+        monkeypatch.setattr(workflow_router, "_workflow_configuration", lambda: ("synthetic-agent", "v1"))
+        endpoint = "/enterprise/api/v1/workflow"
     await gw_write(runtime.db, exec_sql, "INSERT INTO ext_asset_registry (tenant_id, equipment_id, fixed_asset_no, asset_id) VALUES ('customer-a', 'EQ-EXPIRED', 'FA-EXPIRED', 'FA-EXPIRED')")
     async with _client(runtime) as client:
         conversation = await _create_conversation(client, equipmentId="EQ-EXPIRED")
         req = v2_router.CreateMessageRequest(
             clientMessageId="expired-1", question="expired"
         )
+        internal_req = workflow_router._internal_request(req) if route == "workflow" else req
         await gw_write(
             runtime.db,
             v2_store.reserve_message_run,
             conversation_id=conversation["conversationId"],
             tenant_id="customer-a",
             business_user_id="biz-user-001",
-            client_message_id=req.clientMessageId,
-            request_hash=v2_router._request_hash(req),
+            client_message_id=internal_req.clientMessageId,
+            request_hash=v2_router._request_hash(internal_req),
             run_id="stable-expired-run",
             user_message_id="expired-user-message",
             assistant_message_id="expired-assistant-message",
@@ -526,16 +574,24 @@ async def test_expired_duplicate_is_stable_run_interrupted(runtime):
             lease_seconds=-1,
         )
         first = await client.post(
-            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            f"{endpoint}/conversations/{conversation['conversationId']}/messages",
             json=req.model_dump(exclude_none=True),
         )
         replay = await client.post(
-            f"{BASE}/conversations/{conversation['conversationId']}/messages",
+            f"{endpoint}/conversations/{conversation['conversationId']}/messages",
             json=req.model_dump(exclude_none=True),
+        )
+        history = await client.get(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages"
         )
 
     assert first.status_code == replay.status_code == 503
     assert first.json()["code"] == replay.json()["code"] == "RUN_INTERRUPTED"
+    assert first.json() == replay.json()
+    assert len([
+        item for item in history.json()["items"]
+        if item["role"] == "assistant" and item["status"] == "失败"
+    ]) == 1
 
 
 @pytest.mark.asyncio
@@ -1774,6 +1830,10 @@ class _ScopeViolationAfterDeltaStub(RAGFlowQueryStub):
 
 
 class _ExplicitStreamOutcomeStub(RAGFlowQueryStub):
+    def __init__(self, status: str = "no_reliable_evidence") -> None:
+        super().__init__()
+        self.outcome_status = status
+
     async def chat_completion_stream(
         self,
         chat_id: str,
@@ -1793,7 +1853,7 @@ class _ExplicitStreamOutcomeStub(RAGFlowQueryStub):
             "code": 0,
             "data": {
                 "answer": "explicit stream answer [ID:0]",
-                "status": "no_reliable_evidence",
+                "status": self.outcome_status,
                 "final": False,
             },
         }
@@ -1801,7 +1861,7 @@ class _ExplicitStreamOutcomeStub(RAGFlowQueryStub):
             "code": 0,
             "data": {
                 "answer": "",
-                "status": "no_reliable_evidence",
+                "status": self.outcome_status,
                 "final": True,
                 "grounding": _grounding(grounding_version),
                 "reference": {
@@ -1998,12 +2058,10 @@ async def test_v2_json_billing_error_maps_to_safe_message(runtime):
 
 
 @pytest.mark.asyncio
-async def test_v2_stream_no_reliable_evidence_clears_citations_defensively(
+async def test_v2_stream_no_reliable_evidence_preserves_body_and_citations(
     runtime,
 ):
-    """SSE: an explicit no_reliable_evidence final frame must not stream
-    citations next to the replaced standard abstain answer, even when the
-    upstream contract-violatingly sent cited markers in the body."""
+    """SSE keeps an explicit no-reliable result separate from its evidence."""
     await _insert_document(
         runtime.db,
         external_id="DOC-STREAM-STATE",
@@ -2024,9 +2082,10 @@ async def test_v2_stream_no_reliable_evidence_clears_citations_defensively(
 
     assert response.status_code == 200
     assert '"status": "无可靠依据"' in response.text
-    assert "event: answer.replaced" in response.text
-    assert '"content": "当前检索结果中没有找到可靠依据"' in response.text
-    assert "event: citation" not in response.text
+    assert "explicit stream answer" in response.text
+    assert "event: citation" in response.text
+    assert '"citationId": "stream-chunk-' in response.text
+    assert "event: answer.completed" in response.text
 
 
 @pytest.mark.asyncio
@@ -2068,7 +2127,7 @@ async def test_v2_json_missing_status_is_contract_error_with_failed_run(runtime)
 
 
 @pytest.mark.asyncio
-async def test_v2_sse_missing_status_replaces_answer_then_fails(runtime):
+async def test_v2_sse_missing_status_preserves_partial_answer_then_fails(runtime):
     await _insert_document(
         runtime.db,
         external_id="DOC-NO-STATUS-SSE",
@@ -2095,14 +2154,13 @@ async def test_v2_sse_missing_status_replaces_answer_then_fails(runtime):
 
     assert response.status_code == 200
     assert "event: answer.delta" in response.text
-    assert "event: answer.replaced" in response.text
-    assert '"content": ""' in response.text
+    assert '"content": "stub answer' in response.text
     assert "event: run.failed" in response.text
     assert '"code": "RAGFLOW_API_INCOMPATIBLE"' in response.text
     assert "event: answer.completed" not in response.text
-    replaced_at = response.text.index("event: answer.replaced")
     failed_at = response.text.index("event: run.failed")
-    assert replaced_at < failed_at
+    assert response.text.index("event: answer.delta") < failed_at
+    assert "event: citation" in response.text
     assert run["status"] == "failed"
 
 
@@ -2450,12 +2508,25 @@ async def test_v2_keeps_only_chunks_cited_in_the_answer(runtime):
     assert "invoice.pdf" not in {item["title"] for item in body["citations"]}
 
 
+def test_external_citations_rejects_unselected_out_of_scope_reference():
+    """An unmarked upstream chunk cannot bypass the evidence scope check."""
+    with pytest.raises(v2_router._FormalQueryError) as caught:
+        v2_router._external_citations(
+            [
+                {"id": "allowed", "document_id": "doc-1", "content": "safe"},
+                {"id": "outside", "document_id": "doc-outside", "content": "leak"},
+            ],
+            {"doc-1": object()},
+            "message-id",
+            answer="依据 [ID:0]",
+            status="completed",
+        )
+    assert caught.value.code == "RAGFLOW_SCOPE_VIOLATION"
+
+
 @pytest.mark.asyncio
-async def test_v2_no_reliable_evidence_clears_citations_defensively(runtime):
-    """RF-PATCH-007 compliant upstream abstains with a marker-free answer, so
-    citations are empty anyway; a contract-violating upstream that reports
-    no_reliable_evidence together with cited markers must not persist the
-    standard abstain text next to dangling citations."""
+async def test_v2_no_reliable_evidence_preserves_body_and_citations(runtime):
+    """An explicit no-reliable result may retain its explanation and evidence."""
     await _insert_document(
         runtime.db,
         external_id="EXT-DOC-NONE",
@@ -2476,8 +2547,78 @@ async def test_v2_no_reliable_evidence_clears_citations_defensively(runtime):
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["status"] == "无可靠依据"
-    assert body["answer"] == "当前检索结果中没有找到可靠依据"
-    assert body["citations"] == []
+    assert body["answer"] == "explicit answer [ID:0]"
+    assert len(body["citations"]) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["chat", "workflow"])
+@pytest.mark.parametrize("transport", ["json", "sse"])
+async def test_failed_state_preserves_safe_body_and_citations(runtime, monkeypatch, route, transport):
+    """A failed run is visibly incomplete while its safe partial evidence survives."""
+    await _insert_document(
+        runtime.db,
+        external_id="DOC-FAILED-PARTIAL",
+        ragflow_id="doc-failed-partial",
+        equipment_id="EQ-FAILED-PARTIAL",
+        fixed_asset_no="FA-FAILED-PARTIAL",
+    )
+    if route == "chat":
+        formal_router._query_stub = _ExplicitStreamOutcomeStub("failed") if transport == "sse" else _ExplicitOutcomeStub(
+            status="failed", include_chunk=True
+        )
+        endpoint = BASE
+    else:
+        from enterprise.gateway.query.workflow_client import RAGFlowAgentStub
+
+        stub = RAGFlowAgentStub()
+        stub.status = "failed"
+        stub.answer = "Workflow partial answer [ID:0]"
+        stub.reference = {
+            "chunks": [
+                {
+                    "id": "workflow-failed-chunk",
+                    "document_id": "doc-failed-partial",
+                    "document_name": "failed.pdf",
+                    "content": "safe evidence",
+                }
+            ]
+        }
+        runtime.app.include_router(workflow_router.router)
+        monkeypatch.setattr(
+            workflow_router, "_workflow_configuration", lambda: ("synthetic-agent", "v1")
+        )
+        monkeypatch.setattr(workflow_router, "_workflow_client", lambda: stub)
+        endpoint = "/enterprise/api/v1/workflow"
+
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(
+            client, equipmentId="EQ-FAILED-PARTIAL"
+        )
+        response = await client.post(
+            f"{endpoint}/conversations/{conversation['conversationId']}/messages",
+            headers={"Accept": "text/event-stream" if transport == "sse" else "application/json"},
+            json={"clientMessageId": f"failed-partial-{route}-{transport}", "question": "问题"},
+        )
+        history = await client.get(
+            f"{BASE}/conversations/{conversation['conversationId']}/messages"
+        )
+
+    if transport == "json":
+        assert response.status_code == 503, response.text
+        assert response.json()["code"] == "RAGFLOW_UNAVAILABLE"
+    else:
+        assert response.status_code == 200, response.text
+        assert "event: run.failed" in response.text
+        assert "event: answer.completed" not in response.text
+        assert "partial answer" in response.text
+        assert "event: citation" in response.text
+    assistant = next(
+        item for item in history.json()["items"] if item["role"] == "assistant"
+    )
+    assert assistant["status"] == "失败"
+    assert "partial answer" in assistant["content"]
+    assert len(assistant["citations"]) == 1
 
 
 @pytest.mark.asyncio
@@ -3316,3 +3457,65 @@ async def test_v2_json_tool_protocol_artifact_fails_and_is_not_completed(runtime
     )
     assert stream_assistant["status"] == "failed"
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('route', ['chat', 'workflow'])
+@pytest.mark.parametrize('transport', ['json', 'sse'])
+async def test_technical_citation_body_survives_response_and_history(runtime, monkeypatch, route, transport):
+    from enterprise.gateway.query.workflow_client import RAGFlowAgentStub
+
+    await _insert_document(runtime.db, external_id='F12-DOC', ragflow_id='doc-1',
+                           equipment_id='EQ-F12', fixed_asset_no='FA-F12')
+    answer = ('检查 [L1] arr[0] matrix[1][2] [] 12:[7]:5。  保留空格\n\n'
+              '`[ID:0] ID:0` [手册 ID:1](https://example.invalid/[1])\n\n'
+              '```text\n[ID:0]\n```\n\n见文档[2]。')
+    expected = answer.replace('见文档[2]', '见文档[ID:2]')
+    chunks = [dict(id=f'synthetic-{i}', document_id='doc-1', document_name='manual.pdf',
+                   content=f'synthetic evidence {i}', positions=[[i + 1, .1, .2, .3, .4]]) for i in range(3)]
+    runtime.stub.forced_answer = answer
+    runtime.stub._omit_default_chunk = True
+    runtime.stub._extra_chunks = chunks
+    endpoint = BASE
+    if route == 'workflow':
+        stub = RAGFlowAgentStub()
+        stub.answer = answer
+        stub.reference = {'chunks': chunks}
+        runtime.app.include_router(workflow_router.router)
+        monkeypatch.setattr(workflow_router, '_workflow_configuration', lambda: ('synthetic-agent', 'v1'))
+        monkeypatch.setattr(workflow_router, '_workflow_client', lambda: stub)
+        endpoint = '/enterprise/api/v1/workflow'
+    async with _client(runtime) as client:
+        conversation = await _create_conversation(client, equipmentId='EQ-F12')
+        response = await client.post(
+            f"{endpoint}/conversations/{conversation['conversationId']}/messages",
+            json={'clientMessageId': 'f12', 'question': '接线说明'},
+            headers={'Accept': 'text/event-stream' if transport == 'sse' else 'application/json'},
+        )
+        assert response.status_code == 200, response.text
+        if transport == 'json':
+            body = response.json()
+            assert body['answer'] == expected
+        else:
+            content = ''
+            body = None
+            for block in response.text.replace('\r\n', '\n').split('\n\n'):
+                lines = block.splitlines()
+                event = next((line[7:] for line in lines if line.startswith('event: ')), '')
+                data = '\n'.join(line[6:] for line in lines if line.startswith('data: '))
+                if not data:
+                    continue
+                payload = json.loads(data)
+                if event == 'answer.delta':
+                    content += payload['content']
+                elif event == 'answer.replaced':
+                    content = payload['content']
+                elif event == 'answer.completed':
+                    body = payload
+            assert body is not None, response.text
+            assert content == expected
+        assert [item['refIndex'] for item in body['citations']] == [2]
+        history = await client.get(f"{BASE}/conversations/{conversation['conversationId']}/messages")
+    assistant = next(item for item in history.json()['items'] if item['role'] == 'assistant')
+    assert assistant['content'] == expected
+    assert assistant['status'] == body['status']
+    assert [item['refIndex'] for item in assistant['citations']] == [2]

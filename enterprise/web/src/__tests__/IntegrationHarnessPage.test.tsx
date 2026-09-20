@@ -213,11 +213,13 @@ describe('IntegrationHarnessPage', () => {
     await user.type(input, 'sse-error replay status');
     await user.click(screen.getByRole('button', { name: '发送' }));
     await screen.findByText('业务状态：失败');
+    expect(screen.getByText('回答未完成，不可视为最终答案。')).toBeTruthy();
 
     first.unmount();
     render(<IntegrationHarnessPage />);
     await user.click(await screen.findByRole('button', { name: /sse-error replay status/ }));
     await screen.findByText('业务状态：失败');
+    expect(screen.getByText('回答未完成，不可视为最终答案。')).toBeTruthy();
     expect(screen.getByText('引用 1 条')).toBeTruthy();
     expect(screen.getByText(/ASSET-HARNESS-001/)).toBeTruthy();
   });

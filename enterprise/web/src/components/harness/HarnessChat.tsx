@@ -209,6 +209,11 @@ export function HarnessChat({
                   <span>{statusLabel(message.status)}</span>
                   <span>引用 {message.citations.length} 条</span>
                 </div>
+                {isFailed && (
+                  <p className="diag-help" role="status">
+                    回答未完成，不可视为最终答案。
+                  </p>
+                )}
                 {(isThinking || hasReasoning) && (
                   <div className={`harness-reasoning${expandedReasoning === message.id ? ' is-expanded' : ''}`}>
                     <button

@@ -35,6 +35,12 @@ from enterprise.gateway.query.workflow_client import (
     RAGFlowAgentClient,
     RAGFlowAgentStub,
 )
+from enterprise.gateway.query.workflow_events import (
+    VALID_STATUSES as WORKFLOW_VALID_STATUSES,
+    WorkflowEventCollector,
+    WorkflowEventError,
+    event_frame,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +52,6 @@ router = APIRouter(
 )
 
 _workflow_client_instance: RAGFlowAgentClient | RAGFlowAgentStub | None = None
-_VALID_STATUSES = {"completed", "no_reliable_evidence", "failed"}
 _MAX_WORKFLOW_REASONING_CHARS = 12_000
 
 
@@ -100,19 +105,7 @@ def _public_request_id(req: v2.CreateMessageRequest) -> str:
 
 def _workflow_frame(payload: dict[str, Any]) -> tuple[str, dict[str, Any], str | None]:
     """Extract ``event``, event data and session id from Agent API envelopes."""
-    event = str(payload.get("event") or "")
-    session_id = payload.get("session_id") or payload.get("sessionId")
-    data = payload.get("data")
-    if not event and isinstance(data, dict) and data.get("event"):
-        event = str(data.get("event") or "")
-        session_id = session_id or data.get("session_id") or data.get("sessionId")
-        inner = data.get("data")
-        if isinstance(inner, dict):
-            session_id = session_id or inner.get("session_id") or inner.get("sessionId")
-        data = inner
-    if not isinstance(data, dict):
-        data = {}
-    return event, data, str(session_id) if session_id else None
+    return event_frame(payload)
 
 
 def _workflow_chunks(reference: Any) -> list[dict]:
@@ -182,47 +175,6 @@ def _workflow_attachment_ids(pending: list[v2.PendingAttachment]) -> set[str]:
         for item in pending
         if (item.ragflow_file or {}).get("id")
     }
-
-
-def _workflow_evidence_present(
-    chunks: list[dict],
-    citations: list[dict],
-    pending: list[v2.PendingAttachment],
-) -> bool:
-    """Return whether a completed Workflow answer has usable evidence.
-
-    Document/web citations are already authorization-checked by
-    ``_external_citations``. Temporary attachment chunks intentionally do not
-    become public citations, so an attachment reference is accepted as a
-    second evidence form for attachment-only questions.
-
-    Chat-parity (v1.5): production Chat does not post-filter a completed
-    answer merely because citation markers were omitted. Treat in-scope
-    retrieval chunks as usable evidence so Direct answers that omit ``[ID:n]``
-    are not false-killed by this Gateway gate.
-    """
-    if citations:
-        return True
-    attachment_ids = _workflow_attachment_ids(pending)
-    if any(
-        str(chunk.get("document_id") or chunk.get("doc_id") or "")
-        in attachment_ids
-        for chunk in chunks
-        if isinstance(chunk, dict)
-    ):
-        return True
-    return any(
-        isinstance(chunk, dict)
-        and (
-            str(
-                chunk.get("content")
-                or chunk.get("content_with_weight")
-                or ""
-            ).strip()
-            or str(chunk.get("document_id") or chunk.get("doc_id") or "").strip()
-        )
-        for chunk in chunks
-    )
 
 
 def _workflow_start_trace(
@@ -829,14 +781,14 @@ def _workflow_status_from(
     answer: str,
 ) -> str:
     status = str(explicit or "").strip()
-    if status in _VALID_STATUSES:
+    if status in WORKFLOW_VALID_STATUSES:
         return status
-    if status:
-        # A non-empty terminal value is part of the upstream contract. Treat
-        # an unknown value as a failed run instead of deriving success from
-        # answer text.
-        return "failed"
-    return "completed" if str(answer or "").strip() else "no_reliable_evidence"
+    del answer
+    raise v2._FormalQueryError(
+        "RAGFLOW_API_INCOMPATIBLE",
+        502,
+        "Workflow terminal status missing or invalid",
+    )
 
 
 async def _parse_request(
@@ -874,6 +826,13 @@ async def _workflow_run_result(
     request: Request,
 ) -> tuple[dict | None, JSONResponse | None]:
     assistant_message_id = run.get("assistant_message_id") or str(uuid.uuid4())
+    docs_by_internal_id: dict[str, Any] = {}
+    answer = ""
+    chunks: list[dict] = []
+    reasoning: str | None = None
+    partial_answer = ""
+    partial_chunks: list[dict] = []
+    effective_internet = False
     config_values = _workflow_configuration()
     if config_values is None:
         return None, v2._error(
@@ -936,6 +895,12 @@ async def _workflow_run_result(
                 return_trace=_workflow_diagnostics_return_trace(),
             )
             event, data, returned_session = _workflow_frame(payload)
+            if event != "workflow_finished" or data.get("_workflow_complete") is not True:
+                raise v2._FormalQueryError(
+                    "RAGFLOW_API_INCOMPATIBLE",
+                    502,
+                    "Workflow terminal event was not confirmed",
+                )
             _workflow_merge_upstream_diagnostics(run, data, payload)
             workflow_session_id = returned_session or workflow_session_id
             raw_answer = str(data.get("content") or data.get("answer") or "")
@@ -960,17 +925,6 @@ async def _workflow_run_result(
             # keep it out of the Gateway response and persisted message. The
             # split is still used to remove any wrappers before answer handling.
             reasoning = None
-            if not event and not answer:
-                raise v2.RAGFlowAPIError(
-                    "RAGFlow Workflow returned an empty result", 502, run["run_id"]
-                )
-            if status != "completed":
-                if status == "failed":
-                    raise v2.RAGFlowAPIError(
-                        "RAGFlow Workflow reported a failed run", 502, run["run_id"]
-                    )
-                answer = v2.NO_RELIABLE_EVIDENCE_ANSWER
-                chunks = []
         citations = v2._external_citations(
             chunks,
             docs_by_internal_id,
@@ -980,18 +934,25 @@ async def _workflow_run_result(
             internet_enabled=req.internetEnabled,
             attachment_document_ids=_workflow_attachment_ids(pending),
         )
-        if status == "completed" and not _workflow_evidence_present(
-            chunks, citations, pending
-        ):
-            # The Agent must not turn an ungrounded final Message into a
-            # successful business answer merely because it returned text.
-            status = "no_reliable_evidence"
-            answer = v2.NO_RELIABLE_EVIDENCE_ANSWER
-            chunks = []
-            citations = []
         public_citations = await v2._project_citations(
             db, citations, request, principal
         )
+        if status == "failed":
+            return None, await v2._save_failed_run(
+                db,
+                principal,
+                conversation,
+                internal_req,
+                run,
+                assistant_message_id,
+                code="RAGFLOW_UNAVAILABLE",
+                status_code=503,
+                message="Workflow reported a failed run",
+                request=request,
+                content=answer,
+                citations=citations,
+                reasoning=reasoning,
+            )
         await v2._gw_write(
             db,
             v2.v2_store.add_message,
@@ -1061,17 +1022,72 @@ async def _workflow_run_result(
     except asyncio.CancelledError:
         raise
     except v2._FormalQueryError as exc:
+        partial_content, partial_citations = v2._safe_failed_projection(
+            answer,
+            chunks,
+            docs_by_internal_id,
+            assistant_message_id,
+            allow_body=exc.code in {
+                "RAGFLOW_API_INCOMPATIBLE",
+                "RAGFLOW_UNAVAILABLE",
+                "RUN_INTERRUPTED",
+            },
+            internet_enabled=effective_internet or req.internetEnabled,
+            attachment_document_ids=_workflow_attachment_ids(pending),
+        )
         return None, await v2._save_failed_run(
             db, principal, conversation, internal_req, run, assistant_message_id,
             code=exc.code, status_code=exc.status_code, message=exc.message,
-            request=request,
+            request=request, content=partial_content, citations=partial_citations,
         )
     except v2.RAGFlowAPIError as exc:
         v2.merge_upstream(run.get("_diagnostics"), getattr(exc, "diagnostics", None))
+        partial = getattr(exc, "workflow_partial", {})
+        if isinstance(partial, dict):
+            partial_answer = v2.sanitize_citation_markers(
+                str(partial.get("content") or "")
+            )
+            partial_chunks = _workflow_chunks(partial.get("reference"))
+        partial_content, partial_citations = v2._safe_failed_projection(
+            partial_answer,
+            partial_chunks,
+            docs_by_internal_id,
+            assistant_message_id,
+            allow_body=True,
+            internet_enabled=effective_internet or req.internetEnabled,
+            attachment_document_ids=_workflow_attachment_ids(pending),
+        )
+        error_code = getattr(exc, "code", None)
+        if error_code == "RUN_INTERRUPTED":
+            code, status_code, message = (
+                "RUN_INTERRUPTED",
+                503,
+                "Workflow ended before its terminal event",
+            )
+        elif getattr(exc, "status_code", None) == 0:
+            code, status_code, message = (
+                "RUN_INTERRUPTED",
+                503,
+                "Workflow connection interrupted before its terminal event",
+            )
+        elif error_code == "RAGFLOW_API_INCOMPATIBLE":
+            code, status_code, message = (
+                "RAGFLOW_API_INCOMPATIBLE",
+                502,
+                "Workflow returned an incompatible event contract",
+            )
+        else:
+            code, status_code, message = (
+                "RAGFLOW_UNAVAILABLE",
+                503,
+                "Query engine unavailable",
+            )
         return None, await v2._save_failed_run(
             db, principal, conversation, internal_req, run, assistant_message_id,
-            code="RAGFLOW_UNAVAILABLE", status_code=503,
-            message="Query engine unavailable", request=request,
+            code=code, status_code=status_code,
+            message=message, request=request,
+            content=partial_content,
+            citations=partial_citations,
         )
     except Exception:
         logger.exception("workflow message run failed")
@@ -1108,6 +1124,7 @@ async def _workflow_stream(
     final_delta: str | None = None
     reference: dict = {"chunks": [], "doc_aggs": []}
     explicit_status: Any = None
+    event_collector = WorkflowEventCollector()
     workflow_session_id = str(conversation.get("workflow_session_id") or "").strip() or None
     splitter = v2.StreamThinkSplitter()
     emitted_answer = ""
@@ -1116,6 +1133,46 @@ async def _workflow_stream(
         "reasoning": False,
         "answer": False,
     }
+    docs_by_internal_id: dict[str, Any] = {}
+
+    async def persist_workflow_failure(
+        code: str,
+        status_code: int,
+        message: str,
+        *,
+        allow_body: bool,
+    ) -> tuple[str, list[dict]]:
+        partial_content, partial_citations = v2._safe_failed_projection(
+            v2.sanitize_citation_markers(accumulated),
+            _workflow_chunks(reference),
+            docs_by_internal_id,
+            assistant_message_id,
+            allow_body=allow_body,
+            internet_enabled=req.internetEnabled,
+            attachment_document_ids=_workflow_attachment_ids(pending),
+        )
+        await v2._save_failed_run(
+            db,
+            principal,
+            conversation,
+            internal_req,
+            run,
+            assistant_message_id,
+            code=code,
+            status_code=status_code,
+            message=message,
+            request=request,
+            content=partial_content,
+            citations=partial_citations,
+        )
+        try:
+            public = await v2._project_citations(
+                db, partial_citations, request, principal
+            )
+        except Exception:
+            public = []
+        return partial_content, public
+
     _workflow_start_trace(run, request, question, req, stream=True)
     _workflow_record_run_started(run, request)
     yield v2._sse(
@@ -1159,6 +1216,12 @@ async def _workflow_stream(
                 request_id=run["run_id"],
                 return_trace=_workflow_diagnostics_return_trace(),
             ):
+                try:
+                    event_collector.consume(payload)
+                except WorkflowEventError as exc:
+                    raise v2._FormalQueryError(
+                        exc.code, exc.status_code, exc.message
+                    ) from exc
                 event, data, returned_session = _workflow_frame(payload)
                 _workflow_merge_upstream_diagnostics(run, data, payload)
                 workflow_session_id = returned_session or workflow_session_id
@@ -1215,6 +1278,29 @@ async def _workflow_stream(
                     if data.get("reference"):
                         reference = _workflow_reference(data["reference"])
 
+            if scope.is_empty:
+                # Gateway authorization can legitimately produce no upstream
+                # call. This explicit evidence outcome has no upstream terminal
+                # event to wait for.
+                accumulated = v2.NO_RELIABLE_EVIDENCE_ANSWER
+                explicit_status = "no_reliable_evidence"
+                final_delta = None
+            else:
+                try:
+                    normalized = event_collector.finalize()
+                except WorkflowEventError as exc:
+                    raise v2._FormalQueryError(
+                        exc.code, exc.status_code, exc.message
+                    ) from exc
+                _normalized_event, normalized_data, normalized_session = event_frame(
+                    normalized
+                )
+                workflow_session_id = normalized_session or workflow_session_id
+                accumulated = str(normalized_data.get("content") or "")
+                reference = _workflow_reference(normalized_data.get("reference"))
+                explicit_status = normalized_data.get("status")
+                final_delta = None
+
         finalized = v2.finalize_streamed_output(
             accumulated, accumulated_reasoning, final_delta
         )
@@ -1238,21 +1324,6 @@ async def _workflow_stream(
         # The Workflow endpoint never publishes raw model reasoning.
         reasoning = None
         status = _workflow_status_from(explicit_status, accumulated)
-        if not accumulated:
-            accumulated = v2.NO_RELIABLE_EVIDENCE_ANSWER
-            status = "no_reliable_evidence"
-        elif status == "failed":
-            raise v2.RAGFlowAPIError(
-                "RAGFlow Workflow reported a failed run", 502, run["run_id"]
-            )
-        elif status == "no_reliable_evidence" and explicit_status not in _VALID_STATUSES:
-            # Older/third-party Agent API versions may omit a terminal status
-            # frame. A non-empty final Message is still an explicit successful
-            # workflow result; an empty stream remains no-reliable-evidence.
-            status = "completed"
-        if status != "completed":
-            accumulated = v2.NO_RELIABLE_EVIDENCE_ANSWER
-            reference = {"chunks": [], "doc_aggs": []}
         chunks = _workflow_chunks(reference)
         citations = v2._external_citations(
             chunks,
@@ -1263,14 +1334,44 @@ async def _workflow_stream(
             internet_enabled=req.internetEnabled,
             attachment_document_ids=_workflow_attachment_ids(pending),
         )
-        if status == "completed" and not _workflow_evidence_present(
-            chunks, citations, pending
-        ):
-            status = "no_reliable_evidence"
-            accumulated = v2.NO_RELIABLE_EVIDENCE_ANSWER
-            reference = {"chunks": [], "doc_aggs": []}
-            citations = []
         public_citations = await v2._project_citations(db, citations, request, principal)
+        if status == "failed":
+            await v2._save_failed_run(
+                db,
+                principal,
+                conversation,
+                internal_req,
+                run,
+                assistant_message_id,
+                code="RAGFLOW_UNAVAILABLE",
+                status_code=503,
+                message="Workflow reported a failed run",
+                request=request,
+                content=accumulated,
+                citations=citations,
+                reasoning=reasoning,
+            )
+            if accumulated != emitted_answer:
+                yield v2._sse(
+                    "answer.replaced" if emitted_answer else "answer.delta",
+                    {
+                        "conversationId": conversation["conversation_id"],
+                        "runId": run["run_id"],
+                        "content": accumulated,
+                    },
+                )
+            for citation in public_citations:
+                yield v2._sse("citation", citation)
+            yield v2._sse(
+                "run.failed",
+                {
+                    "conversationId": conversation["conversation_id"],
+                    "runId": run["run_id"],
+                    "code": "RAGFLOW_UNAVAILABLE",
+                    "message": "Workflow reported a failed run",
+                },
+            )
+            return
         if accumulated != emitted_answer:
             # Canvas can send a decorated final Message after answer deltas
             # (for example when think tags were split differently). Replace the
@@ -1350,31 +1451,55 @@ async def _workflow_stream(
         if isinstance(exc, v2._FormalQueryError):
             code, status_code, message = exc.code, exc.status_code, exc.message
         else:
-            mapped = v2._mapped_llm_provider_failure(str(exc))
-            if mapped is not None:
-                code, status_code, message = mapped
-            else:
-                code = (
-                    "RAGFLOW_API_INCOMPATIBLE"
-                    if exc.status_code
-                    and (400 <= exc.status_code < 500 or exc.status_code == 502)
-                    else "RAGFLOW_UNAVAILABLE"
+            error_code = getattr(exc, "code", None)
+            if error_code == "RUN_INTERRUPTED":
+                code, status_code, message = (
+                    "RUN_INTERRUPTED",
+                    503,
+                    "Workflow ended before its terminal event",
                 )
-                status_code = 503
-                message = "Query engine unavailable"
-        await v2._save_failed_run(
-            db, principal, conversation, internal_req, run, assistant_message_id,
-            code=code, status_code=status_code, message=message, request=request,
+            elif getattr(exc, "status_code", None) == 0:
+                code, status_code, message = (
+                    "RUN_INTERRUPTED",
+                    503,
+                    "Workflow connection interrupted before its terminal event",
+                )
+            elif error_code == "RAGFLOW_API_INCOMPATIBLE":
+                code, status_code, message = (
+                    "RAGFLOW_API_INCOMPATIBLE",
+                    502,
+                    "Workflow returned an incompatible event contract",
+                )
+            else:
+                mapped = v2._mapped_llm_provider_failure(str(exc))
+                if mapped is not None:
+                    code, status_code, message = mapped
+                else:
+                    code = (
+                        "RAGFLOW_API_INCOMPATIBLE"
+                        if exc.status_code
+                        and (400 <= exc.status_code < 500 or exc.status_code == 502)
+                        else "RAGFLOW_UNAVAILABLE"
+                    )
+                    status_code = 503
+                    message = "Query engine unavailable"
+        partial_content, public_citations = await persist_workflow_failure(
+            code,
+            status_code,
+            message,
+            allow_body=code in {"RAGFLOW_API_INCOMPATIBLE", "RAGFLOW_UNAVAILABLE", "RUN_INTERRUPTED"},
         )
-        if emitted_answer:
+        if partial_content != emitted_answer:
             yield v2._sse(
                 "answer.replaced",
                 {
                     "conversationId": conversation["conversation_id"],
                     "runId": run["run_id"],
-                    "content": "",
+                    "content": partial_content,
                 },
             )
+        for citation in public_citations:
+            yield v2._sse("citation", citation)
         yield v2._sse(
             "run.failed",
             {
@@ -1385,45 +1510,51 @@ async def _workflow_stream(
             },
         )
     except (v2.httpx.HTTPError, asyncio.TimeoutError, ConnectionError, OSError):
-        await v2._save_failed_run(
-            db, principal, conversation, internal_req, run, assistant_message_id,
-            code="RAGFLOW_UNAVAILABLE", status_code=503,
-            message="Query engine unavailable", request=request,
+        partial_content, public_citations = await persist_workflow_failure(
+            "RUN_INTERRUPTED",
+            503,
+            "Workflow connection interrupted before its terminal event",
+            allow_body=True,
         )
-        if emitted_answer:
+        if partial_content != emitted_answer:
             yield v2._sse(
                 "answer.replaced",
                 {
                     "conversationId": conversation["conversation_id"],
                     "runId": run["run_id"],
-                    "content": "",
+                    "content": partial_content,
                 },
             )
+        for citation in public_citations:
+            yield v2._sse("citation", citation)
         yield v2._sse(
             "run.failed",
             {
                 "conversationId": conversation["conversation_id"],
                 "runId": run["run_id"],
-                "code": "RAGFLOW_UNAVAILABLE",
-                "message": "Query engine unavailable",
+                "code": "RUN_INTERRUPTED",
+                "message": "Workflow connection interrupted before its terminal event",
             },
         )
     except Exception:
         logger.exception("workflow stream failed")
-        await v2._save_failed_run(
-            db, principal, conversation, internal_req, run, assistant_message_id,
-            code="INTERNAL_ERROR", status_code=500,
-            message="Workflow message run failed", request=request,
+        partial_content, public_citations = await persist_workflow_failure(
+            "INTERNAL_ERROR",
+            500,
+            "Workflow message run failed",
+            allow_body=False,
         )
-        if emitted_answer:
+        if partial_content != emitted_answer:
             yield v2._sse(
                 "answer.replaced",
                 {
                     "conversationId": conversation["conversation_id"],
                     "runId": run["run_id"],
-                    "content": "",
+                    "content": partial_content,
                 },
             )
+        for citation in public_citations:
+            yield v2._sse("citation", citation)
         yield v2._sse(
             "run.failed",
             {

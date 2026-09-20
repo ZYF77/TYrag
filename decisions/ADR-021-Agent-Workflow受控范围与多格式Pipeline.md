@@ -21,6 +21,10 @@ Parser 原先没有 JSON 配置分支。
    数组和记录边界。普通 Parser 默认行为不改变。
 4. Gateway Workflow 代理负责注入 scope、会话、附件和用户 Memory；模型不能修改
    这些安全输入。
+5. `restrict` Retrieval 的有效范围定义为 `S = G ∩ metadata_filter`。当 metadata
+   条件有效但 S 为空时，Retrieval 必须在调用检索器前返回空输出；不得依赖下游 ES
+   对空列表的处理。需要放宽设备条件时，必须由 Workflow 显式调用另一个仍绑定 G
+   的补检索工具，不能由空 `doc_ids` 隐式回退。
 
 ## 不在本 ADR 内
 

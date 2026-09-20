@@ -1,8 +1,8 @@
 import ReactMarkdown from 'react-markdown';
 import type { Citation } from '../../api/v2Types';
 
-/** 匹配 `[ID: 3]` 与 `[3]` 两种引用角标写法。 */
-export const CITATION_MARKER_PATTERN = /\[(?:ID:)\s*(\d+)\]|\[(\d+)\]/gi;
+import { transformCitationMarkers } from './citationText';
+export { CITATION_MARKER_PATTERN } from './citationText';
 
 export function citationForMarker(citations: Citation[], marker: number): Citation | undefined {
   return citations.find((citation) => citation.refIndex === marker) ?? citations[marker - 1];
@@ -10,8 +10,7 @@ export function citationForMarker(citations: Citation[], marker: number): Citati
 
 /** 把正文中的引用角标改写成指向 citation 锚点的 markdown 链接。 */
 export function rewriteCitationMarkers(content: string, hrefPrefix: string, messageId?: string): string {
-  return content.replace(CITATION_MARKER_PATTERN, (_match, prefixed, plain) => {
-    const marker = prefixed ?? plain;
+  return transformCitationMarkers(content, (marker) => {
     const suffix = messageId ? `${messageId}-${marker}` : `${marker}`;
     return `[${marker}](${hrefPrefix}${suffix})`;
   });

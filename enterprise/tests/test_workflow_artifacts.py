@@ -178,11 +178,11 @@ def test_workflow_inputs_use_begin_value_contract():
     }
 
 
-def test_workflow_evidence_present_accepts_in_scope_chunks_without_citations():
-    pending = []
-    chunks = [{"document_id": "doc-1", "content": "厂家：浙江某某"}]
-    assert workflow_router._workflow_evidence_present(chunks, [], pending) is True
-    assert workflow_router._workflow_evidence_present([], [], pending) is False
+def test_workflow_terminal_status_does_not_depend_on_evidence_or_wording():
+    assert workflow_router._workflow_status_from("completed", "") == "completed"
+    assert workflow_router._workflow_status_from(
+        "no_reliable_evidence", "解释为何证据不足"
+    ) == "no_reliable_evidence"
 
 
 @pytest.mark.asyncio

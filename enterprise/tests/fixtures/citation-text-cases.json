@@ -1,0 +1,225 @@
+[
+  {
+    "name": "technical",
+    "text": "检查 [L1]、[警告]、[]、[ ]，arr[0] matrix[1][2] x_1[9] 12:[7]:5 15:02:[1]。  保留\t空格",
+    "sanitized": "检查 [L1]、[警告]、[]、[ ]，arr[0] matrix[1][2] x_1[9] 12:[7]:5 15:02:[1]。  保留\t空格",
+    "indexes": [],
+    "rendered": "检查 [L1]、[警告]、[]、[ ]，arr[0] matrix[1][2] x_1[9] 12:[7]:5 15:02:[1]。  保留\t空格"
+  },
+  {
+    "name": "legacy Chinese",
+    "text": "见文档[2]与[0]。",
+    "sanitized": "见文档[ID:2]与[ID:0]。",
+    "indexes": [
+      2,
+      0
+    ],
+    "rendered": "见文档[2](#cite-m-2)与[0](#cite-m-0)。"
+  },
+  {
+    "name": "canonical adjacent",
+    "text": "[ID:0][ID:66][ID:459]",
+    "sanitized": "[ID:0][ID:66][ID:459]",
+    "indexes": [
+      0,
+      66,
+      459
+    ],
+    "rendered": "[0](#cite-m-0)[66](#cite-m-66)[459](#cite-m-459)"
+  },
+  {
+    "name": "unicode",
+    "text": "见[٢]、[ID:۵]、[ID: 3]",
+    "sanitized": "见[ID:2]、[ID:5]、[ID:3]",
+    "indexes": [
+      2,
+      5,
+      3
+    ],
+    "rendered": "见[2](#cite-m-2)、[5](#cite-m-5)、[3](#cite-m-3)"
+  },
+  {
+    "name": "malformed explicit",
+    "text": "[ID[3]][[ID:4]] [I[D]:2] [[I:D]:3] [[D]:1]",
+    "sanitized": "[ID:3][ID:4] [ID:2] [ID:3] [ID:1]",
+    "indexes": [
+      3,
+      4,
+      2,
+      1
+    ],
+    "rendered": "[3](#cite-m-3)[4](#cite-m-4) [2](#cite-m-2) [3](#cite-m-3) [1](#cite-m-1)"
+  },
+  {
+    "name": "uncertain",
+    "text": "说明[ID:[[[[ 以及正常[ID:0]。",
+    "sanitized": "说明[ID:[[[[ 以及正常[ID:0]。",
+    "indexes": [
+      0
+    ],
+    "rendered": "说明[ID:[[[[ 以及正常[0](#cite-m-0)。"
+  },
+  {
+    "name": "inline code",
+    "text": "`[ID:2] ID:3 [2] [[D]:1]` 与 ``[ID:4] `x` ``",
+    "sanitized": "`[ID:2] ID:3 [2] [[D]:1]` 与 ``[ID:4] `x` ``",
+    "indexes": [],
+    "rendered": "`[ID:2] ID:3 [2] [[D]:1]` 与 ``[ID:4] `x` ``"
+  },
+  {
+    "name": "fenced code",
+    "text": "```python\n[ID:2] ID:3 [[D]:1]\n```\n正文[2]",
+    "sanitized": "```python\n[ID:2] ID:3 [[D]:1]\n```\n正文[ID:2]",
+    "indexes": [
+      2
+    ],
+    "rendered": "```python\n[ID:2] ID:3 [[D]:1]\n```\n正文[2](#cite-m-2)"
+  },
+  {
+    "name": "long closing fence",
+    "text": "~~~text\n[ID:2]\n~~~~\n见[1]",
+    "sanitized": "~~~text\n[ID:2]\n~~~~\n见[ID:1]",
+    "indexes": [
+      1
+    ],
+    "rendered": "~~~text\n[ID:2]\n~~~~\n见[1](#cite-m-1)"
+  },
+  {
+    "name": "unclosed fence",
+    "text": "```\n[ID:2] ID:1",
+    "sanitized": "```\n[ID:2] ID:1",
+    "indexes": [],
+    "rendered": "```\n[ID:2] ID:1"
+  },
+  {
+    "name": "indented code",
+    "text": "    [ID:2] ID:3\n\t[4]\n正文[0]",
+    "sanitized": "    [ID:2] ID:3\n\t[4]\n正文[ID:0]",
+    "indexes": [
+      0
+    ],
+    "rendered": "    [ID:2] ID:3\n\t[4]\n正文[0](#cite-m-0)"
+  },
+  {
+    "name": "links and images",
+    "text": "[ID:2](https://example.invalid/a(b)) ![图 [ID:3]](/image) [手册](https://example.invalid/[4])",
+    "sanitized": "[ID:2](https://example.invalid/a(b)) ![图 [ID:3]](/image) [手册](https://example.invalid/[4])",
+    "indexes": [],
+    "rendered": "[ID:2](https://example.invalid/a(b)) ![图 [ID:3]](/image) [手册](https://example.invalid/[4])"
+  },
+  {
+    "name": "reference links",
+    "text": "[2][manual] [manual][] [manual]\n\n[manual]: https://example.invalid/[ID:5] \"ID:6\"",
+    "sanitized": "[2][manual] [manual][] [manual]\n\n[manual]: https://example.invalid/[ID:5] \"ID:6\"",
+    "indexes": [],
+    "rendered": "[2][manual] [manual][] [manual]\n\n[manual]: https://example.invalid/[ID:5] \"ID:6\""
+  },
+  {
+    "name": "numeric reference",
+    "text": "[2]\n\n[2]: https://example.invalid/[3]",
+    "sanitized": "[2]\n\n[2]: https://example.invalid/[3]",
+    "indexes": [],
+    "rendered": "[2]\n\n[2]: https://example.invalid/[3]"
+  },
+  {
+    "name": "escaped",
+    "text": "\\[ID:2\\] \\[3] \\[警告\\]",
+    "sanitized": "\\[ID:2\\] \\[3] \\[警告\\]",
+    "indexes": [],
+    "rendered": "\\[ID:2\\] \\[3] \\[警告\\]"
+  },
+  {
+    "name": "prose ID",
+    "text": "知识库ID:2、ID:5。",
+    "sanitized": "知识库ID:2、ID:5。",
+    "indexes": [
+      2,
+      5
+    ],
+    "rendered": "知识库ID:2、ID:5。"
+  },
+  {
+    "name": "technical adjacency",
+    "text": "[2]mm 3[4] _[0] matrix[1][2]，见文档[9]",
+    "sanitized": "[2]mm 3[4] _[0] matrix[1][2]，见文档[ID:9]",
+    "indexes": [
+      9
+    ],
+    "rendered": "[2]mm 3[4] _[0] matrix[1][2]，见文档[9](#cite-m-9)"
+  },
+  {
+    "name": "whitespace",
+    "text": "  说明  [L1]  \t[2]\n\n",
+    "sanitized": "  说明  [L1]  \t[ID:2]\n\n",
+    "indexes": [
+      2
+    ],
+    "rendered": "  说明  [L1]  \t[2](#cite-m-2)\n\n"
+  },
+  {
+    "name": "autolinks",
+    "text": "<https://example.invalid/[ID:2]> <mailto:ID:3@example.invalid>",
+    "sanitized": "<https://example.invalid/[ID:2]> <mailto:ID:3@example.invalid>",
+    "indexes": [],
+    "rendered": "<https://example.invalid/[ID:2]> <mailto:ID:3@example.invalid>"
+  },
+  {
+    "name": "long inline fence",
+    "text": "``[ID:2] ` [ID:3]``",
+    "sanitized": "``[ID:2] ` [ID:3]``",
+    "indexes": [],
+    "rendered": "``[ID:2] ` [ID:3]``"
+  },
+  {
+    "name": "carriage returns",
+    "text": "~~~\r\n[ID:2]\r\n~~~\r\n",
+    "sanitized": "~~~\r\n[ID:2]\r\n~~~\r\n",
+    "indexes": [],
+    "rendered": "~~~\r\n[ID:2]\r\n~~~\r\n"
+  },
+  {
+    "name": "image nested brackets",
+    "text": "![设备 [ID:2]](https://example.invalid/image(a).png)",
+    "sanitized": "![设备 [ID:2]](https://example.invalid/image(a).png)",
+    "indexes": [],
+    "rendered": "![设备 [ID:2]](https://example.invalid/image(a).png)"
+  },
+  {
+    "name": "prose inside link",
+    "text": "[手册 ID:2 [3]](https://example.invalid)",
+    "sanitized": "[手册 ID:2 [3]](https://example.invalid)",
+    "indexes": [],
+    "rendered": "[手册 ID:2 [3]](https://example.invalid)"
+  },
+  {
+    "name": "quoted fence",
+    "text": "> ```\n> [ID:2] ID:3\n> ```\n",
+    "sanitized": "> ```\n> [ID:2] ID:3\n> ```\n",
+    "indexes": [],
+    "rendered": "> ```\n> [ID:2] ID:3\n> ```\n"
+  },
+  {
+    "name": "list fence",
+    "text": "- ```text\n  [ID:2]\n  ```\n",
+    "sanitized": "- ```text\n  [ID:2]\n  ```\n",
+    "indexes": [],
+    "rendered": "- ```text\n  [ID:2]\n  ```\n"
+  },
+  {
+    "name": "nested repair fixed point",
+    "text": "[[ID[3]]] 与 [ID[4]]]",
+    "sanitized": "[ID:3] 与 [ID:4]",
+    "indexes": [
+      3,
+      4
+    ],
+    "rendered": "[3](#cite-m-3) 与 [4](#cite-m-4)"
+  },
+  {
+    "name": "ambiguous nested numbers",
+    "text": "[[2]] [2]]",
+    "sanitized": "[[2]] [2]]",
+    "indexes": [],
+    "rendered": "[[2]] [2]]"
+  }
+]

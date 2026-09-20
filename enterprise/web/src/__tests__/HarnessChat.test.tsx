@@ -139,6 +139,34 @@ describe('HarnessChat', () => {
     expect(screen.getAllByText('思考中').length).toBeGreaterThan(0);
   });
 
+  it('keeps a failed partial answer and marks it as non-final', () => {
+    const message = {
+      ...assistantMessage([sourceCitation('failed-citation', 1)]),
+      content: '部分结果 [ID:1]',
+      status: '失败' as const,
+    };
+    render(
+      <HarnessChat
+        conversation={conversation}
+        messages={[message]}
+        isStreaming={false}
+        error={null}
+        onSend={vi.fn()}
+        onRetry={vi.fn()}
+        onCancel={vi.fn()}
+        onCitation={vi.fn()}
+        reasoningMode="simple"
+        onReasoningModeChange={vi.fn()}
+        internetEnabled={false}
+        onInternetEnabledChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText('部分结果')).toBeTruthy();
+    expect(screen.getByRole('status').textContent).toContain('回答未完成，不可视为最终答案。');
+    expect(screen.getByText('引用 1 条')).toBeTruthy();
+  });
+
   it('labels an authorized crop citation as a RAGFlow inline figure', () => {
     const citation: Citation = {
       ...sourceCitation('crop-1', 1),

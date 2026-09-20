@@ -1278,6 +1278,12 @@ def _external_citations(
     internet_enabled: bool = False,
     attachment_document_ids: set[str] | None = None,
 ) -> list[dict]:
+    _validate_reference_scope(
+        chunks,
+        docs_by_internal_id,
+        internet_enabled=internet_enabled,
+        attachment_document_ids=attachment_document_ids,
+    )
     cited_refs = select_cited_chunk_refs(answer, chunks, status)
     attachment_document_ids = attachment_document_ids or set()
     citations: list[dict] = []
@@ -1333,6 +1339,81 @@ def _external_citations(
             }
         )
     return citations
+
+
+def _validate_reference_scope(
+    chunks: list[dict],
+    docs_by_internal_id: dict[str, ExtDocumentMap],
+    *,
+    internet_enabled: bool,
+    attachment_document_ids: set[str] | None = None,
+) -> None:
+    """Reject any received document reference outside the current evidence scope.
+
+    Citation selection intentionally keeps only chunks the answer cites, but an
+    upstream reference list can contain additional chunks.  Those chunks must
+    not become an unobserved authorization bypass merely because the model did
+    not place a marker next to them.
+    """
+    attachment_document_ids = attachment_document_ids or set()
+    for chunk in chunks:
+        if not isinstance(chunk, dict):
+            continue
+        document_id = str(chunk.get("document_id") or chunk.get("doc_id") or "").strip()
+        if document_id and (
+            document_id in attachment_document_ids
+            or document_id in docs_by_internal_id
+        ):
+            continue
+        url = _valid_web_url(chunk.get("url"))
+        if url and internet_enabled:
+            continue
+        if document_id or chunk.get("url"):
+            raise _FormalQueryError(
+                "RAGFLOW_SCOPE_VIOLATION",
+                502,
+                "RAGFlow retrieval returned an out-of-scope document",
+            )
+
+
+def _safe_failed_projection(
+    answer: str,
+    chunks: list[dict],
+    docs_by_internal_id: dict[str, ExtDocumentMap],
+    message_id: str,
+    *,
+    allow_body: bool,
+    internet_enabled: bool,
+    attachment_document_ids: set[str] | None = None,
+) -> tuple[str, list[dict]]:
+    """Return only safe partial output that can accompany a failed run.
+
+    Business failure does not erase already validated output. Security and
+    protocol failures remain a separate boundary: tool payloads and any body
+    whose selected citation is out of scope are cleared together.
+    """
+    if not allow_body:
+        return "", []
+    safe_answer = sanitize_citation_markers(answer or "")
+    if _contains_tool_protocol_artifact(safe_answer):
+        return "", []
+    try:
+        citations = _external_citations(
+            chunks,
+            docs_by_internal_id,
+            message_id,
+            answer=safe_answer,
+            status="failed",
+            internet_enabled=internet_enabled,
+            attachment_document_ids=attachment_document_ids,
+        )
+    except _FormalQueryError as exc:
+        if exc.code == "RAGFLOW_SCOPE_VIOLATION":
+            return "", []
+        return "", []
+    except Exception:
+        return "", []
+    return safe_answer, citations
 
 
 def _web_search_configured(chat: dict) -> bool:
@@ -1778,17 +1859,10 @@ async def _save_failed_run(
     status_code: int,
     message: str,
     request: Request | None = None,
+    content: str = "",
+    citations: list[dict] | None = None,
+    reasoning: str | None = None,
 ) -> JSONResponse:
-    await _gw_write(db, v2_store.add_message,
-        message_id=assistant_message_id,
-        conversation_id=conversation["conversation_id"],
-        tenant_id=principal.tenant_id,
-        business_user_id=principal.business_user_id,
-        role="assistant",
-        content="",
-        status="failed",
-        citations=[],
-    )
     error_response = _error(status_code, code, message)
     failed_result = {
         "_error": {
@@ -1802,14 +1876,18 @@ async def _save_failed_run(
     )
     if diagnostics:
         failed_result["_diagnostics"] = diagnostics
-    await _gw_write(db, v2_store.complete_message_run,
+    await _gw_write(
+        db,
+        v2_store.save_failed_message_run,
+        message_id=assistant_message_id,
         conversation_id=conversation["conversation_id"],
         tenant_id=principal.tenant_id,
         business_user_id=principal.business_user_id,
         client_message_id=req.clientMessageId,
         result=failed_result,
-        status="failed",
-        assistant_message_id=assistant_message_id,
+        content=content,
+        citations=citations or [],
+        reasoning=reasoning,
     )
     return error_response
 
@@ -1862,6 +1940,12 @@ async def _execute_json_run(
     pending = pending or []
     client = None
     retrieval_context = _run_retrieval_context(run, conversation)
+    docs_by_internal_id: dict[str, ExtDocumentMap] = {}
+    chunks: list[dict] = []
+    answer = ""
+    citations: list[dict] = []
+    reasoning: str | None = None
+    effective_internet = False
     if config.rag_diagnostics_enabled:
         try:
             run["_diagnostics"] = start_trace(
@@ -2039,13 +2123,26 @@ async def _execute_json_run(
                         agent_response=answer,
                         request_id=run["run_id"],
                     )
-                else:
-                    # Defensive: a contract-violating upstream that reports
-                    # no_reliable_evidence/failed together with cited markers
-                    # must not persist the standard abstain text next to
-                    # dangling citations (mirrors the v1 router).
-                    citations = []
-                    answer = NO_RELIABLE_EVIDENCE_ANSWER
+                if status == "failed":
+                    # The explicit upstream state is terminal, but the
+                    # sanitized partial answer and scope-checked citations are
+                    # still useful in history.  The HTTP response remains the
+                    # existing non-2xx error contract.
+                    return None, await _save_failed_run(
+                        db,
+                        principal,
+                        conversation,
+                        req,
+                        run,
+                        assistant_message_id,
+                        code="RAGFLOW_UNAVAILABLE",
+                        status_code=503,
+                        message="Query engine reported a failed run",
+                        request=request,
+                        content=answer,
+                        citations=citations,
+                        reasoning=reasoning,
+                    )
             await _gw_write(db, v2_store.add_message,
                 message_id=assistant_message_id,
                 conversation_id=conversation["conversation_id"],
@@ -2112,22 +2209,46 @@ async def _execute_json_run(
             if isinstance(exc, _FormalQueryError):
                 code, status_code, message = exc.code, exc.status_code, exc.message
             else:
-                mapped = _mapped_llm_provider_failure(str(exc))
-                if mapped is not None:
-                    code, status_code, message = mapped
-                else:
-                    code = (
-                        "RAGFLOW_API_INCOMPATIBLE"
-                        if exc.status_code
-                        and (400 <= exc.status_code < 500 or exc.status_code == 502)
-                        else "RAGFLOW_UNAVAILABLE"
+                error_code = getattr(exc, "code", None)
+                if error_code == "RAGFLOW_API_INCOMPATIBLE":
+                    code, status_code, message = (
+                        "RAGFLOW_API_INCOMPATIBLE",
+                        502,
+                        "Query engine returned an incompatible response",
                     )
-                    status_code = 503
-                    message = "Query engine unavailable"
+                else:
+                    mapped = _mapped_llm_provider_failure(str(exc))
+                    if mapped is not None:
+                        code, status_code, message = mapped
+                    else:
+                        code = (
+                            "RAGFLOW_API_INCOMPATIBLE"
+                            if exc.status_code
+                            and (400 <= exc.status_code < 500 or exc.status_code == 502)
+                            else "RAGFLOW_UNAVAILABLE"
+                        )
+                        status_code = 503
+                        message = "Query engine unavailable"
+            partial_content, partial_citations = _safe_failed_projection(
+                answer,
+                chunks,
+                docs_by_internal_id,
+                assistant_message_id,
+                allow_body=code in {"RAGFLOW_API_INCOMPATIBLE", "RAGFLOW_UNAVAILABLE", "RUN_INTERRUPTED"},
+                internet_enabled=effective_internet,
+                attachment_document_ids={
+                    str((item.ragflow_file or {}).get("id") or "")
+                    for item in pending
+                    if (item.ragflow_file or {}).get("id")
+                },
+            )
             return None, await _save_failed_run(
                 db, principal, conversation, req, run, assistant_message_id,
                 code=code, status_code=status_code, message=message,
                 request=request,
+                content=partial_content,
+                citations=partial_citations,
+                reasoning=reasoning,
             )
         except Exception as exc:
             logger.exception("json message run failed err_type=%s", type(exc).__name__)
@@ -2197,6 +2318,8 @@ async def _stream_run_events(
     final_delta: str | None = None
     chunks: list[dict] = []
     citations: list[dict] = []
+    docs_by_internal_id: dict[str, ExtDocumentMap] = {}
+    effective_internet = False
     upstream_status: str | None = None
     status = "no_reliable_evidence"
     answer = NO_RELIABLE_EVIDENCE_ANSWER
@@ -2210,6 +2333,49 @@ async def _stream_run_events(
     first_stream_output_recorded = False
     first_reasoning_recorded = False
     first_answer_recorded = False
+
+    async def persist_stream_failure(
+        code: str,
+        status_code: int,
+        message: str,
+        *,
+        allow_body: bool,
+    ) -> tuple[str, list[dict]]:
+        partial_content, partial_citations = _safe_failed_projection(
+            accumulated,
+            chunks,
+            docs_by_internal_id,
+            assistant_message_id,
+            allow_body=allow_body,
+            internet_enabled=effective_internet,
+            attachment_document_ids={
+                str((item.ragflow_file or {}).get("id") or "")
+                for item in pending
+                if (item.ragflow_file or {}).get("id")
+            },
+        )
+        await _save_failed_run(
+            db,
+            principal,
+            conversation,
+            req,
+            run,
+            assistant_message_id,
+            code=code,
+            status_code=status_code,
+            message=message,
+            request=request,
+            content=partial_content,
+            citations=partial_citations,
+        )
+        try:
+            public = await _project_citations(
+                db, partial_citations, request, principal
+            )
+        except Exception:
+            public = []
+        return partial_content, public
+
     try:
         question, client, observations = await _retrieval_question(
             db,
@@ -2473,6 +2639,10 @@ async def _stream_run_events(
                     if (item.ragflow_file or {}).get("id")
                 },
             )
+            # Body, state and citations are independent.  Preserve the
+            # sanitized partial body for a failed upstream run, while keeping
+            # the public HTTP/SSE terminal contract as an error.
+            answer = accumulated
             if status == "completed":
                 answer = _with_equipment_hint(conversation, accumulated, status)
                 schedule_memory_candidate(
@@ -2483,11 +2653,46 @@ async def _stream_run_events(
                     agent_response=answer,
                     request_id=run["run_id"],
                 )
-            else:
-                # Defensive: never stream/persist citations next to the
-                # replaced standard abstain answer (mirrors the v1 router).
-                citations = []
-                answer = NO_RELIABLE_EVIDENCE_ANSWER
+            if status == "failed":
+                public_citations = await _project_citations(
+                    db, citations, request, principal
+                )
+                await _save_failed_run(
+                    db,
+                    principal,
+                    conversation,
+                    req,
+                    run,
+                    assistant_message_id,
+                    code="RAGFLOW_UNAVAILABLE",
+                    status_code=503,
+                    message="Query engine reported a failed run",
+                    request=request,
+                    content=answer,
+                    citations=citations,
+                    reasoning=reasoning,
+                )
+                if answer != emitted_answer:
+                    yield _sse(
+                        "answer.replaced" if emitted_answer else "answer.delta",
+                        {
+                            "conversationId": conversation_id,
+                            "runId": run["run_id"],
+                            "content": answer,
+                        },
+                    )
+                for citation in public_citations:
+                    yield _sse("citation", citation)
+                yield _sse(
+                    "run.failed",
+                    {
+                        "conversationId": conversation_id,
+                        "runId": run["run_id"],
+                        "code": "RAGFLOW_UNAVAILABLE",
+                        "message": "Query engine reported a failed run",
+                    },
+                )
+                return
         await _gw_write(db, v2_store.add_message,
             message_id=assistant_message_id,
             conversation_id=conversation_id,
@@ -2601,7 +2806,13 @@ async def _stream_run_events(
             status_code = exc.status_code
         else:
             mapped = _mapped_llm_provider_failure(str(exc))
-            if mapped is not None:
+            if getattr(exc, "code", None) == "RAGFLOW_API_INCOMPATIBLE":
+                code, status_code, message = (
+                    "RAGFLOW_API_INCOMPATIBLE",
+                    502,
+                    "Query engine returned an incompatible response",
+                )
+            elif mapped is not None:
                 code, status_code, message = mapped
             else:
                 code = (
@@ -2612,20 +2823,23 @@ async def _stream_run_events(
                 )
                 message = "Query engine unavailable"
                 status_code = 503
-        await _save_failed_run(
-            db, principal, conversation, req, run, assistant_message_id,
-            code=code, status_code=status_code, message=message,
-            request=request,
+        partial_content, public_citations = await persist_stream_failure(
+            code,
+            status_code,
+            message,
+            allow_body=code in {"RAGFLOW_API_INCOMPATIBLE", "RAGFLOW_UNAVAILABLE", "RUN_INTERRUPTED"},
         )
-        if live_streamed and emitted_answer:
+        if partial_content != emitted_answer:
             yield _sse(
                 "answer.replaced",
                 {
                     "conversationId": conversation_id,
                     "runId": run["run_id"],
-                    "content": "",
+                    "content": partial_content,
                 },
             )
+        for citation in public_citations:
+            yield _sse("citation", citation)
         yield _sse(
             "run.failed",
             {
@@ -2636,21 +2850,23 @@ async def _stream_run_events(
             },
         )
     except (httpx.HTTPError, asyncio.TimeoutError, ConnectionError, OSError):
-        await _save_failed_run(
-            db, principal, conversation, req, run, assistant_message_id,
-            code="RAGFLOW_UNAVAILABLE", status_code=503,
-            message="Query engine unavailable",
-            request=request,
+        partial_content, public_citations = await persist_stream_failure(
+            "RAGFLOW_UNAVAILABLE",
+            503,
+            "Query engine unavailable",
+            allow_body=True,
         )
-        if live_streamed and emitted_answer:
+        if partial_content != emitted_answer:
             yield _sse(
                 "answer.replaced",
                 {
                     "conversationId": conversation_id,
                     "runId": run["run_id"],
-                    "content": "",
+                    "content": partial_content,
                 },
             )
+        for citation in public_citations:
+            yield _sse("citation", citation)
         yield _sse(
             "run.failed",
             {
@@ -2662,20 +2878,23 @@ async def _stream_run_events(
         )
     except Exception as exc:
         logger.exception("sse message run failed err_type=%s", type(exc).__name__)
-        await _save_failed_run(
-            db, principal, conversation, req, run, assistant_message_id,
-            code="INTERNAL_ERROR", status_code=500, message="Message run failed",
-            request=request,
+        partial_content, public_citations = await persist_stream_failure(
+            "INTERNAL_ERROR",
+            500,
+            "Message run failed",
+            allow_body=False,
         )
-        if live_streamed and emitted_answer:
+        if partial_content != emitted_answer:
             yield _sse(
                 "answer.replaced",
                 {
                     "conversationId": conversation_id,
                     "runId": run["run_id"],
-                    "content": "",
+                    "content": partial_content,
                 },
             )
+        for citation in public_citations:
+            yield _sse("citation", citation)
         yield _sse(
             "run.failed",
             {
