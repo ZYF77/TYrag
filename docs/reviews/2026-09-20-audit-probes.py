@@ -117,6 +117,14 @@ async def main():
     assert run["status"] == "running" and not any("INSERT INTO ext_v2_message" in s for s in statements)
     observations["pending_retry_preserves_running"] = {
         "lease_expiry_update_rows": 0, "run_status": run["status"], "failed_message_insert_attempted": False}
+    import importlib.util
+    parent_spec = importlib.util.spec_from_file_location("parent_probe", ROOT / "ragflow/rag/utils/parent_chunks.py")
+    parent_module = importlib.util.module_from_spec(parent_spec)
+    parent_spec.loader.exec_module(parent_module)
+    parent_a = parent_module.parent_id("t", "kb", "A", "task", "same parent")
+    parent_b = parent_module.parent_id("t", "kb", "B", "task", "same parent")
+    assert parent_a != parent_b
+    observations["parent_source_identity"] = {"equal_text_distinct_documents_have_distinct_ids": True}
     observations["empty_metadata_scope"] = await retrieval_empty_metadata_probe()
     # A non-empty Message and normal EOF still require workflow_finished.
     message = {"event": "message", "data": {"content": "synthetic partial answer"}}

@@ -596,6 +596,8 @@ class RAGTools:
         if not kbinfos:
             return {"chunks": [], "doc_aggs": []}
         kbinfos["chunks"] = settings.retriever.retrieval_by_children(kbinfos.get("chunks", []), self.tenant_ids)
+        from rag.utils.parent_chunks import parent_doc_aggs
+        kbinfos["doc_aggs"] = parent_doc_aggs(kbinfos["chunks"])
         return {"chunks": kbinfos.get("chunks", []), "doc_aggs": kbinfos.get("doc_aggs", [])}
 
     async def web_retrieve(self, query: str) -> dict[str, list]:

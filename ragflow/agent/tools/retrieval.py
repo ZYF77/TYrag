@@ -313,6 +313,8 @@ class Retrieval(ToolBase, ABC):
                 if cks:
                     kbinfos["chunks"] = cks
             kbinfos["chunks"] = settings.retriever.retrieval_by_children(kbinfos["chunks"], [kb.tenant_id for kb in kbs])
+            from rag.utils.parent_chunks import parent_doc_aggs
+            kbinfos["doc_aggs"] = parent_doc_aggs(kbinfos["chunks"])
             if self._param.use_kg and not strict_scope:
                 tenant_id = self._canvas.get_tenant_id()
                 chat_model_config = get_tenant_default_model_by_type(tenant_id, LLMType.CHAT)

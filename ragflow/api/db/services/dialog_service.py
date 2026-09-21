@@ -1432,6 +1432,8 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
                     if cks:
                         kbinfos["chunks"] = cks
                 kbinfos["chunks"] = retriever.retrieval_by_children(kbinfos["chunks"], tenant_ids)
+                from rag.utils.parent_chunks import parent_doc_aggs
+                kbinfos["doc_aggs"] = parent_doc_aggs(kbinfos["chunks"])
             if use_web_search and not strict_empty_scope:
                 web_started = timer()
                 web_status = "success"

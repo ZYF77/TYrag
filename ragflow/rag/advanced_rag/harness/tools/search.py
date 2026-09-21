@@ -218,6 +218,8 @@ def _normalize(kbinfos: dict, tenant_ids: list[str] | str | None) -> dict:
         kbinfos.get("chunks", []),
         tenant_ids,
     )
+    from rag.utils.parent_chunks import parent_doc_aggs
+    kbinfos["doc_aggs"] = parent_doc_aggs(kbinfos["chunks"])
     return kbinfos
 
 

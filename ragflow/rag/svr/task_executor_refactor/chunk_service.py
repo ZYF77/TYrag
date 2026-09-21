@@ -259,7 +259,7 @@ class ChunkService:
         doc_bulk_size = doc_bulk_size or settings.DOC_BULK_SIZE
 
         # Create mother chunks (summary chunks)
-        mothers = self._create_mother_chunks(chunks)
+        mothers = self._create_mother_chunks(chunks, task_tenant_id, task_dataset_id, task_id)
 
         # Insert mother chunks
         if not await self._insert_mother_chunks(task_id, task_tenant_id, task_dataset_id, mothers, doc_bulk_size):
@@ -269,40 +269,9 @@ class ChunkService:
         return await self._insert_main_chunks(task_id, task_tenant_id, task_dataset_id, chunks, doc_bulk_size)
 
     @classmethod
-    def _create_mother_chunks(cls, chunks: List[Dict]) -> List[Dict]:
-        """Create mother chunks from summary fields.
-
-        Mother chunks are summary/abstract chunks that are stored separately.
-        """
-        mothers = []
-        mother_ids = set()
-
-        for ck in chunks:
-            mom = ck.get("mom") or ck.get("mom_with_weight") or ""
-            if not mom:
-                continue
-
-            mom_id = xxhash.xxh64(mom.encode("utf-8")).hexdigest()
-            ck["mom_id"] = mom_id
-
-            if mom_id in mother_ids:
-                continue
-
-            mother_ids.add(mom_id)
-            mom_ck = copy.deepcopy(ck)
-            mom_ck["id"] = mom_id
-            mom_ck["content_with_weight"] = mom
-            mom_ck["available_int"] = 0
-
-            # Keep only essential fields
-            allowed_fields = ["id", "content_with_weight", "doc_id", "docnm_kwd", "kb_id", "available_int", "position_int", "create_timestamp_flt", "page_num_int", "top_int"]
-            for fld in list(mom_ck.keys()):
-                if fld not in allowed_fields:
-                    del mom_ck[fld]
-
-            mothers.append(mom_ck)
-
-        return mothers
+    def _create_mother_chunks(cls, chunks: List[Dict], tenant_id: str, dataset_id: str, task_id: str) -> List[Dict]:
+        from rag.utils.parent_chunks import create_parent_chunks
+        return create_parent_chunks(chunks, tenant_id, dataset_id, task_id)
 
     async def _insert_mother_chunks(
         self,

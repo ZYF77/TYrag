@@ -119,7 +119,7 @@ Chat 和 Workflow 不再因 `no_reliable_evidence` 或 `failed` 自动替换正�
 
 **建议**：稳定 chunk/source/version 标识；把 found/supported/contradicted 分开；关键冲突作为否决或降级条件，不用 max 抹掉。数值核验先限定字段、单位与上下文，不能确定就保持 unknown。修复前不要以“高档位”为可靠性保证，先与普通 Chat 在同一设备问答集上盲测。
 
-### F07 · P1：父块 ID 和来源关联可能串位〔源码确认，上游亦报告〕
+### F07 · P1：父块 ID 和来源关联〔本地修复，待真实引擎验收〕
 
 位置：`ragflow/rag/svr/task_executor_refactor/chunk_service.py:272`、`ragflow/rag/nlp/search.py:1063`、`ragflow/common/doc_store/es_conn_base.py:235`。
 
@@ -128,6 +128,8 @@ Chat 和 Workflow 不再因 `no_reliable_evidence` 或 `failed` 自动替换正�
 即使最终 G 过滤挡住越界来源，仍可能变成错误拒答；两份文档都在 G 内时仍会产生错误归属。与官方 [#19350](https://github.com/infiniflow/ragflow/issues/19350) 对应。
 
 **建议**：父块 ID 纳入租户/数据集/文档版本，扩展时校验来源和 S，失败回退原子块。已有索引需要重建或迁移，不是只改 hash 即可修好历史数据。
+
+**本次实现**：两个写入入口统一新格式父块ID，绑定来源与解析任务；读取前限定ID/知识库/文档，读取后校验来源和正文摘要。旧格式及异常父块保留原子块，Chat/Workflow/Agentic重建聚合。父块无服务测试7项通过；真实文档引擎、完整解析与引用定位未验收，生产旧索引未重建。详见 [F07登记与盘点说明](../../patches/CHANGE-REQUEST-F07-PARENT-SOURCE.md)。
 
 ### F08 · P0（生产启用门禁）：ACL 仍是联调同租户开放〔用户明确暂缓，未解决〕
 
