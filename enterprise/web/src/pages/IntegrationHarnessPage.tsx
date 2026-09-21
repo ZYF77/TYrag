@@ -93,6 +93,9 @@ export function IntegrationHarnessPage() {
 
   const executionMode = tab === 'workflow' ? 'workflow' : 'chat';
   const chat = useV2Chat(activeId, { reasoningMode, internetEnabled, executionMode });
+  useEffect(() => {
+    if (chat.rejectedDraft) setPendingFiles(chat.rejectedDraft.files);
+  }, [chat.rejectedDraft]);
 
   useEffect(() => {
     if (tab !== 'workflow') return;
@@ -375,6 +378,8 @@ export function IntegrationHarnessPage() {
             )}
             <HarnessContextBar conversation={activeConversation} saving={contextSaving} error={contextError} onSave={(context) => void saveContext(context)} />
             <HarnessChat
+              restoredDraft={chat.rejectedDraft}
+              onNewConversation={() => setShowDeviceCreate(true)}
               conversation={activeConversation}
               messages={chat.messages}
               isStreaming={chat.isStreaming}

@@ -96,13 +96,17 @@ Chat 和 Workflow 不再因 `no_reliable_evidence` 或 `failed` 自动替换正�
 
 **验收状态**：更新 Chat/Workflow JSON/SSE 与历史回放契约，新增失败部分正文/引用测试，调整旧的“无可靠依据必须清空引用”断言；保留 F01、F02、F12 回归。完整 Python 3.13、PostgreSQL、前端集成验收尚未在当前环境完成。独立变更登记：[F04](../../patches/CHANGE-REQUEST-F04-STATE-EVIDENCE.md)。
 
-### F05 · P1：同会话并发与终态提交没有完整保护〔源码确认〕
+### F05 · P1：同会话运行所有权与终态提交〔本地实现，待完整环境验收〕
 
 位置：`v2_router.py:2910`、`workflow_router.py:1480`、`v2_store.py:478`。
 
 会话锁只包住准备过程，执行时已释放；同会话不同 clientMessageId 可并发调用上游。进程内锁也不保护多 worker。run 唯一约束只实现“同请求幂等”，并非“同会话串行”。上游会话读改写因此可能丢上下文或错序。租约还缺少明确续约/失效竞争处理。
 
 **建议**：数据库保证同会话一个 active run，选择明确的排队或 409/202 策略；用 run fencing/version 条件写入，终态与 assistant message 原子提交。避免在长事务里等待 LLM。补充跨 worker、断线重连、租约到期和迟到结果测试。
+
+**本次实现**：数据库会话锁、active-run部分唯一索引、120秒租约/30秒续租、1800秒总上限、run_id条件写入及原子终态保存。新增BUSY/RESTART_REQUIRED两个409码；无法确认上游停止时旧会话只读，保留历史，新会话继续。设备范围在占用后计算，前端恢复拒绝请求草稿。schema 9；详见 [F05变更登记](../../patches/CHANGE-REQUEST-F05-RUN-OWNERSHIP.md)。
+
+**验证边界**：无服务终态控制流测试2项及审查探针通过；RunOwnership/HarnessChat/ErrorStates 前端14项通过，TypeScript检查通过；真实Python3.13、PG双连接/双worker验收待执行。前端页面既有8项失败在未修改HEAD副本复现，不能宣称完整E2E通过。未部署。
 
 ### F06 · P1：Agentic 的“验证充分”机制并不可信〔源码确认〕
 

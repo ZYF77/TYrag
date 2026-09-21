@@ -336,6 +336,7 @@ ext_v2_conversation = Table(
     Column("conversation_id", Text, primary_key=True),
     Column("tenant_id", Text, primary_key=True),
     Column("business_user_id", Text, primary_key=True),
+    Column("restart_required", Integer, nullable=False, server_default="0"),
     Column("title", Text, nullable=False, server_default="New conversation"),
     Column("equipment_id", Text),
     Column("fixed_asset_no", Text),

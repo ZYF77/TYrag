@@ -42,6 +42,8 @@ from enterprise.gateway.query.workflow_events import (
     event_frame,
 )
 
+from enterprise.gateway.query.run_lifecycle import leased_run, active_run
+
 logger = logging.getLogger(__name__)
 
 # Internal Console test surface; keep the frozen external OpenAPI unchanged.
@@ -814,6 +816,7 @@ async def _parse_request(
         raise ValueError("Invalid workflow message") from exc
 
 
+@leased_run
 async def _workflow_run_result(
     db,
     principal: UserPrincipal,
@@ -825,6 +828,7 @@ async def _workflow_run_result(
     pending: list[v2.PendingAttachment],
     request: Request,
 ) -> tuple[dict | None, JSONResponse | None]:
+    run["_upstream_started"] = True
     assistant_message_id = run.get("assistant_message_id") or str(uuid.uuid4())
     docs_by_internal_id: dict[str, Any] = {}
     answer = ""
@@ -948,34 +952,11 @@ async def _workflow_run_result(
                 code="RAGFLOW_UNAVAILABLE",
                 status_code=503,
                 message="Workflow reported a failed run",
+                upstream_confirmed=True,
                 request=request,
                 content=answer,
                 citations=citations,
                 reasoning=reasoning,
-            )
-        await v2._gw_write(
-            db,
-            v2.v2_store.add_message,
-            message_id=assistant_message_id,
-            conversation_id=conversation["conversation_id"],
-            tenant_id=principal.tenant_id,
-            business_user_id=principal.business_user_id,
-            role="assistant",
-            content=answer,
-            status=status,
-            citations=citations,
-            reasoning=reasoning,
-        )
-        if workflow_session_id:
-            await v2._gw_write(
-                db,
-                v2.v2_store.set_workflow_session,
-                conversation_id=conversation["conversation_id"],
-                tenant_id=principal.tenant_id,
-                business_user_id=principal.business_user_id,
-                agent_id=agent_id,
-                version=version,
-                session_id=workflow_session_id,
             )
         result = {
             "conversationId": conversation["conversation_id"],
@@ -1000,14 +981,17 @@ async def _workflow_run_result(
             result["_diagnostics"] = diagnostics
         await v2._gw_write(
             db,
-            v2.v2_store.complete_message_run,
+            v2.v2_store.save_terminal_message_run,
             conversation_id=conversation["conversation_id"],
             tenant_id=principal.tenant_id,
             business_user_id=principal.business_user_id,
             client_message_id=internal_req.clientMessageId,
             result=result,
-            status="completed",
+
             assistant_message_id=assistant_message_id,
+                  run_id=run["run_id"], content=answer, citations=citations,
+                  business_status=status, reasoning=reasoning,
+                  workflow_binding=dict(agent_id=agent_id, version=version, session_id=workflow_session_id) if workflow_session_id else None,
         )
         if status == "completed":
             schedule_memory_candidate(
@@ -1100,6 +1084,7 @@ async def _workflow_run_result(
         await cleanup_ragflow_files(pending, client, db)
 
 
+@leased_run
 async def _workflow_stream(
     db,
     principal: UserPrincipal,
@@ -1112,6 +1097,7 @@ async def _workflow_stream(
     request: Request,
 ) -> AsyncIterator[str]:
     """Stream Canvas Message events through the stable Gateway SSE vocabulary."""
+    run["_upstream_started"] = True
     assistant_message_id = run.get("assistant_message_id") or str(uuid.uuid4())
     config_values = _workflow_configuration()
     if config_values is None:
@@ -1346,6 +1332,7 @@ async def _workflow_stream(
                 code="RAGFLOW_UNAVAILABLE",
                 status_code=503,
                 message="Workflow reported a failed run",
+                upstream_confirmed=True,
                 request=request,
                 content=accumulated,
                 citations=citations,
@@ -1384,23 +1371,6 @@ async def _workflow_stream(
                     "content": accumulated,
                 },
             )
-        await v2._gw_write(
-            db, v2.v2_store.add_message,
-            message_id=assistant_message_id,
-            conversation_id=conversation["conversation_id"],
-            tenant_id=principal.tenant_id,
-            business_user_id=principal.business_user_id,
-            role="assistant", content=accumulated, status=status,
-            citations=citations, reasoning=reasoning or None,
-        )
-        if workflow_session_id:
-            await v2._gw_write(
-                db, v2.v2_store.set_workflow_session,
-                conversation_id=conversation["conversation_id"],
-                tenant_id=principal.tenant_id,
-                business_user_id=principal.business_user_id,
-                agent_id=agent_id, version=version, session_id=workflow_session_id,
-            )
         result = {
             "conversationId": conversation["conversation_id"],
             "clientMessageId": _public_request_id(req),
@@ -1413,12 +1383,15 @@ async def _workflow_stream(
         if diagnostics:
             result["_diagnostics"] = diagnostics
         await v2._gw_write(
-            db, v2.v2_store.complete_message_run,
+            db, v2.v2_store.save_terminal_message_run,
             conversation_id=conversation["conversation_id"],
             tenant_id=principal.tenant_id,
             business_user_id=principal.business_user_id,
             client_message_id=internal_req.clientMessageId,
-            result=result, status="completed", assistant_message_id=assistant_message_id,
+            result=result,  assistant_message_id=assistant_message_id,
+                  run_id=run["run_id"], content=accumulated, citations=citations,
+                  business_status=status, reasoning=reasoning,
+                  workflow_binding=dict(agent_id=agent_id, version=version, session_id=workflow_session_id) if workflow_session_id else None,
         )
         if status == "completed":
             schedule_memory_candidate(
@@ -1440,10 +1413,8 @@ async def _workflow_stream(
             },
         )
     except asyncio.CancelledError:
-        await v2._save_failed_run(
-            db, principal, conversation, internal_req, run, assistant_message_id,
-            code="RUN_INTERRUPTED", status_code=503,
-            message="Message run was interrupted before completion", request=request,
+        await persist_workflow_failure(
+            "RUN_INTERRUPTED", 503, "Message run was interrupted before completion", allow_body=True,
         )
         raise
     except (v2.RAGFlowAPIError, v2._FormalQueryError) as exc:

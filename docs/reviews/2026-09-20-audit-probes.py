@@ -109,7 +109,7 @@ async def main():
         return None  # conditional UPDATE did not transition a live run
     async def get_run(*args, **kwargs):
         return {"status": "running"}
-    ns = {"utc_now": lambda: "2026-09-20T00:00:00Z", "json": json,
+    ns = {"lock_conversation": noop_async, "quarantine_conversation": noop_async, "utc_now": lambda: "2026-09-20T00:00:00Z", "json": json,
           "exec_sql": sql, "fetchone": fetch, "get_message_run": get_run}
     extract("enterprise/gateway/query/v2_store.py", {"mark_expired_run_interrupted"}, ns)
     run = await ns["mark_expired_run_interrupted"](None, conversation_id="c",

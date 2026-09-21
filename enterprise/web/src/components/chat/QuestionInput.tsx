@@ -17,6 +17,7 @@ interface QuestionInputProps {
   composerTools?: ReactNode;
   /** Clear draft text when the surrounding conversation changes. */
   resetKey?: string | number;
+  restoredDraft?: { question: string } | null;
 }
 
 const FILE_INPUT_ACCEPT = '.jpg,.jpeg,.png,.txt,.pdf,.docx,.xlsx';
@@ -32,6 +33,7 @@ export function QuestionInput({
   variant = 'default',
   composerTools,
   resetKey,
+  restoredDraft,
 }: QuestionInputProps) {
   const [value, setValue] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -43,13 +45,17 @@ export function QuestionInput({
     if (resetKey !== undefined) setValue('');
   }, [resetKey]);
 
+  useEffect(() => {
+    if (restoredDraft) setValue(restoredDraft.question);
+  }, [restoredDraft]);
+
   const handleSend = useCallback(() => {
     const trimmed = value.trim();
-    if (!trimmed || disabled) return;
+    if (!trimmed || disabled || isStreaming) return;
     onSend(trimmed);
     setValue('');
     textareaRef.current?.focus();
-  }, [value, disabled, onSend]);
+  }, [value, disabled, isStreaming, onSend]);
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {

@@ -1199,6 +1199,10 @@ components:
       type: object
       additionalProperties: false
       required: [code, message, requestId, retryable]
+      description: >-
+        会话运行期间不同请求返回 409 CONVERSATION_BUSY，未接受该消息，可稍后重试。
+        无法确认上游停止的会话返回 409 CONVERSATION_RESTART_REQUIRED，历史保留，需新建会话。
+        相同 clientMessageId 仍优先执行幂等检查和终态回放。
       properties:
         code: { type: string }
         message: { type: string }

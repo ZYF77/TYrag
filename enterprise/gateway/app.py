@@ -223,6 +223,20 @@ app.add_middleware(TransientAttachmentBodyLimitMiddleware)
 app.include_router(console_auth_router)
 
 
+from enterprise.gateway.query.v2_store import ConversationUnavailable
+
+
+@app.exception_handler(ConversationUnavailable)
+async def conversation_unavailable_handler(request: Request, exc: ConversationUnavailable):
+    messages = {
+        "CONVERSATION_BUSY": "正在回答，请稍后重试。",
+        "CONVERSATION_RESTART_REQUIRED": "上次回答已中断，历史仍可查看，请新建会话继续。",
+    }
+    return JSONResponse(status_code=404 if exc.code == "CONVERSATION_NOT_FOUND" else 409,
+        content={"code": exc.code, "message": messages.get(exc.code, "会话不可修改"),
+                 "requestId": str(uuid.uuid4()), "retryable": exc.code == "CONVERSATION_BUSY"})
+
+
 @app.exception_handler(UserAuthError)
 async def user_auth_error_handler(request: Request, exc: UserAuthError):
     return JSONResponse(

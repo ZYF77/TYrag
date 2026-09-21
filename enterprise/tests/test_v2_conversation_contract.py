@@ -507,6 +507,7 @@ async def test_pending_duplicate_returns_same_run_without_second_user_message(ru
         await gw_write(
             runtime.db,
             v2_store.complete_message_run,
+            run_id="stable-pending-run",
             conversation_id=conversation["conversationId"],
             tenant_id="customer-a",
             business_user_id="biz-user-001",

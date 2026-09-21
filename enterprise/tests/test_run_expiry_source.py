@@ -14,7 +14,7 @@ def test_only_expiry_winner_inserts_placeholder(transitioned):
 
     async def fetch(conn, sql, params):
         assert conn is connection
-        assert "status='running'" in sql and 'lease_expires_at <= ?' in sql
+        assert "status='running'" in sql and 'lease_expires_at::timestamptz <= clock_timestamp()' in sql
         assert 'RETURNING assistant_message_id' in sql
         return transitioned
 
@@ -25,7 +25,10 @@ def test_only_expiry_winner_inserts_placeholder(transitioned):
     async def current(conn, **kwargs):
         return {'status': 'failed' if transitioned else 'running'}
 
-    namespace = dict(utc_now=lambda: '2026-09-20T00:00:00Z', json=json,
+    async def noop(*args, **kwargs):
+        pass
+
+    namespace = dict(lock_conversation=noop, quarantine_conversation=noop, utc_now=lambda: '2026-09-20T00:00:00Z', json=json,
                      fetchone=fetch, exec_sql=execute, get_message_run=current)
     path = Path(__file__).parents[1] / 'gateway/query/v2_store.py'
     tree = ast.parse(path.read_text())

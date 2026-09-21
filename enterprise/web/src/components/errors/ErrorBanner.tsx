@@ -65,6 +65,13 @@ function errorConfig(code: string): {
         title: '文档未就绪',
         suggestion: '文档仍在同步或解析中，请等待状态变为可查询后再提问。',
       };
+    case 'CONVERSATION_BUSY':
+    case 'CONVERSATION_RESTART_REQUIRED':
+      return {
+        icon: AlertTriangle, bgColor: 'bg-amber-50', borderColor: 'border-amber-200', textColor: 'text-amber-800',
+        title: code === 'CONVERSATION_BUSY' ? '正在回答' : '会话已中断',
+        suggestion: code === 'CONVERSATION_BUSY' ? '请稍后重试，您的输入已保留。' : '历史仍可查看，请新建会话继续。',
+      };
     case 'CONVERSATION_CONTEXT_CONFLICT':
     case 'CONVERSATION_CONTEXT_INVALID':
     case 'CONVERSATION_CONTEXT_REQUIRED':

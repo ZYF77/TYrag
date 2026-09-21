@@ -249,6 +249,8 @@ async def update_conversation_mapping(
     ragflow_chat_id: str | None,
     ragflow_session_id: str | None,
 ) -> None:
+    await assert_conversation_writable(conn, conversation_id=conversation_id,
+        tenant_id=tenant_id, business_user_id=business_user_id)
     result = await exec_sql(conn,
         """UPDATE ext_v2_conversation
            SET ragflow_chat_id=COALESCE(?, ragflow_chat_id),
@@ -280,6 +282,8 @@ async def set_workflow_session(
     column. A test run can therefore switch between the two entry points without
     accidentally continuing the other runtime's conversation.
     """
+    await assert_conversation_writable(conn, conversation_id=conversation_id,
+        tenant_id=tenant_id, business_user_id=business_user_id)
     await exec_sql(
         conn,
         """UPDATE ext_v2_conversation
@@ -348,6 +352,8 @@ async def update_context(
     update_anchor: bool = False,
     business_context: dict | None | object = _UNSET,
 ) -> dict | None:
+    await assert_conversation_writable(conn, conversation_id=conversation_id,
+        tenant_id=tenant_id, business_user_id=business_user_id)
     query = """UPDATE ext_v2_conversation
                SET equipment_id=?, fixed_asset_no=?, asset_id=?, fault_code=?,
                    context_version=?, registry_version=?, context_resolved_at=?"""
@@ -421,6 +427,8 @@ async def list_messages_ordered(
 async def archive_conversation(
     conn, *, conversation_id: str, tenant_id: str, business_user_id: str
 ) -> dict:
+    await assert_conversation_writable(conn, conversation_id=conversation_id,
+        tenant_id=tenant_id, business_user_id=business_user_id)
     result = await exec_sql(conn,
         """UPDATE ext_v2_conversation SET status='archived'
            WHERE conversation_id=? AND tenant_id=? AND business_user_id=?""",
@@ -493,14 +501,19 @@ async def reserve_message_run(
     entity_scope: list[str] | tuple[str, ...] = (),
     allowed_doc_ids: list[str] | tuple[str, ...] = (),
     retrieval_context: dict | None = None,
-    lease_seconds: int = 1800,
+    lease_seconds: int = 120,
 ) -> dict | None:
     run_id = run_id or __import__("uuid").uuid4().hex
-    lease_expires_at = datetime.fromtimestamp(
-        datetime.now(timezone.utc).timestamp() + lease_seconds,
-        tz=timezone.utc,
-    ).isoformat()
     await begin_transaction(conn)
+    identity = dict(conversation_id=conversation_id, tenant_id=tenant_id,
+                    business_user_id=business_user_id)
+    await lock_conversation(conn, **identity)
+    existing = await get_message_run(conn, **identity, client_message_id=client_message_id)
+    if existing:
+        return None
+    await assert_conversation_writable(conn, **identity)
+    clock = await fetchone(conn, "SELECT (clock_timestamp() + (? * interval '1 second'))::text AS expires", (lease_seconds,))
+    lease_expires_at = clock["expires"]
     result = await exec_sql(conn,
         """INSERT INTO ext_v2_message_run
            (conversation_id, tenant_id, business_user_id, client_message_id,
@@ -568,31 +581,50 @@ async def reserve_message_run(
 
 
 async def complete_message_run(
-    conn,
-    *,
-    conversation_id: str,
-    tenant_id: str,
-    business_user_id: str,
-    client_message_id: str,
-    result: dict,
-    status: str = "completed",
-    assistant_message_id: str | None = None,
+    conn, *, conversation_id: str, tenant_id: str, business_user_id: str,
+    client_message_id: str, run_id: str, result: dict,
+    status: str = "completed", assistant_message_id: str | None = None,
 ) -> None:
-    result = await exec_sql(conn,
+    identity = dict(conversation_id=conversation_id, tenant_id=tenant_id,
+                    business_user_id=business_user_id)
+    await lock_conversation(conn, **identity)
+    row = await fetchone(conn,
         """UPDATE ext_v2_message_run
            SET result_json=?, status=?, assistant_message_id=?, lease_expires_at=NULL
            WHERE conversation_id=? AND tenant_id=? AND business_user_id=?
-             AND client_message_id=? AND status='running'""",
-        (
-            json.dumps(result, ensure_ascii=False, separators=(",", ":")),
-            status,
-            assistant_message_id,
-            conversation_id,
-            tenant_id,
-            business_user_id,
-            client_message_id,
-        ),
-    )
+             AND client_message_id=? AND run_id=? AND status='running'
+             AND lease_expires_at::timestamptz > clock_timestamp()
+           RETURNING run_id""",
+        (json.dumps(result, ensure_ascii=False, separators=(",", ":")), status,
+         assistant_message_id, conversation_id, tenant_id, business_user_id,
+         client_message_id, run_id))
+    if not row:
+        raise RunOwnershipLost()
+
+
+async def save_terminal_message_run(
+    conn, *, conversation_id: str, tenant_id: str, business_user_id: str,
+    client_message_id: str, run_id: str, result: dict, assistant_message_id: str,
+    content: str, citations: list[dict], business_status: str,
+    reasoning: str | None = None, workflow_binding: dict | None = None,
+    restart_required: bool = False,
+) -> None:
+    """CAS first; all durable output and bindings share the caller's transaction."""
+    identity = dict(conversation_id=conversation_id, tenant_id=tenant_id,
+                    business_user_id=business_user_id)
+    await complete_message_run(conn, **identity, client_message_id=client_message_id,
+        run_id=run_id, result=result, status="failed" if business_status == "failed" else "completed",
+        assistant_message_id=assistant_message_id)
+    await add_message(conn, **identity, message_id=assistant_message_id, role="assistant",
+        content=content, status=business_status, citations=citations, reasoning=reasoning)
+    if workflow_binding:
+        await exec_sql(conn, """UPDATE ext_v2_conversation
+            SET workflow_agent_id=?, workflow_version=?, workflow_session_id=?
+            WHERE conversation_id=? AND tenant_id=? AND business_user_id=?""",
+            (workflow_binding["agent_id"], workflow_binding["version"], workflow_binding["session_id"],
+             conversation_id, tenant_id, business_user_id))
+    if restart_required:
+        await quarantine_conversation(conn, **identity)
 
 
 async def mark_expired_run_interrupted(
@@ -604,6 +636,7 @@ async def mark_expired_run_interrupted(
     client_message_id: str,
 ) -> dict | None:
     """Turn an abandoned run into a stable, replayable failure."""
+    await lock_conversation(conn, conversation_id=conversation_id, tenant_id=tenant_id, business_user_id=business_user_id)
     now = utc_now()
     result = {
         "_error": {
@@ -621,7 +654,7 @@ async def mark_expired_run_interrupted(
            SET status='failed', result_json=?, lease_expires_at=NULL
            WHERE conversation_id=? AND tenant_id=? AND business_user_id=?
              AND client_message_id=? AND status='running'
-             AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?
+             AND lease_expires_at IS NOT NULL AND lease_expires_at::timestamptz <= clock_timestamp()
            RETURNING assistant_message_id""",
         (
             json.dumps(result, ensure_ascii=False, separators=(",", ":")),
@@ -629,9 +662,10 @@ async def mark_expired_run_interrupted(
             tenant_id,
             business_user_id,
             client_message_id,
-            now,
         ),
     )
+    if transitioned:
+        await quarantine_conversation(conn, conversation_id=conversation_id, tenant_id=tenant_id, business_user_id=business_user_id)
     # Only the request that changed the run from expired ``running`` to
     # ``failed`` may create the replay placeholder.  A live duplicate gets no
     # write at all, and a concurrent loser observes the already-terminal run
@@ -734,41 +768,16 @@ async def add_message(
 
 
 async def save_failed_message_run(
-    conn,
-    *,
-    message_id: str,
-    conversation_id: str,
-    tenant_id: str,
-    business_user_id: str,
-    client_message_id: str,
-    result: dict,
-    content: str = "",
-    citations: list[dict] | None = None,
-    reasoning: str | None = None,
+    conn, *, message_id: str, conversation_id: str, tenant_id: str,
+    business_user_id: str, client_message_id: str, run_id: str, result: dict,
+    content: str = "", citations: list[dict] | None = None,
+    reasoning: str | None = None, restart_required: bool = False,
 ) -> None:
-    """Persist a failed assistant projection and terminal run atomically."""
-    await add_message(
-        conn,
-        message_id=message_id,
-        conversation_id=conversation_id,
-        tenant_id=tenant_id,
-        business_user_id=business_user_id,
-        role="assistant",
-        content=content,
-        status="failed",
-        citations=citations or [],
-        reasoning=reasoning,
-    )
-    await complete_message_run(
-        conn,
-        conversation_id=conversation_id,
-        tenant_id=tenant_id,
-        business_user_id=business_user_id,
-        client_message_id=client_message_id,
-        result=result,
-        status="failed",
-        assistant_message_id=message_id,
-    )
+    await save_terminal_message_run(conn, conversation_id=conversation_id,
+        tenant_id=tenant_id, business_user_id=business_user_id,
+        client_message_id=client_message_id, run_id=run_id, result=result,
+        assistant_message_id=message_id, content=content, citations=citations or [],
+        business_status="failed", reasoning=reasoning, restart_required=restart_required)
 
 
 async def claim_ragflow_session(
@@ -781,6 +790,8 @@ async def claim_ragflow_session(
     ragflow_session_id: str,
 ) -> int:
     """Atomically bind session when still unset; returns affected rowcount."""
+    await assert_conversation_writable(conn, conversation_id=conversation_id,
+        tenant_id=tenant_id, business_user_id=business_user_id)
     result = await exec_sql(
         conn,
         """UPDATE ext_v2_conversation
@@ -881,3 +892,85 @@ async def get_citation(
         return json.loads(row["snapshot_json"])
     except json.JSONDecodeError:
         return None
+
+
+class ConversationUnavailable(Exception):
+    def __init__(self, code):
+        self.code = code
+        super().__init__(code)
+
+
+class RunOwnershipLost(Exception):
+    pass
+
+
+async def lock_conversation(conn, *, conversation_id, tenant_id, business_user_id):
+    row = await fetchone(conn, """SELECT * FROM ext_v2_conversation
+        WHERE conversation_id=? AND tenant_id=? AND business_user_id=? FOR UPDATE""",
+        (conversation_id, tenant_id, business_user_id))
+    if not row:
+        raise ConversationUnavailable("CONVERSATION_NOT_FOUND")
+    return row
+
+
+async def quarantine_conversation(conn, *, conversation_id, tenant_id, business_user_id):
+    await exec_sql(conn, """UPDATE ext_v2_conversation SET restart_required=1
+        WHERE conversation_id=? AND tenant_id=? AND business_user_id=?""",
+        (conversation_id, tenant_id, business_user_id))
+
+
+async def assert_conversation_writable(conn, *, conversation_id, tenant_id, business_user_id):
+    from enterprise.gateway.query.run_lifecycle import active_run
+    identity = dict(conversation_id=conversation_id, tenant_id=tenant_id, business_user_id=business_user_id)
+    row = await lock_conversation(conn, **identity)
+    if row.get("restart_required"):
+        raise ConversationUnavailable("CONVERSATION_RESTART_REQUIRED")
+    if row["status"] == "archived":
+        raise ConversationUnavailable("CONVERSATION_ARCHIVED")
+    owner = active_run.get()
+    run = await fetchone(conn, """SELECT * FROM ext_v2_message_run
+        WHERE conversation_id=? AND tenant_id=? AND business_user_id=? AND status='running'""",
+        (conversation_id, tenant_id, business_user_id))
+    if owner and owner["identity"] == identity:
+        await assert_run_owner(conn, **identity, run_id=owner["run_id"])
+    elif run:
+        # This transition may quarantine; callers must commit before returning 409.
+        raise ConversationUnavailable("CONVERSATION_BUSY")
+
+
+async def assert_run_owner(conn, *, conversation_id, tenant_id, business_user_id, run_id):
+    await lock_conversation(conn, conversation_id=conversation_id, tenant_id=tenant_id, business_user_id=business_user_id)
+    row = await fetchone(conn, """SELECT run_id FROM ext_v2_message_run
+        WHERE conversation_id=? AND tenant_id=? AND business_user_id=? AND run_id=?
+          AND status='running' AND lease_expires_at::timestamptz > clock_timestamp() FOR UPDATE""",
+        (conversation_id, tenant_id, business_user_id, run_id))
+    if not row:
+        raise RunOwnershipLost()
+
+
+async def renew_run(conn, *, conversation_id, tenant_id, business_user_id, run_id):
+    await assert_run_owner(conn, conversation_id=conversation_id, tenant_id=tenant_id, business_user_id=business_user_id, run_id=run_id)
+    await exec_sql(conn, """UPDATE ext_v2_message_run
+        SET lease_expires_at=(clock_timestamp() + interval '120 seconds')::text
+        WHERE run_id=? AND conversation_id=? AND tenant_id=? AND business_user_id=?""",
+        (run_id, conversation_id, tenant_id, business_user_id))
+
+
+async def save_run_scope(conn, *, conversation_id, tenant_id, business_user_id, run_id,
+                         entity_scope, allowed_doc_ids, retrieval_context):
+    await assert_run_owner(conn, conversation_id=conversation_id, tenant_id=tenant_id, business_user_id=business_user_id, run_id=run_id)
+    await exec_sql(conn, """UPDATE ext_v2_message_run SET entity_scope_json=?,
+        allowed_doc_ids_json=?, retrieval_context_json=?
+        WHERE conversation_id=? AND tenant_id=? AND business_user_id=? AND run_id=?""",
+        (json.dumps(entity_scope), json.dumps(allowed_doc_ids), json.dumps(retrieval_context),
+         conversation_id, tenant_id, business_user_id, run_id))
+
+
+async def expire_conversation_run(conn, *, conversation_id, tenant_id, business_user_id):
+    await lock_conversation(conn, conversation_id=conversation_id, tenant_id=tenant_id, business_user_id=business_user_id)
+    row = await fetchone(conn, """SELECT client_message_id FROM ext_v2_message_run
+        WHERE conversation_id=? AND tenant_id=? AND business_user_id=? AND status='running'""",
+        (conversation_id, tenant_id, business_user_id))
+    if row:
+        await mark_expired_run_interrupted(conn, conversation_id=conversation_id, tenant_id=tenant_id,
+            business_user_id=business_user_id, client_message_id=row["client_message_id"])

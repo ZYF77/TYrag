@@ -88,6 +88,8 @@ from enterprise.gateway.sync.transient_attachment import (
     attachment_max_size_bytes,
 )
 
+from enterprise.gateway.query.run_lifecycle import leased_run, active_run
+
 
 router = APIRouter(prefix="/enterprise/api/v2", tags=["query-v2"])
 logger = logging.getLogger(__name__)
@@ -137,6 +139,9 @@ async def _gw_write(gateway, fn, /, *args, **kwargs):
     if not isinstance(gateway, GatewayDatabase):
         return await fn(gateway, *args, **kwargs)
     async with gateway.transaction(write=True) as conn:
+        owner = active_run.get()
+        if owner:
+            await v2_store.assert_run_owner(conn, **owner["identity"], run_id=owner["run_id"])
         return await fn(conn, *args, **kwargs)
 
 
@@ -1820,12 +1825,12 @@ async def _prepare_message_run(
         question = definition["displayPrompt"]
     else:
         question = req.question or ""
-    conversation = await _resolve_turn_scope(
-        db, principal, conversation, question
-    )
     title = " ".join(question.split())[:80] or (
         pending[0].file_name if pending else "New conversation"
     )
+    await _gw_write(db, v2_store.expire_conversation_run,
+        conversation_id=conversation["conversation_id"], tenant_id=principal.tenant_id,
+        business_user_id=principal.business_user_id)
     run = await _gw_write(db, v2_store.reserve_message_run,
         conversation_id=conversation["conversation_id"],
         tenant_id=principal.tenant_id,
@@ -1844,6 +1849,25 @@ async def _prepare_message_run(
     if run is None:
         replay, response = await _replay_or_pending(db, principal, conversation, req, pending)
         return conversation, "", replay, response or _error(503, "RUN_INTERRUPTED", "Message run could not be reserved")
+    identity = dict(conversation_id=conversation["conversation_id"], tenant_id=principal.tenant_id,
+                    business_user_id=principal.business_user_id)
+    token = active_run.set(dict(identity=identity, run_id=run["run_id"]))
+    try:
+        conversation = await _owned_conversation(db, principal, conversation["conversation_id"])
+        conversation = await _resolve_turn_scope(db, principal, conversation, question)
+        snapshot = dict(entity_scope=conversation.get("_turn_entity_ids") or [],
+                        allowed_doc_ids=conversation.get("_turn_document_ids") or [],
+                        retrieval_context=_retrieval_context_snapshot(conversation))
+        await _gw_write(db, v2_store.save_run_scope, **identity, run_id=run["run_id"], **snapshot)
+        run.update(entity_scope_json=json.dumps(snapshot["entity_scope"]),
+                   allowed_doc_ids_json=json.dumps(snapshot["allowed_doc_ids"]),
+                   retrieval_context_json=json.dumps(snapshot["retrieval_context"]))
+    except Exception:
+        await _save_failed_run(db, principal, conversation, req, run, run["assistant_message_id"],
+            code="RUN_INTERRUPTED", status_code=503, message="Message preparation failed")
+        raise
+    finally:
+        active_run.reset(token)
     return conversation, question, run, None
 
 
@@ -1862,6 +1886,7 @@ async def _save_failed_run(
     content: str = "",
     citations: list[dict] | None = None,
     reasoning: str | None = None,
+    upstream_confirmed: bool = False,
 ) -> JSONResponse:
     error_response = _error(status_code, code, message)
     failed_result = {
@@ -1879,6 +1904,8 @@ async def _save_failed_run(
     await _gw_write(
         db,
         v2_store.save_failed_message_run,
+        run_id=run["run_id"],
+        restart_required=bool(run.get("_upstream_started")) and not upstream_confirmed,
         message_id=assistant_message_id,
         conversation_id=conversation["conversation_id"],
         tenant_id=principal.tenant_id,
@@ -1926,6 +1953,7 @@ async def _retrieval_question(
     return enrich_question(question, observations), client, observations
 
 
+@leased_run
 async def _execute_json_run(
     db,
     principal: UserPrincipal,
@@ -1938,6 +1966,7 @@ async def _execute_json_run(
 ) -> tuple[dict | None, JSONResponse | None]:
     assistant_message_id = run.get("assistant_message_id") or str(uuid.uuid4())
     pending = pending or []
+    run["_upstream_started"] = True
     client = None
     retrieval_context = _run_retrieval_context(run, conversation)
     docs_by_internal_id: dict[str, ExtDocumentMap] = {}
@@ -2115,14 +2144,6 @@ async def _execute_json_run(
                 )
                 if status == "completed":
                     answer = _with_equipment_hint(conversation, answer, status)
-                    schedule_memory_candidate(
-                        principal,
-                        chat_id=chat_id,
-                        session_id=session_id,
-                        user_input=question,
-                        agent_response=answer,
-                        request_id=run["run_id"],
-                    )
                 if status == "failed":
                     # The explicit upstream state is terminal, but the
                     # sanitized partial answer and scope-checked citations are
@@ -2138,22 +2159,12 @@ async def _execute_json_run(
                         code="RAGFLOW_UNAVAILABLE",
                         status_code=503,
                         message="Query engine reported a failed run",
+                        upstream_confirmed=True,
                         request=request,
                         content=answer,
                         citations=citations,
                         reasoning=reasoning,
                     )
-            await _gw_write(db, v2_store.add_message,
-                message_id=assistant_message_id,
-                conversation_id=conversation["conversation_id"],
-                tenant_id=principal.tenant_id,
-                business_user_id=principal.business_user_id,
-                role="assistant",
-                content=answer,
-                status=status,
-                citations=citations,
-                reasoning=reasoning,
-            )
             result = {
                 "conversationId": conversation["conversation_id"],
                 "clientMessageId": req.clientMessageId,
@@ -2195,15 +2206,26 @@ async def _execute_json_run(
             )
             if diagnostics:
                 result["_diagnostics"] = diagnostics
-            await _gw_write(db, v2_store.complete_message_run,
+            await _gw_write(db, v2_store.save_terminal_message_run,
                 conversation_id=conversation["conversation_id"],
                 tenant_id=principal.tenant_id,
                 business_user_id=principal.business_user_id,
                 client_message_id=req.clientMessageId,
                 result=result,
-                status="completed",
+
                 assistant_message_id=assistant_message_id,
+                      run_id=run["run_id"], content=answer, citations=citations,
+                      business_status=status, reasoning=reasoning,
             )
+            if status == "completed" and not scope.is_empty:
+                schedule_memory_candidate(
+                    principal,
+                    chat_id=chat_id,
+                    session_id=session_id,
+                    user_input=question,
+                    agent_response=answer,
+                    request_id=run["run_id"],
+                )
             return result, None
         except (RAGFlowAPIError, _FormalQueryError) as exc:
             if isinstance(exc, _FormalQueryError):
@@ -2261,6 +2283,7 @@ async def _execute_json_run(
         await cleanup_ragflow_files(pending, client, db)
 
 
+@leased_run
 async def _stream_run_events(
     db,
     principal: UserPrincipal,
@@ -2326,6 +2349,7 @@ async def _stream_run_events(
     reasoning: str | None = None
     splitter = StreamThinkSplitter()
     pending = pending or []
+    run["_upstream_started"] = True
     client = None
     retrieval_context = _run_retrieval_context(run, conversation)
     live_streamed = False
@@ -2645,14 +2669,6 @@ async def _stream_run_events(
             answer = accumulated
             if status == "completed":
                 answer = _with_equipment_hint(conversation, accumulated, status)
-                schedule_memory_candidate(
-                    principal,
-                    chat_id=chat_id,
-                    session_id=session_id,
-                    user_input=question,
-                    agent_response=answer,
-                    request_id=run["run_id"],
-                )
             if status == "failed":
                 public_citations = await _project_citations(
                     db, citations, request, principal
@@ -2667,6 +2683,7 @@ async def _stream_run_events(
                     code="RAGFLOW_UNAVAILABLE",
                     status_code=503,
                     message="Query engine reported a failed run",
+                        upstream_confirmed=True,
                     request=request,
                     content=answer,
                     citations=citations,
@@ -2693,17 +2710,6 @@ async def _stream_run_events(
                     },
                 )
                 return
-        await _gw_write(db, v2_store.add_message,
-            message_id=assistant_message_id,
-            conversation_id=conversation_id,
-            tenant_id=principal.tenant_id,
-            business_user_id=principal.business_user_id,
-            role="assistant",
-            content=answer,
-            status=status,
-            citations=citations,
-            reasoning=reasoning,
-        )
         stream_deltas: list[dict] = []
         if reasoning:
             stream_deltas.append({"event": "reasoning.delta", "content": reasoning})
@@ -2751,15 +2757,26 @@ async def _stream_run_events(
         diagnostics = finish_trace(run.get("_diagnostics"), outcome=status)
         if diagnostics:
             result["_diagnostics"] = diagnostics
-        await _gw_write(db, v2_store.complete_message_run,
+        await _gw_write(db, v2_store.save_terminal_message_run,
             conversation_id=conversation_id,
             tenant_id=principal.tenant_id,
             business_user_id=principal.business_user_id,
             client_message_id=req.clientMessageId,
             result=result,
-            status="completed",
+
             assistant_message_id=assistant_message_id,
+                  run_id=run["run_id"], content=answer, citations=citations,
+                  business_status=status, reasoning=reasoning,
         )
+        if status == "completed" and not scope.is_empty:
+            schedule_memory_candidate(
+                principal,
+                chat_id=chat_id,
+                session_id=session_id,
+                user_input=question,
+                agent_response=answer,
+                request_id=run["run_id"],
+            )
         if live_streamed:
             if answer != emitted_answer:
                 yield _sse(
@@ -2793,11 +2810,8 @@ async def _stream_run_events(
             },
         )
     except asyncio.CancelledError:
-        await _save_failed_run(
-            db, principal, conversation, req, run, assistant_message_id,
-            code="RUN_INTERRUPTED", status_code=503,
-            message="Message run was interrupted before completion",
-            request=request,
+        await persist_stream_failure(
+            "RUN_INTERRUPTED", 503, "Message run was interrupted before completion", allow_body=True,
         )
         raise
     except (RAGFlowAPIError, _FormalQueryError) as exc:

@@ -81,7 +81,9 @@ async def test_placeholder_failure_rolls_back_expiry_transition(run_db, monkeypa
 @pytest.mark.parametrize('status', ['completed', 'no_reliable_evidence', 'failed'])
 async def test_terminal_run_is_unchanged(run_db, status):
     db, identity = run_db
-    await gw_write(db, v2_store.complete_message_run, **identity,
+    run = await gw_read(db, v2_store.get_message_run, **identity)
+    await gw_write(db, exec_sql, "UPDATE ext_v2_message_run SET lease_expires_at=(clock_timestamp() + interval '120 seconds')::text")
+    await gw_write(db, v2_store.complete_message_run, **identity, run_id=run['run_id'],
                    result={'synthetic': status}, status=status, assistant_message_id='assistant')
     # Even a stale expired lease on a terminal row cannot reopen its outcome.
     await gw_write(db, exec_sql,

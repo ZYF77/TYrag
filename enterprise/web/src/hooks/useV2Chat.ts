@@ -125,6 +125,7 @@ export function useV2Chat(
   const executionMode = options.executionMode ?? 'chat';
   const [messages, setMessages] = useState<HarnessMessage[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [rejectedDraft, setRejectedDraft] = useState<{ question: string; files: File[] } | null>(null);
   const [error, setError] = useState<DisplayError | null>(null);
   const controllerRef = useRef<AbortController | null>(null);
   const retryRef = useRef<RetryRequest | null>(null);
@@ -265,6 +266,13 @@ export function useV2Chat(
         .catch((streamError: unknown) => {
           if (streamError instanceof DOMException && streamError.name === 'AbortError') return;
           const displayError = toDisplayError(streamError);
+          if (displayError.code === 'CONVERSATION_BUSY' || displayError.code === 'CONVERSATION_RESTART_REQUIRED') {
+            setError(displayError);
+            setRejectedDraft({ question: request.question, files: request.files ?? [] });
+            setMessages((previous) => previous.filter((message) => message.clientMessageId !== request.clientMessageId));
+            retryRef.current = null;
+            return;
+          }
           setError(displayError);
           retryRef.current = request;
           updateReply(request.replyId, (message) => ({
@@ -286,6 +294,7 @@ export function useV2Chat(
     controllerRef.current = null;
     retryRef.current = null;
     setMessages([]);
+    setRejectedDraft(null);
     setError(null);
     setIsStreaming(false);
     if (!conversationId) return;
@@ -393,6 +402,7 @@ export function useV2Chat(
   }, []);
 
   return {
+    rejectedDraft,
     messages,
     isStreaming,
     error,

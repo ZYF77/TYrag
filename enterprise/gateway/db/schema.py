@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from enterprise.gateway.db.dialect import add_column_if_missing, exec_sql
 from enterprise.gateway.db.tables import metadata
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 def _quote_identifier(value: str) -> str:
@@ -274,6 +274,16 @@ async def initialize_schema(engine: AsyncEngine, *, schema: str = "public") -> N
             "retrieval_context_json",
             "TEXT",
         )
+        await add_column_if_missing(conn, "ext_v2_conversation", "restart_required", "INTEGER NOT NULL DEFAULT 0")
+        duplicates = await conn.execute(text("""SELECT COUNT(*) FROM (
+            SELECT 1 FROM ext_v2_message_run WHERE status='running'
+            GROUP BY tenant_id, business_user_id, conversation_id HAVING COUNT(*) > 1
+        ) AS conflicts"""))
+        if duplicates.scalar_one():
+            raise RuntimeError("F05 migration blocked: duplicate active conversations; drain workers and reconcile runs")
+        await conn.execute(text("""CREATE UNIQUE INDEX IF NOT EXISTS uq_v2_active_conversation
+            ON ext_v2_message_run(tenant_id, business_user_id, conversation_id)
+            WHERE status='running'"""))
         result = await conn.execute(
             text("SELECT version FROM gateway_schema_version ORDER BY version")
         )
@@ -299,6 +309,8 @@ async def initialize_schema(engine: AsyncEngine, *, schema: str = "public") -> N
         if values == [7]:
             await _upgrade_v7_to_v8(conn)
             values = [8]
+        if values == [8]:
+            values = [9]
         elif values not in ([], [SCHEMA_VERSION]):
             raise RuntimeError(
                 f"unsupported Gateway schema version: {values!r}; "

@@ -1,0 +1,13 @@
+# F05 — 会话运行所有权与终态提交
+
+状态：已实现，完整环境验收待执行；未部署。仅企业层。
+
+会话行锁 + `running` 部分唯一索引保证跨进程占用。相同请求优先幂等回放；其他请求返回 409 CONVERSATION_BUSY，无新消息/设备变更/上游调用。占用后重新读取会话并保存本轮范围。租约120秒，独立心跳30秒，运行总上限1800秒。所有权由不可重用 run_id 和数据库时钟共同验证。
+
+终态 CAS、消息、证据、Workflow 绑定在同一事务。失效执行者不能插入迟到消息。过期/未确认停止时保留历史并将 restart_required 设为1，后续新请求返回409 CONVERSATION_RESTART_REQUIRED；显式终态业务失败不封闭会话。前端恢复忙请求草稿/附件并删除未接收消息的乐观占位，提供新建会话入口。
+
+企业 schema 8→9；仅新增内部列和部分索引，不改官方数据库。API增加两个409错误码，不新增消息状态或响应字段。部署必须排空旧worker；迁移若发现重复active run则停止，不能自动选择胜者。回滚不能将仍运行的新worker与旧worker混用。
+
+验证：`python3 -m unittest discover -s docs/reviews/tests -p test_f05_control_flow.py -v` 2通过；审查探针通过。前端独立测试/类型检查结果见完整报告。`enterprise/tests/test_run_ownership.py` 提供真实PG竞争、迟到写入、续租及事务回滚用例；当前Python3.14环境缺少pytest_asyncio，未执行Python3.13/真实PG/双worker验收。不能以源码控制流测试代替数据库集成验证。
+
+回归页面测试出现8项失败；在改动前HEAD的隔离副本上复现相同8项（包括既有界面断言、MSW未处理路由及当前Node multipart错误）。没有删除/跳过这些用例。

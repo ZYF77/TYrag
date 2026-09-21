@@ -21,6 +21,8 @@ interface HarnessChatProps {
   error: DisplayError | null;
   onSend: (question: string) => void;
   onRetry: () => void;
+  onNewConversation?: () => void;
+  restoredDraft?: { question: string } | null;
   onCancel: () => void;
   onCitation: (citation: Citation) => void;
   onCitationGroup?: (citations: Citation[]) => void;
@@ -100,6 +102,8 @@ export function HarnessChat({
   error,
   onSend,
   onRetry,
+  onNewConversation,
+  restoredDraft,
   onCancel,
   onCitation,
   onCitationGroup,
@@ -289,11 +293,15 @@ export function HarnessChat({
           <div ref={transcriptEndRef} aria-hidden="true" />
         </div>
         {error && <ConsoleAlert error={error} />}
+        {error?.code === 'CONVERSATION_RESTART_REQUIRED' && onNewConversation && (
+          <button type="button" className="console-secondary-button" onClick={onNewConversation}>新建会话继续</button>
+        )}
         <QuestionInput
           onSend={onSend}
           onCancel={onCancel}
           isStreaming={isStreaming}
-          disabled={!conversation}
+          disabled={!conversation || error?.code === 'CONVERSATION_RESTART_REQUIRED'}
+          restoredDraft={restoredDraft}
           selectedFiles={selectedFiles}
           onFilesPicked={onFilesPicked}
           onRemoveFile={onRemoveFile}
