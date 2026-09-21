@@ -96,7 +96,7 @@ async def planner_node(state: dict, tools) -> dict:
         if isinstance(c, dict) and c.get("description"):
             claims.append(
                 ClaimTarget(
-                    claim_id=c.get("claim_id", f"c{i}"),
+                    claim_id=f"c{i}",
                     description=c["description"],
                     priority=c.get("priority", 0),
                     suggested_tools=c.get("suggested_tools", []),

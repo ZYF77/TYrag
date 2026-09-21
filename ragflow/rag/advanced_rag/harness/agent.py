@@ -209,7 +209,7 @@ class ResearchToolSession:
             if isinstance(ans, tuple):
                 ans = ans[0]
             ans = re.sub(r"^.*</think>", "", ans or "", flags=re.DOTALL)
-            _LOG.exception("[Navigation] sufficiency check: %s", ans)
+            _LOG.info("[Navigation] preliminary evidence check completed")
             return ans.strip().lower().startswith("yes")
         except Exception:
             _LOG.exception("[Navigation] sufficiency check failed")
@@ -217,37 +217,23 @@ class ResearchToolSession:
 
     def _normalize_report(self, report: dict) -> dict:
         normalized = dict(report)
-        evidence_ids = []
-        for eid in normalized.get("evidence_ids") or []:
-            try:
-                idx = int(eid)
-            except (TypeError, ValueError):
-                continue
-            if idx not in evidence_ids:
-                evidence_ids.append(idx)
-        if not evidence_ids and self.evidence_ids:
-            evidence_ids = list(self.evidence_ids)
-        normalized["evidence_ids"] = evidence_ids
+        supplied = normalized.get("evidence_ids")
+        if not isinstance(supplied, list):
+            supplied = []
+        normalized["evidence_ids"] = list(dict.fromkeys(
+            eid for eid in supplied if type(eid) is int and eid in self._seen_evidence_ids))
+        # Self-assessment never becomes a verified claim.
+        normalized["is_verified"] = False
+        normalized["confidence"] = 0.0
         return normalized
 
     def _record_evidence_ids(self, chunks: list[dict]) -> None:
-        all_chunks = self.pipeline.tools.kbinfos.get("chunks", [])
-        index_by_key = {}
-        for idx, chunk in enumerate(all_chunks):
-            index_by_key[_chunk_key(chunk)] = idx
-
-        for chunk in chunks:
-            idx = index_by_key.get(_chunk_key(chunk))
-            if idx is None:
-                idx = next((i for i, existing in enumerate(all_chunks) if existing is chunk), None)
-            if idx is None or idx in self._seen_evidence_ids:
-                continue
-            self._seen_evidence_ids.add(idx)
-            self.evidence_ids.append(idx)
-
-
-def _chunk_key(chunk: dict) -> object:
-    return chunk.get("chunk_id") or chunk.get("id") or id(chunk)
+        from rag.advanced_rag.harness.evidence import registry_for
+        ids = registry_for(self.pipeline.tools).register(chunks, self.pipeline.claim_id)
+        for eid in ids:
+            if eid not in self._seen_evidence_ids:
+                self._seen_evidence_ids.add(eid)
+                self.evidence_ids.append(eid)
 
 
 def _build_tool_schemas(gated_defs: list[dict]) -> list[dict]:
@@ -352,8 +338,8 @@ async def _research_native(
     _LOG.info("research_agent(native): no generate_report call; using final text as report")
     return {
         "report": (final_text or "").strip(),
-        "is_verified": session.got_evidence,
-        "confidence": 0.5 if session.got_evidence else 0.0,
+        "is_verified": False,
+        "confidence": 0.0,
         "evidence_ids": list(session.evidence_ids),
         "gaps": [] if session.got_evidence else ["no generate_report emitted"],
         "discovered_claims": [],
@@ -589,7 +575,8 @@ def _fmt_tool_result(result: ToolResult) -> str:
     if result.docs:
         located = ", ".join(str(doc)[:128] for doc in result.docs[:32])
         parts.append(f"[located documents: {located}]")
-    parts.extend(c.get("content_with_weight", c.get("text", ""))[:300] for c in result.chunks[:3])
+    parts.extend(f"[ID:{c['_evidence_id']}] " + c.get("content_with_weight", c.get("text", ""))[:1200]
+                 for c in result.chunks[:6] if type(c.get('_evidence_id')) is int)
     if not parts:
         return "[no results found]"
     return "\n\n".join(parts)

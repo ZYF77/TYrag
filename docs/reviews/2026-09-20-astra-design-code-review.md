@@ -106,9 +106,9 @@ Chat 和 Workflow 不再因 `no_reliable_evidence` 或 `failed` 自动替换正�
 
 **本次实现**：数据库会话锁、active-run部分唯一索引、120秒租约/30秒续租、1800秒总上限、run_id条件写入及原子终态保存。新增BUSY/RESTART_REQUIRED两个409码；无法确认上游停止时旧会话只读，保留历史，新会话继续。设备范围在占用后计算，前端恢复拒绝请求草稿。schema 9；详见 [F05变更登记](../../patches/CHANGE-REQUEST-F05-RUN-OWNERSHIP.md)。
 
-**验证边界**：无服务终态控制流测试2项及审查探针通过；RunOwnership/HarnessChat/ErrorStates 前端14项通过，TypeScript检查通过；真实Python3.13、PG双连接/双worker验收待执行。前端页面既有8项失败在未修改HEAD副本复现，不能宣称完整E2E通过。未部署。
+**验证边界**：无服务终态控制流测试5项及审查探针通过；RunOwnership/HarnessChat/ErrorStates 前端14项通过，TypeScript检查通过；真实Python3.13、PG双连接/双worker验收待执行。前端页面既有8项失败在未修改HEAD副本复现，不能宣称完整E2E通过。未部署。
 
-### F06 · P1：Agentic 的“验证充分”机制并不可信〔源码确认〕
+### F06 · P1：Agentic 证据关联与充分性〔本地实现，待真实模型验收〕
 
 位置：`ragflow/rag/advanced_rag/harness/orchestrator/decompose.py:43`；`ragflow/rag/advanced_rag/harness/sufficiency.py:34`、`:89`。
 
@@ -118,6 +118,10 @@ Chat 和 Workflow 不再因 `no_reliable_evidence` 或 `failed` 自动替换正�
 4. medium 使用 max(agent_score, cross_score)，自报已验证可能压过失败的交叉验证，仍判充分。
 
 **建议**：稳定 chunk/source/version 标识；把 found/supported/contradicted 分开；关键冲突作为否决或降级条件，不用 max 抹掉。数值核验先限定字段、单位与上下文，不能确定就保持 unknown。修复前不要以“高档位”为可靠性保证，先与普通 Chat 在同一设备问答集上盲测。
+
+**本次实现**：请求级不可变证据快照和全局编号、每个子问题独立路由、结构化语义验证与Decimal量纲检查。召回不再直接设置已验证，自报confidence不参与充分性；必要项全部得到支持才充分。最终事实正文先验证，最多修订一次，无法验证时输出已支持部分与缺口；状态独立显式输出。未改变生产Workflow。详见 [F06登记](../../patches/CHANGE-REQUEST-F06-VERIFIED-EVIDENCE.md)。
+
+**验证边界**：16项合成测试通过；40条真实模型盲评fixture和160组评分工具已准备，但没有真实模型评测结果。延迟、可答率、误判充分比例及真实API/引用契约均待固定Python3.13/完整服务环境验收，不能声称语义判断准确性已获保证。
 
 ### F07 · P1：父块 ID 和来源关联〔本地修复，待真实引擎验收〕
 
@@ -316,3 +320,12 @@ Workflow 路由 include_in_schema=False 不构成权限，现有 ask/view_citati
 | `cd enterprise/web && ./node_modules/.bin/tsc -b --pretty false` | 通过 |
 
 事件样例与失败部分正文/引用回放测试使用脱敏合成数据；真实 Workflow 的事件形状、断流/取消、事务回滚、跨请求重放仍是集成门禁。生产部署另行执行。
+
+
+## F05 / F07 / F06 实施补记（2026-09-21）
+
+依次实现并分项登记。F05企业schema升至9，新增CONVERSATION_BUSY/CONVERSATION_RESTART_REQUIRED两个409码；F07/F06有独立上游改动及ADR。生产Workflow导入文件、ACL、官方数据库迁移、依赖锁未改；未部署、未执行生产重解析。此前“无schema/API变化”仅描述此前F01–F04/F12批次。
+
+本轮可执行证据：28项无服务控制流/父块/语义验证测试通过（F05 5项、F07 7项、F06 16项）；F05前端14项与TypeScript检查通过；审查探针通过。F05补充提交后停止续租、终态只发送一次的边界保护。现有F01/F03/F12纯文本和事件回归在Python3.14下运行74项，73通过，1项因缺少fastapi无法导入Workflow路由而失败。企业完整pytest收集缺pytest_asyncio，真实PG/双worker、真实引擎、Python3.13固定依赖、模型盲评未验收。前端IntegrationHarnessPage既有8项失败在未改动HEAD副本同样复现，未删断言或跳过测试。
+
+上线前必须完成服务验收、排空旧Gateway worker、迁移重复active run预检，再配套更新Gateway/前端。父块先安全读后重建；F06须完成真实模型盲评。提交/本地测试不代表生产已修复。

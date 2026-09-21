@@ -125,6 +125,13 @@ async def main():
     parent_b = parent_module.parent_id("t", "kb", "B", "task", "same parent")
     assert parent_a != parent_b
     observations["parent_source_identity"] = {"equal_text_distinct_documents_have_distinct_ids": True}
+    verdict_ns = {"SufficiencyVerdict": NS}
+    extract("ragflow/rag/advanced_rag/harness/sufficiency.py", {"claim_verdict"}, verdict_ns)
+    claim = NS(claim_id="c", required=True, is_verified=True, confidence=1.0,
+               agent_result=NS(evidence_ids=[0]))
+    verdict = verdict_ns["claim_verdict"]([claim], [])
+    assert verdict.status != "SUFFICIENT"
+    observations["agentic_self_report_is_not_verification"] = {"status": verdict.status}
     observations["empty_metadata_scope"] = await retrieval_empty_metadata_probe()
     # A non-empty Message and normal EOF still require workflow_finished.
     message = {"event": "message", "data": {"content": "synthetic partial answer"}}

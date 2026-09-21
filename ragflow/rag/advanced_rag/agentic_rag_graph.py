@@ -199,6 +199,10 @@ def _merge_result_into_kbinfos(tools, result: dict) -> None:
     Mirrors the orchestrators' merge so seed evidence and orchestrator evidence
     share one deduplicated pool.
     """
+    if getattr(tools, "thinking_mode", "low") in {"medium", "high", "ultra"}:
+        from rag.advanced_rag.harness.evidence import registry_for
+        registry_for(tools).register(result.get("chunks", []))
+        return
     if hasattr(tools, "enforce_doc_scope"):
         result = tools.enforce_doc_scope(result)
     if not result or not result.get("chunks"):
@@ -312,6 +316,13 @@ def build_agentic_graph(tools, token_queue: asyncio.Queue, gen_conf: dict | None
 
         tools.kbinfos = kbinfos
 
+        mode = state.get("route").thinking_mode if state.get("route") else getattr(tools, "thinking_mode", "low")
+        if mode in {"medium", "high", "ultra"}:
+            from rag.advanced_rag.harness.semantic_verifier import guarded_final_answer
+            answer = await guarded_final_answer(tools, question, state.get("verdict"))
+            token_queue.put_nowait(answer)
+            return {"final_answer": answer, "kbinfos": tools.kbinfos}
+
         # Abstain
         if abstain:
             msg = "I cannot answer this question based on the available information."
@@ -387,6 +398,12 @@ async def run_agentic_rag(tools, messages: list, max_loops: int = 3, gen_conf: d
         len(messages[-1].get("content", "")) if messages else 0,
     )
 
+    # A second invocation in the same HTTP request must not inherit the previous
+    # question's claim assessments or terminal business status.
+    tools._evidence_registry = None
+    tools._verification_status = None
+    tools._verification_question = next((m['content'] for m in reversed(messages)
+        if m.get('role') == 'user' and isinstance(m.get('content'), str)), '')
     token_queue: asyncio.Queue = asyncio.Queue()
     graph = build_agentic_graph(tools, token_queue, gen_conf=gen_conf)
     _SENTINEL = object()

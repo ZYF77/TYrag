@@ -125,7 +125,7 @@ def _generate_report_schema() -> dict:
                     "evidence_ids": {
                         "type": "array",
                         "items": {"type": "integer"},
-                        "description": "Referenced chunk IDs.",
+                        "description": "Exact integer IDs from the [ID:n] evidence labels returned by tools; never invent or renumber IDs.",
                     },
                     "gaps": {
                         "type": "array",
@@ -138,7 +138,7 @@ def _generate_report_schema() -> dict:
                         "description": "New research directions discovered during research.",
                     },
                 },
-                "required": ["report", "is_verified", "confidence"],
+                "required": ["report", "evidence_ids"],
             },
         },
     }

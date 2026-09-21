@@ -59,7 +59,9 @@ class ClaimTarget:
     is_verified: bool = False
     confidence: float = 0.0
     suggested_tools: list[str] = field(default_factory=list)
-    agent_result: dict | None = None
+    agent_result: AgentResult | None = None
+    required: bool = True
+    verification: str = "unknown"
 
 
 @dataclass
@@ -83,6 +85,7 @@ class AgentResult:
     evidence_ids: list[int] = field(default_factory=list)
     gaps: list[str] = field(default_factory=list)
     discovered_claims: list[str] = field(default_factory=list)
+    verification: str = "unknown"
 
 
 # ═══════════════════════════════════════════════════════════════

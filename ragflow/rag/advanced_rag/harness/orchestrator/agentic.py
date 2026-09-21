@@ -9,11 +9,12 @@ from rag.advanced_rag.harness.types import (
     OrchestratorContext,
 )
 from rag.advanced_rag.harness.config import get_mode
+from rag.advanced_rag.harness.evidence import registry_for
+from rag.advanced_rag.harness.semantic_verifier import assess_claims
 from rag.advanced_rag.harness.pipeline import Pipeline
 from rag.advanced_rag.harness.agent import research_agent_loop
 from rag.advanced_rag.harness.sufficiency import (
-    cross_check_claim,
-    compute_fusion_score,
+    claim_verdict,
     route_sufficiency_verdict,
 )
 
@@ -38,8 +39,10 @@ async def agentic_research(state: dict, tools) -> dict:
     compilation_map = await _get_compilation_map(tools)
 
     claims = [ClaimTarget(**c) if isinstance(c, dict) else c for c in claims_raw]
+    for c in claims:
+        c.required, c.is_verified, c.verification = True, False, "unknown"
+    registry = registry_for(tools)
     ctx = OrchestratorContext(question=question, claims=claims, mode=mode_label)
-    pipeline = Pipeline(tools, compilation_map)
 
     for cycle in range(mode.max_orchestrator_cycles):
         ctx.iteration = cycle
@@ -47,6 +50,8 @@ async def agentic_research(state: dict, tools) -> dict:
 
         # ── Step A: Research unverified claims (parallel if mode allows) ──
         unverified = [c for c in ctx.claims if not c.is_verified]
+        unverified.sort(key=lambda c: c.claim_id in registry.assessments)
+        unverified = unverified[:8]
 
         if unverified:
             # Process in batches of max_parallel_agents
@@ -59,7 +64,7 @@ async def agentic_research(state: dict, tools) -> dict:
                     len(batch),
                     "; ".join(f'"{c.description}"' for c in batch),
                 )
-                tasks = [_run_claim_research(c, tools, pipeline, ctx, mode, compilation_map) for c in batch]
+                tasks = [_run_claim_research(c, tools, Pipeline(tools, compilation_map, c.claim_id), ctx, mode, compilation_map) for c in batch]
                 agent_results = await asyncio.gather(*tasks)
                 _LOG.info(
                     "[Agentic research] Round %d: finished researching %d step(s).",
@@ -68,15 +73,15 @@ async def agentic_research(state: dict, tools) -> dict:
                 )
 
                 for c, result in zip(batch, agent_results):
-                    is_verified = result.get("is_verified", False)
+                    is_verified = False
                     c.is_verified = is_verified
-                    c.confidence = result.get("confidence", 0.0)
+                    c.confidence = 0.0
                     c.agent_result = AgentResult(
                         claim_id=c.claim_id,
                         report=result.get("report", ""),
                         is_verified=is_verified,
                         confidence=c.confidence,
-                        evidence_ids=result.get("evidence_ids", []),
+                        evidence_ids=list(registry.for_claim(c.claim_id, result.get("evidence_ids", []))),
                         gaps=result.get("gaps", []),
                         discovered_claims=result.get("discovered_claims", []),
                     )
@@ -89,16 +94,14 @@ async def agentic_research(state: dict, tools) -> dict:
                                     ClaimTarget(
                                         claim_id=f"c_dyn_{len(ctx.claims)}",
                                         description=dc,
+                                        required=False,
                                     )
                                 )
                                 _LOG.info('[Agentic research] Found a new angle worth researching: "%s"', dc)
 
         # ── Step B: Sufficiency Check ──
-        all_chunks = {i: c for i, c in enumerate(tools.kbinfos.get("chunks", []))}
-        agent_results_list = [c.agent_result for c in ctx.claims if c.agent_result]
-        cross_results = [cross_check_claim(r, all_chunks) for r in agent_results_list]
-
-        verdict = compute_fusion_score(agent_results_list, cross_results, mode)
+        assessments = await assess_claims(tools, question, ctx.claims)
+        verdict = claim_verdict(ctx.claims, assessments)
         ctx.verdict = verdict
 
         action, should_continue = route_sufficiency_verdict(
@@ -115,19 +118,7 @@ async def agentic_research(state: dict, tools) -> dict:
         if action == "ANSWER_PARTIAL":
             return _finalize(ctx, tools, partial=True)
         if action == "ABSTAIN":
-            tools.kbinfos["chunks"] = []
-            return {"verdict": verdict.__dict__, "abstain": True}
-        if action == "REPLAN":
-            # Ultra: re-plan on low score
-            from rag.advanced_rag.harness.planner import planner_node
-
-            state["feedback"] = verdict.feedback
-            state["route"] = route
-            new_plan = await planner_node(state, tools)
-            ctx.claims = new_plan.get("claims", ctx.claims)
-        if action == "FALLBACK_LLM":
-            return _finalize(ctx, tools, partial=True, fallback=True)
-
+            return _finalize(ctx, tools, partial=True)
     # Max cycles reached
     return _finalize(ctx, tools, partial=True)
 
@@ -186,10 +177,12 @@ async def _run_claim_research(
 
 def _finalize(ctx: OrchestratorContext, tools, partial: bool = False, fallback: bool = False) -> dict:
     """Merge agent results into kbinfos and return."""
+    registry_for(tools).publish()
     _merge_agent_results(ctx, tools)
     return {
         "verdict": ctx.verdict.__dict__ if ctx.verdict else None,
         "partial_answer": partial or fallback,
+        "abstain": not any(c.is_verified for c in ctx.claims),
         "kbinfos": tools.kbinfos,
     }
 
@@ -200,7 +193,7 @@ def _merge_agent_results(ctx: OrchestratorContext, tools):
     seen_evidence = set()
 
     for c in ctx.claims:
-        if c.agent_result and c.agent_result.report:
+        if c.is_verified and c.agent_result and c.agent_result.report:
             status = "✅" if c.is_verified else "❌"
             combined.append(f"【{c.claim_id}】{status} {c.agent_result.report[:500]}")
 

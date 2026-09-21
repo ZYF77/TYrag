@@ -2931,6 +2931,7 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
 
         refs = deepcopy(rag_tools.kbinfos) if doc_ids else []
         for c in refs.get("chunks", []) if isinstance(refs, dict) else []:
+            c.pop("_evidence_id", None)
             if c.get("vector"):
                 del c["vector"]
 
@@ -3094,7 +3095,7 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
             final = await decorate_answer(traced)
             final["final"] = True
             final["audio_binary"] = None
-            final["status"] = _completion_status(final.get("answer") or "")
+            final["status"] = getattr(rag_tools, "_verification_status", None) or _completion_status(final.get("answer") or "")
             yield final
     else:
         answer = await chat_mdl.async_chat(rag_tools.sys_prompt(), messages, gen_conf)
@@ -3103,6 +3104,6 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
             logging.debug("User: {}|Assistant: {}".format(user_content, answer))
         res = await decorate_answer(answer)
         res["audio_binary"] = tts(tts_mdl, answer)
-        res["status"] = _completion_status(res.get("answer") or "")
+        res["status"] = getattr(rag_tools, "_verification_status", None) or _completion_status(res.get("answer") or "")
         yield res
     return
