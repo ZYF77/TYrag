@@ -52,7 +52,8 @@ async def execution_lease(db, principal, conversation, run):
     identity = identity_for(principal, conversation)
     await gw_write(db, store.assert_run_owner, **identity, run_id=run["run_id"])
     owner = asyncio.current_task()
-    token = active_run.set(dict(identity=identity, run_id=run["run_id"]))
+    execution = dict(identity=identity, run_id=run["run_id"], terminal_committed=False)
+    token = active_run.set(execution)
     lost = False
 
     async def heartbeat():
@@ -60,12 +61,18 @@ async def execution_lease(db, principal, conversation, run):
         try:
             while True:
                 await asyncio.sleep(HEARTBEAT_SECONDS)
+                if execution["terminal_committed"]:
+                    return
                 # The DB operation itself is bounded; a stuck DB must not keep emitting.
                 await asyncio.wait_for(gw_write(db, store.renew_run, **identity,
                     run_id=run["run_id"]), timeout=HEARTBEAT_SECONDS)
         except asyncio.CancelledError:
             raise
         except Exception:
+            # Renewal may have raced the terminal transaction. A committed
+            # result is authoritative; do not cancel its response delivery.
+            if execution["terminal_committed"]:
+                return
             lost = True
             owner.cancel()
 
@@ -99,12 +106,19 @@ def leased_run(fn):
             from . import v2_router as v2
             db, principal, conversation, run = context(args, kwargs)
             identity = identity_for(principal, conversation)
+            terminal_sent = False
             try:
                 async with execution_lease(db, principal, conversation, run):
                     async with contextlib.aclosing(fn(*args, **kwargs)) as source:
                         async for item in source:
+                            terminal_sent = terminal_sent or any(
+                                line.strip() in ("event: answer.completed", "event: run.failed")
+                                for line in item.splitlines()
+                            )
                             yield item
             except (store.RunOwnershipLost, TimeoutError):
+                if terminal_sent:
+                    return
                 result, error = await interrupted_result(db, identity, run)
                 if result:
                     async for item in v2._result_events(result):
@@ -113,11 +127,18 @@ def leased_run(fn):
                     body = json.loads(error.body)
                     yield v2._sse("run.failed", dict(body, conversationId=identity["conversation_id"], runId=run["run_id"]))
             except Exception:
-                _, error = await interrupted_result(db, identity, run)
-                body = json.loads(error.body) if error else {"code": "RUN_INTERRUPTED", "message": "Run interrupted"}
-                yield v2._sse("run.failed", dict(body, conversationId=identity["conversation_id"], runId=run["run_id"]))
+                if terminal_sent:
+                    return
+                result, error = await interrupted_result(db, identity, run)
+                if result:
+                    async for item in v2._result_events(result):
+                        yield item
+                else:
+                    body = json.loads(error.body)
+                    yield v2._sse("run.failed", dict(body, conversationId=identity["conversation_id"], runId=run["run_id"]))
             except (asyncio.CancelledError, GeneratorExit):
-                await asyncio.shield(interrupted_result(db, identity, run))
+                if not terminal_sent:
+                    await asyncio.shield(interrupted_result(db, identity, run))
                 raise
         return stream
 

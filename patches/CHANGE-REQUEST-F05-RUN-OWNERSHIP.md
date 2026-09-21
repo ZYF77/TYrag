@@ -8,6 +8,8 @@
 
 企业 schema 8→9；仅新增内部列和部分索引，不改官方数据库。API增加两个409错误码，不新增消息状态或响应字段。部署必须排空旧worker；迁移若发现重复active run则停止，不能自动选择胜者。回滚不能将仍运行的新worker与旧worker混用。
 
-验证：`python3 -m unittest discover -s docs/reviews/tests -p test_f05_control_flow.py -v` 2通过；审查探针通过。前端独立测试/类型检查结果见完整报告。`enterprise/tests/test_run_ownership.py` 提供真实PG竞争、迟到写入、续租及事务回滚用例；当前Python3.14环境缺少pytest_asyncio，未执行Python3.13/真实PG/双worker验收。不能以源码控制流测试代替数据库集成验证。
+终态提交后停止续租；成功终态已发送时，后续清理异常不能再次发送失败。提交成功但发送前异常时，从持久化结果回放。
+
+验证：`python3 -m unittest discover -s docs/reviews/tests -p test_f05_control_flow.py -v` 5通过；包含实际异步生成器的终态单次发送、提交后心跳停止和错误恢复测试。审查探针通过。前端独立测试/类型检查结果见完整报告。`enterprise/tests/test_run_ownership.py` 提供真实PG竞争、迟到写入、续租及事务回滚用例；当前Python3.14环境缺少pytest_asyncio，未执行Python3.13/真实PG/双worker验收。不能以源码控制流测试代替数据库集成验证。
 
 回归页面测试出现8项失败；在改动前HEAD的隔离副本上复现相同8项（包括既有界面断言、MSW未处理路由及当前Node multipart错误）。没有删除/跳过这些用例。

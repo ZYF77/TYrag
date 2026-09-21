@@ -142,7 +142,12 @@ async def _gw_write(gateway, fn, /, *args, **kwargs):
         owner = active_run.get()
         if owner:
             await v2_store.assert_run_owner(conn, **owner["identity"], run_id=owner["run_id"])
-        return await fn(conn, *args, **kwargs)
+        result = await fn(conn, *args, **kwargs)
+    # Set only after the transaction committed. The heartbeat shares this
+    # request-local record and must stop renewing a successfully finalized run.
+    if owner and fn in (v2_store.save_terminal_message_run, v2_store.save_failed_message_run):
+        owner["terminal_committed"] = True
+    return result
 
 
 async def get_db():
