@@ -1219,3 +1219,194 @@ async def test_quality_reconciler_fails_stuck_running():
         assert evaluation.last_error_code == "QUALITY_RUNNING_TIMEOUT"
     finally:
         await gateway.dispose()
+
+
+@pytest.mark.usefixtures("isolated_phase2_db")
+class TestQualityConfirmAPI:
+    """EAM inbound quality:confirm — review_required override + promote."""
+
+    @pytest.mark.asyncio
+    async def test_confirm_requires_audit_fields(self):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.post(
+                "/enterprise/api/v1/documents/DOC-C1/quality:confirm",
+                json={
+                    "source_system": "DEMO",
+                    "source_version_id": "v1",
+                    "decision_id": "dec-1",
+                },
+            )
+            assert resp.status_code == 422
+            assert resp.json()["code"] == "VALIDATION_ERROR"
+
+    @pytest.mark.asyncio
+    async def test_confirm_review_required_promotes(self):
+        from enterprise.gateway.quality import router as quality_router_module
+        from enterprise.gateway.sync.models import get_mapping
+
+        db = app.dependency_overrides[quality_router_module.get_db]()
+        doc = await _insert_ready_document(db, doc_id="DOC-C-PASS")
+        await _create_evaluation(db, doc, quality_status="review_required")
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.post(
+                "/enterprise/api/v1/documents/DOC-C-PASS/quality:confirm",
+                json={
+                    "tenant_id": "customer-a",
+                    "source_system": "DEMO",
+                    "source_version_id": "v1",
+                    "actor": "eam-reviewer-1",
+                    "reason": "manual override after visual check",
+                    "decision_id": "DEC-PASS-1",
+                },
+            )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["parseQualityStatus"] == "passed"
+        assert body["promoted"] is True
+        assert body["idempotent"] is False
+        assert body["currentVersion"] >= 1
+
+        evaluation = await gw_read(
+            db,
+            quality_models.get_latest_evaluation,
+            "customer-a",
+            "DEMO",
+            "DOC-C-PASS",
+            "v1",
+        )
+        assert evaluation.parse_quality_status == "passed"
+        assert any("manual_confirm" in r for r in (evaluation.quality_reasons or []))
+        assert (evaluation.metrics_json or {}).get("manualConfirm", {}).get("actor") == "eam-reviewer-1"
+
+        refreshed = await gw_read(
+            db, get_mapping, "customer-a", "DEMO", "DOC-C-PASS", "v1",
+        )
+        assert refreshed.current_version >= 1
+        assert refreshed.business_status == "active"
+
+    @pytest.mark.asyncio
+    async def test_confirm_idempotent_when_already_passed_current(self):
+        from enterprise.gateway.quality import router as quality_router_module
+        from enterprise.gateway.sync.models import get_mapping, update_mapping_status
+
+        db = app.dependency_overrides[quality_router_module.get_db]()
+        doc = await _insert_ready_document(db, doc_id="DOC-C-IDEM")
+        await _create_evaluation(db, doc, quality_status="passed")
+        # Mark as already current/retrievable without going through promote.
+        await gw_write(
+            db,
+            update_mapping_status,
+            doc,
+            sync_status="ready",
+            business_status="active",
+            current_version=1,
+            event_status="completed",
+        )
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.post(
+                "/enterprise/api/v1/documents/DOC-C-IDEM/quality:confirm",
+                headers={"Idempotency-Key": "DEC-IDEM-1"},
+                json={
+                    "tenant_id": "customer-a",
+                    "source_system": "DEMO",
+                    "source_version_id": "v1",
+                    "actor": "eam-reviewer-1",
+                    "reason": "replay",
+                },
+            )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["idempotent"] is True
+        assert body["parseQualityStatus"] == "passed"
+        assert body["promoted"] is True
+
+    @pytest.mark.asyncio
+    async def test_confirm_non_latest_returns_409(self):
+        from enterprise.gateway.quality import router as quality_router_module
+
+        db = app.dependency_overrides[quality_router_module.get_db]()
+        old = await _insert_ready_document(db, doc_id="DOC-C-OLD", ragflow_document_id="rf-old")
+        # Insert a newer version (higher id) for the same external document.
+        newer = await _insert_ready_document(
+            db, doc_id="DOC-C-OLD", ragflow_document_id="rf-new",
+        )
+        # Force distinct source_version_id on newer by rewriting via second insert helper pattern:
+        # _insert_ready_document always uses v1 — create an explicit second version.
+        from enterprise.gateway.sync.models import ExtDocumentMap, insert_mapping
+        import json as _json
+        newer_doc = ExtDocumentMap(
+            tenant_id="customer-a",
+            source_system="DEMO",
+            external_document_id="DOC-C-OLD",
+            source_version_id="v2",
+            event_id=str(uuid.uuid4()),
+            sha256=hashlib.sha256(b"ready-v2").hexdigest(),
+            file_name="manual.pdf",
+            ragflow_dataset_id="ds-1",
+            ragflow_document_id="rf-new",
+            sync_status="ready",
+            media_type="application/pdf",
+            department_id="d10",
+            security_level=2,
+            allow_group_ids=_json.dumps(["maintenance"]),
+            deny_group_ids="[]",
+            business_status="active",
+        )
+        newer_doc = await gw_write(db, insert_mapping, newer_doc)
+        await _create_evaluation(db, old, quality_status="review_required")
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.post(
+                "/enterprise/api/v1/documents/DOC-C-OLD/quality:confirm",
+                json={
+                    "tenant_id": "customer-a",
+                    "source_system": "DEMO",
+                    "source_version_id": "v1",
+                    "actor": "eam-reviewer-1",
+                    "reason": "should conflict",
+                    "decision_id": "DEC-OLD-1",
+                },
+            )
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["code"] == "CONFLICT"
+
+    @pytest.mark.asyncio
+    async def test_confirm_disabled_returns_review_already_closed(self):
+        from enterprise.gateway.quality import router as quality_router_module
+        from enterprise.gateway.sync.models import update_mapping_status
+
+        db = app.dependency_overrides[quality_router_module.get_db]()
+        doc = await _insert_ready_document(db, doc_id="DOC-C-DIS")
+        await _create_evaluation(db, doc, quality_status="review_required")
+        await gw_write(
+            db,
+            update_mapping_status,
+            doc,
+            sync_status="ready",
+            business_status="disabled",
+            current_version=0,
+            event_status="completed",
+        )
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.post(
+                "/enterprise/api/v1/documents/DOC-C-DIS/quality:confirm",
+                json={
+                    "tenant_id": "customer-a",
+                    "source_system": "DEMO",
+                    "source_version_id": "v1",
+                    "actor": "eam-reviewer-1",
+                    "reason": "should reject",
+                    "decision_id": "DEC-DIS-1",
+                },
+            )
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["code"] == "REVIEW_ALREADY_CLOSED"
+

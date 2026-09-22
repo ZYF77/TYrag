@@ -88,6 +88,12 @@ paths:
   /documents/{externalDocumentId}/disable:
     post:
       summary: Disable all active knowledge versions for an external document
+      description: |
+        EAM inbound stop/disable. Idempotent — repeating disable on an
+        already-disabled document succeeds with the same terminal state.
+        Maps to business_status=disabled and RAGFlow document disable.
+        Pair with quality:confirm for the review_required decision loop
+        (confirm = release into G; disable = stop retrieval).
       operationId: disableDocument
       x-status: implemented
       security:
@@ -281,6 +287,77 @@ paths:
               schema:
                 $ref: '#/components/schemas/ReevaluateQualityResponse'
         '404': { $ref: '#/components/responses/Error' }
+
+  /documents/{externalDocumentId}/quality:confirm:
+    post:
+      summary: EAM manual confirm of review_required quality (force passed + promote)
+      operationId: confirmDocumentQuality
+      x-status: implemented
+      description: |
+        EAM inbound. When Gateway quality gate marked a document `review_required`,
+        EAM may confirm release into the retrievable set G.
+
+        Semantics:
+        - Only `review_required` is confirmable (except idempotent replay of
+          already-passed + already-current).
+        - Writes audit override to parse_quality_status=passed, then calls the
+          existing promote_quality_passed_version path (RAGFlow enable +
+          promote_version_if_latest).
+        - Non-latest versions return 409 CONFLICT (no dual current).
+        - Disabled documents return 409 REVIEW_ALREADY_CLOSED.
+        - Auth: same service principal / HMAC as disable and quality:reevaluate.
+      security:
+        - ServiceAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ExternalDocumentId'
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: Alternative to body decision_id; at least one is required.
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfirmQualityRequest'
+            examples:
+              confirm:
+                value:
+                  tenant_id: default
+                  source_system: EAM
+                  source_version_id: "v1"
+                  actor: eam-reviewer-42
+                  reason: "Scanned manual reviewed; OCR gaps acceptable for retrieval"
+                  decision_id: "DEC-20260922-001"
+      responses:
+        '200':
+          description: Confirmed and promoted (or idempotent replay)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfirmQualityResponse'
+        '404':
+          description: NOT_FOUND
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '409':
+          description: CONFLICT or REVIEW_ALREADY_CLOSED
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '422':
+          description: VALIDATION_ERROR (missing actor/reason/source fields)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '503':
+          description: RAGFLOW_UNAVAILABLE (retryable)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
   /conversations:
     post:
       summary: Create a business conversation mapped to RAGFlow
@@ -611,6 +688,35 @@ components:
         excerpt: { type: [string, 'null'] }
         recordType: { type: [string, 'null'] }
         recordId: { type: [string, 'null'] }
+
+    ConfirmQualityRequest:
+      type: object
+      required: [source_system, source_version_id, actor, reason]
+      properties:
+        tenant_id: { type: string, default: default }
+        source_system: { type: string, description: Same as reevaluate source_system }
+        source_version_id: { type: string, description: Same as reevaluate source_version_id }
+        actor: { type: string, minLength: 1, description: EAM operator or system identity (required) }
+        reason: { type: string, minLength: 1, description: Non-empty audit reason (required) }
+        decision_id:
+          type: string
+          description: Idempotency token; required if Idempotency-Key header absent
+    ConfirmQualityResponse:
+      type: object
+      required: [externalDocumentId, sourceVersionId, parseQualityStatus, promoted, requestId]
+      properties:
+        externalDocumentId: { type: string }
+        sourceVersionId: { type: string }
+        parseQualityStatus: { type: string, enum: [passed] }
+        currentVersion: { type: integer }
+        businessStatus: { type: string }
+        promoted: { type: boolean }
+        idempotent: { type: boolean }
+        decisionId: { type: string, nullable: true }
+        actor: { type: string }
+        reason: { type: string }
+        requestId: { type: string }
+
     ErrorResponse:
       type: object
       required: [code, message, requestId]

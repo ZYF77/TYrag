@@ -273,3 +273,7 @@ GET `/enterprise/api/v3/documents/{id}/status` 仍保留给 Console/运维诊断
 - `contracts/file-share-v3.yaml`（3.1.0）
 - `contracts/file-share-callback-v1.yaml`
 - `contracts/metadata-schema.json`
+
+## 复核确认 / 停用（入站）
+
+质量门 `review_required` 后的 EAM 确认放行与停用，见 [`eam-file-share-review-inbound.md`](./eam-file-share-review-inbound.md)。

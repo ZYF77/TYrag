@@ -16,6 +16,7 @@ from enterprise.gateway.acl.policy import evaluate_document_acl
 from enterprise.gateway.acl.schema import DocumentAclFacts
 from enterprise.gateway.db.ops import gw_read, gw_write
 from enterprise.gateway.quality import models as quality_models
+from enterprise.gateway.quality import confirm as quality_confirm
 from enterprise.gateway.quality.gate import quality_dimensions, safe_metric_summary
 from enterprise.gateway.sync.models import get_mapping, get_versions_for_document
 
@@ -267,3 +268,103 @@ async def reevaluate_document_quality(
             "requestId": request_id,
         },
     )
+
+
+@router.post("/{external_document_id}/quality:confirm")
+async def confirm_document_quality(
+    external_document_id: str,
+    request: Request,
+    db=Depends(get_db),
+    principal=Depends(require_service_principal),
+):
+    """EAM inbound: manually confirm review_required -> passed + promote."""
+    del principal  # auth side-effect only; scope mirrors reevaluate
+    request_id = str(uuid.uuid4())
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+
+    source_system = str(body.get("source_system") or body.get("sourceSystem") or "").strip()
+    source_version_id = str(
+        body.get("source_version_id") or body.get("sourceVersionId") or ""
+    ).strip()
+    actor = str(body.get("actor") or "").strip()
+    reason = str(body.get("reason") or "").strip()
+    decision_id = body.get("decision_id") or body.get("decisionId")
+    if decision_id is not None:
+        decision_id = str(decision_id).strip() or None
+    if not decision_id:
+        decision_id = (request.headers.get("Idempotency-Key") or "").strip() or None
+
+    tenant_id = str(
+        body.get("tenant_id")
+        or body.get("tenantId")
+        or request.query_params.get("tenant_id")
+        or "default"
+    ).strip() or "default"
+
+    if not source_system or not source_version_id:
+        return _error(
+            422,
+            "VALIDATION_ERROR",
+            "source_system and source_version_id are required",
+            request_id,
+        )
+    if not actor or not reason:
+        return _error(
+            422,
+            "VALIDATION_ERROR",
+            "actor and reason are required and must be non-empty",
+            request_id,
+        )
+    if not decision_id:
+        return _error(
+            422,
+            "VALIDATION_ERROR",
+            "decision_id (body) or Idempotency-Key (header) is required",
+            request_id,
+        )
+
+    from enterprise.gateway import app as app_module
+
+    ragflow_client = app_module._ragflow_client()
+    try:
+        result = await quality_confirm.confirm_document_quality(
+            db,
+            tenant_id=tenant_id,
+            source_system=source_system,
+            external_document_id=external_document_id,
+            source_version_id=source_version_id,
+            actor=actor,
+            reason=reason,
+            decision_id=decision_id,
+            ragflow_client=ragflow_client,
+        )
+    except quality_confirm.ConfirmQualityError as exc:
+        return JSONResponse(
+            status_code=exc.http_status,
+            content={
+                "code": exc.code,
+                "message": exc.message,
+                "requestId": request_id,
+                "retryable": exc.retryable,
+            },
+        )
+
+    return {
+        "externalDocumentId": result.external_document_id,
+        "sourceVersionId": result.source_version_id,
+        "parseQualityStatus": result.parse_quality_status,
+        "currentVersion": result.current_version,
+        "businessStatus": result.business_status,
+        "promoted": result.promoted,
+        "idempotent": result.idempotent,
+        "decisionId": result.decision_id,
+        "actor": result.actor,
+        "reason": result.reason,
+        "requestId": request_id,
+    }
+
