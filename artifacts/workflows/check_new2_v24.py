@@ -11,6 +11,7 @@ assert "Agent:Research" not in c
 assert "Agent:AnswerResearch" in c and "Agent:AnswerResearch" in nodes
 ar_node = nodes["Agent:AnswerResearch"]
 assert ar_node.get("type") == "agentNode", ar_node.get("type")
+assert ar_node.get("data", {}).get("name"), "AnswerResearch missing data.name"
 
 assert "Switch:Coverage" not in c
 
@@ -66,5 +67,12 @@ assert "Agent:Draft@" not in blob
 assert "Agent:Research@" not in blob
 assert "{Agent:AnswerResearch@structured.answer}" in c["Message:Direct"]["obj"]["params"]["content"][0]
 assert "{Agent:AnswerResearch@structured.answer}" in c["Message:ResearchNoEvidence"]["obj"]["params"]["content"][0]
+
+
+# Edges must carry ReactFlow handles like v2.3 or import/runtime may drop Seed→AnswerResearch
+for e in d["graph"]["edges"]:
+    assert "sourceHandle" in e and "targetHandle" in e, e
+seed_ar = [e for e in d["graph"]["edges"] if e["source"]=="VariableAggregator:Seed" and e["target"]=="Agent:AnswerResearch"]
+assert seed_ar and seed_ar[0].get("sourceHandle")=="start" and seed_ar[0].get("targetHandle")=="end"
 
 print("PASS: New2 v2.4 structure checks")

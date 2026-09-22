@@ -644,9 +644,9 @@
     "Switch:ResearchOutcome": {
       "downstream": [
         "Message:Direct",
-        "Message:Failure",
+        "Message:ResearchNoEvidence",
         "Message:NoEvidence",
-        "Message:ResearchNoEvidence"
+        "Message:Failure"
       ],
       "obj": {
         "component_name": "Switch",
@@ -1143,134 +1143,165 @@
   "graph": {
     "edges": [
       {
-        "id": "e1",
+        "id": "Agent:Attachment:start->Message:Attachment",
         "source": "Agent:Attachment",
-        "target": "Message:Attachment"
+        "sourceHandle": "start",
+        "target": "Message:Attachment",
+        "targetHandle": "end"
       },
       {
-        "id": "e2",
+        "id": "Agent:Conversation:start->Message:Conversation",
         "source": "Agent:Conversation",
-        "target": "Message:Conversation"
+        "sourceHandle": "start",
+        "target": "Message:Conversation",
+        "targetHandle": "end"
       },
       {
-        "id": "e3",
+        "id": "Agent:Plan:start->Switch:Intent",
         "source": "Agent:Plan",
-        "target": "Switch:Intent"
+        "sourceHandle": "start",
+        "target": "Switch:Intent",
+        "targetHandle": "end"
       },
       {
-        "id": "e4",
+        "id": "Retrieval:Scope:start->VariableAggregator:Seed",
         "source": "Retrieval:Scope",
-        "target": "VariableAggregator:Seed"
+        "sourceHandle": "start",
+        "target": "VariableAggregator:Seed",
+        "targetHandle": "end"
       },
       {
-        "id": "e5",
+        "id": "Retrieval:Target:start->VariableAggregator:Seed",
         "source": "Retrieval:Target",
-        "target": "VariableAggregator:Seed"
+        "sourceHandle": "start",
+        "target": "VariableAggregator:Seed",
+        "targetHandle": "end"
       },
       {
-        "id": "e6",
+        "id": "Switch:Focus:Case 1->Retrieval:Target",
         "source": "Switch:Focus",
+        "sourceHandle": "Case 1",
         "target": "Retrieval:Target",
-        "sourceHandle": "Case 1"
+        "targetHandle": "end"
       },
       {
-        "id": "e7",
+        "id": "Switch:Focus:Case 2->Retrieval:Scope",
         "source": "Switch:Focus",
+        "sourceHandle": "Case 2",
         "target": "Retrieval:Scope",
-        "sourceHandle": "Case 2"
+        "targetHandle": "end"
       },
       {
-        "id": "e8",
+        "id": "Switch:Focus:end_cpn_ids->Message:Failure",
         "source": "Switch:Focus",
+        "sourceHandle": "end_cpn_ids",
         "target": "Message:Failure",
-        "sourceHandle": "end_cpn_ids"
+        "targetHandle": "end"
       },
       {
-        "id": "e9",
+        "id": "Switch:Intent:Case 1->Message:Clarify",
         "source": "Switch:Intent",
+        "sourceHandle": "Case 1",
         "target": "Message:Clarify",
-        "sourceHandle": "Case 1"
+        "targetHandle": "end"
       },
       {
-        "id": "e10",
+        "id": "Switch:Intent:Case 2->Message:Boundary",
         "source": "Switch:Intent",
+        "sourceHandle": "Case 2",
         "target": "Message:Boundary",
-        "sourceHandle": "Case 2"
+        "targetHandle": "end"
       },
       {
-        "id": "e11",
+        "id": "Switch:Intent:Case 3->Agent:Attachment",
         "source": "Switch:Intent",
+        "sourceHandle": "Case 3",
         "target": "Agent:Attachment",
-        "sourceHandle": "Case 3"
+        "targetHandle": "end"
       },
       {
-        "id": "e12",
+        "id": "Switch:Intent:Case 4->Agent:Conversation",
         "source": "Switch:Intent",
+        "sourceHandle": "Case 4",
         "target": "Agent:Conversation",
-        "sourceHandle": "Case 4"
+        "targetHandle": "end"
       },
       {
-        "id": "e13",
+        "id": "Switch:Intent:Case 5->Switch:Scope",
         "source": "Switch:Intent",
+        "sourceHandle": "Case 5",
         "target": "Switch:Scope",
-        "sourceHandle": "Case 5"
+        "targetHandle": "end"
       },
       {
-        "id": "e14",
+        "id": "Switch:Intent:end_cpn_ids->Message:Failure",
         "source": "Switch:Intent",
+        "sourceHandle": "end_cpn_ids",
         "target": "Message:Failure",
-        "sourceHandle": "end_cpn_ids"
+        "targetHandle": "end"
       },
       {
-        "id": "e15",
+        "id": "Switch:ResearchOutcome:Case 1->Message:Direct",
         "source": "Switch:ResearchOutcome",
+        "sourceHandle": "Case 1",
         "target": "Message:Direct",
-        "sourceHandle": "Case 1"
+        "targetHandle": "end"
       },
       {
-        "id": "e16",
+        "id": "Switch:ResearchOutcome:Case 2->Message:ResearchNoEvidence",
         "source": "Switch:ResearchOutcome",
-        "target": "Message:Failure",
-        "sourceHandle": "end_cpn_ids"
-      },
-      {
-        "id": "e17",
-        "source": "Switch:ResearchOutcome",
-        "target": "Message:NoEvidence",
-        "sourceHandle": "Case 3"
-      },
-      {
-        "id": "e18",
-        "source": "Switch:ResearchOutcome",
+        "sourceHandle": "Case 2",
         "target": "Message:ResearchNoEvidence",
-        "sourceHandle": "Case 2"
+        "targetHandle": "end"
       },
       {
-        "id": "e19",
+        "id": "Switch:ResearchOutcome:Case 3->Message:NoEvidence",
+        "source": "Switch:ResearchOutcome",
+        "sourceHandle": "Case 3",
+        "target": "Message:NoEvidence",
+        "targetHandle": "end"
+      },
+      {
+        "id": "Switch:ResearchOutcome:end_cpn_ids->Message:Failure",
+        "source": "Switch:ResearchOutcome",
+        "sourceHandle": "end_cpn_ids",
+        "target": "Message:Failure",
+        "targetHandle": "end"
+      },
+      {
+        "id": "Switch:Scope:Case 1->Message:NoScope",
         "source": "Switch:Scope",
+        "sourceHandle": "Case 1",
         "target": "Message:NoScope",
-        "sourceHandle": "Case 1"
+        "targetHandle": "end"
       },
       {
-        "id": "e20",
+        "id": "Switch:Scope:end_cpn_ids->Switch:Focus",
         "source": "Switch:Scope",
+        "sourceHandle": "end_cpn_ids",
         "target": "Switch:Focus",
-        "sourceHandle": "end_cpn_ids"
+        "targetHandle": "end"
       },
       {
-        "id": "e21",
+        "id": "VariableAggregator:Seed:start->Agent:AnswerResearch",
         "source": "VariableAggregator:Seed",
-        "target": "Agent:AnswerResearch"
+        "sourceHandle": "start",
+        "target": "Agent:AnswerResearch",
+        "targetHandle": "end"
       },
       {
-        "id": "e22",
+        "id": "begin:start->Agent:Plan",
         "source": "begin",
-        "target": "Agent:Plan"
+        "sourceHandle": "start",
+        "target": "Agent:Plan",
+        "targetHandle": "end"
       },
       {
-        "id": "e23",
+        "id": "Agent:AnswerResearch:start->Switch:ResearchOutcome",
         "source": "Agent:AnswerResearch",
-        "target": "Switch:ResearchOutcome"
+        "sourceHandle": "start",
+        "target": "Switch:ResearchOutcome",
+        "targetHandle": "end"
       }
     ],
     "nodes": [
@@ -2682,7 +2713,8 @@
             "top_p": 0.75,
             "user_prompt": "",
             "visual_files_var": ""
-          }
+          },
+          "name": "够证直答 · 缺口补证 · 合并 Draft+Research"
         },
         "sourcePosition": "right",
         "targetPosition": "left"

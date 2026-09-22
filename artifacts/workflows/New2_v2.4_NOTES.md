@@ -23,3 +23,11 @@ python3 artifacts/workflows/check_new2_v24.py
 ## Hotfix (Sim KeyError)
 - `Agent:AnswerResearch` graph node type must be `agentNode` (was wrongly `ragNode` after v2.4 transform), otherwise Seed succeeds then KeyError before AnswerResearch runs.
 
+## Hotfix2 (Sim still KeyError after agentNode)
+- Rebuild all graph edges with `sourceHandle`/`targetHandle` (v2.3 style). Transform had stripped them; Seed could finish while AnswerResearch never started.
+
+## Hotfix2b (Probe)
+- Runtime KeyError is exactly `name`: `canvas.get_component_name` reads `graph.nodes[Agent:AnswerResearch].data["name"]`.
+- Bad PUT had `type=ragNode` and data with only label+form (no name).
+- Fix requires both `type=agentNode` and non-empty `data.name`.
+
