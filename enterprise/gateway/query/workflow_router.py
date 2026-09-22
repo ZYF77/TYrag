@@ -1074,7 +1074,7 @@ async def _workflow_run_result(
             citations=partial_citations,
         )
     except Exception:
-        logger.exception("workflow message run failed")
+        logger.error("workflow message run failed")
         return None, await v2._save_failed_run(
             db, principal, conversation, internal_req, run, assistant_message_id,
             code="INTERNAL_ERROR", status_code=500,
@@ -1508,7 +1508,7 @@ async def _workflow_stream(
             },
         )
     except Exception:
-        logger.exception("workflow stream failed")
+        logger.error("workflow stream failed")
         partial_content, public_citations = await persist_workflow_failure(
             "INTERNAL_ERROR",
             500,

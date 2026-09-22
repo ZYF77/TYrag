@@ -105,7 +105,7 @@ def _strip_timeline_html(answer: str) -> tuple[str, str]:
     return text, ""
 
 
-def split_assistant_output(raw: str | None) -> SplitOutput:
+def _split_unprotected_output(raw: str | None) -> SplitOutput:
     text = _repair_damaged_think_tags(raw or "")
     if not text:
         return SplitOutput("", "")
@@ -113,8 +113,8 @@ def split_assistant_output(raw: str | None) -> SplitOutput:
     if blocks:
         reasoning = "\n".join(item.strip() for item in blocks if item.strip())
         answer = _PAIR_RE.sub("", text)
-        answer, timeline = _strip_timeline_html(answer.strip())
-        return SplitOutput(answer.strip(), _join_reasoning(reasoning, timeline))
+        rest = _split_unprotected_output(answer.strip())
+        return SplitOutput(rest.answer, _join_reasoning(reasoning, rest.reasoning))
     close_at = text.lower().rfind(_CLOSE)
     if close_at >= 0:
         reasoning = _TAG_RE.sub("", text[:close_at]).strip()
@@ -124,7 +124,28 @@ def split_assistant_output(raw: str | None) -> SplitOutput:
     answer, timeline = _strip_timeline_html(text)
     if timeline:
         return SplitOutput(answer.strip(), timeline)
+    open_at = text.lower().find(_OPEN)
+    if open_at >= 0:
+        return SplitOutput(text[:open_at].strip(), text[open_at + len(_OPEN):])
     return SplitOutput(text, "")
+
+
+def split_assistant_output(raw: str | None) -> SplitOutput:
+    from .citation_select import _protected_ranges
+    import uuid
+    text = raw or ""
+    prefix = uuid.uuid4().hex
+    saved = {}
+    for i, (start, end) in reversed(list(enumerate(_protected_ranges(text)))):
+        token = f"{prefix}_{i}_"
+        saved[token] = text[start:end]
+        text = text[:start] + token + text[end:]
+    result = _split_unprotected_output(text)
+    answer, reasoning = result.answer, result.reasoning
+    for token, content in saved.items():
+        answer = answer.replace(token, content)
+        reasoning = reasoning.replace(token, content)
+    return SplitOutput(answer, reasoning)
 
 
 def finalize_streamed_output(
@@ -164,8 +185,12 @@ def finalize_streamed_output(
 
 
 def public_reasoning(text: str | None) -> str | None:
-    value = (text or "").strip()
-    return value or None
+    # Only report an observed processing stage; never copy model text.
+    return "正在处理请求。" if text else None
+
+
+def safe_execution_reasoning(text: str | None, format: str | None) -> str | None:
+    return text if format == "safe_execution_v1" and text == "正在处理请求。" else None
 
 
 class StreamThinkSplitter:
@@ -174,6 +199,8 @@ class StreamThinkSplitter:
     def __init__(self) -> None:
         self._in_think = False
         self._carry = ""
+        self._code = ""
+        self._line = ""
 
     def feed(
         self,
@@ -191,39 +218,59 @@ class StreamThinkSplitter:
             self._in_think = False
         return [(kind, chunk) for kind, chunk in pieces if chunk]
 
+    def finish(self) -> list[tuple[str, str]]:
+        carry, self._carry = self._carry, ""
+        if not carry or carry.lower().startswith("<"):
+            return []
+        return [(self._kind(), carry)]
+
     def _kind(self) -> str:
         return "reasoning" if self._in_think else "answer"
 
     def _split_text(self, text: str) -> list[tuple[str, str]]:
         pieces: list[tuple[str, str]] = []
+        def emit(value):
+            if pieces and pieces[-1][0] == self._kind():
+                pieces[-1] = (self._kind(), pieces[-1][1] + value)
+            else:
+                pieces.append((self._kind(), value))
+            self._line = (self._line + value).rsplit("\n", 1)[-1]
         index = 0
         while index < len(text):
-            open_at = text.find(_OPEN, index)
-            close_at = text.find(_CLOSE, index)
-            if open_at < 0 and close_at < 0:
-                carry_len = _incomplete_tag_suffix(text[index:])
-                if carry_len:
-                    chunk = text[index : len(text) - carry_len]
-                    if chunk:
-                        pieces.append((self._kind(), chunk))
-                    self._carry = text[len(text) - carry_len :]
-                elif text[index:]:
-                    pieces.append((self._kind(), text[index:]))
-                break
-            if open_at >= 0 and (close_at < 0 or open_at < close_at):
-                tag_at, tag_len, opening = open_at, len(_OPEN), True
-            else:
-                tag_at, tag_len, opening = close_at, len(_CLOSE), False
-            if tag_at > index:
-                pieces.append((self._kind(), text[index:tag_at]))
-            self._in_think = opening
-            index = tag_at + tag_len
+            char = text[index]
+            if char in "`~" and not self._in_think:
+                run = re.match(re.escape(char) + "+", text[index:]).group(0)
+                if index + len(run) == len(text):
+                    self._carry = text[index:]
+                    break
+                if self._code:
+                    if run == self._code or (len(self._code) >= 3 and run[0] == self._code[0] and len(run) >= len(self._code)):
+                        self._code = ""
+                elif char == "`" or (len(run) >= 3 and not self._line.strip()):
+                    self._code = run
+                emit(run)
+                index += len(run)
+                continue
+            indented = self._line.startswith(("    ", "\t"))
+            escaped = (len(self._line) - len(self._line.rstrip("\\"))) % 2 == 1
+            if char == "<" and not self._code and not indented and not escaped:
+                tail = text[index:].lower()
+                tag = next((tag for tag in (_OPEN, _CLOSE) if tail.startswith(tag)), None)
+                if tag:
+                    self._in_think = tag == _OPEN
+                    index += len(tag)
+                    continue
+                if _OPEN.startswith(tail) or _CLOSE.startswith(tail):
+                    self._carry = text[index:]
+                    break
+            emit(char)
+            index += 1
         return pieces
 
 
 def _incomplete_tag_suffix(text: str) -> int:
     for length in range(min(len(_CLOSE), len(text)), 0, -1):
-        suffix = text[-length:]
+        suffix = text[-length:].lower()
         if _OPEN.startswith(suffix) or _CLOSE.startswith(suffix):
             return length
     return 0

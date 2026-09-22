@@ -201,7 +201,8 @@ export function HarnessChat({
             }
             const isFailed = isFailedStatus(message.status);
             const isThinking = message.thinking || (message.status === 'streaming' && !message.content);
-            const hasReasoning = Boolean(message.reasoning?.trim());
+            const safeReasoning = message.reasoning === '正在处理请求。' ? message.reasoning : '';
+            const hasReasoning = Boolean(safeReasoning);
             const sources = groupCitationSources(message.citations);
             return (
               <article
@@ -228,12 +229,12 @@ export function HarnessChat({
                     >
                       <ChevronRight size={15} aria-hidden="true" className="harness-reasoning-chevron" />
                       {isThinking && <span className="console-thinking-dot" aria-hidden="true" />}
-                      <span>{isThinking ? '思考中' : '思考过程'}</span>
+                      <span>{isThinking ? '处理中' : '处理过程'}</span>
                       {hasReasoning && <small>{expandedReasoning === message.id ? '收起' : '展开'}</small>}
                     </button>
                     {expandedReasoning === message.id && hasReasoning && (
-                      <div className="harness-reasoning-content" aria-label="思考过程">
-                        {message.reasoning}
+                      <div className="harness-reasoning-content" aria-label="处理过程">
+                        {safeReasoning}
                       </div>
                     )}
                     {isThinking && !hasReasoning && (
@@ -296,7 +297,7 @@ export function HarnessChat({
         {error?.code === 'CONVERSATION_RESTART_REQUIRED' && onNewConversation && (
           <button type="button" className="console-secondary-button" onClick={onNewConversation}>新建会话继续</button>
         )}
-        <QuestionInput
+      <QuestionInput
           onSend={onSend}
           onCancel={onCancel}
           isStreaming={isStreaming}

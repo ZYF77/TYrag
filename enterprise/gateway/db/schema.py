@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from enterprise.gateway.db.dialect import add_column_if_missing, exec_sql
 from enterprise.gateway.db.tables import metadata
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 
 def _quote_identifier(value: str) -> str:
@@ -275,6 +275,7 @@ async def initialize_schema(engine: AsyncEngine, *, schema: str = "public") -> N
             "TEXT",
         )
         await add_column_if_missing(conn, "ext_v2_conversation", "restart_required", "INTEGER NOT NULL DEFAULT 0")
+        await add_column_if_missing(conn, "ext_v2_message", "reasoning_format", "TEXT")
         duplicates = await conn.execute(text("""SELECT COUNT(*) FROM (
             SELECT 1 FROM ext_v2_message_run WHERE status='running'
             GROUP BY tenant_id, business_user_id, conversation_id HAVING COUNT(*) > 1
@@ -311,6 +312,8 @@ async def initialize_schema(engine: AsyncEngine, *, schema: str = "public") -> N
             values = [8]
         if values == [8]:
             values = [9]
+        if values == [9]:
+            values = [10]
         elif values not in ([], [SCHEMA_VERSION]):
             raise RuntimeError(
                 f"unsupported Gateway schema version: {values!r}; "

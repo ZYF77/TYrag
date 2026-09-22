@@ -114,7 +114,7 @@ async def list_my_memory(
             limit=max(1, min(int(limit), 100)),
         )
     except Exception as exc:
-        logger.warning("list_my_memory_failed error=%s", exc)
+        logger.warning("list_my_memory_failed error_type=%s", type(exc).__name__)
         return _error(502, "MEMORY_UPSTREAM_ERROR", "Failed to list memory messages")
     return {
         "code": 0,
@@ -159,7 +159,7 @@ async def forget_my_memory(
             message_id=message_id,
         )
     except Exception as exc:
-        logger.warning("forget_my_memory_failed error=%s", exc)
+        logger.warning("forget_my_memory_failed error_type=%s", type(exc).__name__)
         return _error(502, "MEMORY_UPSTREAM_ERROR", "Failed to forget memory message")
     return {"code": 0, "message": "ok", "data": {"forgotten": True, "messageId": message_id}}
 

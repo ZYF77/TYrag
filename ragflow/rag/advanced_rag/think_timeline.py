@@ -122,9 +122,10 @@ def display_stage_name(stage: str) -> str:
     raw = (stage or "").strip()
     if not raw:
         return "stage"
-    if raw.startswith("[") and raw.endswith("]"):
-        return raw[1:-1].strip() or raw
-    return _STAGE_DISPLAY.get(raw, raw)
+    from rag.advanced_rag.think_log import _STAGE_DESCRIPTIONS
+    if raw in _STAGE_DESCRIPTIONS:
+        return raw[1:-1].strip()
+    return _STAGE_DISPLAY.get(raw, "")
 
 
 def _safe_meta(payload: dict[str, Any] | None) -> dict[str, Any]:
@@ -143,13 +144,13 @@ def _safe_meta(payload: dict[str, Any] | None) -> dict[str, Any]:
                 continue
             out[key] = round(float(value), 3)
         elif isinstance(value, str):
-            # Skip reasons / statuses only — never free-form user text.
-            cleaned = value.strip()
-            if not cleaned or len(cleaned) > 120:
-                continue
-            if any(ch in cleaned for ch in ("\n", "<", "{", "}")):
-                continue
-            out[key] = cleaned
+            allowed = {
+                "status": {"success", "failed", "skipped", "empty", "started", "info"},
+                "mode": {"agentic", "simple", "low", "medium", "high", "ultra"},
+                "source": {"ragflow", "agentic", "gateway"},
+            }
+            if value in allowed.get(key, set()):
+                out[key] = value
     return out
 
 
@@ -168,7 +169,8 @@ def record_think_timeline_stage(
             return
         started = _TIMELINE_STARTED.get() or time.perf_counter()
         stage_name = str(stage or "").strip()[:64]
-        if not stage_name:
+        from rag.advanced_rag.think_log import _STAGE_DESCRIPTIONS
+        if stage_name not in _STAGE_DISPLAY and stage_name not in _STAGE_DESCRIPTIONS:
             return
         safe = _safe_meta(meta)
         # Deduplicate identical consecutive stage+status (common for repeated logs).
@@ -198,7 +200,7 @@ def record_think_timeline_stage(
                 "display": display_stage_name(stage_name),
                 "atMs": round(max(0.0, (time.perf_counter() - started) * 1000), 3),
                 "meta": safe,
-                "source": str(source)[:32],
+                "source": source if source in {"ragflow", "agentic", "gateway"} else "ragflow",
             }
         )
     except Exception:
@@ -243,8 +245,11 @@ def render_think_timeline(entries: list[dict[str, Any]] | None = None) -> str:
         "<p><em>Structured safe execution timeline (no prompt / knowledge / tool bodies).</em></p>"
     ]
     for item in items:
-        display = html.escape(str(item.get("display") or item.get("stage") or "stage"))
-        meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+        display = display_stage_name(str(item.get("stage") or ""))
+        if not display:
+            continue
+        display = html.escape(display)
+        meta = _safe_meta(item.get("meta"))
         duration = meta.get("durationMs")
         status = meta.get("status")
         summary_bits = [f"<strong>{display}</strong>"]
@@ -290,6 +295,8 @@ def stages_from_flat_lines(lines: list[str]) -> list[dict[str, Any]]:
             stage = f"[{match.group(1).strip()}]"
         else:
             stage = text[:64]
+        if not display_stage_name(stage):
+            continue
         entries.append(
             {
                 "stage": stage,

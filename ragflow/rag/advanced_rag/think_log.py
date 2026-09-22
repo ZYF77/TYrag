@@ -88,10 +88,9 @@ class ThinkLogHandler(logging.Handler):
         # Only the bracket-tagged progress lines ("[Hybrid search] ...").
         if not msg or not msg.lstrip().startswith("["):
             return
-        if _think_log_redact.get():
-            msg = public_think_log_detail(msg)
-            if not msg:
-                return
+        msg = public_think_log_detail(msg)
+        if not msg:
+            return
         try:
             sink("<br>" + msg.strip())
         except Exception:
@@ -119,7 +118,9 @@ def public_think_log_detail(msg: str) -> str | None:
     if display_tag.startswith("<br>"):
         display_tag = display_tag[4:].strip()
     description = _STAGE_DESCRIPTIONS.get(display_tag)
-    safe = f"{display_tag} {description}" if description else display_tag
+    if not description:
+        return None
+    safe = f"{display_tag} {description}"
     # Additive: project into structured Thinking timeline when collector is on.
     try:
         from rag.advanced_rag.think_timeline import (

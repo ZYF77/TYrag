@@ -38,6 +38,9 @@ class LLMService(CommonService):
 
 class LLMBundle(LLM4Tenant):
     def __init__(self, tenant_id: str, model_config: dict, lang="Chinese", **kwargs):
+        from rag.safe_logging import active
+        if active():
+            kwargs["disable_langfuse"] = True
         super().__init__(tenant_id, model_config, lang, **kwargs)
 
     def _start_langfuse_observation(self, **kwargs):

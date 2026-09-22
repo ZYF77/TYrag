@@ -173,8 +173,8 @@ async def main():
     observations["noncitation_text_preserved"] = {"input": original, "output": changed}
     from enterprise.gateway.query.answer_split import split_assistant_output, public_reasoning
     raw = public_reasoning(split_assistant_output("<think>synthetic private reasoning</think>answer").reasoning)
-    assert raw == "synthetic private reasoning"
-    observations["public_reasoning_is_unredacted"] = {"synthetic_reasoning_preserved": True}
+    assert raw == "正在处理请求。"
+    observations["public_reasoning_is_safe_stage"] = {"synthetic_reasoning_preserved": False}
     print(json.dumps({"kind": "source-level synthetic audit observations", "observations": observations}, ensure_ascii=False, indent=2))
 
 

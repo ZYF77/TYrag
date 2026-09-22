@@ -143,13 +143,15 @@ Chat 和 Workflow 不再因 `no_reliable_evidence` 或 `failed` 自动替换正�
 
 **建议**：保留可识别的联调策略；生产 profile 启动时禁止 tenant-open，或明确限定上线仅接受租户级隔离。若要求文档级 ACL，必须先实现真实策略并负向验收，不能通过隐藏菜单宣称满足。
 
-### F09 · P1：原始推理存在公开展示通道〔源码复现与调用链确认〕
+### F09 · P1：原始推理存在公开展示通道〔本地修复，待服务验收〕
 
 位置：`enterprise/gateway/query/answer_split.py` 的 public_reasoning；`v2_router.py:2017`、`:2330`；上游 `ragflow/rag/llm/chat_model.py` 的 reasoning_content 处理。
 
-public_reasoning 主要原样返回拆出的 think 内容，Chat JSON/SSE 会投影并持久化。若 provider 返回原始 reasoning，则可进入 reasoning.delta，不符合安全诊断摘要要求。Workflow 主动丢弃 reasoning 的做法较合理。另 planner 的问题片段/解析失败原文截断日志不是脱敏。
+**修复前**：public_reasoning 主要原样返回拆出的 think 内容，Chat JSON/SSE 会投影并持久化。若 provider 返回原始 reasoning，则可进入 reasoning.delta，不符合安全诊断摘要要求。Workflow 主动丢弃 reasoning 的做法较合理。另 planner 的问题片段/解析失败原文截断日志不是脱敏。
 
 **建议**：只公开白名单事件摘要，例如“检索完成，获得 N 条候选”，不从原始 Chain-of-Thought 自动摘录；原始模型响应和问题正文不进入普通日志。本次仅用合成推理验证通道，未读取实际用户推理或认定线上已泄漏。
+
+**本次实现（2026-09-22）**：Gateway 仅输出固定处理提示，旧 reasoning 无内部格式标记则隐藏；前端只展示白名单提示并改为“处理过程”。JSON/流式协议标签与代码字面量分别处理。企业调用的上游日志记录在 handler 前移除正文、参数和异常堆栈，模型 tracing 禁止敏感外发；未知阶段/字符串元数据丢弃。企业 schema 增加 reasoning_format，旧记录不物理删除。详见 [F09登记](../../patches/CHANGE-REQUEST-F09-SAFE-PROCESS.md)。固定 Python3.13 / 真实 Provider 与日志出口集成待验收。
 
 ### F10 · P1：Workflow 版本是标签，尚不是不可变发布物〔源码确认〕
 
@@ -329,3 +331,8 @@ Workflow 路由 include_in_schema=False 不构成权限，现有 ask/view_citati
 本轮可执行证据：28项无服务控制流/父块/语义验证测试通过（F05 5项、F07 7项、F06 16项）；F05前端14项与TypeScript检查通过；审查探针通过。F05补充提交后停止续租、终态只发送一次的边界保护。现有F01/F03/F12纯文本和事件回归在Python3.14下运行74项，73通过，1项因缺少fastapi无法导入Workflow路由而失败。企业完整pytest收集缺pytest_asyncio，真实PG/双worker、真实引擎、Python3.13固定依赖、模型盲评未验收。前端IntegrationHarnessPage既有8项失败在未改动HEAD副本同样复现，未删断言或跳过测试。
 
 上线前必须完成服务验收、排空旧Gateway worker、迁移重复active run预检，再配套更新Gateway/前端。父块先安全读后重建；F06须完成真实模型盲评。提交/本地测试不代表生产已修复。
+
+
+## F09 实施补记（2026-09-22）
+
+安全过程白名单与历史格式标记已实现，企业schema 9→10。F09六项合成控制测试、既有文本/事件回归和前端安全过程用例通过；真实Python3.13、Provider、日志出口与PG迁移仍待验收。上游最小补丁和升级重放见F09登记；未部署，不修改生产Workflow或ACL。

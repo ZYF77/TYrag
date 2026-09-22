@@ -47,6 +47,7 @@ from enterprise.gateway.query.answer_split import (
     StreamThinkSplitter,
     finalize_streamed_output,
     public_reasoning,
+    safe_execution_reasoning,
     split_assistant_output,
 )
 from enterprise.gateway.query.citation_select import (
@@ -219,6 +220,7 @@ def _public_run_payload(result: dict, citations: list[dict] | None = None) -> di
         for key, value in result.items()
         if not str(key).startswith("_")
     }
+    payload["reasoning"] = safe_execution_reasoning(result.get("reasoning"), result.get("_reasoning_format"))
     if citations is not None:
         payload["citations"] = citations
     return payload
@@ -1687,7 +1689,7 @@ async def _warmup_ragflow_mapping(
             session_id,
         )
     except Exception:
-        logger.exception(
+        logger.error(
             "ragflow_warmup_failed conversation_id=%s",
             conversation_id,
         )
@@ -2177,6 +2179,7 @@ async def _execute_json_run(
                 "messageId": assistant_message_id,
                 "answer": answer,
                 "reasoning": reasoning,
+                "_reasoning_format": "safe_execution_v1",
                 "status": status,
                 "citations": citations,
                 "replayed": False,
@@ -2278,7 +2281,7 @@ async def _execute_json_run(
                 reasoning=reasoning,
             )
         except Exception as exc:
-            logger.exception("json message run failed err_type=%s", type(exc).__name__)
+            logger.error("json message run failed err_type=%s", type(exc).__name__)
             return None, await _save_failed_run(
                 db, principal, conversation, req, run, assistant_message_id,
                 code="INTERNAL_ERROR", status_code=500, message="Message run failed",
@@ -2540,7 +2543,10 @@ async def _stream_run_events(
                                     },
                                 )
                                 first_reasoning_recorded = True
-                            accumulated_reasoning += chunk
+                            if accumulated_reasoning:
+                                continue
+                            accumulated_reasoning = public_reasoning(chunk) or ""
+                            chunk = accumulated_reasoning
                             event = "reasoning.delta"
                         else:
                             if chunk and not first_answer_recorded:
@@ -2574,6 +2580,9 @@ async def _stream_run_events(
 
             # Safety net: strip timeline / think wrappers even if stream flags or
             # tags were missing/corrupted before persist + outbound answer.delta.
+            for kind, tail in splitter.finish():
+                if kind == "answer":
+                    accumulated += tail
             raw_stream_outputs = (accumulated, accumulated_reasoning, final_delta)
             finalized = finalize_streamed_output(
                 accumulated, accumulated_reasoning, final_delta
@@ -2726,6 +2735,7 @@ async def _stream_run_events(
             "messageId": assistant_message_id,
             "answer": answer,
             "reasoning": reasoning,
+            "_reasoning_format": "safe_execution_v1",
             "status": status,
             "citations": citations,
             "replayed": False,
@@ -2896,7 +2906,7 @@ async def _stream_run_events(
             },
         )
     except Exception as exc:
-        logger.exception("sse message run failed err_type=%s", type(exc).__name__)
+        logger.error("sse message run failed err_type=%s", type(exc).__name__)
         partial_content, public_citations = await persist_stream_failure(
             "INTERNAL_ERROR",
             500,
@@ -2937,30 +2947,13 @@ async def _result_events(result: dict) -> AsyncIterator[str]:
             "replayed": result["replayed"],
         },
     )
-    for delta in result.get("_streamDeltas", []):
-        if isinstance(delta, dict):
-            event = str(delta.get("event") or "answer.delta")
-            content = delta.get("content")
-        else:
-            event = "answer.delta"
-            content = delta
-        yield _sse(
-            event,
-            {
-                "conversationId": result["conversationId"],
-                "runId": result.get("runId"),
-                "content": content,
-            },
-        )
-    if not result.get("_streamDeltas"):
-        yield _sse(
-            "answer.delta",
-            {
-                "conversationId": result["conversationId"],
-                "runId": result.get("runId"),
-                "content": result.get("answer", ""),
-            },
-        )
+    # Reconstruct from durable safe content, never historical raw event buffers.
+    reasoning = safe_execution_reasoning(result.get("reasoning"), result.get("_reasoning_format"))
+    if reasoning:
+        yield _sse("reasoning.delta", {"conversationId": result["conversationId"],
+            "runId": result.get("runId"), "content": reasoning})
+    yield _sse("answer.delta", {"conversationId": result["conversationId"],
+        "runId": result.get("runId"), "content": result.get("answer", "")})
     for citation in result["citations"]:
         yield _sse("citation", citation)
     yield _sse(

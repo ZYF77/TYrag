@@ -139,6 +139,20 @@ describe('HarnessChat', () => {
     expect(screen.getAllByText('思考中').length).toBeGreaterThan(0);
   });
 
+  it('hides old raw reasoning and displays only the safe process label', async () => {
+    const props = { conversation: null, isStreaming: false, error: null,
+      onSend: vi.fn(), onRetry: vi.fn(), onCancel: vi.fn(), onCitation: vi.fn(),
+      reasoningMode: 'simple' as const, onReasoningModeChange: vi.fn(),
+      internetEnabled: false, onInternetEnabledChange: vi.fn() };
+    const message = { ...assistantMessage([]), reasoning: 'PRIVATE_SYNTHETIC_REASONING' };
+    const { rerender } = render(<HarnessChat {...props} messages={[message]} />);
+    expect(screen.queryByText('PRIVATE_SYNTHETIC_REASONING')).toBeNull();
+    expect(screen.queryByText('处理过程')).toBeNull();
+    rerender(<HarnessChat {...props} messages={[{ ...message, reasoning: '正在处理请求。' }]} />);
+    await userEvent.click(screen.getByText('处理过程'));
+    expect(screen.getByText('正在处理请求。')).toBeTruthy();
+  });
+
   it('keeps a failed partial answer and marks it as non-final', () => {
     const message = {
       ...assistantMessage([sourceCitation('failed-citation', 1)]),

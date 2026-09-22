@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 def store_functions(namespace):
+    namespace["__package__"] = "enterprise.gateway.query"
     tree = ast.parse((ROOT / 'enterprise/gateway/query/v2_store.py').read_text())
     names = {'complete_message_run', 'save_terminal_message_run', 'RunOwnershipLost'}
     nodes = [n for n in tree.body if getattr(n, 'name', None) in names]

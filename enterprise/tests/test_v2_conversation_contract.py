@@ -2684,14 +2684,16 @@ async def test_v2_splits_think_from_answer_and_filters_citations_on_body(runtime
     body = response.json()
     assert body["answer"] == "漏气维修见工单。[ID:1]"
     assert "规划" not in body["answer"]
-    assert body["reasoning"] == "规划并引用发票 [ID:0]"
+    assert body["reasoning"] == "正在处理请求。"
+    assert "规划并引用发票" not in response.text
     assert [item["title"] for item in body["citations"]] == ["repair.pdf"]
     items = history.json()["items"]
     user = next(item for item in items if item["role"] == "user")
     assistant = next(item for item in items if item["role"] == "assistant")
     assert user["reasoning"] is None
     assert assistant["content"] == "漏气维修见工单。[ID:1]"
-    assert assistant["reasoning"] == "规划并引用发票 [ID:0]"
+    assert assistant["reasoning"] == "正在处理请求。"
+    assert "规划并引用发票" not in history.text
 
 
 @pytest.mark.asyncio
@@ -2726,7 +2728,8 @@ async def test_v2_sse_routes_think_tokens_to_reasoning_delta(runtime):
 
     assert response.status_code == 200, response.text
     assert "event: reasoning.delta" in response.text
-    assert '"content": "规划过程"' in response.text
+    assert '"content": "正在处理请求。"' in response.text
+    assert "规划过程" not in response.text
     assert response.text.count("event: answer.delta") == 1
     assert '"content": "你好呀"' in response.text
     answer_block = response.text.split("event: answer.delta", 1)[-1].split(
@@ -2737,7 +2740,8 @@ async def test_v2_sse_routes_think_tokens_to_reasoning_delta(runtime):
     assert "event: reasoning.delta" in replay.text
     assert json_replay.status_code == 200
     assert json_replay.json()["answer"] == "你好呀"
-    assert json_replay.json()["reasoning"] == "规划过程"
+    assert json_replay.json()["reasoning"] == "正在处理请求。"
+    assert "规划过程" not in replay.text
 
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"crop-bytes"

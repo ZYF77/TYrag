@@ -376,6 +376,7 @@ ext_v2_message = Table(
     Column("citations_json", Text, nullable=False, server_default="[]"),
     Column("attachments_json", Text, nullable=False, server_default="[]"),
     Column("reasoning", Text),
+    Column("reasoning_format", Text),
     Column("created_at", Text, nullable=False),
 )
 

@@ -612,6 +612,11 @@ async def save_terminal_message_run(
     """CAS first; all durable output and bindings share the caller's transaction."""
     identity = dict(conversation_id=conversation_id, tenant_id=tenant_id,
                     business_user_id=business_user_id)
+    from .answer_split import safe_execution_reasoning
+    result = dict(result)
+    result.pop("_streamDeltas", None)
+    result["reasoning"] = safe_execution_reasoning(reasoning, "safe_execution_v1")
+    result["_reasoning_format"] = "safe_execution_v1"
     await complete_message_run(conn, **identity, client_message_id=client_message_id,
         run_id=run_id, result=result, status="failed" if business_status == "failed" else "completed",
         assistant_message_id=assistant_message_id)
@@ -708,12 +713,14 @@ async def add_message(
     citations: list[dict],
     reasoning: str | None = None,
 ) -> dict:
+    from .answer_split import safe_execution_reasoning
+    reasoning = safe_execution_reasoning(reasoning, "safe_execution_v1")
     now = utc_now()
     result = await exec_sql(conn,
         """INSERT INTO ext_v2_message
            (message_id, conversation_id, tenant_id, business_user_id, role,
-            content, status, citations_json, reasoning, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            content, status, citations_json, reasoning, reasoning_format, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             message_id,
             conversation_id,
@@ -724,6 +731,7 @@ async def add_message(
             status,
             json.dumps(citations, ensure_ascii=False, separators=(",", ":")),
             reasoning if role == "assistant" else None,
+            "safe_execution_v1" if role == "assistant" else None,
             now,
         ),
     )
@@ -852,7 +860,8 @@ async def list_messages(
         reasoning = None
         if "reasoning" in keys:
             value = row["reasoning"]
-            reasoning = value if isinstance(value, str) and value.strip() else None
+            from .answer_split import safe_execution_reasoning
+            reasoning = safe_execution_reasoning(value, row["reasoning_format"] if "reasoning_format" in keys else None)
         items.append(
             {
                 "messageId": row["message_id"],

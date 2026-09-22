@@ -39,6 +39,7 @@ from common.exceptions import TaskCanceledException
 from common.misc_utils import get_uuid, hash_str2int
 from common.token_utils import token_usage_sink, langfuse_run_attrs
 from rag.prompts.generator import chunks_format
+from rag.safe_logging import scoped_execution
 from rag.utils.redis_conn import REDIS_CONN
 from rag.utils.tts_cache import synthesize_with_cache
 
@@ -425,6 +426,7 @@ class Canvas(Graph):
                 else:
                     self.globals[k] = ""
 
+    @scoped_execution
     async def run(self, **kwargs):
         # Install a fresh per-run token usage sink and Langfuse correlation context,
         # and guarantee both are torn down when the run ends (even on early return or

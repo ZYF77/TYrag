@@ -20,6 +20,7 @@ import re
 import time
 import uuid
 from copy import deepcopy
+from rag.safe_logging import scoped_execution
 from rag.advanced_rag.agentic_rag import RAGTools
 
 logger = logging.getLogger(__name__)
@@ -634,6 +635,7 @@ def _resolve_dialog_llm_config(dialog):
         return get_tenant_default_model_by_type(dialog.tenant_id, LLMType.CHAT)
 
 
+@scoped_execution
 async def async_chat_solo(dialog, messages, stream=True, session_id=None, grounding_version=None, **kwargs):
     grounding_enabled = _grounding_requested(grounding_version)
     allowed_identifiers = list(kwargs.pop("allowed_identifiers", None) or [])
@@ -648,7 +650,7 @@ async def async_chat_solo(dialog, messages, stream=True, session_id=None, ground
     model_config = _resolve_dialog_llm_config(dialog)
 
     bundle_kwargs = {"langfuse_session_id": session_id}
-    if grounding_enabled:
+    if grounding_enabled or kwargs.get("disable_langfuse"):
         bundle_kwargs["disable_langfuse"] = True
     chat_mdl = LLMBundle(dialog.tenant_id, model_config, **bundle_kwargs)
     factory = model_config.get("llm_factory", "") if model_config else ""
@@ -991,6 +993,7 @@ def repair_bad_citation_formats(answer: str, kbinfos: dict, idx: set):
     return answer, idx
 
 
+@scoped_execution
 async def async_chat(dialog, messages, stream=True, **kwargs):
     logging.debug("Begin async_chat")
     assert messages[-1]["role"] == "user", "The last content of this conversation is not from user."
@@ -1018,7 +1021,7 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
     use_web_search = _should_use_web_search(dialog.prompt_config, kwargs.get("internet"))
     logging.debug("web_search kb=%s configured=%s internet=%r enabled=%s", bool(dialog.kb_ids), has_web_search_provider(dialog.prompt_config), kwargs.get("internet"), use_web_search)
     if not dialog.kb_ids and not use_web_search:
-        solo_kwargs = {"session_id": session_id}
+        solo_kwargs = {"session_id": session_id, "disable_langfuse": doc_scope_mode == "restrict"}
         if grounding_enabled:
             solo_kwargs["grounding_version"] = 1
             solo_kwargs["allowed_identifiers"] = allowed_identifiers
@@ -1038,7 +1041,7 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
     langfuse_tracer = None
     langfuse_generation = None
     trace_context = {}
-    langfuse_keys = None if grounding_enabled else TenantLangfuseService.filter_by_tenant(tenant_id=dialog.tenant_id)
+    langfuse_keys = None if grounding_enabled or doc_scope_mode == "restrict" else TenantLangfuseService.filter_by_tenant(tenant_id=dialog.tenant_id)
     if langfuse_keys:
         langfuse = Langfuse(public_key=langfuse_keys.public_key, secret_key=langfuse_keys.secret_key, host=langfuse_keys.host)
         try:
@@ -1052,7 +1055,7 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
 
     check_langfuse_tracer_ts = timer()
     model_kwargs = {"trace_context": trace_context, "langfuse_session_id": session_id}
-    if grounding_enabled:
+    if grounding_enabled or doc_scope_mode == "restrict":
         model_kwargs["disable_langfuse"] = True
     model_bind_started = timer()
     model_bind_status = "success"
@@ -2801,6 +2804,7 @@ async def gen_mindmap(question, kb_ids, tenant_id, search_config={}):
     return mind_map.output
 
 
+@scoped_execution
 async def rag_agent(dialog, messages, stream=True, **kwargs):
     prompt_config = dialog.prompt_config or {}
     assert messages[-1]["role"] == "user", "The last content of this conversation is not from user."
@@ -2820,7 +2824,7 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
     doc_scope_mode = kwargs.pop("doc_scope_mode", None)
     business_context = kwargs.pop("business_context", None)
     model_kwargs = {"langfuse_session_id": kwargs.get("session_id")}
-    if grounding_enabled:
+    if grounding_enabled or doc_scope_mode == "restrict":
         model_kwargs["disable_langfuse"] = True
     model_bind_started = timer()
     model_bind_status = "success"

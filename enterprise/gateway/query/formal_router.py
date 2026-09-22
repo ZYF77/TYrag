@@ -1034,7 +1034,10 @@ async def _stream_ask_events(
                 )
                 for kind, chunk in pieces:
                     if kind == "reasoning":
-                        accumulated_reasoning += chunk
+                        if accumulated_reasoning:
+                            continue
+                        accumulated_reasoning = public_reasoning(chunk) or ""
+                        chunk = accumulated_reasoning
                         event = "reasoning.delta"
                     else:
                         accumulated += chunk
@@ -1046,6 +1049,9 @@ async def _stream_ask_events(
                             "content": chunk,
                         },
                     )
+        for kind, tail in splitter.finish():
+            if kind == "answer":
+                accumulated += tail
         finalized = finalize_streamed_output(
             accumulated, accumulated_reasoning, final_delta
         )
