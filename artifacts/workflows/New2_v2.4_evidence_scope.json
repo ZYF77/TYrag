@@ -1,0 +1,2697 @@
+{
+  "components": {
+    "Agent:Attachment": {
+      "downstream": [
+        "Message:Attachment"
+      ],
+      "obj": {
+        "component_name": "Agent",
+        "params": {
+          "cite": false,
+          "delay_after_error": 1,
+          "description": "",
+          "exception_comment": "",
+          "exception_default_value": "",
+          "exception_goto": [],
+          "exception_method": null,
+          "frequencyPenaltyEnabled": false,
+          "frequency_penalty": 0,
+          "llm_id": "ep-20260310093543-zl952@LLM@VolcEngine",
+          "maxTokensEnabled": true,
+          "max_retries": 1,
+          "max_rounds": 1,
+          "max_tokens": 2500,
+          "mcp": [],
+          "message_history_window_size": 0,
+          "outputs": {
+            "content": {
+              "type": "string",
+              "value": ""
+            }
+          },
+          "parameter": "Custom",
+          "presencePenaltyEnabled": false,
+          "presence_penalty": 0,
+          "prompts": [
+            {
+              "content": "仅依据系统实际附加的文件内容回答：{sys.query}\n消歧：{Agent:Plan@structured.resolved_question}\n偏好：{begin@user_memory}",
+              "role": "user"
+            }
+          ],
+          "sys_prompt": "你只回答当前问题允许的非知识库内容。不得根据常识捏造设备厂家、参数、维修、身份或检索结果；不得声称访问未提供附件。附件仅凭当前真正可读取的文本/图片回答；不可见时要求提供可读内容。用户Memory只是表达偏好，不是企业事实。不要输出工具协议、内部路径、授权数据或推理链；不生成知识库[ID:n]。",
+          "temperature": 0.1,
+          "temperatureEnabled": true,
+          "thinking": "disabled",
+          "tools": [],
+          "topPEnabled": true,
+          "top_p": 0.75,
+          "user_prompt": "",
+          "visual_files_var": ""
+        }
+      },
+      "upstream": [
+        "Switch:Intent"
+      ]
+    },
+    "Agent:Conversation": {
+      "downstream": [
+        "Message:Conversation"
+      ],
+      "obj": {
+        "component_name": "Agent",
+        "params": {
+          "cite": false,
+          "delay_after_error": 1,
+          "description": "",
+          "exception_comment": "",
+          "exception_default_value": "",
+          "exception_goto": [],
+          "exception_method": null,
+          "frequencyPenaltyEnabled": false,
+          "frequency_penalty": 0,
+          "llm_id": "ep-20260310093543-zl952@LLM@VolcEngine",
+          "maxTokensEnabled": true,
+          "max_retries": 1,
+          "max_rounds": 1,
+          "max_tokens": 500,
+          "mcp": [],
+          "message_history_window_size": 0,
+          "outputs": {
+            "content": {
+              "type": "string",
+              "value": ""
+            }
+          },
+          "parameter": "Custom",
+          "presencePenaltyEnabled": false,
+          "presence_penalty": 0,
+          "prompts": [
+            {
+              "content": "用户：{sys.query}\n偏好：{begin@user_memory}\n仅简短回应寒暄/表达要求，遇企业事实不得猜测。",
+              "role": "user"
+            }
+          ],
+          "sys_prompt": "你只回答当前问题允许的非知识库内容。不得根据常识捏造设备厂家、参数、维修、身份或检索结果；不得声称访问未提供附件。附件仅凭当前真正可读取的文本/图片回答；不可见时要求提供可读内容。用户Memory只是表达偏好，不是企业事实。不要输出工具协议、内部路径、授权数据或推理链；不生成知识库[ID:n]。",
+          "temperature": 0.1,
+          "temperatureEnabled": true,
+          "thinking": "disabled",
+          "tools": [],
+          "topPEnabled": true,
+          "top_p": 0.75,
+          "user_prompt": "",
+          "visual_files_var": ""
+        }
+      },
+      "upstream": [
+        "Switch:Intent"
+      ]
+    },
+    "Agent:Plan": {
+      "downstream": [
+        "Switch:Intent"
+      ],
+      "obj": {
+        "component_name": "Agent",
+        "params": {
+          "cite": false,
+          "delay_after_error": 1,
+          "description": "",
+          "exception_comment": "",
+          "exception_default_value": "",
+          "exception_goto": [],
+          "exception_method": null,
+          "frequencyPenaltyEnabled": false,
+          "frequency_penalty": 0,
+          "llm_id": "ep-20260310093543-zl952@LLM@VolcEngine",
+          "maxTokensEnabled": true,
+          "max_retries": 1,
+          "max_rounds": 1,
+          "max_tokens": 900,
+          "mcp": [],
+          "message_history_window_size": 8,
+          "outputs": {
+            "structured": {
+              "additionalProperties": false,
+              "properties": {
+                "route": {
+                  "description": "",
+                  "enum": [
+                    "knowledge",
+                    "clarify",
+                    "boundary",
+                    "attachment",
+                    "conversation"
+                  ],
+                  "type": "string"
+                },
+                "resolved_question": {
+                  "description": "可独立理解的完整问题，不回答事实",
+                  "type": "string"
+                },
+                "scope_mode": {
+                  "description": "targeted=存在一个或多个明确目标设备；global=没有特定设备对象",
+                  "enum": [
+                    "targeted",
+                    "global"
+                  ],
+                  "type": "string"
+                },
+                "scope_source": {
+                  "description": "可选审计字段：本轮目标设备集合来源",
+                  "enum": [
+                    "current_query",
+                    "conversation",
+                    "gateway_context",
+                    "none"
+                  ],
+                  "type": "string"
+                },
+                "target_equipment_ids": {
+                  "description": "本轮明确目标设备集合；global 时必须为空",
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 20,
+                  "type": "array"
+                },
+                "focused_query": {
+                  "description": "targeted 检索：部件+字段/步骤/故障主题；设备集合由 metadata IN 过滤",
+                  "type": "string"
+                },
+                "broad_query": {
+                  "description": "global 或补检索：保留用户明确设备/型号/部件/时间等实体",
+                  "type": "string"
+                },
+                "clarification_question": {
+                  "description": "仅 clarify 路由，询问唯一阻碍缺口；其余空串",
+                  "type": "string"
+                },
+                "boundary_response": {
+                  "description": "仅 boundary 路由说明需全量权威或不支持写操作；其余空串",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "route",
+                "resolved_question",
+                "scope_mode",
+                "target_equipment_ids",
+                "focused_query",
+                "broad_query",
+                "clarification_question",
+                "boundary_response"
+              ],
+              "type": "object"
+            }
+          },
+          "parameter": "Custom",
+          "presencePenaltyEnabled": false,
+          "presence_penalty": 0,
+          "prompts": [
+            {
+              "content": "用户问题：{sys.query}\n业务背景：{begin@business_context}\n兼容背景：{begin@gateway_context}\n表达偏好：{begin@user_memory}\n当前日期（可选）：{begin@current_date}",
+              "role": "user"
+            }
+          ],
+          "sys_prompt": "你是设备知识问答的 PlanLite 规划器，只输出指定 JSON，不输出推理链或事实答案。\n\n# 可信边界\n- authorized_dataset_ids / authorized_doc_ids(G) 由 Gateway 决定；你不生成、不扩大、不修改授权范围。\n- 业务背景、会话历史和 Memory 都不是授权，也不是设备事实证据。\n\n# 目标设备集合（顺序）\n1. 当前问题明确设备/资产标识 → target_equipment_ids 取当前问题目标，scope_mode=targeted，scope_source=current_query。\n2. 未显式给设备但承接会话最近明确设备 → 用会话对象，scope_source=conversation。\n3. 前两项没有且当前问题语义承接 Gateway 页面背景中的明确设备 → 使用之，scope_source=gateway_context。\n4. 否则 scope_mode=global、target_equipment_ids=[]、scope_source=none。\n5. 用户明确转向其他设备时，不被历史/页面锁回。\n6. 不猜设备号；实质歧义且无法先答有意义部分时 route=clarify。\n\n# Query\n- focused_query：已有 target_equipment_ids 硬过滤时，只写部件+字段/步骤/故障主题。\n- broad_query：global 或补检索，保留用户明确实体。\n- scope_mode=global 时 target_equipment_ids 必须为空且 broad_query 非空；targeted 时两者与 focused_query 均非空。\n\n# 路由\n- knowledge / clarify / boundary / attachment / conversation（定义同前；企业事实不得分到 conversation）。\n\n只输出 PlanLite 字段；不要输出 intent/keywords/subquestions/context_summary 等扩展字段。不输出思考过程。\n",
+          "temperature": 0.1,
+          "temperatureEnabled": true,
+          "thinking": "disabled",
+          "tools": [],
+          "topPEnabled": true,
+          "top_p": 0.75,
+          "user_prompt": "",
+          "visual_files_var": ""
+        }
+      },
+      "upstream": [
+        "begin"
+      ]
+    },
+    "Message:Attachment": {
+      "downstream": [],
+      "obj": {
+        "component_name": "Message",
+        "params": {
+          "content": [
+            "{Agent:Attachment@content}"
+          ],
+          "status": "completed",
+          "stream": true
+        }
+      },
+      "upstream": [
+        "Agent:Attachment"
+      ]
+    },
+    "Message:Boundary": {
+      "downstream": [],
+      "obj": {
+        "component_name": "Message",
+        "params": {
+          "content": [
+            "{Agent:Plan@structured.boundary_response}"
+          ],
+          "status": "completed",
+          "stream": true
+        }
+      },
+      "upstream": [
+        "Switch:Intent"
+      ]
+    },
+    "Message:Clarify": {
+      "downstream": [],
+      "obj": {
+        "component_name": "Message",
+        "params": {
+          "content": [
+            "{Agent:Plan@structured.clarification_question}"
+          ],
+          "status": "completed",
+          "stream": true
+        }
+      },
+      "upstream": [
+        "Switch:Intent"
+      ]
+    },
+    "Message:Conversation": {
+      "downstream": [],
+      "obj": {
+        "component_name": "Message",
+        "params": {
+          "content": [
+            "{Agent:Conversation@content}"
+          ],
+          "status": "completed",
+          "stream": true
+        }
+      },
+      "upstream": [
+        "Agent:Conversation"
+      ]
+    },
+    "Message:Direct": {
+      "downstream": [],
+      "obj": {
+        "component_name": "Message",
+        "params": {
+          "content": [
+            "{Agent:AnswerResearch@structured.answer}"
+          ],
+          "status": "completed",
+          "stream": true
+        }
+      },
+      "upstream": [
+        "Switch:ResearchOutcome"
+      ]
+    },
+    "Message:Failure": {
+      "downstream": [],
+      "obj": {
+        "component_name": "Message",
+        "params": {
+          "content": [
+            "本次问答执行未能正常完成，请稍后重试。"
+          ],
+          "status": "failed",
+          "stream": true
+        }
+      },
+      "upstream": [
+        "Switch:Focus",
+        "Switch:Intent",
+        "Switch:ResearchOutcome"
+      ]
+    },
+    "Message:NoEvidence": {
+      "downstream": [],
+      "obj": {
+        "component_name": "Message",
+        "params": {
+          "content": [
+            "当前检索结果中未找到足以支持该问题的可靠依据。"
+          ],
+          "status": "no_reliable_evidence",
+          "stream": true
+        }
+      },
+      "upstream": [
+        "Switch:ResearchOutcome"
+      ]
+    },
+    "Message:NoScope": {
+      "downstream": [],
+      "obj": {
+        "component_name": "Message",
+        "params": {
+          "content": [
+            "当前没有可用于本次检索的授权资料。请核对资料是否已发布、版本是否有效及当前访问范围；这不代表系统中不存在相关文档。"
+          ],
+          "status": "no_reliable_evidence",
+          "stream": true
+        }
+      },
+      "upstream": [
+        "Switch:Scope"
+      ]
+    },
+    "Message:Research": {
+      "downstream": [],
+      "obj": {
+        "component_name": "Message",
+        "params": {
+          "content": [
+            "{Agent:AnswerResearch@structured.answer}"
+          ],
+          "status": "completed",
+          "stream": true
+        }
+      },
+      "upstream": []
+    },
+    "Retrieval:Scope": {
+      "downstream": [
+        "VariableAggregator:Seed"
+      ],
+      "obj": {
+        "component_name": "Retrieval",
+        "params": {
+          "cross_languages": [],
+          "dataset_ids": [
+            "begin@authorized_dataset_ids"
+          ],
+          "description": "仅当没有任何可靠特定设备对象时，在 Gateway 授权 G 内做范围检索；不得越过 authorized_doc_ids。",
+          "doc_scope_ids": [
+            "begin@authorized_doc_ids"
+          ],
+          "doc_scope_mode": "restrict",
+          "empty_response": "",
+          "kb_ids": [],
+          "keywords_similarity_weight": 0.7,
+          "memory_ids": [],
+          "meta_data_filter": {},
+          "outputs": {
+            "formalized_content": {
+              "type": "string",
+              "value": ""
+            },
+            "json": {
+              "type": "Array<Object>",
+              "value": []
+            }
+          },
+          "query": "Agent:Plan@structured.broad_query",
+          "rerank_id": "qwen3-rerank@千问@Tongyi-Qianwen",
+          "retrieval_from": "dataset",
+          "similarity_threshold": 0.1,
+          "toc_enhance": false,
+          "top_k": 128,
+          "top_n": 8,
+          "use_kg": false
+        }
+      },
+      "upstream": [
+        "Switch:Focus"
+      ]
+    },
+    "Retrieval:Target": {
+      "downstream": [
+        "VariableAggregator:Seed"
+      ],
+      "obj": {
+        "component_name": "Retrieval",
+        "params": {
+          "cross_languages": [],
+          "dataset_ids": [
+            "begin@authorized_dataset_ids"
+          ],
+          "description": "仅在 Gateway 授权 G 内，对一个或多个明确目标设备做 equipment_id IN 精确过滤，再进行混合检索；无权扩大 G。",
+          "doc_scope_ids": [
+            "begin@authorized_doc_ids"
+          ],
+          "doc_scope_mode": "restrict",
+          "empty_response": "",
+          "kb_ids": [],
+          "keywords_similarity_weight": 0.7,
+          "memory_ids": [],
+          "meta_data_filter": {
+            "logic": "and",
+            "manual": [
+              {
+                "key": "equipment_id",
+                "op": "in",
+                "value": "{Agent:Plan@structured.target_equipment_ids}"
+              }
+            ],
+            "method": "manual"
+          },
+          "outputs": {
+            "formalized_content": {
+              "type": "string",
+              "value": ""
+            },
+            "json": {
+              "type": "Array<Object>",
+              "value": []
+            }
+          },
+          "query": "Agent:Plan@structured.focused_query",
+          "rerank_id": "qwen3-rerank@千问@Tongyi-Qianwen",
+          "retrieval_from": "dataset",
+          "similarity_threshold": 0.1,
+          "toc_enhance": false,
+          "top_k": 64,
+          "top_n": 8,
+          "use_kg": false
+        }
+      },
+      "upstream": [
+        "Switch:Focus"
+      ]
+    },
+    "Switch:Focus": {
+      "downstream": [
+        "Retrieval:Target",
+        "Retrieval:Scope",
+        "Message:Failure"
+      ],
+      "obj": {
+        "component_name": "Switch",
+        "params": {
+          "conditions": [
+            {
+              "items": [
+                {
+                  "cpn_id": "Agent:Plan@structured.scope_mode",
+                  "operator": "=",
+                  "value": "targeted"
+                },
+                {
+                  "cpn_id": "Agent:Plan@structured.target_equipment_ids",
+                  "operator": "not empty",
+                  "value": ""
+                },
+                {
+                  "cpn_id": "Agent:Plan@structured.focused_query",
+                  "operator": "not empty",
+                  "value": ""
+                }
+              ],
+              "logical_operator": "and",
+              "to": [
+                "Retrieval:Target"
+              ]
+            },
+            {
+              "items": [
+                {
+                  "cpn_id": "Agent:Plan@structured.scope_mode",
+                  "operator": "=",
+                  "value": "global"
+                },
+                {
+                  "cpn_id": "Agent:Plan@structured.target_equipment_ids",
+                  "operator": "empty",
+                  "value": ""
+                },
+                {
+                  "cpn_id": "Agent:Plan@structured.broad_query",
+                  "operator": "not empty",
+                  "value": ""
+                }
+              ],
+              "logical_operator": "and",
+              "to": [
+                "Retrieval:Scope"
+              ]
+            }
+          ],
+          "end_cpn_ids": [
+            "Message:Failure"
+          ]
+        }
+      },
+      "upstream": [
+        "Switch:Scope"
+      ]
+    },
+    "Switch:Intent": {
+      "downstream": [
+        "Message:Clarify",
+        "Message:Boundary",
+        "Agent:Attachment",
+        "Agent:Conversation",
+        "Switch:Scope",
+        "Message:Failure"
+      ],
+      "obj": {
+        "component_name": "Switch",
+        "params": {
+          "conditions": [
+            {
+              "items": [
+                {
+                  "cpn_id": "Agent:Plan@structured.route",
+                  "operator": "=",
+                  "value": "clarify"
+                },
+                {
+                  "cpn_id": "Agent:Plan@structured.clarification_question",
+                  "operator": "not empty",
+                  "value": ""
+                }
+              ],
+              "logical_operator": "and",
+              "to": [
+                "Message:Clarify"
+              ]
+            },
+            {
+              "items": [
+                {
+                  "cpn_id": "Agent:Plan@structured.route",
+                  "operator": "=",
+                  "value": "boundary"
+                },
+                {
+                  "cpn_id": "Agent:Plan@structured.boundary_response",
+                  "operator": "not empty",
+                  "value": ""
+                }
+              ],
+              "logical_operator": "and",
+              "to": [
+                "Message:Boundary"
+              ]
+            },
+            {
+              "items": [
+                {
+                  "cpn_id": "Agent:Plan@structured.route",
+                  "operator": "=",
+                  "value": "attachment"
+                }
+              ],
+              "logical_operator": "and",
+              "to": [
+                "Agent:Attachment"
+              ]
+            },
+            {
+              "items": [
+                {
+                  "cpn_id": "Agent:Plan@structured.route",
+                  "operator": "=",
+                  "value": "conversation"
+                }
+              ],
+              "logical_operator": "and",
+              "to": [
+                "Agent:Conversation"
+              ]
+            },
+            {
+              "items": [
+                {
+                  "cpn_id": "Agent:Plan@structured.route",
+                  "operator": "=",
+                  "value": "knowledge"
+                },
+                {
+                  "cpn_id": "Agent:Plan@structured.resolved_question",
+                  "operator": "not empty",
+                  "value": ""
+                }
+              ],
+              "logical_operator": "and",
+              "to": [
+                "Switch:Scope"
+              ]
+            }
+          ],
+          "end_cpn_ids": [
+            "Message:Failure"
+          ]
+        }
+      },
+      "upstream": [
+        "Agent:Plan"
+      ]
+    },
+    "Switch:ResearchOutcome": {
+      "downstream": [
+        "Message:Direct",
+        "Message:Failure",
+        "Message:NoEvidence",
+        "Message:ResearchNoEvidence"
+      ],
+      "obj": {
+        "component_name": "Switch",
+        "params": {
+          "conditions": [
+            {
+              "items": [
+                {
+                  "cpn_id": "Agent:AnswerResearch@structured.status",
+                  "operator": "=",
+                  "value": "completed"
+                },
+                {
+                  "cpn_id": "Agent:AnswerResearch@structured.answer",
+                  "operator": "not empty",
+                  "value": ""
+                },
+                {
+                  "cpn_id": "Agent:AnswerResearch@structured.evidence_ids",
+                  "operator": "not empty",
+                  "value": ""
+                }
+              ],
+              "logical_operator": "and",
+              "to": [
+                "Message:Direct"
+              ]
+            },
+            {
+              "items": [
+                {
+                  "cpn_id": "Agent:AnswerResearch@structured.status",
+                  "operator": "=",
+                  "value": "no_reliable_evidence"
+                },
+                {
+                  "cpn_id": "Agent:AnswerResearch@structured.answer",
+                  "operator": "not empty",
+                  "value": ""
+                }
+              ],
+              "logical_operator": "and",
+              "to": [
+                "Message:ResearchNoEvidence"
+              ]
+            },
+            {
+              "items": [
+                {
+                  "cpn_id": "Agent:AnswerResearch@structured.status",
+                  "operator": "=",
+                  "value": "no_reliable_evidence"
+                }
+              ],
+              "logical_operator": "and",
+              "to": [
+                "Message:NoEvidence"
+              ]
+            }
+          ],
+          "end_cpn_ids": [
+            "Message:Failure"
+          ]
+        }
+      },
+      "upstream": [
+        "Agent:AnswerResearch"
+      ]
+    },
+    "Switch:Scope": {
+      "downstream": [
+        "Message:NoScope",
+        "Switch:Focus"
+      ],
+      "obj": {
+        "component_name": "Switch",
+        "params": {
+          "conditions": [
+            {
+              "items": [
+                {
+                  "cpn_id": "begin@authorized_doc_ids",
+                  "operator": "empty",
+                  "value": ""
+                },
+                {
+                  "cpn_id": "begin@authorized_dataset_ids",
+                  "operator": "empty",
+                  "value": ""
+                }
+              ],
+              "logical_operator": "or",
+              "to": [
+                "Message:NoScope"
+              ]
+            }
+          ],
+          "end_cpn_ids": [
+            "Switch:Focus"
+          ]
+        }
+      },
+      "upstream": [
+        "Switch:Intent"
+      ]
+    },
+    "VariableAggregator:Seed": {
+      "downstream": [
+        "Agent:AnswerResearch"
+      ],
+      "obj": {
+        "component_name": "VariableAggregator",
+        "params": {
+          "groups": [
+            {
+              "group_name": "evidence",
+              "type": "string",
+              "variables": [
+                {
+                  "value": "Retrieval:Target@formalized_content"
+                },
+                {
+                  "value": "Retrieval:Scope@formalized_content"
+                }
+              ]
+            }
+          ],
+          "outputs": {
+            "evidence": {
+              "type": "string",
+              "value": ""
+            }
+          }
+        }
+      },
+      "upstream": [
+        "Retrieval:Scope",
+        "Retrieval:Target"
+      ]
+    },
+    "begin": {
+      "downstream": [
+        "Agent:Plan"
+      ],
+      "obj": {
+        "component_name": "Begin",
+        "params": {
+          "enablePrologue": true,
+          "inputs": {
+            "authorized_dataset_ids": {
+              "key": "authorized_dataset_ids",
+              "name": "Gateway 授权 dataset IDs · JSON数组",
+              "optional": true,
+              "options": [],
+              "type": "object",
+              "value": "[]"
+            },
+            "authorized_doc_ids": {
+              "key": "authorized_doc_ids",
+              "name": "Gateway 授权文档 G · JSON数组",
+              "optional": true,
+              "options": [],
+              "type": "object",
+              "value": "[]"
+            },
+            "business_context": {
+              "key": "business_context",
+              "name": "Gateway 业务背景 · JSON对象",
+              "optional": true,
+              "options": [],
+              "type": "object",
+              "value": "{}"
+            },
+            "current_date": {
+              "key": "current_date",
+              "name": "Gateway 当前日期 · YYYY-MM-DD（可选）",
+              "optional": true,
+              "options": [],
+              "type": "line",
+              "value": ""
+            },
+            "doc_scope_mode": {
+              "key": "doc_scope_mode",
+              "name": "兼容输入 · 忽略；Retrieval 固定 restrict",
+              "optional": true,
+              "options": [],
+              "type": "line",
+              "value": "restrict"
+            },
+            "gateway_context": {
+              "key": "gateway_context",
+              "name": "兼容背景上下文",
+              "optional": true,
+              "options": [],
+              "type": "line",
+              "value": ""
+            },
+            "internet_enabled": {
+              "key": "internet_enabled",
+              "name": "兼容输入 · 忽略；本版无联网工具",
+              "optional": true,
+              "options": [],
+              "type": "boolean",
+              "value": false
+            },
+            "reasoning_mode": {
+              "key": "reasoning_mode",
+              "name": "兼容输入 · 本版不参与路由/权限",
+              "optional": true,
+              "options": [],
+              "type": "line",
+              "value": "simple"
+            },
+            "user_memory": {
+              "key": "user_memory",
+              "name": "当前认证用户 Memory · 弱上下文",
+              "optional": true,
+              "options": [],
+              "type": "line",
+              "value": ""
+            },
+            "workflow_version": {
+              "key": "workflow_version",
+              "name": "版本标记 · 不参与权限",
+              "optional": true,
+              "options": [],
+              "type": "line",
+              "value": "enterprise-qa-agent-v2.3-evidence-scope"
+            }
+          },
+          "mode": "conversational",
+          "prologue": "你好，我可以在当前授权资料内查询设备信息、操作维护和记录，并在需要时补充检索。",
+          "description": "New2 v2.4 PlanLite+AnswerResearch"
+        }
+      },
+      "upstream": []
+    },
+    "Message:DraftNoEvidence": {
+      "downstream": [],
+      "obj": {
+        "component_name": "Message",
+        "params": {
+          "content": [
+            "{Agent:AnswerResearch@structured.answer}"
+          ],
+          "status": "no_reliable_evidence",
+          "stream": true
+        }
+      },
+      "upstream": []
+    },
+    "Message:ResearchNoEvidence": {
+      "downstream": [],
+      "obj": {
+        "component_name": "Message",
+        "params": {
+          "content": [
+            "{Agent:AnswerResearch@structured.answer}"
+          ],
+          "status": "no_reliable_evidence",
+          "stream": true
+        }
+      },
+      "upstream": [
+        "Switch:ResearchOutcome"
+      ]
+    },
+    "Agent:AnswerResearch": {
+      "downstream": [
+        "Switch:ResearchOutcome"
+      ],
+      "obj": {
+        "component_name": "Agent",
+        "params": {
+          "cite": false,
+          "delay_after_error": 1,
+          "description": "",
+          "exception_comment": "",
+          "exception_default_value": "",
+          "exception_goto": [],
+          "exception_method": null,
+          "frequencyPenaltyEnabled": false,
+          "frequency_penalty": 0,
+          "llm_id": "ep-20260310093543-zl952@LLM@VolcEngine",
+          "maxTokensEnabled": true,
+          "max_retries": 1,
+          "max_rounds": 2,
+          "max_tokens": 2800,
+          "mcp": [],
+          "message_history_window_size": 0,
+          "outputs": {
+            "structured": {
+              "additionalProperties": false,
+              "properties": {
+                "status": {
+                  "description": "",
+                  "enum": [
+                    "completed",
+                    "no_reliable_evidence",
+                    "failed"
+                  ],
+                  "type": "string"
+                },
+                "answer": {
+                  "description": "用户可见答案；B 级须写清相关资料与不能迁到目标对象的原因；真无证据可用既定兜底句",
+                  "type": "string"
+                },
+                "evidence_ids": {
+                  "description": "答案实际引用的本轮真实 ID；无可靠依据时也可保留相关引用",
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 16,
+                  "type": "array"
+                },
+                "unresolved": {
+                  "description": "最多 3 条未覆盖事项",
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "status",
+                "answer",
+                "evidence_ids",
+                "unresolved"
+              ],
+              "type": "object"
+            }
+          },
+          "parameter": "Custom",
+          "presencePenaltyEnabled": false,
+          "presence_penalty": 0,
+          "prompts": [
+            {
+              "content": "用户原问：{sys.query}\n消歧问题：{Agent:Plan@structured.resolved_question}\nGateway背景：{begin@business_context}\n初始证据见系统提示中的 Seed。",
+              "role": "user"
+            }
+          ],
+          "sys_prompt": "你服务于药品制药工厂的设备管理场景。领域背景只帮助理解术语，不是事实证据。\n\n仅依据本轮实际提供的知识库 Content、工具返回结果和实际可读取附件。历史回答、业务背景、Memory 不作设备事实证据。\n\n# 证据适用性\n- A1：正文直接建立目标对象与所问事实/操作要求之间的关系。\n- A2：正文明确说明适用范围，且本轮证据证明目标对象落在该范围内。不能只凭同设备、同手册、型号相似或邻近章节推定适用。\n- B：存在相关资料，但没有证明适用于目标对象。只能说明原文对象、已发现资料和缺少的适用关系；不能作为目标对象的操作建议（即使加“仅供参考”也不允许迁移步骤/介质/限制）。\n- C：无可靠关联，不采用。\n\n整机、控制器、取样阀、半球阀和喷嘴等对象必须区分；不能把半球阀阀座要求迁移到取样阀喷嘴。\n\n# 执行策略（单一 AnswerResearch Agent）\n1. 先阅读初始检索证据。若已有 A1/A2 足以回答实质问题：直接作答，status=completed，**不要调用工具**，不要进入大上下文补查循环。\n2. 仅当存在实质缺口时，才按缺口选择工具补证（最多 2 轮工具）：\n   - 目标设备集合内换部件/主题表述 → TargetEvidence\n   - metadata 缺失 / 共享手册 / 型号级资料 → AuthorizedEvidence\n   - 精确故障码/型号/标题术语 → KeywordEvidence\n   **禁止**固定按 Target→Authorized→Keyword 流水线依次空跑。\n3. 补证后仍无 A1/A2：status=no_reliable_evidence。\n   - 若仍有相关 B 级 cite：answer 必须写清「相关资料引用 + 为何不能迁到目标对象」，**禁止**在仍有 cite 时整句只写“未找到可靠依据/无法回答”。\n   - 若完全无可说明相关资料：可用既定空证据兜底句。\n4. status=completed 时 evidence_ids 不得为空。引用只用本轮真实 ID。\n5. 工具/协议失败且无法形成有效结果 → status=failed，不伪装无据。\n\n只读、不联网、不执行写操作。不输出思维链、工具参数或内部路径。\n\n计划（不是事实证据）：{Agent:Plan@structured}\n初始证据：{VariableAggregator:Seed@evidence}\nGateway 背景（只消歧）：{begin@business_context}\n表达偏好：{begin@user_memory}\n用户原问：{sys.query}\n消歧问题：{Agent:Plan@structured.resolved_question}\n",
+          "temperature": 0.1,
+          "temperatureEnabled": true,
+          "thinking": "disabled",
+          "tools": [
+            {
+              "component_name": "Retrieval",
+              "id": "Retrieval:TargetEvidence",
+              "name": "TargetEvidence",
+              "params": {
+                "cross_languages": [],
+                "dataset_ids": [
+                  "begin@authorized_dataset_ids"
+                ],
+                "description": "在计划中明确的一个或多个目标设备集合内查部件/型号/字段/操作/故障。仅 scope_mode=targeted 且 target_equipment_ids 非空时使用；equipment_id IN 过滤固定，query 不重复设备号。不能修改目标集合或授权 G。 仅在存在对应缺口时选用；禁止固定按 Target→Authorized→Keyword 顺序空跑。",
+                "doc_scope_ids": [
+                  "begin@authorized_doc_ids"
+                ],
+                "doc_scope_mode": "restrict",
+                "empty_response": "",
+                "function_name": "target_evidence",
+                "kb_ids": [],
+                "keywords_similarity_weight": 0.7,
+                "memory_ids": [],
+                "meta_data_filter": {
+                  "logic": "and",
+                  "manual": [
+                    {
+                      "key": "equipment_id",
+                      "op": "in",
+                      "value": "{Agent:Plan@structured.target_equipment_ids}"
+                    }
+                  ],
+                  "method": "manual"
+                },
+                "outputs": {
+                  "formalized_content": {
+                    "type": "string",
+                    "value": ""
+                  },
+                  "json": {
+                    "type": "Array<Object>",
+                    "value": []
+                  }
+                },
+                "rerank_id": "qwen3-rerank@千问@Tongyi-Qianwen",
+                "retrieval_from": "dataset",
+                "similarity_threshold": 0.1,
+                "toc_enhance": false,
+                "top_k": 64,
+                "top_n": 4,
+                "use_kg": false
+              }
+            },
+            {
+              "component_name": "Retrieval",
+              "id": "Retrieval:AuthorizedEvidence",
+              "name": "AuthorizedEvidence",
+              "params": {
+                "cross_languages": [],
+                "dataset_ids": [
+                  "begin@authorized_dataset_ids"
+                ],
+                "description": "只在Gateway授权G内扩展检索，不附加equipment_id过滤。目标过滤未命中、metadata缺失、比较或共同型号规程时使用；query保留所需对象与部件，结果需核对归属。不能扩大dataset或G。 仅在存在对应缺口时选用；禁止固定按 Target→Authorized→Keyword 顺序空跑。",
+                "doc_scope_ids": [
+                  "begin@authorized_doc_ids"
+                ],
+                "doc_scope_mode": "restrict",
+                "empty_response": "",
+                "function_name": "authorized_evidence",
+                "kb_ids": [],
+                "keywords_similarity_weight": 0.7,
+                "memory_ids": [],
+                "meta_data_filter": {},
+                "outputs": {
+                  "formalized_content": {
+                    "type": "string",
+                    "value": ""
+                  },
+                  "json": {
+                    "type": "Array<Object>",
+                    "value": []
+                  }
+                },
+                "rerank_id": "qwen3-rerank@千问@Tongyi-Qianwen",
+                "retrieval_from": "dataset",
+                "similarity_threshold": 0.1,
+                "toc_enhance": false,
+                "top_k": 128,
+                "top_n": 4,
+                "use_kg": false
+              }
+            },
+            {
+              "component_name": "Retrieval",
+              "id": "Retrieval:KeywordEvidence",
+              "name": "KeywordEvidence",
+              "params": {
+                "cross_languages": [],
+                "dataset_ids": [
+                  "begin@authorized_dataset_ids"
+                ],
+                "description": "在相同授权G内做关键词权重较高的混合检索，适合型号/故障码/厂家字段/标题术语定位。不是纯BM25工具；只在常规召回明显缺失且有精确关键词时补查。避免重复相同请求。 仅在存在对应缺口时选用；禁止固定按 Target→Authorized→Keyword 顺序空跑。",
+                "doc_scope_ids": [
+                  "begin@authorized_doc_ids"
+                ],
+                "doc_scope_mode": "restrict",
+                "empty_response": "",
+                "function_name": "keyword_evidence",
+                "kb_ids": [],
+                "keywords_similarity_weight": 0.85,
+                "memory_ids": [],
+                "meta_data_filter": {},
+                "outputs": {
+                  "formalized_content": {
+                    "type": "string",
+                    "value": ""
+                  },
+                  "json": {
+                    "type": "Array<Object>",
+                    "value": []
+                  }
+                },
+                "rerank_id": "qwen3-rerank@千问@Tongyi-Qianwen",
+                "retrieval_from": "dataset",
+                "similarity_threshold": 0.1,
+                "toc_enhance": false,
+                "top_k": 128,
+                "top_n": 4,
+                "use_kg": false
+              }
+            }
+          ],
+          "topPEnabled": true,
+          "top_p": 0.75,
+          "user_prompt": "",
+          "visual_files_var": ""
+        }
+      },
+      "upstream": [
+        "VariableAggregator:Seed"
+      ]
+    }
+  },
+  "globals": {
+    "sys.conversation_turns": 0,
+    "sys.files": [],
+    "sys.history": [],
+    "sys.query": "",
+    "sys.user_id": ""
+  },
+  "graph": {
+    "edges": [
+      {
+        "id": "e1",
+        "source": "Agent:Attachment",
+        "target": "Message:Attachment"
+      },
+      {
+        "id": "e2",
+        "source": "Agent:Conversation",
+        "target": "Message:Conversation"
+      },
+      {
+        "id": "e3",
+        "source": "Agent:Plan",
+        "target": "Switch:Intent"
+      },
+      {
+        "id": "e4",
+        "source": "Retrieval:Scope",
+        "target": "VariableAggregator:Seed"
+      },
+      {
+        "id": "e5",
+        "source": "Retrieval:Target",
+        "target": "VariableAggregator:Seed"
+      },
+      {
+        "id": "e6",
+        "source": "Switch:Focus",
+        "target": "Retrieval:Target",
+        "sourceHandle": "Case 1"
+      },
+      {
+        "id": "e7",
+        "source": "Switch:Focus",
+        "target": "Retrieval:Scope",
+        "sourceHandle": "Case 2"
+      },
+      {
+        "id": "e8",
+        "source": "Switch:Focus",
+        "target": "Message:Failure",
+        "sourceHandle": "end_cpn_ids"
+      },
+      {
+        "id": "e9",
+        "source": "Switch:Intent",
+        "target": "Message:Clarify",
+        "sourceHandle": "Case 1"
+      },
+      {
+        "id": "e10",
+        "source": "Switch:Intent",
+        "target": "Message:Boundary",
+        "sourceHandle": "Case 2"
+      },
+      {
+        "id": "e11",
+        "source": "Switch:Intent",
+        "target": "Agent:Attachment",
+        "sourceHandle": "Case 3"
+      },
+      {
+        "id": "e12",
+        "source": "Switch:Intent",
+        "target": "Agent:Conversation",
+        "sourceHandle": "Case 4"
+      },
+      {
+        "id": "e13",
+        "source": "Switch:Intent",
+        "target": "Switch:Scope",
+        "sourceHandle": "Case 5"
+      },
+      {
+        "id": "e14",
+        "source": "Switch:Intent",
+        "target": "Message:Failure",
+        "sourceHandle": "end_cpn_ids"
+      },
+      {
+        "id": "e15",
+        "source": "Switch:ResearchOutcome",
+        "target": "Message:Direct",
+        "sourceHandle": "Case 1"
+      },
+      {
+        "id": "e16",
+        "source": "Switch:ResearchOutcome",
+        "target": "Message:Failure",
+        "sourceHandle": "end_cpn_ids"
+      },
+      {
+        "id": "e17",
+        "source": "Switch:ResearchOutcome",
+        "target": "Message:NoEvidence",
+        "sourceHandle": "Case 3"
+      },
+      {
+        "id": "e18",
+        "source": "Switch:ResearchOutcome",
+        "target": "Message:ResearchNoEvidence",
+        "sourceHandle": "Case 2"
+      },
+      {
+        "id": "e19",
+        "source": "Switch:Scope",
+        "target": "Message:NoScope",
+        "sourceHandle": "Case 1"
+      },
+      {
+        "id": "e20",
+        "source": "Switch:Scope",
+        "target": "Switch:Focus",
+        "sourceHandle": "end_cpn_ids"
+      },
+      {
+        "id": "e21",
+        "source": "VariableAggregator:Seed",
+        "target": "Agent:AnswerResearch"
+      },
+      {
+        "id": "e22",
+        "source": "begin",
+        "target": "Agent:Plan"
+      },
+      {
+        "id": "e23",
+        "source": "Agent:AnswerResearch",
+        "target": "Switch:ResearchOutcome"
+      }
+    ],
+    "nodes": [
+      {
+        "data": {
+          "form": {
+            "enablePrologue": true,
+            "inputs": {
+              "authorized_dataset_ids": {
+                "key": "authorized_dataset_ids",
+                "name": "Gateway 授权 dataset IDs · JSON数组",
+                "optional": true,
+                "options": [],
+                "type": "object",
+                "value": "[]"
+              },
+              "authorized_doc_ids": {
+                "key": "authorized_doc_ids",
+                "name": "Gateway 授权文档 G · JSON数组",
+                "optional": true,
+                "options": [],
+                "type": "object",
+                "value": "[]"
+              },
+              "business_context": {
+                "key": "business_context",
+                "name": "Gateway 业务背景 · JSON对象",
+                "optional": true,
+                "options": [],
+                "type": "object",
+                "value": "{}"
+              },
+              "current_date": {
+                "key": "current_date",
+                "name": "Gateway 当前日期 · YYYY-MM-DD（可选）",
+                "optional": true,
+                "options": [],
+                "type": "line",
+                "value": ""
+              },
+              "doc_scope_mode": {
+                "key": "doc_scope_mode",
+                "name": "兼容输入 · 忽略；Retrieval 固定 restrict",
+                "optional": true,
+                "options": [],
+                "type": "line",
+                "value": "restrict"
+              },
+              "gateway_context": {
+                "key": "gateway_context",
+                "name": "兼容背景上下文",
+                "optional": true,
+                "options": [],
+                "type": "line",
+                "value": ""
+              },
+              "internet_enabled": {
+                "key": "internet_enabled",
+                "name": "兼容输入 · 忽略；本版无联网工具",
+                "optional": true,
+                "options": [],
+                "type": "boolean",
+                "value": false
+              },
+              "reasoning_mode": {
+                "key": "reasoning_mode",
+                "name": "兼容输入 · 本版不参与路由/权限",
+                "optional": true,
+                "options": [],
+                "type": "line",
+                "value": "simple"
+              },
+              "user_memory": {
+                "key": "user_memory",
+                "name": "当前认证用户 Memory · 弱上下文",
+                "optional": true,
+                "options": [],
+                "type": "line",
+                "value": ""
+              },
+              "workflow_version": {
+                "key": "workflow_version",
+                "name": "版本标记 · 不参与权限",
+                "optional": true,
+                "options": [],
+                "type": "line",
+                "value": "enterprise-qa-agent-v2.3-evidence-scope"
+              }
+            },
+            "mode": "conversational",
+            "prologue": "你好，我可以在当前授权资料内查询设备信息、操作维护和记录，并在需要时补充检索。",
+            "description": "New2 v2.4 PlanLite+AnswerResearch"
+          },
+          "label": "begin",
+          "name": "可信输入 · G / Dataset / 背景 / Memory / Date"
+        },
+        "id": "begin",
+        "measured": {
+          "height": 433,
+          "width": 200
+        },
+        "position": {
+          "x": 40,
+          "y": 420
+        },
+        "sourcePosition": "right",
+        "targetPosition": "left",
+        "type": "beginNode"
+      },
+      {
+        "data": {
+          "form": {
+            "cite": false,
+            "delay_after_error": 1,
+            "description": "",
+            "exception_comment": "",
+            "exception_default_value": "",
+            "exception_goto": [],
+            "exception_method": null,
+            "frequencyPenaltyEnabled": false,
+            "frequency_penalty": 0,
+            "llm_id": "ep-20260310093543-zl952@LLM@VolcEngine",
+            "maxTokensEnabled": true,
+            "max_retries": 1,
+            "max_rounds": 1,
+            "max_tokens": 900,
+            "mcp": [],
+            "message_history_window_size": 8,
+            "outputs": {
+              "structured": {
+                "additionalProperties": false,
+                "properties": {
+                  "route": {
+                    "description": "",
+                    "enum": [
+                      "knowledge",
+                      "clarify",
+                      "boundary",
+                      "attachment",
+                      "conversation"
+                    ],
+                    "type": "string"
+                  },
+                  "resolved_question": {
+                    "description": "可独立理解的完整问题，不回答事实",
+                    "type": "string"
+                  },
+                  "scope_mode": {
+                    "description": "targeted=存在一个或多个明确目标设备；global=没有特定设备对象",
+                    "enum": [
+                      "targeted",
+                      "global"
+                    ],
+                    "type": "string"
+                  },
+                  "scope_source": {
+                    "description": "可选审计字段：本轮目标设备集合来源",
+                    "enum": [
+                      "current_query",
+                      "conversation",
+                      "gateway_context",
+                      "none"
+                    ],
+                    "type": "string"
+                  },
+                  "target_equipment_ids": {
+                    "description": "本轮明确目标设备集合；global 时必须为空",
+                    "items": {
+                      "type": "string"
+                    },
+                    "maxItems": 20,
+                    "type": "array"
+                  },
+                  "focused_query": {
+                    "description": "targeted 检索：部件+字段/步骤/故障主题；设备集合由 metadata IN 过滤",
+                    "type": "string"
+                  },
+                  "broad_query": {
+                    "description": "global 或补检索：保留用户明确设备/型号/部件/时间等实体",
+                    "type": "string"
+                  },
+                  "clarification_question": {
+                    "description": "仅 clarify 路由，询问唯一阻碍缺口；其余空串",
+                    "type": "string"
+                  },
+                  "boundary_response": {
+                    "description": "仅 boundary 路由说明需全量权威或不支持写操作；其余空串",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "route",
+                  "resolved_question",
+                  "scope_mode",
+                  "target_equipment_ids",
+                  "focused_query",
+                  "broad_query",
+                  "clarification_question",
+                  "boundary_response"
+                ],
+                "type": "object"
+              }
+            },
+            "parameter": "Custom",
+            "presencePenaltyEnabled": false,
+            "presence_penalty": 0,
+            "prompts": [
+              {
+                "content": "用户问题：{sys.query}\n业务背景：{begin@business_context}\n兼容背景：{begin@gateway_context}\n表达偏好：{begin@user_memory}\n当前日期（可选）：{begin@current_date}",
+                "role": "user"
+              }
+            ],
+            "sys_prompt": "你是设备知识问答的 PlanLite 规划器，只输出指定 JSON，不输出推理链或事实答案。\n\n# 可信边界\n- authorized_dataset_ids / authorized_doc_ids(G) 由 Gateway 决定；你不生成、不扩大、不修改授权范围。\n- 业务背景、会话历史和 Memory 都不是授权，也不是设备事实证据。\n\n# 目标设备集合（顺序）\n1. 当前问题明确设备/资产标识 → target_equipment_ids 取当前问题目标，scope_mode=targeted，scope_source=current_query。\n2. 未显式给设备但承接会话最近明确设备 → 用会话对象，scope_source=conversation。\n3. 前两项没有且当前问题语义承接 Gateway 页面背景中的明确设备 → 使用之，scope_source=gateway_context。\n4. 否则 scope_mode=global、target_equipment_ids=[]、scope_source=none。\n5. 用户明确转向其他设备时，不被历史/页面锁回。\n6. 不猜设备号；实质歧义且无法先答有意义部分时 route=clarify。\n\n# Query\n- focused_query：已有 target_equipment_ids 硬过滤时，只写部件+字段/步骤/故障主题。\n- broad_query：global 或补检索，保留用户明确实体。\n- scope_mode=global 时 target_equipment_ids 必须为空且 broad_query 非空；targeted 时两者与 focused_query 均非空。\n\n# 路由\n- knowledge / clarify / boundary / attachment / conversation（定义同前；企业事实不得分到 conversation）。\n\n只输出 PlanLite 字段；不要输出 intent/keywords/subquestions/context_summary 等扩展字段。不输出思考过程。\n",
+            "temperature": 0.1,
+            "temperatureEnabled": true,
+            "thinking": "disabled",
+            "tools": [],
+            "topPEnabled": true,
+            "top_p": 0.75,
+            "user_prompt": "",
+            "visual_files_var": ""
+          },
+          "label": "Agent:Plan",
+          "name": "意图 · 消歧 · 目标集合 · 拆问 · 关键词"
+        },
+        "id": "Agent:Plan",
+        "measured": {
+          "height": 79,
+          "width": 200
+        },
+        "position": {
+          "x": 370,
+          "y": 420
+        },
+        "sourcePosition": "right",
+        "targetPosition": "left",
+        "type": "agentNode"
+      },
+      {
+        "data": {
+          "form": {
+            "conditions": [
+              {
+                "items": [
+                  {
+                    "cpn_id": "Agent:Plan@structured.route",
+                    "operator": "=",
+                    "value": "clarify"
+                  },
+                  {
+                    "cpn_id": "Agent:Plan@structured.clarification_question",
+                    "operator": "not empty",
+                    "value": ""
+                  }
+                ],
+                "logical_operator": "and",
+                "to": [
+                  "Message:Clarify"
+                ]
+              },
+              {
+                "items": [
+                  {
+                    "cpn_id": "Agent:Plan@structured.route",
+                    "operator": "=",
+                    "value": "boundary"
+                  },
+                  {
+                    "cpn_id": "Agent:Plan@structured.boundary_response",
+                    "operator": "not empty",
+                    "value": ""
+                  }
+                ],
+                "logical_operator": "and",
+                "to": [
+                  "Message:Boundary"
+                ]
+              },
+              {
+                "items": [
+                  {
+                    "cpn_id": "Agent:Plan@structured.route",
+                    "operator": "=",
+                    "value": "attachment"
+                  }
+                ],
+                "logical_operator": "and",
+                "to": [
+                  "Agent:Attachment"
+                ]
+              },
+              {
+                "items": [
+                  {
+                    "cpn_id": "Agent:Plan@structured.route",
+                    "operator": "=",
+                    "value": "conversation"
+                  }
+                ],
+                "logical_operator": "and",
+                "to": [
+                  "Agent:Conversation"
+                ]
+              },
+              {
+                "items": [
+                  {
+                    "cpn_id": "Agent:Plan@structured.route",
+                    "operator": "=",
+                    "value": "knowledge"
+                  },
+                  {
+                    "cpn_id": "Agent:Plan@structured.resolved_question",
+                    "operator": "not empty",
+                    "value": ""
+                  }
+                ],
+                "logical_operator": "and",
+                "to": [
+                  "Switch:Scope"
+                ]
+              }
+            ],
+            "end_cpn_ids": [
+              "Message:Failure"
+            ]
+          },
+          "label": "Switch:Intent",
+          "name": "意图分流"
+        },
+        "id": "Switch:Intent",
+        "measured": {
+          "height": 555,
+          "width": 200
+        },
+        "position": {
+          "x": 700,
+          "y": 420
+        },
+        "sourcePosition": "right",
+        "targetPosition": "left",
+        "type": "switchNode"
+      },
+      {
+        "data": {
+          "form": {
+            "content": [
+              "{Agent:Plan@structured.clarification_question}"
+            ],
+            "status": "completed",
+            "stream": true
+          },
+          "label": "Message:Clarify",
+          "name": "澄清问题"
+        },
+        "id": "Message:Clarify",
+        "measured": {
+          "height": 85,
+          "width": 200
+        },
+        "position": {
+          "x": 1050,
+          "y": -440
+        },
+        "sourcePosition": "right",
+        "targetPosition": "left",
+        "type": "messageNode"
+      },
+      {
+        "data": {
+          "form": {
+            "content": [
+              "{Agent:Plan@structured.boundary_response}"
+            ],
+            "status": "completed",
+            "stream": true
+          },
+          "label": "Message:Boundary",
+          "name": "能力边界"
+        },
+        "id": "Message:Boundary",
+        "measured": {
+          "height": 85,
+          "width": 200
+        },
+        "position": {
+          "x": 1050,
+          "y": -270
+        },
+        "selected": false,
+        "sourcePosition": "right",
+        "targetPosition": "left",
+        "type": "messageNode"
+      },
+      {
+        "data": {
+          "form": {
+            "cite": false,
+            "delay_after_error": 1,
+            "description": "",
+            "exception_comment": "",
+            "exception_default_value": "",
+            "exception_goto": [],
+            "exception_method": null,
+            "frequencyPenaltyEnabled": false,
+            "frequency_penalty": 0,
+            "llm_id": "ep-20260310093543-zl952@LLM@VolcEngine",
+            "maxTokensEnabled": true,
+            "max_retries": 1,
+            "max_rounds": 1,
+            "max_tokens": 2500,
+            "mcp": [],
+            "message_history_window_size": 0,
+            "outputs": {
+              "content": {
+                "type": "string",
+                "value": ""
+              }
+            },
+            "parameter": "Custom",
+            "presencePenaltyEnabled": false,
+            "presence_penalty": 0,
+            "prompts": [
+              {
+                "content": "仅依据系统实际附加的文件内容回答：{sys.query}\n消歧：{Agent:Plan@structured.resolved_question}\n偏好：{begin@user_memory}",
+                "role": "user"
+              }
+            ],
+            "sys_prompt": "你只回答当前问题允许的非知识库内容。不得根据常识捏造设备厂家、参数、维修、身份或检索结果；不得声称访问未提供附件。附件仅凭当前真正可读取的文本/图片回答；不可见时要求提供可读内容。用户Memory只是表达偏好，不是企业事实。不要输出工具协议、内部路径、授权数据或推理链；不生成知识库[ID:n]。",
+            "temperature": 0.1,
+            "temperatureEnabled": true,
+            "thinking": "disabled",
+            "tools": [],
+            "topPEnabled": true,
+            "top_p": 0.75,
+            "user_prompt": "",
+            "visual_files_var": ""
+          },
+          "label": "Agent:Attachment",
+          "name": "附件可见内容 · 不入库"
+        },
+        "id": "Agent:Attachment",
+        "measured": {
+          "height": 79,
+          "width": 200
+        },
+        "position": {
+          "x": 1050,
+          "y": -90
+        },
+        "selected": true,
+        "sourcePosition": "right",
+        "targetPosition": "left",
+        "type": "agentNode"
+      },
+      {
+        "data": {
+          "form": {
+            "content": [
+              "{Agent:Attachment@content}"
+            ],
+            "status": "completed",
+            "stream": true
+          },
+          "label": "Message:Attachment",
+          "name": "附件回答"
+        },
+        "id": "Message:Attachment",
+        "measured": {
+          "height": 85,
+          "width": 200
+        },
+        "position": {
+          "x": 1380,
+          "y": -90
+        },
+        "sourcePosition": "right",
+        "targetPosition": "left",
+        "type": "messageNode"
+      },
+      {
+        "data": {
+          "form": {
+            "cite": false,
+            "delay_after_error": 1,
+            "description": "",
+            "exception_comment": "",
+            "exception_default_value": "",
+            "exception_goto": [],
+            "exception_method": null,
+            "frequencyPenaltyEnabled": false,
+            "frequency_penalty": 0,
+            "llm_id": "ep-20260310093543-zl952@LLM@VolcEngine",
+            "maxTokensEnabled": true,
+            "max_retries": 1,
+            "max_rounds": 1,
+            "max_tokens": 500,
+            "mcp": [],
+            "message_history_window_size": 0,
+            "outputs": {
+              "content": {
+                "type": "string",
+                "value": ""
+              }
+            },
+            "parameter": "Custom",
+            "presencePenaltyEnabled": false,
+            "presence_penalty": 0,
+            "prompts": [
+              {
+                "content": "用户：{sys.query}\n偏好：{begin@user_memory}\n仅简短回应寒暄/表达要求，遇企业事实不得猜测。",
+                "role": "user"
+              }
+            ],
+            "sys_prompt": "你只回答当前问题允许的非知识库内容。不得根据常识捏造设备厂家、参数、维修、身份或检索结果；不得声称访问未提供附件。附件仅凭当前真正可读取的文本/图片回答；不可见时要求提供可读内容。用户Memory只是表达偏好，不是企业事实。不要输出工具协议、内部路径、授权数据或推理链；不生成知识库[ID:n]。",
+            "temperature": 0.1,
+            "temperatureEnabled": true,
+            "thinking": "disabled",
+            "tools": [],
+            "topPEnabled": true,
+            "top_p": 0.75,
+            "user_prompt": "",
+            "visual_files_var": ""
+          },
+          "label": "Agent:Conversation",
+          "name": "寒暄与表达偏好"
+        },
+        "id": "Agent:Conversation",
+        "measured": {
+          "height": 79,
+          "width": 200
+        },
+        "position": {
+          "x": 1050,
+          "y": 100
+        },
+        "sourcePosition": "right",
+        "targetPosition": "left",
+        "type": "agentNode"
+      },
+      {
+        "data": {
+          "form": {
+            "content": [
+              "{Agent:Conversation@content}"
+            ],
+            "status": "completed",
+            "stream": true
+          },
+          "label": "Message:Conversation",
+          "name": "对话回应"
+        },
+        "id": "Message:Conversation",
+        "measured": {
+          "height": 85,
+          "width": 200
+        },
+        "position": {
+          "x": 1380,
+          "y": 100
+        },
+        "sourcePosition": "right",
+        "targetPosition": "left",
+        "type": "messageNode"
+      },
+      {
+        "data": {
+          "form": {
+            "conditions": [
+              {
+                "items": [
+                  {
+                    "cpn_id": "begin@authorized_doc_ids",
+                    "operator": "empty",
+                    "value": ""
+                  },
+                  {
+                    "cpn_id": "begin@authorized_dataset_ids",
+                    "operator": "empty",
+                    "value": ""
+                  }
+                ],
+                "logical_operator": "or",
+                "to": [
+                  "Message:NoScope"
+                ]
+              }
+            ],
+            "end_cpn_ids": [
+              "Switch:Focus"
+            ]
+          },
+          "label": "Switch:Scope",
+          "name": "空 G / 空 dataset 阻断"
+        },
+        "id": "Switch:Scope",
+        "measured": {
+          "height": 173,
+          "width": 200
+        },
+        "position": {
+          "x": 1050,
+          "y": 420
+        },
+        "selected": false,
+        "sourcePosition": "right",
+        "targetPosition": "left",
+        "type": "switchNode"
+      },
+      {
+        "data": {
+          "form": {
+            "content": [
+              "当前没有可用于本次检索的授权资料。请核对资料是否已发布、版本是否有效及当前访问范围；这不代表系统中不存在相关文档。"
+            ],
+            "status": "no_reliable_evidence",
+            "stream": true
+          },
+          "label": "Message:NoScope",
+          "name": "当前无可检索授权资料"
+        },
+        "id": "Message:NoScope",
+        "measured": {
+          "height": 85,
+          "width": 200
+        },
+        "position": {
+          "x": 1400,
+          "y": 790
+        },
+        "sourcePosition": "right",
+        "targetPosition": "left",
+        "type": "messageNode"
+      },
+      {
+        "data": {
+          "form": {
+            "conditions": [
+              {
+                "items": [
+                  {
+                    "cpn_id": "Agent:Plan@structured.scope_mode",
+                    "operator": "=",
+                    "value": "targeted"
+                  },
+                  {
+                    "cpn_id": "Agent:Plan@structured.target_equipment_ids",
+                    "operator": "not empty",
+                    "value": ""
+                  },
+                  {
+                    "cpn_id": "Agent:Plan@structured.focused_query",
+                    "operator": "not empty",
+                    "value": ""
+                  }
+                ],
+                "logical_operator": "and",
+                "to": [
+                  "Retrieval:Target"
+                ]
+              },
+              {
+                "items": [
+                  {
+                    "cpn_id": "Agent:Plan@structured.scope_mode",
+                    "operator": "=",
+                    "value": "global"
+                  },
+                  {
+                    "cpn_id": "Agent:Plan@structured.target_equipment_ids",
+                    "operator": "empty",
+                    "value": ""
+                  },
+                  {
+                    "cpn_id": "Agent:Plan@structured.broad_query",
+                    "operator": "not empty",
+                    "value": ""
+                  }
+                ],
+                "logical_operator": "and",
+                "to": [
+                  "Retrieval:Scope"
+                ]
+              }
+            ],
+            "end_cpn_ids": [
+              "Message:Failure"
+            ]
+          },
+          "label": "Switch:Focus",
+          "name": "目标设备集合 / 全 G"
+        },
+        "id": "Switch:Focus",
+        "measured": {
+          "height": 197,
+          "width": 200
+        },
+        "position": {
+          "x": 1400,
+          "y": 400
+        },
+        "selected": false,
+        "sourcePosition": "right",
+        "targetPosition": "left",
+        "type": "switchNode"
+      },
+      {
+        "data": {
+          "form": {
+            "cross_languages": [],
+            "dataset_ids": [
+              "begin@authorized_dataset_ids"
+            ],
+            "description": "仅在 Gateway 授权 G 内，对一个或多个明确目标设备做 equipment_id IN 精确过滤，再进行混合检索；无权扩大 G。",
+            "doc_scope_ids": [
+              "begin@authorized_doc_ids"
+            ],
+            "doc_scope_mode": "restrict",
+            "empty_response": "",
+            "kb_ids": [],
+            "keywords_similarity_weight": 0.7,
+            "memory_ids": [],
+            "meta_data_filter": {
+              "logic": "and",
+              "manual": [
+                {
+                  "key": "equipment_id",
+                  "op": "in",
+                  "value": "{Agent:Plan@structured.target_equipment_ids}"
+                }
+              ],
+              "method": "manual"
+            },
+            "outputs": {
+              "formalized_content": {
+                "type": "string",
+                "value": ""
+              },
+              "json": {
+                "type": "Array<Object>",
+                "value": []
+              }
+            },
+            "query": "Agent:Plan@structured.focused_query",
+            "rerank_id": "qwen3-rerank@千问@Tongyi-Qianwen",
+            "retrieval_from": "dataset",
+            "similarity_threshold": 0.1,
+            "toc_enhance": false,
+            "top_k": 64,
+            "top_n": 8,
+            "use_kg": false
+          },
+          "label": "Retrieval:Target",
+          "name": "目标设备集合 IN 过滤 + 混合检索"
+        },
+        "id": "Retrieval:Target",
+        "measured": {
+          "height": 89,
+          "width": 200
+        },
+        "position": {
+          "x": 1750,
+          "y": 300
+        },
+        "selected": false,
+        "sourcePosition": "right",
+        "targetPosition": "left",
+        "type": "retrievalNode"
+      },
+      {
+        "data": {
+          "form": {
+            "cross_languages": [],
+            "dataset_ids": [
+              "begin@authorized_dataset_ids"
+            ],
+            "description": "仅当没有任何可靠特定设备对象时，在 Gateway 授权 G 内做范围检索；不得越过 authorized_doc_ids。",
+            "doc_scope_ids": [
+              "begin@authorized_doc_ids"
+            ],
+            "doc_scope_mode": "restrict",
+            "empty_response": "",
+            "kb_ids": [],
+            "keywords_similarity_weight": 0.7,
+            "memory_ids": [],
+            "meta_data_filter": {},
+            "outputs": {
+              "formalized_content": {
+                "type": "string",
+                "value": ""
+              },
+              "json": {
+                "type": "Array<Object>",
+                "value": []
+              }
+            },
+            "query": "Agent:Plan@structured.broad_query",
+            "rerank_id": "qwen3-rerank@千问@Tongyi-Qianwen",
+            "retrieval_from": "dataset",
+            "similarity_threshold": 0.1,
+            "toc_enhance": false,
+            "top_k": 128,
+            "top_n": 8,
+            "use_kg": false
+          },
+          "label": "Retrieval:Scope",
+          "name": "无特定设备 · 授权 G 范围检索"
+        },
+        "id": "Retrieval:Scope",
+        "measured": {
+          "height": 89,
+          "width": 200
+        },
+        "position": {
+          "x": 1750,
+          "y": 640
+        },
+        "sourcePosition": "right",
+        "targetPosition": "left",
+        "type": "retrievalNode"
+      },
+      {
+        "data": {
+          "form": {
+            "groups": [
+              {
+                "group_name": "evidence",
+                "type": "string",
+                "variables": [
+                  {
+                    "value": "Retrieval:Target@formalized_content"
+                  },
+                  {
+                    "value": "Retrieval:Scope@formalized_content"
+                  }
+                ]
+              }
+            ],
+            "outputs": {
+              "evidence": {
+                "type": "string",
+                "value": ""
+              }
+            }
+          },
+          "label": "VariableAggregator:Seed",
+          "name": "选取本轮检索证据"
+        },
+        "id": "VariableAggregator:Seed",
+        "measured": {
+          "height": 121,
+          "width": 200
+        },
+        "position": {
+          "x": 2090,
+          "y": 420
+        },
+        "sourcePosition": "right",
+        "targetPosition": "left",
+        "type": "variableAggregatorNode"
+      },
+      {
+        "data": {
+          "form": {
+            "content": [
+              "{Agent:AnswerResearch@structured.answer}"
+            ],
+            "status": "completed",
+            "stream": true
+          },
+          "label": "Message:Direct",
+          "name": "已有充分证据 · 直接答"
+        },
+        "id": "Message:Direct",
+        "measured": {
+          "height": 85,
+          "width": 200
+        },
+        "position": {
+          "x": 3120,
+          "y": 70
+        },
+        "sourcePosition": "right",
+        "targetPosition": "left",
+        "type": "messageNode"
+      },
+      {
+        "data": {
+          "form": {
+            "conditions": [
+              {
+                "items": [
+                  {
+                    "cpn_id": "Agent:AnswerResearch@structured.status",
+                    "operator": "=",
+                    "value": "completed"
+                  },
+                  {
+                    "cpn_id": "Agent:AnswerResearch@structured.answer",
+                    "operator": "not empty",
+                    "value": ""
+                  },
+                  {
+                    "cpn_id": "Agent:AnswerResearch@structured.evidence_ids",
+                    "operator": "not empty",
+                    "value": ""
+                  }
+                ],
+                "logical_operator": "and",
+                "to": [
+                  "Message:Direct"
+                ]
+              },
+              {
+                "items": [
+                  {
+                    "cpn_id": "Agent:AnswerResearch@structured.status",
+                    "operator": "=",
+                    "value": "no_reliable_evidence"
+                  },
+                  {
+                    "cpn_id": "Agent:AnswerResearch@structured.answer",
+                    "operator": "not empty",
+                    "value": ""
+                  }
+                ],
+                "logical_operator": "and",
+                "to": [
+                  "Message:ResearchNoEvidence"
+                ]
+              },
+              {
+                "items": [
+                  {
+                    "cpn_id": "Agent:AnswerResearch@structured.status",
+                    "operator": "=",
+                    "value": "no_reliable_evidence"
+                  }
+                ],
+                "logical_operator": "and",
+                "to": [
+                  "Message:NoEvidence"
+                ]
+              }
+            ],
+            "end_cpn_ids": [
+              "Message:Failure"
+            ]
+          },
+          "label": "Switch:ResearchOutcome",
+          "name": "终态硬门 · completed 必须有 Evidence"
+        },
+        "id": "Switch:ResearchOutcome",
+        "measured": {
+          "height": 281,
+          "width": 200
+        },
+        "position": {
+          "x": 3480,
+          "y": 450
+        },
+        "sourcePosition": "right",
+        "targetPosition": "left",
+        "type": "switchNode"
+      },
+      {
+        "data": {
+          "form": {
+            "content": [
+              "{Agent:AnswerResearch@structured.answer}"
+            ],
+            "status": "completed",
+            "stream": true
+          },
+          "label": "Message:Research",
+          "name": "补查后回答"
+        },
+        "id": "Message:Research",
+        "measured": {
+          "height": 85,
+          "width": 200
+        },
+        "position": {
+          "x": 3850,
+          "y": 430
+        },
+        "sourcePosition": "right",
+        "targetPosition": "left",
+        "type": "messageNode"
+      },
+      {
+        "data": {
+          "form": {
+            "content": [
+              "当前检索结果中未找到足以支持该问题的可靠依据。"
+            ],
+            "status": "no_reliable_evidence",
+            "stream": true
+          },
+          "label": "Message:NoEvidence",
+          "name": "依据不足：空答案兜底"
+        },
+        "id": "Message:NoEvidence",
+        "measured": {
+          "height": 85,
+          "width": 200
+        },
+        "position": {
+          "x": 3480,
+          "y": 1100
+        },
+        "sourcePosition": "right",
+        "targetPosition": "left",
+        "type": "messageNode"
+      },
+      {
+        "data": {
+          "form": {
+            "content": [
+              "本次问答执行未能正常完成，请稍后重试。"
+            ],
+            "status": "failed",
+            "stream": true
+          },
+          "label": "Message:Failure",
+          "name": "执行/结构异常"
+        },
+        "id": "Message:Failure",
+        "measured": {
+          "height": 85,
+          "width": 200
+        },
+        "position": {
+          "x": 1700,
+          "y": -560
+        },
+        "sourcePosition": "right",
+        "targetPosition": "left",
+        "type": "messageNode"
+      },
+      {
+        "data": {
+          "form": {
+            "text": "G由Gateway提供，Retrieval固定restrict。targeted使用Plan设备集合的manual IN；只有显式global且设备集合为空才走Scope。无效目标计划走失败分支。本模板不包含底层代码补丁；IN字符串在内存回退中的精确匹配仍需代码修复。"
+          },
+          "label": "Note",
+          "name": "授权 G 是硬边界；TargetSet 只缩小不扩大"
+        },
+        "id": "Note:Scope",
+        "measured": {
+          "height": 127,
+          "width": 241
+        },
+        "position": {
+          "x": 40,
+          "y": -150
+        },
+        "sourcePosition": "right",
+        "targetPosition": "left",
+        "type": "noteNode"
+      },
+      {
+        "data": {
+          "form": {
+            "text": "快速路径：Plan + 一次受限 Retrieval + AnswerResearch，证据足且 evidence_ids 非空即结束。缺口路径才启用 Research。结构化回答会先完整生成再由 Message 输出，本版不声称逐 token 真流式。"
+          },
+          "label": "Note",
+          "name": "按需付费的两条路径"
+        },
+        "id": "Note:Fast",
+        "measured": {
+          "height": 127,
+          "width": 241
+        },
+        "position": {
+          "x": 2050,
+          "y": -150
+        },
+        "sourcePosition": "right",
+        "targetPosition": "left",
+        "type": "noteNode"
+      },
+      {
+        "data": {
+          "form": {
+            "text": "保持Research max_rounds=2与现有检索参数。提示最多3次补查仍是软策略，不等于服务端调用硬上限；本模板未增加预算/去重代码或双模型。"
+          },
+          "label": "Note",
+          "name": "工具与预算边界"
+        },
+        "id": "Note:Budget",
+        "measured": {
+          "height": 127,
+          "width": 241
+        },
+        "position": {
+          "x": 3150,
+          "y": -200
+        },
+        "sourcePosition": "right",
+        "targetPosition": "left",
+        "type": "noteNode"
+      },
+      {
+        "data": {
+          "form": {
+            "text": "A1目标直接证据/A2明确适用范围才能支持目标结论；B仅描述相关资料与缺口。业务状态与引用独立，无据可以保留相关引用。模板仅检查字段与分支，不证明ID真实性或语义支持；本轮ID与授权校验需运行时实现。"
+          },
+          "label": "Note",
+          "name": "Evidence 两层校验"
+        },
+        "id": "Note:Evidence",
+        "measured": {
+          "height": 127,
+          "width": 241
+        },
+        "position": {
+          "x": 3480,
+          "y": -210
+        },
+        "sourcePosition": "right",
+        "targetPosition": "left",
+        "type": "noteNode"
+      },
+      {
+        "data": {
+          "form": {
+            "text": "TYrag 当前 LLM/Agent runtime 会自动注入 sys.files；visual_files_var 为空不等于附件不可见。纯附件问题走 attachment；附件 + 知识库问题走 knowledge，并仍受 G 与 Evidence 规则约束。附件是否可读仍需 E2E 验证；附件生命周期/ownership/TTL 继续由 Gateway 管理。"
+          },
+          "label": "Note",
+          "name": "附件运行时语义"
+        },
+        "id": "Note:Attachment",
+        "measured": {
+          "height": 127,
+          "width": 241
+        },
+        "position": {
+          "x": 1030,
+          "y": -250
+        },
+        "selected": false,
+        "sourcePosition": "right",
+        "targetPosition": "left",
+        "type": "noteNode"
+      },
+      {
+        "data": {
+          "form": {
+            "content": [
+              "{Agent:AnswerResearch@structured.answer}"
+            ],
+            "status": "no_reliable_evidence",
+            "stream": true
+          },
+          "label": "Message:DraftNoEvidence",
+          "name": "初答：依据不足说明"
+        },
+        "id": "Message:DraftNoEvidence",
+        "measured": {
+          "height": 85,
+          "width": 200
+        },
+        "position": {
+          "x": 3480,
+          "y": 1320
+        },
+        "sourcePosition": "right",
+        "targetPosition": "left",
+        "type": "messageNode"
+      },
+      {
+        "data": {
+          "form": {
+            "content": [
+              "{Agent:AnswerResearch@structured.answer}"
+            ],
+            "status": "no_reliable_evidence",
+            "stream": true
+          },
+          "label": "Message:ResearchNoEvidence",
+          "name": "补查：依据不足说明"
+        },
+        "id": "Message:ResearchNoEvidence",
+        "measured": {
+          "height": 85,
+          "width": 200
+        },
+        "position": {
+          "x": 3480,
+          "y": 1460
+        },
+        "sourcePosition": "right",
+        "targetPosition": "left",
+        "type": "messageNode"
+      },
+      {
+        "id": "Agent:AnswerResearch",
+        "type": "ragNode",
+        "position": {
+          "x": 920,
+          "y": 320
+        },
+        "data": {
+          "label": "Agent:AnswerResearch",
+          "form": {
+            "cite": false,
+            "delay_after_error": 1,
+            "description": "",
+            "exception_comment": "",
+            "exception_default_value": "",
+            "exception_goto": [],
+            "exception_method": null,
+            "frequencyPenaltyEnabled": false,
+            "frequency_penalty": 0,
+            "llm_id": "ep-20260310093543-zl952@LLM@VolcEngine",
+            "maxTokensEnabled": true,
+            "max_retries": 1,
+            "max_rounds": 2,
+            "max_tokens": 2800,
+            "mcp": [],
+            "message_history_window_size": 0,
+            "outputs": {
+              "structured": {
+                "additionalProperties": false,
+                "properties": {
+                  "status": {
+                    "description": "",
+                    "enum": [
+                      "completed",
+                      "no_reliable_evidence",
+                      "failed"
+                    ],
+                    "type": "string"
+                  },
+                  "answer": {
+                    "description": "用户可见答案；B 级须写清相关资料与不能迁到目标对象的原因；真无证据可用既定兜底句",
+                    "type": "string"
+                  },
+                  "evidence_ids": {
+                    "description": "答案实际引用的本轮真实 ID；无可靠依据时也可保留相关引用",
+                    "items": {
+                      "type": "string"
+                    },
+                    "maxItems": 16,
+                    "type": "array"
+                  },
+                  "unresolved": {
+                    "description": "最多 3 条未覆盖事项",
+                    "items": {
+                      "type": "string"
+                    },
+                    "maxItems": 3,
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "status",
+                  "answer",
+                  "evidence_ids",
+                  "unresolved"
+                ],
+                "type": "object"
+              }
+            },
+            "parameter": "Custom",
+            "presencePenaltyEnabled": false,
+            "presence_penalty": 0,
+            "prompts": [
+              {
+                "content": "用户原问：{sys.query}\n消歧问题：{Agent:Plan@structured.resolved_question}\nGateway背景：{begin@business_context}\n初始证据见系统提示中的 Seed。",
+                "role": "user"
+              }
+            ],
+            "sys_prompt": "你服务于药品制药工厂的设备管理场景。领域背景只帮助理解术语，不是事实证据。\n\n仅依据本轮实际提供的知识库 Content、工具返回结果和实际可读取附件。历史回答、业务背景、Memory 不作设备事实证据。\n\n# 证据适用性\n- A1：正文直接建立目标对象与所问事实/操作要求之间的关系。\n- A2：正文明确说明适用范围，且本轮证据证明目标对象落在该范围内。不能只凭同设备、同手册、型号相似或邻近章节推定适用。\n- B：存在相关资料，但没有证明适用于目标对象。只能说明原文对象、已发现资料和缺少的适用关系；不能作为目标对象的操作建议（即使加“仅供参考”也不允许迁移步骤/介质/限制）。\n- C：无可靠关联，不采用。\n\n整机、控制器、取样阀、半球阀和喷嘴等对象必须区分；不能把半球阀阀座要求迁移到取样阀喷嘴。\n\n# 执行策略（单一 AnswerResearch Agent）\n1. 先阅读初始检索证据。若已有 A1/A2 足以回答实质问题：直接作答，status=completed，**不要调用工具**，不要进入大上下文补查循环。\n2. 仅当存在实质缺口时，才按缺口选择工具补证（最多 2 轮工具）：\n   - 目标设备集合内换部件/主题表述 → TargetEvidence\n   - metadata 缺失 / 共享手册 / 型号级资料 → AuthorizedEvidence\n   - 精确故障码/型号/标题术语 → KeywordEvidence\n   **禁止**固定按 Target→Authorized→Keyword 流水线依次空跑。\n3. 补证后仍无 A1/A2：status=no_reliable_evidence。\n   - 若仍有相关 B 级 cite：answer 必须写清「相关资料引用 + 为何不能迁到目标对象」，**禁止**在仍有 cite 时整句只写“未找到可靠依据/无法回答”。\n   - 若完全无可说明相关资料：可用既定空证据兜底句。\n4. status=completed 时 evidence_ids 不得为空。引用只用本轮真实 ID。\n5. 工具/协议失败且无法形成有效结果 → status=failed，不伪装无据。\n\n只读、不联网、不执行写操作。不输出思维链、工具参数或内部路径。\n\n计划（不是事实证据）：{Agent:Plan@structured}\n初始证据：{VariableAggregator:Seed@evidence}\nGateway 背景（只消歧）：{begin@business_context}\n表达偏好：{begin@user_memory}\n用户原问：{sys.query}\n消歧问题：{Agent:Plan@structured.resolved_question}\n",
+            "temperature": 0.1,
+            "temperatureEnabled": true,
+            "thinking": "disabled",
+            "tools": [
+              {
+                "component_name": "Retrieval",
+                "id": "Retrieval:TargetEvidence",
+                "name": "TargetEvidence",
+                "params": {
+                  "cross_languages": [],
+                  "dataset_ids": [
+                    "begin@authorized_dataset_ids"
+                  ],
+                  "description": "在计划中明确的一个或多个目标设备集合内查部件/型号/字段/操作/故障。仅 scope_mode=targeted 且 target_equipment_ids 非空时使用；equipment_id IN 过滤固定，query 不重复设备号。不能修改目标集合或授权 G。 仅在存在对应缺口时选用；禁止固定按 Target→Authorized→Keyword 顺序空跑。",
+                  "doc_scope_ids": [
+                    "begin@authorized_doc_ids"
+                  ],
+                  "doc_scope_mode": "restrict",
+                  "empty_response": "",
+                  "function_name": "target_evidence",
+                  "kb_ids": [],
+                  "keywords_similarity_weight": 0.7,
+                  "memory_ids": [],
+                  "meta_data_filter": {
+                    "logic": "and",
+                    "manual": [
+                      {
+                        "key": "equipment_id",
+                        "op": "in",
+                        "value": "{Agent:Plan@structured.target_equipment_ids}"
+                      }
+                    ],
+                    "method": "manual"
+                  },
+                  "outputs": {
+                    "formalized_content": {
+                      "type": "string",
+                      "value": ""
+                    },
+                    "json": {
+                      "type": "Array<Object>",
+                      "value": []
+                    }
+                  },
+                  "rerank_id": "qwen3-rerank@千问@Tongyi-Qianwen",
+                  "retrieval_from": "dataset",
+                  "similarity_threshold": 0.1,
+                  "toc_enhance": false,
+                  "top_k": 64,
+                  "top_n": 4,
+                  "use_kg": false
+                }
+              },
+              {
+                "component_name": "Retrieval",
+                "id": "Retrieval:AuthorizedEvidence",
+                "name": "AuthorizedEvidence",
+                "params": {
+                  "cross_languages": [],
+                  "dataset_ids": [
+                    "begin@authorized_dataset_ids"
+                  ],
+                  "description": "只在Gateway授权G内扩展检索，不附加equipment_id过滤。目标过滤未命中、metadata缺失、比较或共同型号规程时使用；query保留所需对象与部件，结果需核对归属。不能扩大dataset或G。 仅在存在对应缺口时选用；禁止固定按 Target→Authorized→Keyword 顺序空跑。",
+                  "doc_scope_ids": [
+                    "begin@authorized_doc_ids"
+                  ],
+                  "doc_scope_mode": "restrict",
+                  "empty_response": "",
+                  "function_name": "authorized_evidence",
+                  "kb_ids": [],
+                  "keywords_similarity_weight": 0.7,
+                  "memory_ids": [],
+                  "meta_data_filter": {},
+                  "outputs": {
+                    "formalized_content": {
+                      "type": "string",
+                      "value": ""
+                    },
+                    "json": {
+                      "type": "Array<Object>",
+                      "value": []
+                    }
+                  },
+                  "rerank_id": "qwen3-rerank@千问@Tongyi-Qianwen",
+                  "retrieval_from": "dataset",
+                  "similarity_threshold": 0.1,
+                  "toc_enhance": false,
+                  "top_k": 128,
+                  "top_n": 4,
+                  "use_kg": false
+                }
+              },
+              {
+                "component_name": "Retrieval",
+                "id": "Retrieval:KeywordEvidence",
+                "name": "KeywordEvidence",
+                "params": {
+                  "cross_languages": [],
+                  "dataset_ids": [
+                    "begin@authorized_dataset_ids"
+                  ],
+                  "description": "在相同授权G内做关键词权重较高的混合检索，适合型号/故障码/厂家字段/标题术语定位。不是纯BM25工具；只在常规召回明显缺失且有精确关键词时补查。避免重复相同请求。 仅在存在对应缺口时选用；禁止固定按 Target→Authorized→Keyword 顺序空跑。",
+                  "doc_scope_ids": [
+                    "begin@authorized_doc_ids"
+                  ],
+                  "doc_scope_mode": "restrict",
+                  "empty_response": "",
+                  "function_name": "keyword_evidence",
+                  "kb_ids": [],
+                  "keywords_similarity_weight": 0.85,
+                  "memory_ids": [],
+                  "meta_data_filter": {},
+                  "outputs": {
+                    "formalized_content": {
+                      "type": "string",
+                      "value": ""
+                    },
+                    "json": {
+                      "type": "Array<Object>",
+                      "value": []
+                    }
+                  },
+                  "rerank_id": "qwen3-rerank@千问@Tongyi-Qianwen",
+                  "retrieval_from": "dataset",
+                  "similarity_threshold": 0.1,
+                  "toc_enhance": false,
+                  "top_k": 128,
+                  "top_n": 4,
+                  "use_kg": false
+                }
+              }
+            ],
+            "topPEnabled": true,
+            "top_p": 0.75,
+            "user_prompt": "",
+            "visual_files_var": ""
+          }
+        },
+        "sourcePosition": "right",
+        "targetPosition": "left"
+      }
+    ]
+  },
+  "history": [],
+  "messages": [],
+  "path": [],
+  "retrieval": [],
+  "variables": {}
+}
