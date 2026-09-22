@@ -9,6 +9,9 @@ nodes = {n["id"]: n for n in d["graph"]["nodes"]}
 assert "Agent:Draft" not in c and "Agent:Draft" not in nodes
 assert "Agent:Research" not in c
 assert "Agent:AnswerResearch" in c and "Agent:AnswerResearch" in nodes
+ar_node = nodes["Agent:AnswerResearch"]
+assert ar_node.get("type") == "agentNode", ar_node.get("type")
+
 assert "Switch:Coverage" not in c
 
 # PlanLite fields

@@ -2469,13 +2469,13 @@
       },
       {
         "id": "Agent:AnswerResearch",
-        "type": "ragNode",
+        "type": "agentNode",
         "position": {
           "x": 920,
           "y": 320
         },
         "data": {
-          "label": "Agent:AnswerResearch",
+          "label": "Agent",
           "form": {
             "cite": false,
             "delay_after_error": 1,

@@ -19,3 +19,7 @@ Base: `New2_v2.3_evidence_scope.json`
 ```bash
 python3 artifacts/workflows/check_new2_v24.py
 ```
+
+## Hotfix (Sim KeyError)
+- `Agent:AnswerResearch` graph node type must be `agentNode` (was wrongly `ragNode` after v2.4 transform), otherwise Seed succeeds then KeyError before AnswerResearch runs.
+
