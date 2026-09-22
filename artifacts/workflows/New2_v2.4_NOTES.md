@@ -31,3 +31,8 @@ python3 artifacts/workflows/check_new2_v24.py
 - Bad PUT had `type=ragNode` and data with only label+form (no name).
 - Fix requires both `type=agentNode` and non-empty `data.name`.
 
+## Hotfix3 (Sim S1/S2 答效)
+- S1：Initial 已有 A1/A2（如厂家名）时 AnswerResearch 必须 `completed` + Direct，**禁止调工具** / 禁止改 NoEvidence。
+- S2：B 级话术「相关+不能迁移」时 `evidence_ids` 必须非空。
+- S3：真无证据路径保持不变。
+

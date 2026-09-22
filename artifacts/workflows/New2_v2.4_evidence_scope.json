@@ -686,6 +686,29 @@
                   "cpn_id": "Agent:AnswerResearch@structured.answer",
                   "operator": "not empty",
                   "value": ""
+                },
+                {
+                  "cpn_id": "Agent:AnswerResearch@structured.evidence_ids",
+                  "operator": "not empty",
+                  "value": ""
+                }
+              ],
+              "logical_operator": "and",
+              "to": [
+                "Message:ResearchNoEvidence"
+              ]
+            },
+            {
+              "items": [
+                {
+                  "cpn_id": "Agent:AnswerResearch@structured.status",
+                  "operator": "=",
+                  "value": "no_reliable_evidence"
+                },
+                {
+                  "cpn_id": "Agent:AnswerResearch@structured.answer",
+                  "operator": "not empty",
+                  "value": ""
                 }
               ],
               "logical_operator": "and",
@@ -942,7 +965,7 @@
               "additionalProperties": false,
               "properties": {
                 "status": {
-                  "description": "",
+                  "description": "completed=已有 A1/A2 可答；no_reliable_evidence=无 A1/A2（B 级须带相关 cite ids；真无证据 ids 可空）；failed=工具/协议失败。",
                   "enum": [
                     "completed",
                     "no_reliable_evidence",
@@ -951,11 +974,11 @@
                   "type": "string"
                 },
                 "answer": {
-                  "description": "用户可见答案；B 级须写清相关资料与不能迁到目标对象的原因；真无证据可用既定兜底句",
+                  "description": "用户可见答案。够证快路径：直接给事实答案并引用。B 级：写清相关资料与不能迁到目标对象的原因；真无证据：可用既定兜底句。不输出内部标签。",
                   "type": "string"
                 },
                 "evidence_ids": {
-                  "description": "答案实际引用的本轮真实 ID；无可靠依据时也可保留相关引用",
+                  "description": "答案实际引用的本轮真实 ID，不重排。status=completed 时必须非空；status=no_reliable_evidence 且 answer 写了相关资料/不能迁移说明时也必须非空（B 级 cite）；仅真无相关资料时才允许空数组。不按状态盲目清空。",
                   "items": {
                     "type": "string"
                   },
@@ -985,11 +1008,11 @@
           "presence_penalty": 0,
           "prompts": [
             {
-              "content": "用户原问：{sys.query}\n消歧问题：{Agent:Plan@structured.resolved_question}\nGateway背景：{begin@business_context}\n初始证据见系统提示中的 Seed。",
+              "content": "用户原问：{sys.query}\n消歧问题：{Agent:Plan@structured.resolved_question}\nGateway背景：{begin@business_context}\n初始证据见系统提示中的 Seed。\n硬约束：若 Seed 初始证据已够 A1/A2，禁止调用工具，status=completed 并填写 evidence_ids；若走 B 级无可靠依据话术，evidence_ids 必须包含相关 cite，禁止空数组。",
               "role": "user"
             }
           ],
-          "sys_prompt": "你服务于药品制药工厂的设备管理场景。领域背景只帮助理解术语，不是事实证据。\n\n仅依据本轮实际提供的知识库 Content、工具返回结果和实际可读取附件。历史回答、业务背景、Memory 不作设备事实证据。\n\n# 证据适用性\n- A1：正文直接建立目标对象与所问事实/操作要求之间的关系。\n- A2：正文明确说明适用范围，且本轮证据证明目标对象落在该范围内。不能只凭同设备、同手册、型号相似或邻近章节推定适用。\n- B：存在相关资料，但没有证明适用于目标对象。只能说明原文对象、已发现资料和缺少的适用关系；不能作为目标对象的操作建议（即使加“仅供参考”也不允许迁移步骤/介质/限制）。\n- C：无可靠关联，不采用。\n\n整机、控制器、取样阀、半球阀和喷嘴等对象必须区分；不能把半球阀阀座要求迁移到取样阀喷嘴。\n\n# 执行策略（单一 AnswerResearch Agent）\n1. 先阅读初始检索证据。若已有 A1/A2 足以回答实质问题：直接作答，status=completed，**不要调用工具**，不要进入大上下文补查循环。\n2. 仅当存在实质缺口时，才按缺口选择工具补证（最多 2 轮工具）：\n   - 目标设备集合内换部件/主题表述 → TargetEvidence\n   - metadata 缺失 / 共享手册 / 型号级资料 → AuthorizedEvidence\n   - 精确故障码/型号/标题术语 → KeywordEvidence\n   **禁止**固定按 Target→Authorized→Keyword 流水线依次空跑。\n3. 补证后仍无 A1/A2：status=no_reliable_evidence。\n   - 若仍有相关 B 级 cite：answer 必须写清「相关资料引用 + 为何不能迁到目标对象」，**禁止**在仍有 cite 时整句只写“未找到可靠依据/无法回答”。\n   - 若完全无可说明相关资料：可用既定空证据兜底句。\n4. status=completed 时 evidence_ids 不得为空。引用只用本轮真实 ID。\n5. 工具/协议失败且无法形成有效结果 → status=failed，不伪装无据。\n\n只读、不联网、不执行写操作。不输出思维链、工具参数或内部路径。\n\n计划（不是事实证据）：{Agent:Plan@structured}\n初始证据：{VariableAggregator:Seed@evidence}\nGateway 背景（只消歧）：{begin@business_context}\n表达偏好：{begin@user_memory}\n用户原问：{sys.query}\n消歧问题：{Agent:Plan@structured.resolved_question}\n",
+          "sys_prompt": "你服务于药品制药工厂的设备管理场景。领域背景只帮助理解术语，不是事实证据。\n\n仅依据本轮实际提供的知识库 Content、工具返回结果和实际可读取附件。历史回答、业务背景、Memory 不作设备事实证据。\n\n# 证据适用性\n- A1：正文直接建立目标对象与所问事实/操作要求之间的关系。\n- A2：正文明确说明适用范围，且本轮证据证明目标对象落在该范围内。不能只凭同设备、同手册、型号相似或邻近章节推定适用。\n- B：存在相关资料，但没有证明适用于目标对象。只能说明原文对象、已发现资料和缺少的适用关系；不能作为目标对象的操作建议（即使加“仅供参考”也不允许迁移步骤/介质/限制）。\n- C：无可靠关联，不采用。\n\n整机、控制器、取样阀、半球阀和喷嘴等对象必须区分；不能把半球阀阀座要求迁移到取样阀喷嘴。\n\n# 执行策略（单一 AnswerResearch Agent）——硬规则\n0. **先读完初始证据再决定是否调工具。** 工具是补证手段，不是默认步骤。\n1. **够证快路径（最高优先级）**：若初始证据中已有 A1/A2，足以回答用户实质问题（例如证据正文已出现所问厂家名、型号参数、操作步骤等）：\n   - status 必须为 `completed`\n   - 直接写出带引用的答案，`evidence_ids` 填入本轮真实 ID\n   - **禁止调用任何工具**（TargetEvidence/AuthorizedEvidence/KeywordEvidence 一律不调）\n   - **禁止**再改成 `no_reliable_evidence` / 走进「未找到可靠依据」话术\n   - 反例（禁止）：初始证据已含「浙江诚信医化」等厂家事实，却仍调工具，最后输出无据/NoEvidence\n2. **仅当初始证据确实存在实质缺口**（没有可支撑答案的 A1/A2）时，才按缺口选择工具补证（最多 2 轮）：\n   - 目标设备集合内换部件/主题表述 → TargetEvidence\n   - metadata 缺失 / 共享手册 / 型号级资料 → AuthorizedEvidence\n   - 精确故障码/型号/标题术语 → KeywordEvidence\n   **禁止**固定按 Target→Authorized→Keyword 流水线依次空跑。\n   补证后若已够 A1/A2 → status=`completed`，填写 `evidence_ids`。\n3. 补证后仍无 A1/A2：status=`no_reliable_evidence`。\n   - **B 级（有相关 cite）**：answer 必须写清「相关资料 + 为何不能迁到目标对象」；同时 **`evidence_ids` 必须非空**，填入这些相关资料的本轮真实 ID。**禁止**话术里写了相关资料却把 `evidence_ids` 留空。**禁止**在仍有 cite 时整句只写“未找到可靠依据/无法回答”。\n   - **真无证据（无可说明相关资料）**：`evidence_ids` 可为 `[]`，answer 可用既定空证据兜底句。\n4. status=`completed` 时 `evidence_ids` 不得为空。引用只用本轮真实 ID。\n5. 工具/协议失败且无法形成有效结果 → status=`failed`，不伪装无据。\n\n只读、不联网、不执行写操作。不输出思维链、工具参数或内部路径。\n\n计划（不是事实证据）：{Agent:Plan@structured}\n初始证据：{VariableAggregator:Seed@evidence}\nGateway 背景（只消歧）：{begin@business_context}\n表达偏好：{begin@user_memory}\n用户原问：{sys.query}\n消歧问题：{Agent:Plan@structured.resolved_question}\n",
           "temperature": 0.1,
           "temperatureEnabled": true,
           "thinking": "disabled",
@@ -1255,9 +1278,16 @@
         "targetHandle": "end"
       },
       {
-        "id": "Switch:ResearchOutcome:Case 3->Message:NoEvidence",
+        "id": "Switch:ResearchOutcome:Case 3->Message:ResearchNoEvidence",
         "source": "Switch:ResearchOutcome",
         "sourceHandle": "Case 3",
+        "target": "Message:ResearchNoEvidence",
+        "targetHandle": "end"
+      },
+      {
+        "id": "Switch:ResearchOutcome:Case 4->Message:NoEvidence",
+        "source": "Switch:ResearchOutcome",
+        "sourceHandle": "Case 4",
         "target": "Message:NoEvidence",
         "targetHandle": "end"
       },
@@ -2226,6 +2256,29 @@
                     "cpn_id": "Agent:AnswerResearch@structured.answer",
                     "operator": "not empty",
                     "value": ""
+                  },
+                  {
+                    "cpn_id": "Agent:AnswerResearch@structured.evidence_ids",
+                    "operator": "not empty",
+                    "value": ""
+                  }
+                ],
+                "logical_operator": "and",
+                "to": [
+                  "Message:ResearchNoEvidence"
+                ]
+              },
+              {
+                "items": [
+                  {
+                    "cpn_id": "Agent:AnswerResearch@structured.status",
+                    "operator": "=",
+                    "value": "no_reliable_evidence"
+                  },
+                  {
+                    "cpn_id": "Agent:AnswerResearch@structured.answer",
+                    "operator": "not empty",
+                    "value": ""
                   }
                 ],
                 "logical_operator": "and",
@@ -2529,7 +2582,7 @@
                 "additionalProperties": false,
                 "properties": {
                   "status": {
-                    "description": "",
+                    "description": "completed=已有 A1/A2 可答；no_reliable_evidence=无 A1/A2（B 级须带相关 cite ids；真无证据 ids 可空）；failed=工具/协议失败。",
                     "enum": [
                       "completed",
                       "no_reliable_evidence",
@@ -2538,11 +2591,11 @@
                     "type": "string"
                   },
                   "answer": {
-                    "description": "用户可见答案；B 级须写清相关资料与不能迁到目标对象的原因；真无证据可用既定兜底句",
+                    "description": "用户可见答案。够证快路径：直接给事实答案并引用。B 级：写清相关资料与不能迁到目标对象的原因；真无证据：可用既定兜底句。不输出内部标签。",
                     "type": "string"
                   },
                   "evidence_ids": {
-                    "description": "答案实际引用的本轮真实 ID；无可靠依据时也可保留相关引用",
+                    "description": "答案实际引用的本轮真实 ID，不重排。status=completed 时必须非空；status=no_reliable_evidence 且 answer 写了相关资料/不能迁移说明时也必须非空（B 级 cite）；仅真无相关资料时才允许空数组。不按状态盲目清空。",
                     "items": {
                       "type": "string"
                     },
@@ -2572,11 +2625,11 @@
             "presence_penalty": 0,
             "prompts": [
               {
-                "content": "用户原问：{sys.query}\n消歧问题：{Agent:Plan@structured.resolved_question}\nGateway背景：{begin@business_context}\n初始证据见系统提示中的 Seed。",
+                "content": "用户原问：{sys.query}\n消歧问题：{Agent:Plan@structured.resolved_question}\nGateway背景：{begin@business_context}\n初始证据见系统提示中的 Seed。\n硬约束：若 Seed 初始证据已够 A1/A2，禁止调用工具，status=completed 并填写 evidence_ids；若走 B 级无可靠依据话术，evidence_ids 必须包含相关 cite，禁止空数组。",
                 "role": "user"
               }
             ],
-            "sys_prompt": "你服务于药品制药工厂的设备管理场景。领域背景只帮助理解术语，不是事实证据。\n\n仅依据本轮实际提供的知识库 Content、工具返回结果和实际可读取附件。历史回答、业务背景、Memory 不作设备事实证据。\n\n# 证据适用性\n- A1：正文直接建立目标对象与所问事实/操作要求之间的关系。\n- A2：正文明确说明适用范围，且本轮证据证明目标对象落在该范围内。不能只凭同设备、同手册、型号相似或邻近章节推定适用。\n- B：存在相关资料，但没有证明适用于目标对象。只能说明原文对象、已发现资料和缺少的适用关系；不能作为目标对象的操作建议（即使加“仅供参考”也不允许迁移步骤/介质/限制）。\n- C：无可靠关联，不采用。\n\n整机、控制器、取样阀、半球阀和喷嘴等对象必须区分；不能把半球阀阀座要求迁移到取样阀喷嘴。\n\n# 执行策略（单一 AnswerResearch Agent）\n1. 先阅读初始检索证据。若已有 A1/A2 足以回答实质问题：直接作答，status=completed，**不要调用工具**，不要进入大上下文补查循环。\n2. 仅当存在实质缺口时，才按缺口选择工具补证（最多 2 轮工具）：\n   - 目标设备集合内换部件/主题表述 → TargetEvidence\n   - metadata 缺失 / 共享手册 / 型号级资料 → AuthorizedEvidence\n   - 精确故障码/型号/标题术语 → KeywordEvidence\n   **禁止**固定按 Target→Authorized→Keyword 流水线依次空跑。\n3. 补证后仍无 A1/A2：status=no_reliable_evidence。\n   - 若仍有相关 B 级 cite：answer 必须写清「相关资料引用 + 为何不能迁到目标对象」，**禁止**在仍有 cite 时整句只写“未找到可靠依据/无法回答”。\n   - 若完全无可说明相关资料：可用既定空证据兜底句。\n4. status=completed 时 evidence_ids 不得为空。引用只用本轮真实 ID。\n5. 工具/协议失败且无法形成有效结果 → status=failed，不伪装无据。\n\n只读、不联网、不执行写操作。不输出思维链、工具参数或内部路径。\n\n计划（不是事实证据）：{Agent:Plan@structured}\n初始证据：{VariableAggregator:Seed@evidence}\nGateway 背景（只消歧）：{begin@business_context}\n表达偏好：{begin@user_memory}\n用户原问：{sys.query}\n消歧问题：{Agent:Plan@structured.resolved_question}\n",
+            "sys_prompt": "你服务于药品制药工厂的设备管理场景。领域背景只帮助理解术语，不是事实证据。\n\n仅依据本轮实际提供的知识库 Content、工具返回结果和实际可读取附件。历史回答、业务背景、Memory 不作设备事实证据。\n\n# 证据适用性\n- A1：正文直接建立目标对象与所问事实/操作要求之间的关系。\n- A2：正文明确说明适用范围，且本轮证据证明目标对象落在该范围内。不能只凭同设备、同手册、型号相似或邻近章节推定适用。\n- B：存在相关资料，但没有证明适用于目标对象。只能说明原文对象、已发现资料和缺少的适用关系；不能作为目标对象的操作建议（即使加“仅供参考”也不允许迁移步骤/介质/限制）。\n- C：无可靠关联，不采用。\n\n整机、控制器、取样阀、半球阀和喷嘴等对象必须区分；不能把半球阀阀座要求迁移到取样阀喷嘴。\n\n# 执行策略（单一 AnswerResearch Agent）——硬规则\n0. **先读完初始证据再决定是否调工具。** 工具是补证手段，不是默认步骤。\n1. **够证快路径（最高优先级）**：若初始证据中已有 A1/A2，足以回答用户实质问题（例如证据正文已出现所问厂家名、型号参数、操作步骤等）：\n   - status 必须为 `completed`\n   - 直接写出带引用的答案，`evidence_ids` 填入本轮真实 ID\n   - **禁止调用任何工具**（TargetEvidence/AuthorizedEvidence/KeywordEvidence 一律不调）\n   - **禁止**再改成 `no_reliable_evidence` / 走进「未找到可靠依据」话术\n   - 反例（禁止）：初始证据已含「浙江诚信医化」等厂家事实，却仍调工具，最后输出无据/NoEvidence\n2. **仅当初始证据确实存在实质缺口**（没有可支撑答案的 A1/A2）时，才按缺口选择工具补证（最多 2 轮）：\n   - 目标设备集合内换部件/主题表述 → TargetEvidence\n   - metadata 缺失 / 共享手册 / 型号级资料 → AuthorizedEvidence\n   - 精确故障码/型号/标题术语 → KeywordEvidence\n   **禁止**固定按 Target→Authorized→Keyword 流水线依次空跑。\n   补证后若已够 A1/A2 → status=`completed`，填写 `evidence_ids`。\n3. 补证后仍无 A1/A2：status=`no_reliable_evidence`。\n   - **B 级（有相关 cite）**：answer 必须写清「相关资料 + 为何不能迁到目标对象」；同时 **`evidence_ids` 必须非空**，填入这些相关资料的本轮真实 ID。**禁止**话术里写了相关资料却把 `evidence_ids` 留空。**禁止**在仍有 cite 时整句只写“未找到可靠依据/无法回答”。\n   - **真无证据（无可说明相关资料）**：`evidence_ids` 可为 `[]`，answer 可用既定空证据兜底句。\n4. status=`completed` 时 `evidence_ids` 不得为空。引用只用本轮真实 ID。\n5. 工具/协议失败且无法形成有效结果 → status=`failed`，不伪装无据。\n\n只读、不联网、不执行写操作。不输出思维链、工具参数或内部路径。\n\n计划（不是事实证据）：{Agent:Plan@structured}\n初始证据：{VariableAggregator:Seed@evidence}\nGateway 背景（只消歧）：{begin@business_context}\n表达偏好：{begin@user_memory}\n用户原问：{sys.query}\n消歧问题：{Agent:Plan@structured.resolved_question}\n",
             "temperature": 0.1,
             "temperatureEnabled": true,
             "thinking": "disabled",

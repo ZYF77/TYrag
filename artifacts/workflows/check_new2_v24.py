@@ -32,7 +32,7 @@ assert c["Agent:Plan"]["obj"]["params"]["max_tokens"] <= 900
 
 ar = c["Agent:AnswerResearch"]["obj"]["params"]
 assert ar["max_rounds"] == 2
-assert "不要调用工具" in ar["sys_prompt"] or "不要调用工具" in ar["sys_prompt"]
+assert ("禁止调用任何工具" in ar["sys_prompt"]) or ("不要调用工具" in ar["sys_prompt"])
 assert "禁止" in ar["sys_prompt"] and "Target" in ar["sys_prompt"]
 assert "不能迁到目标对象" in ar["sys_prompt"] or "不能迁" in ar["sys_prompt"]
 tools = ar.get("tools") or []
@@ -74,5 +74,13 @@ for e in d["graph"]["edges"]:
     assert "sourceHandle" in e and "targetHandle" in e, e
 seed_ar = [e for e in d["graph"]["edges"] if e["source"]=="VariableAggregator:Seed" and e["target"]=="Agent:AnswerResearch"]
 assert seed_ar and seed_ar[0].get("sourceHandle")=="start" and seed_ar[0].get("targetHandle")=="end"
+
+
+# Answer-quality gates (Sim S1/S2)
+ar_sys = c["Agent:AnswerResearch"]["obj"]["params"]["sys_prompt"]
+assert "够证快路径" in ar_sys or "禁止调用任何工具" in ar_sys
+assert "evidence_ids` 必须非空" in ar_sys or "evidence_ids 必须非空" in ar_sys or "evidence_ids 必须" in ar_sys
+eid_desc = c["Agent:AnswerResearch"]["obj"]["params"]["outputs"]["structured"]["properties"]["evidence_ids"]["description"]
+assert "B" in eid_desc or "相关" in eid_desc
 
 print("PASS: New2 v2.4 structure checks")
