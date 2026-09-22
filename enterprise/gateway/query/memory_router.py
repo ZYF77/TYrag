@@ -203,3 +203,68 @@ async def patch_my_memory(
         "NOT_IMPLEMENTED",
         "PATCH memory status is reserved; use DELETE /me/{id} to forget",
     )
+
+class PreferenceDecision(BaseModel):
+    model_config = {"extra": "forbid"}
+    revision: int = Field(ge=0)
+    confirm: bool
+
+
+class PreferenceDelete(BaseModel):
+    model_config = {"extra": "forbid"}
+    revision: int = Field(ge=0)
+
+
+@router.get("/preferences")
+async def preferences(request: Request, conversation_id: str | None = None,
+    principal: UserPrincipal = Depends(require_capability("ask"))):
+    rejected = _reject_client_user_id(request)
+    if rejected is not None:
+        return rejected
+    from enterprise.gateway.app import get_gateway_db
+    from .preference_store import list_state
+    db = await get_gateway_db()
+    async with db.transaction(write=False) as conn:
+        state = await list_state(conn, tenant_id=principal.tenant_id,
+            business_user_id=principal.business_user_id, conversation_id=conversation_id)
+    state['enabled'] = user_memory_enabled()
+    if not state['enabled']:
+        state['candidates'] = []
+    return state
+
+
+@router.post("/candidates/{candidate_id}")
+async def confirm_preference(candidate_id: str, body: PreferenceDecision, request: Request,
+    principal: UserPrincipal = Depends(require_capability("ask"))):
+    rejected = _reject_client_user_id(request)
+    if rejected is not None:
+        return rejected
+    if not memory_config_ready():
+        return _error(503, 'MEMORY_NOT_CONFIGURED', 'Preference memory is not enabled or configured')
+    from enterprise.gateway.app import get_gateway_db
+    from .preference_store import decide
+    db = await get_gateway_db()
+    try:
+        async with db.transaction(write=True) as conn:
+            return await decide(conn, tenant_id=principal.tenant_id, business_user_id=principal.business_user_id,
+                candidate_id=candidate_id, revision=body.revision, confirm=body.confirm, memory_id=enterprise_memory_id())
+    except ValueError as exc:
+        code = str(exc)
+        return _error(404 if code == 'PREFERENCE_NOT_FOUND' else 409, code, 'Preference confirmation unavailable; refresh and retry')
+
+
+@router.delete("/preferences/{key}")
+async def delete_preference(key: str, body: PreferenceDelete, request: Request,
+    principal: UserPrincipal = Depends(require_capability("ask"))):
+    rejected = _reject_client_user_id(request)
+    if rejected is not None:
+        return rejected
+    from enterprise.gateway.app import get_gateway_db
+    from .preference_store import delete
+    db = await get_gateway_db()
+    try:
+        async with db.transaction(write=True) as conn:
+            return await delete(conn, tenant_id=principal.tenant_id, business_user_id=principal.business_user_id,
+                key=key, revision=body.revision, memory_id=enterprise_memory_id())
+    except ValueError as exc:
+        return _error(409, str(exc), 'Preference changed; refresh and retry')

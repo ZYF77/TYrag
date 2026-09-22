@@ -192,6 +192,8 @@ function makeError(
 }
 
 export const handlers = [
+  http.get(`${BASE}/ai/memory/preferences`, () =>
+    HttpResponse.json({ enabled: false, preferences: [], candidates: [] })),
   // GET /health - public Gateway liveness probe
   http.get(`${BASE}/health`, () =>
     HttpResponse.json({ status: 'healthy', version: '1.0.0' }),

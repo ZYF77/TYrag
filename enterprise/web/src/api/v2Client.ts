@@ -820,3 +820,14 @@ export function toDisplayError(error: unknown): DisplayError {
     httpStatus: 0,
   };
 }
+
+export const preferenceApi = {
+  list: (conversationId: string) => request<import('../components/harness/PreferencePanel').PreferenceState>(
+    `/ai/memory/preferences?conversation_id=${encodeURIComponent(conversationId)}`, {}, V1_BASE),
+  decide: (item: { id: string; revision: number }, confirm: boolean) => request(
+    `/ai/memory/candidates/${encodeURIComponent(item.id)}`,
+    { method: 'POST', body: JSON.stringify({ revision: item.revision, confirm }) }, V1_BASE),
+  remove: (item: { key: string; revision: number }) => request(
+    `/ai/memory/preferences/${encodeURIComponent(item.key)}`,
+    { method: 'DELETE', body: JSON.stringify({ revision: item.revision }) }, V1_BASE),
+};

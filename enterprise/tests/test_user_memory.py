@@ -29,16 +29,23 @@ def test_memory_subject_from_principal():
         memory_subject_from_principal(SimpleNamespace(tenant_id="", business_user_id="u1"))
 
 
-def test_format_memory_hits():
-    text = um.format_memory_hits(
-        [
-            {"content": "prefers concise answers"},
-            {"user_input": "hi", "agent_response": "hello"},
-        ],
-        top_n=5,
-    )
-    assert "1. prefers concise answers" in text
-    assert "2. User Input: hi" in text
+def test_only_finite_preference_values_are_formatted():
+    from enterprise.gateway.query.preference_rules import preference_text
+    assert '简短回答' in preference_text({'detail': 'brief'})
+    assert preference_text({'user_input': 'hi', 'agent_response': 'technical facts'}) == ''
+
+
+async def confirmed_reader(monkeypatch, gateway_db):
+    from enterprise.gateway import app
+    from enterprise.gateway.query import preference_store
+    async def database(): return gateway_db
+    monkeypatch.setattr(app, 'get_gateway_db', database)
+    async with gateway_db.transaction(write=True) as conn:
+        await preference_store.capture(conn, tenant_id='t1',business_user_id='u1',
+            conversation_id='synthetic',run_id='synthetic',question='以后请简短回答')
+        state=await preference_store.list_state(conn, tenant_id='t1',business_user_id='u1')
+        await preference_store.decide(conn,tenant_id='t1',business_user_id='u1',
+            candidate_id=state['candidates'][0]['id'],revision=0,confirm=True,memory_id='mem-1')
 
 
 @pytest.mark.asyncio
@@ -55,7 +62,8 @@ async def test_fetch_empty_when_disabled(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_fetch_and_schedule_with_stub(monkeypatch):
+async def test_fetch_and_schedule_with_stub(monkeypatch, gateway_db):
+    await confirmed_reader(monkeypatch, gateway_db)
     from enterprise.gateway.config import config as gw_config
     gw_config.clear_runtime_settings()
     stub = RAGFlowMemoryStub()
@@ -74,7 +82,9 @@ async def test_fetch_and_schedule_with_stub(monkeypatch):
 
     principal = SimpleNamespace(tenant_id="t1", business_user_id="u1")
     text = await um.fetch_user_memory_text(principal, "pumps")
-    assert "memory content about pumps" in text
+    assert "简短回答" in text
+    assert "memory content about pumps" not in text
+    assert stub.search_calls == []
     # Isolation: other subject sees nothing
     other = await um.fetch_user_memory_text(
         SimpleNamespace(tenant_id="t1", business_user_id="u2"),
@@ -82,6 +92,7 @@ async def test_fetch_and_schedule_with_stub(monkeypatch):
     )
     assert other == ""
 
+    before = len(stub.add_calls)
     um.schedule_memory_candidate(
         principal,
         chat_id="c1",
@@ -92,7 +103,7 @@ async def test_fetch_and_schedule_with_stub(monkeypatch):
     )
     # Allow the fire-and-forget task to run.
     await asyncio.sleep(0.05)
-    assert any(call.get("user_id") == "eam:t1:u1" for call in stub.add_calls)
+    assert len(stub.add_calls) == before
     um.set_memory_client_for_tests(None)
 
 
@@ -114,8 +125,6 @@ async def test_fetch_noop_when_enabled_without_memory_id(monkeypatch):
     gw_config.clear_runtime_settings()
     monkeypatch.setattr(um.config, "user_memory_enabled", True, raising=False)
     monkeypatch.setattr(um.config, "enterprise_memory_id", "", raising=False)
-    # Reset one-shot warning so this path is exercised cleanly.
-    um._warned_missing_config = False
     text = await um.fetch_user_memory_text(
         SimpleNamespace(tenant_id="t1", business_user_id="u1"),
         "question",
@@ -125,13 +134,14 @@ async def test_fetch_noop_when_enabled_without_memory_id(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_user_memory_hot_toggle_via_runtime_snapshot(monkeypatch):
+async def test_user_memory_hot_toggle_via_runtime_snapshot(monkeypatch, gateway_db):
     """PUT-equivalent apply_runtime_settings flips Search without process restart."""
     from dataclasses import replace
 
     from enterprise.gateway.config import GatewayRuntimeSettings, config as gw_config
     from enterprise.gateway.query.memory_client import RAGFlowMemoryStub
 
+    await confirmed_reader(monkeypatch, gateway_db)
     stub = RAGFlowMemoryStub()
     await stub.add_message(
         memory_id="mem-hot",
@@ -142,7 +152,6 @@ async def test_user_memory_hot_toggle_via_runtime_snapshot(monkeypatch):
         agent_response="hot memory hit about valves",
     )
     um.set_memory_client_for_tests(stub)
-    um._warned_missing_config = False
     gw_config.clear_runtime_settings()
     base = GatewayRuntimeSettings.from_config(gw_config)
     off = replace(
@@ -159,12 +168,13 @@ async def test_user_memory_hot_toggle_via_runtime_snapshot(monkeypatch):
     on = replace(off, user_memory_enabled=True)
     gw_config.apply_runtime_settings(on)
     text = await um.fetch_user_memory_text(principal, "valves")
-    assert "hot memory hit about valves" in text
+    assert "简短回答" in text
+    assert "hot memory hit about valves" not in text
 
-    # enabled=true + empty memoryId => no-op Write/Search
+    # Confirmed local preferences remain usable if the remote pool is unavailable.
     empty = replace(on, user_memory_id="")
     gw_config.apply_runtime_settings(empty)
-    assert await um.fetch_user_memory_text(principal, "valves") == ""
+    assert "简短回答" in await um.fetch_user_memory_text(principal, "valves")
     before = len(stub.add_calls)
     um.schedule_memory_candidate(
         principal,

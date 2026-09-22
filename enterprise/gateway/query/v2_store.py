@@ -614,14 +614,26 @@ async def save_terminal_message_run(
                     business_user_id=business_user_id)
     from .answer_split import safe_execution_reasoning
     result = dict(result)
+    result.pop("_public_citations", None)
     result.pop("_streamDeltas", None)
     result["reasoning"] = safe_execution_reasoning(reasoning, "safe_execution_v1")
     result["_reasoning_format"] = "safe_execution_v1"
+    result["citations"] = citations
     await complete_message_run(conn, **identity, client_message_id=client_message_id,
         run_id=run_id, result=result, status="failed" if business_status == "failed" else "completed",
         assistant_message_id=assistant_message_id)
     await add_message(conn, **identity, message_id=assistant_message_id, role="assistant",
         content=content, status=business_status, citations=citations, reasoning=reasoning)
+    if business_status != "failed":
+        from .user_memory import user_memory_enabled
+        if user_memory_enabled():
+            from .preference_store import capture
+            source = await fetchone(conn, """SELECT m.content FROM ext_v2_message m
+                JOIN ext_v2_message_run r ON r.user_message_id=m.message_id
+                WHERE r.run_id=? AND r.tenant_id=? AND r.business_user_id=?""",
+                (run_id, tenant_id, business_user_id))
+            if source:
+                await capture(conn, **identity, run_id=run_id, question=source["content"])
     if workflow_binding:
         await exec_sql(conn, """UPDATE ext_v2_conversation
             SET workflow_agent_id=?, workflow_version=?, workflow_session_id=?
@@ -983,3 +995,10 @@ async def expire_conversation_run(conn, *, conversation_id, tenant_id, business_
     if row:
         await mark_expired_run_interrupted(conn, conversation_id=conversation_id, tenant_id=tenant_id,
             business_user_id=business_user_id, client_message_id=row["client_message_id"])
+
+
+async def get_message_snapshot(conn, *, message_id, tenant_id, business_user_id):
+    row = await fetchone(conn, """SELECT * FROM ext_v2_message
+        WHERE message_id=? AND tenant_id=? AND business_user_id=?""",
+        (message_id, tenant_id, business_user_id))
+    return dict(row) if row else None

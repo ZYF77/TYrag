@@ -1,3 +1,4 @@
+import { PreferencePanel } from './PreferencePanel';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import { QuestionInput } from '../chat/QuestionInput';
@@ -297,6 +298,8 @@ export function HarnessChat({
         {error?.code === 'CONVERSATION_RESTART_REQUIRED' && onNewConversation && (
           <button type="button" className="console-secondary-button" onClick={onNewConversation}>新建会话继续</button>
         )}
+        {conversation && <PreferencePanel key={conversation.conversationId} conversationId={conversation.conversationId}
+        revision={messages.map(m => m.id + (m.role === 'assistant' ? m.status : '')).join(',')} busy={isStreaming} />}
       <QuestionInput
           onSend={onSend}
           onCancel={onCancel}

@@ -758,3 +758,36 @@ ALL_TABLES = (
     gateway_equipment_recognition_settings,
     gateway_runtime_settings,
 )
+
+
+ext_user_preference = Table(
+    "ext_user_preference", metadata,
+    Column("tenant_id", Text, primary_key=True),
+    Column("business_user_id", Text, primary_key=True),
+    Column("preference_key", Text, primary_key=True),
+    Column("preference_value", Text), Column("revision", Integer, nullable=False),
+)
+ext_preference_candidate = Table(
+    "ext_preference_candidate", metadata,
+    Column("candidate_id", Text, primary_key=True),
+    Column("tenant_id", Text, nullable=False), Column("business_user_id", Text, nullable=False),
+    Column("run_id", Text, nullable=False), Column("conversation_id", Text, nullable=False),
+    Column("preference_key", Text, nullable=False), Column("preference_value", Text, nullable=False),
+    Column("expected_revision", Integer, nullable=False), Column("status", Text, nullable=False),
+    Column("expires_at", Text, nullable=False),
+    Index("idx_preference_candidate_owner", "tenant_id", "business_user_id", "conversation_id", "status"),
+    UniqueConstraint("tenant_id", "business_user_id", "run_id", "preference_key"),
+)
+ext_preference_outbox = Table(
+    "ext_preference_outbox", metadata,
+    Column("event_id", Text, primary_key=True),
+    Column("tenant_id", Text, nullable=False), Column("business_user_id", Text, nullable=False),
+    Column("preference_key", Text, nullable=False), Column("preference_value", Text),
+    Column("revision", Integer, nullable=False), Column("memory_id", Text, nullable=False),
+    Column("status", Text, nullable=False), Column("attempts", Integer, nullable=False),
+    Column("next_attempt_at", Text, nullable=False), Column("claim_id", Text), Column("lease_until", Text),
+    Index("idx_preference_delivery_status", "status", "revision"),
+    UniqueConstraint("tenant_id", "business_user_id", "preference_key", "revision", "memory_id"),
+)
+
+ALL_TABLES += (ext_user_preference, ext_preference_candidate, ext_preference_outbox)

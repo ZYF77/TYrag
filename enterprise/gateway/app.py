@@ -166,6 +166,8 @@ async def lifespan(app: FastAPI):
     set_citation_image_fetcher(_fetch_citation_image)
     started_tasks: list[asyncio.Task] = []
     if not _test_mode():
+        from enterprise.gateway.query.preference_worker import PreferenceWorker
+        started_tasks.append(asyncio.create_task(PreferenceWorker(_gateway_db).run_forever()))
         service = _sync_service(_gateway_db)
         started_tasks.extend(
             [

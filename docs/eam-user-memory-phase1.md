@@ -1,4 +1,6 @@
-# EAM User Long-term Memory — Phase 1
+# EAM User Long-term Memory — Phase 1（历史设计）
+
+> 2026-09-22：本页的自由文本 Search 注入、整轮问答 Candidate 自动写入及 TopN 策略已由 F11 替代。当前只注入用户确认的有限表达偏好，使用企业事务与 outbox；旧问答不注入、不自动迁移。现行实现和操作边界见 [F11登记](../patches/CHANGE-REQUEST-F11-REPLAY-PREFERENCES.md) 与 [偏好接口契约](contracts/f09-f11-preferences.md)。旧配置 topN 为兼容保留，不再影响注入。以下仅留作历史背景。
 
 ## Config knobs (Gateway)
 

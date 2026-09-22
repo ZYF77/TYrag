@@ -668,7 +668,7 @@ export function IntegrationsPanel() {
                   <RuntimeSettingLabel
                     title="用户长期记忆"
                     variable="ENTERPRISE_USER_MEMORY_*"
-                    description="Gateway 预取注入 Chat；subject 仅来自 Token。enabled=true 且 Memory ID 为空时 Search/Write no-op，不阻塞问答。热更载，无需重启。"
+                    description="只使用用户确认的语言、回答详略和排版偏好，不记忆技术事实。关闭后暂停使用与同步；Memory ID 用于偏好镜像。"
                   />
                   <div className="runtime-setting-controls">
                     <ToggleSwitch
@@ -690,14 +690,6 @@ export function IntegrationsPanel() {
                         })}
                       />
                     </label>
-                    <RuntimeRangeField
-                      label="TopN"
-                      value={runtimeDraft.userMemory.topN}
-                      min={1}
-                      max={20}
-                      unit="条"
-                      onChange={(topN) => patchRuntimeSection('userMemory', { topN })}
-                    />
                     <RuntimeRangeField
                       label="Timeout"
                       value={runtimeDraft.userMemory.timeoutSeconds}

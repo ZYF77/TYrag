@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from enterprise.gateway.db.dialect import add_column_if_missing, exec_sql
 from enterprise.gateway.db.tables import metadata
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 
 def _quote_identifier(value: str) -> str:
@@ -230,6 +230,7 @@ async def initialize_schema(engine: AsyncEngine, *, schema: str = "public") -> N
             missing = sorted(expected_names - existing_names)
             extra = sorted(existing_names - expected_names)
             allowed_missing = {
+                "ext_user_preference", "ext_preference_candidate", "ext_preference_outbox",
                 "gateway_runtime_settings",
                 "ragflow_status_inbox",
                 "gateway_equipment_recognition_settings",
@@ -240,11 +241,7 @@ async def initialize_schema(engine: AsyncEngine, *, schema: str = "public") -> N
                 )
         if not existing_names:
             await conn.run_sync(metadata.create_all)
-        elif (
-            "gateway_runtime_settings" not in existing_names
-            or "ragflow_status_inbox" not in existing_names
-            or "gateway_equipment_recognition_settings" not in existing_names
-        ):
+        elif expected_names - existing_names:
             await conn.run_sync(metadata.create_all)
         # 新库由 create_all 建列；老库（含 v1/v2）在此幂等补列并升级版本。
         await add_column_if_missing(
@@ -314,6 +311,8 @@ async def initialize_schema(engine: AsyncEngine, *, schema: str = "public") -> N
             values = [9]
         if values == [9]:
             values = [10]
+        if values == [10]:
+            values = [11]
         elif values not in ([], [SCHEMA_VERSION]):
             raise RuntimeError(
                 f"unsupported Gateway schema version: {values!r}; "

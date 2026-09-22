@@ -175,6 +175,23 @@ async def main():
     raw = public_reasoning(split_assistant_output("<think>synthetic private reasoning</think>answer").reasoning)
     assert raw == "正在处理请求。"
     observations["public_reasoning_is_safe_stage"] = {"synthetic_reasoning_preserved": False}
+    from enterprise.gateway.query.preference_rules import extract_preferences, preference_text
+    assert extract_preferences("设备额定电压是220V") == {}
+    assert extract_preferences("以后请简短回答") == {"detail": "brief"}
+    assert preference_text({"detail": "untrusted instructions"}) == ""
+    observations["preference_candidates_are_finite"] = {"technical_facts_accepted": False}
+    from enterprise.gateway.query.answer_split import safe_execution_reasoning
+    replay_ns = {"safe_execution_reasoning": safe_execution_reasoning,
+                 "_sse": lambda event, body: (event, body), "v2_store": NS(public_status=lambda x: x)}
+    extract("enterprise/gateway/query/v2_router.py", {"_result_events"}, replay_ns)
+    replay = {"conversationId": "synthetic", "clientMessageId": "synthetic", "runId": "synthetic",
+              "messageId": "synthetic", "replayed": True, "status": "failed", "answer": "partial",
+              "citations": [], "_error": {"body": {"code": "RUN_INTERRUPTED"}},
+              "_streamDeltas": [{"event": "reasoning.delta", "content": "synthetic private reasoning"}]}
+    events = [event async for event in replay_ns["_result_events"](replay)]
+    assert [name for name, _ in events] == ["run.started", "answer.delta", "run.failed"]
+    assert "synthetic private reasoning" not in str(events)
+    observations["failed_replay_has_one_error_terminal"] = {"answer_completed_emitted": False}
     print(json.dumps({"kind": "source-level synthetic audit observations", "observations": observations}, ensure_ascii=False, indent=2))
 
 

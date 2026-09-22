@@ -1020,7 +1020,8 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
     session_id = kwargs.get("session_id")
     use_web_search = _should_use_web_search(dialog.prompt_config, kwargs.get("internet"))
     logging.debug("web_search kb=%s configured=%s internet=%r enabled=%s", bool(dialog.kb_ids), has_web_search_provider(dialog.prompt_config), kwargs.get("internet"), use_web_search)
-    if not dialog.kb_ids and not use_web_search:
+    attachment_only = doc_scope_mode == "restrict" and not kwargs.get("doc_ids") and bool(messages[-1].get("files"))
+    if attachment_only or (not dialog.kb_ids and not use_web_search):
         solo_kwargs = {"session_id": session_id, "disable_langfuse": doc_scope_mode == "restrict"}
         if grounding_enabled:
             solo_kwargs["grounding_version"] = 1
@@ -2817,7 +2818,10 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
             begin_think_timeline()
         except Exception:
             pass
-    if _use_simple_chat(prompt_config, kwargs):
+    if _use_simple_chat(prompt_config, kwargs) or (
+        kwargs.get("doc_scope_mode") == "restrict" and not kwargs.get("doc_ids")
+        and messages[-1].get("files")
+    ):
         async for ans in async_chat(dialog, messages, stream, **kwargs):
             yield ans
         return

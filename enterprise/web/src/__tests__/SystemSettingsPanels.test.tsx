@@ -656,15 +656,18 @@ describe('SystemSettingsPanels (admin system settings)', () => {
     const memoryId = within(section).getByLabelText('Memory ID');
     await user.clear(memoryId);
     await user.type(memoryId, 'mem-console-1');
-    const topN = within(section).getByRole('spinbutton', { name: 'TopN' });
-    await user.clear(topN);
-    await user.type(topN, '7');
+    expect(within(section).queryByRole('spinbutton', { name: 'TopN' })).toBeNull();
+    expect(section.textContent).toContain('不记忆技术事实');
+    const timeout = within(section).getByRole('spinbutton', { name: 'Timeout' });
+    await user.clear(timeout);
+    await user.type(timeout, '7');
     expect(saveButton.disabled).toBe(false);
     await user.click(saveButton);
     await screen.findByText('已保存，下一轮循环生效。');
     expect((saved?.userMemory as { enabled: boolean; memoryId: string; topN: number }).enabled).toBe(true);
     expect((saved?.userMemory as { memoryId: string }).memoryId).toBe('mem-console-1');
-    expect((saved?.userMemory as { topN: number }).topN).toBe(7);
+    expect((saved?.userMemory as { topN: number }).topN).toBe(5);
+    expect((saved?.userMemory as { timeoutSeconds: number }).timeoutSeconds).toBe(7);
   });
 
 

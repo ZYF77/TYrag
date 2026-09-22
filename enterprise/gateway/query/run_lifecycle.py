@@ -121,6 +121,8 @@ def leased_run(fn):
                     return
                 result, error = await interrupted_result(db, identity, run)
                 if result:
+                    request = signature.bind(*args, **kwargs).arguments.get("request")
+                    result = await v2._project_replay(db, principal, request, result)
                     async for item in v2._result_events(result):
                         yield item
                 else:
@@ -131,6 +133,8 @@ def leased_run(fn):
                     return
                 result, error = await interrupted_result(db, identity, run)
                 if result:
+                    request = signature.bind(*args, **kwargs).arguments.get("request")
+                    result = await v2._project_replay(db, principal, request, result)
                     async for item in v2._result_events(result):
                         yield item
                 else:

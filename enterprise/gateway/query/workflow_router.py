@@ -29,7 +29,6 @@ from enterprise.gateway.query.attachment_context import (
 )
 from enterprise.gateway.query.user_memory import (
     fetch_user_memory_text,
-    schedule_memory_candidate,
 )
 from enterprise.gateway.query.workflow_client import (
     RAGFlowAgentClient,
@@ -875,7 +874,7 @@ async def _workflow_run_result(
         reasoning = None
         chunks: list[dict] = []
         workflow_session_id = bound_session
-        if not scope.is_empty:
+        if not scope.is_empty or pending:
             user_memory = await fetch_user_memory_text(
                 principal, question, request_id=run["run_id"]
             )
@@ -938,9 +937,7 @@ async def _workflow_run_result(
             internet_enabled=req.internetEnabled,
             attachment_document_ids=_workflow_attachment_ids(pending),
         )
-        public_citations = await v2._project_citations(
-            db, citations, request, principal
-        )
+        public_citations = []
         if status == "failed":
             return None, await v2._save_failed_run(
                 db,
@@ -993,15 +990,6 @@ async def _workflow_run_result(
                   business_status=status, reasoning=reasoning,
                   workflow_binding=dict(agent_id=agent_id, version=version, session_id=workflow_session_id) if workflow_session_id else None,
         )
-        if status == "completed":
-            schedule_memory_candidate(
-                principal,
-                chat_id=f"workflow:{agent_id}",
-                session_id=workflow_session_id or run["run_id"],
-                user_input=question,
-                agent_response=answer,
-                request_id=run["run_id"],
-            )
         return result, None
     except asyncio.CancelledError:
         raise
@@ -1181,7 +1169,7 @@ async def _workflow_stream(
             diagnostics=run.get("_diagnostics"),
         )
         scope, docs_by_internal_id = await v2._context_scope(db, principal, conversation)
-        if not scope.is_empty:
+        if not scope.is_empty or pending:
             user_memory = await fetch_user_memory_text(
                 principal, question, request_id=run["run_id"]
             )
@@ -1264,7 +1252,7 @@ async def _workflow_stream(
                     if data.get("reference"):
                         reference = _workflow_reference(data["reference"])
 
-            if scope.is_empty:
+            if scope.is_empty and not pending:
                 # Gateway authorization can legitimately produce no upstream
                 # call. This explicit evidence outcome has no upstream terminal
                 # event to wait for.
@@ -1320,7 +1308,7 @@ async def _workflow_stream(
             internet_enabled=req.internetEnabled,
             attachment_document_ids=_workflow_attachment_ids(pending),
         )
-        public_citations = await v2._project_citations(db, citations, request, principal)
+        public_citations = []
         if status == "failed":
             await v2._save_failed_run(
                 db,
@@ -1338,6 +1326,7 @@ async def _workflow_stream(
                 citations=citations,
                 reasoning=reasoning,
             )
+            public_citations = await v2._project_citations(db, citations, request, principal)
             if accumulated != emitted_answer:
                 yield v2._sse(
                     "answer.replaced" if emitted_answer else "answer.delta",
@@ -1393,13 +1382,7 @@ async def _workflow_stream(
                   business_status=status, reasoning=reasoning,
                   workflow_binding=dict(agent_id=agent_id, version=version, session_id=workflow_session_id) if workflow_session_id else None,
         )
-        if status == "completed":
-            schedule_memory_candidate(
-                principal, chat_id=f"workflow:{agent_id}",
-                session_id=workflow_session_id or run["run_id"],
-                user_input=question, agent_response=accumulated,
-                request_id=run["run_id"],
-            )
+        public_citations = await v2._project_citations(db, citations, request, principal)
         for citation in public_citations:
             yield v2._sse("citation", citation)
         yield v2._sse(
@@ -1609,6 +1592,12 @@ async def create_workflow_message(
         if "answer" in run_or_result and "messageId" in run_or_result:
             result = dict(run_or_result)
             result["clientMessageId"] = req.clientMessageId
+            result = await v2._project_replay(db, principal, request, result)
+            if "text/event-stream" in request.headers.get("accept", "").lower():
+                return StreamingResponse(v2._result_events(result), media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+            if result.get("_error"):
+                return v2._error_response_from_result(result)
             return v2._public_run_payload(result, result.get("citations", []))
         run = run_or_result
         if pending:
@@ -1628,4 +1617,7 @@ async def create_workflow_message(
     )
     if error:
         return error
-    return v2._public_run_payload(result or {}, (result or {}).get("citations", []))
+    result = await v2._project_replay(db, principal, request, result or {})
+    if result.get("_error"):
+        return v2._error_response_from_result(result)
+    return v2._public_run_payload(result, result.get("citations", []))

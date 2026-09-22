@@ -163,8 +163,10 @@ Workflow 路由 include_in_schema=False 不构成权限，现有 ask/view_citati
 
 **建议**：发布时保存不可变模板、内容摘要、能力表和兼容版本，绑定会话到发布记录；明确老版本续用或显式迁移策略。独立 workflow capability；对所有 Retrieval 节点做发布静态校验和运行范围注入校验。
 
-### F11 · P1/P2：回放、附件和记忆存在链路差异〔源码确认〕
+### F11 · P1/P2：回放、附件和记忆存在链路差异〔本地修复，待服务验收〕
 
+
+以下为修复前观察（其中 Chat 记忆调度提交顺序已在 F05 修正）：
 - 幂等回放直接取 result_json，其中包含公开引用和临时链接；没有像历史查询一样重新过滤当前权限并生成有效链接。撤权后可能重放旧引用摘录；下载路由仍二次检查，不能据此断言原文件下载绕过。
 - Workflow 幂等回放直接 JSON，与首次 Accept SSE 的行为不一致，需契约明确并测试。
 - Chat/Workflow 都在 scope.is_empty 时短路，即使存在已授权附件；与纯附件问答目标不一致。应将 KB 空范围和附件授权独立处理，或明确撤销该产品能力。
@@ -172,6 +174,10 @@ Workflow 路由 include_in_schema=False 不构成权限，现有 ask/view_citati
 - 文档事实进入长期记忆后，不能绕过原文撤权、版本和设备隔离。建议先限定偏好记忆；如需事实记忆，保留来源/权限修订并在使用时复核。
 
 建议缓存 canonical message，不缓存临时访问授权；回放重新投影并保留原业务状态。记忆只在提交后调度，确需可靠投递再加轻量 outbox。
+
+**本次实现（2026-09-22）**：当前 ACL/版本校验后重新签发引用链接，撤权保留正文/状态并隐藏引用；Workflow 回放遵守 SSE，失败只发 run.failed。G 与附件授权分开，restrict 空 G 带附件进入现有文件生成路径，知识库/网络工具不执行；生产 New2.json 不变。
+
+长期记忆改为有限表达偏好，完整明确句式生成候选、用户确认后生效；确认修订与 outbox 同事务。企业确认值是注入真相源，旧技术问答不注入；官方 Memory 仅作独立命名空间镜像，使用有界重试并承认重复/延迟边界。企业 schema 升至11，新增候选/确认值/outbox表与偏好自助接口。详见 [F11登记](../../patches/CHANGE-REQUEST-F11-REPLAY-PREFERENCES.md)。实际 PG 竞争、附件解析与 Memory API 投递均待服务验收；未部署。
 
 ### F12 · P1：引用清洗会损坏技术正文〔本地修复，待完整环境验收〕
 
@@ -333,6 +339,17 @@ Workflow 路由 include_in_schema=False 不构成权限，现有 ask/view_citati
 上线前必须完成服务验收、排空旧Gateway worker、迁移重复active run预检，再配套更新Gateway/前端。父块先安全读后重建；F06须完成真实模型盲评。提交/本地测试不代表生产已修复。
 
 
-## F09 实施补记（2026-09-22）
+## F09 / F11 实施补记（2026-09-22）
 
-安全过程白名单与历史格式标记已实现，企业schema 9→10。F09六项合成控制测试、既有文本/事件回归和前端安全过程用例通过；真实Python3.13、Provider、日志出口与PG迁移仍待验收。上游最小补丁和升级重放见F09登记；未部署，不修改生产Workflow或ACL。
+两个独立变更单元：安全过程展示；可靠回放、附件路径与确认偏好。新增企业迁移及偏好接口；RAGFlow 仅改日志/模型 tracing/空 G 附件路径，不改官方数据库、依赖锁、生产 Workflow、提示词或 ACL。F08 暂缓、F10 未处理；保留用户 Doc1.pdf 修改。旧推理/旧事实记忆未物理清理。
+
+| 验证 | 结果 |
+|---|---|
+| `python3 -m unittest discover -s docs/reviews/tests -q` | 45 passed；F09 6项、F11 11项及F05/F06/F07既有28项。实际纯函数/路由和存储方法配合合成I/O；不是服务集成。 |
+| 文本与事件：`pytest --noconftest test_answer_split.py test_run_expiry_source.py test_sanitize_citation_markers.py test_workflow_events.py -q` | 69 passed；命令文件均位于 enterprise/tests。 |
+| 前端 PreferencePanel/HarnessChat/RunOwnership/CitationMarkdown/Citations/ErrorStates/SystemSettingsPanels | 78 passed；包含安全过程、偏好面板、引用保护、回放和系统设置回归；TypeScript 检查通过。 |
+| 审查探针、Workflow模板、语法检查 | 通过；F09 探针改为验证原始推理不会公开，其他发现独立。 |
+| `pytest enterprise/tests/test_preference_pg.py enterprise/tests/test_user_memory.py -q` | collection 阻塞：缺 pytest_asyncio。真实独立连接确认/回滚/worker抢占恢复测试已编写，未执行。 |
+| 上游 think_log / think_timeline pytest | 项目配置缺 asyncio 插件；隔离配置后仍因缺 peewee 无法导入。新增无服务白名单/日志测试通过，不能代替完整上游环境。 |
+
+环境仍为 Python3.14.4，无 Python3.13 / Docker；缺 FastAPI、SQLAlchemy、asyncpg 等固定依赖。本地测试不等于生产修复。待验收：真实 Chat/Workflow JSON/SSE/回放/历史；带附件的空G请求实际检索次数；Memory异步落地、重复和删除；PG迁移及两个worker。部署需先排空旧worker、迁移schema并配套更新Gateway/企业前端；本次没有部署、重解析或读取生产数据。

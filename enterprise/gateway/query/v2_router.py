@@ -76,7 +76,6 @@ from enterprise.gateway.query.formal_router import (
 )
 from enterprise.gateway.query.user_memory import (
     fetch_user_memory_text,
-    schedule_memory_candidate,
 )
 from enterprise.gateway.query.llm_provider_errors import classify_llm_provider_error
 from enterprise.gateway.query.ragflow_client import RAGFlowAPIError
@@ -255,7 +254,7 @@ async def _citation_allowed(
     return await _citation_document_allowed(db, principal, citation)
 
 
-async def _project_citations(
+async def _project_citations_checked(
     db,
     citations: list[dict],
     request: Request,
@@ -263,6 +262,8 @@ async def _project_citations(
 ) -> list[dict]:
     projected: list[dict] = []
     for item in citations:
+        if not isinstance(item, dict) or not await _citation_allowed(db, principal, item):
+            continue
         if item.get("sourceType") == "web":
             if _valid_web_url(item.get("url")):
                 projected.append(
@@ -285,9 +286,13 @@ async def _project_citations(
                     }
                 )
             continue
-        ticket = await _gw_write(
-            db, issue_citation_file_ticket, citation=item, principal=principal
-        )
+        # Ticket projection is not a run mutation and may occur after commit.
+        from enterprise.gateway.db import GatewayDatabase
+        if isinstance(db, GatewayDatabase):
+            async with db.transaction(write=True) as conn:
+                ticket = await issue_citation_file_ticket(conn, citation=item, principal=principal)
+        else:
+            ticket = await issue_citation_file_ticket(db, citation=item, principal=principal)
         projected.append(
             public_citation(
                 item,
@@ -296,6 +301,43 @@ async def _project_citations(
             )
         )
     return projected
+
+
+async def _project_citations(db, citations, request, principal):
+    try:
+        return await _project_citations_checked(db, citations, request, principal)
+    except Exception:
+        # Link/ACL service availability cannot expose raw snapshots or reverse a
+        # committed run. History/replay can retry projection later.
+        return []
+
+
+async def _project_replay(db, principal, request, result):
+    result = dict(result)
+    # Canonical message snapshots also recover old Workflow public-only results.
+    try:
+        snapshot = await _gw_read(db, v2_store.get_message_snapshot,
+            message_id=result.get("messageId"), tenant_id=principal.tenant_id,
+            business_user_id=principal.business_user_id)
+    except Exception:
+        snapshot = None
+    citations = []
+    if snapshot:
+        result.update(answer=snapshot["content"], status=v2_store.public_status(snapshot["status"]),
+            reasoning=snapshot.get("reasoning"), _reasoning_format=snapshot.get("reasoning_format"))
+        try:
+            citations = json.loads(snapshot.get("citations_json") or "[]")
+            if not isinstance(citations, list):
+                citations = []
+        except (TypeError, ValueError):
+            citations = []
+    if result.get("status") in {"failed", "失败"} and not result.get("_error"):
+        result["_error"] = {"statusCode": 503, "body": {"code": "RUN_INTERRUPTED",
+            "message": "回答未完成，不可视为最终答案", "retryable": False}}
+    result["citations"] = await _project_citations(db, citations, request, principal)
+    result.pop("_public_citations", None)
+    result.pop("_streamDeltas", None)
+    return result
 
 
 def _candidate_identifiers(
@@ -1789,9 +1831,12 @@ async def _replay_or_pending(
             return None, _pending_response(conversation, req, run)
     if run.get("result_json"):
         result = json.loads(run["result_json"])
-        if "_error" in result:
-            return None, _error_response_from_result(result)
         result = dict(result)
+        result.update(conversationId=conversation["conversation_id"], clientMessageId=req.clientMessageId,
+                      runId=run["run_id"], messageId=run.get("assistant_message_id"))
+        if "_error" in result:
+            result["status"] = "failed"
+            result.setdefault("answer", "")
         result["replayed"] = True
         return result, None
     return None, _error(503, "RUN_INTERRUPTED", "Message run did not produce a durable result")
@@ -1940,7 +1985,7 @@ async def _retrieval_question(
     client = _query_client()
     chat_id = None
     scope, _docs = await _context_scope(db, principal, conversation)
-    if not scope.is_empty:
+    if not scope.is_empty or pending:
         chat_id = await _ensure_chat(client, principal, scope)
     observations = await observe_attachments(pending, client, chat_id, db)
     record_timed_event(
@@ -2027,7 +2072,7 @@ async def _execute_json_run(
             status = "no_reliable_evidence"
             citations: list[dict] = []
             reasoning: str | None = None
-            if not scope.is_empty:
+            if not scope.is_empty or pending:
                 client = client or _query_client()
                 chat_id, chat = await _ensure_chat_info(client, principal, scope)
                 effective_internet = req.internetEnabled and _web_search_configured(chat)
@@ -2190,25 +2235,6 @@ async def _execute_json_run(
                     for item in pending
                     if item.attachment_id
                 ]
-            if request is not None:
-                citation_started = perf_counter()
-                try:
-                    public_citations = await _project_citations(
-                        db, citations, request, principal
-                    )
-                except Exception:
-                    public_citations = citations
-                record_timed_event(
-                    run.get("_diagnostics"),
-                    "citation_projection",
-                    citation_started,
-                    {
-                        "source": "gateway",
-                        "stage": "citation_projection",
-                        "citationCount": len(citations),
-                    },
-                )
-                result["_public_citations"] = public_citations
             diagnostics = finish_trace(
                 run.get("_diagnostics"), outcome=status
             )
@@ -2225,15 +2251,25 @@ async def _execute_json_run(
                       run_id=run["run_id"], content=answer, citations=citations,
                       business_status=status, reasoning=reasoning,
             )
-            if status == "completed" and not scope.is_empty:
-                schedule_memory_candidate(
-                    principal,
-                    chat_id=chat_id,
-                    session_id=session_id,
-                    user_input=question,
-                    agent_response=answer,
-                    request_id=run["run_id"],
+            if request is not None:
+                citation_started = perf_counter()
+                try:
+                    public_citations = await _project_citations(
+                        db, citations, request, principal
+                    )
+                except Exception:
+                    public_citations = []
+                record_timed_event(
+                    run.get("_diagnostics"),
+                    "citation_projection",
+                    citation_started,
+                    {
+                        "source": "gateway",
+                        "stage": "citation_projection",
+                        "citationCount": len(citations),
+                    },
                 )
+                result["_public_citations"] = public_citations
             return result, None
         except (RAGFlowAPIError, _FormalQueryError) as exc:
             if isinstance(exc, _FormalQueryError):
@@ -2433,7 +2469,7 @@ async def _stream_run_events(
                 "docScopeMode": retrieval_context.get("doc_scope_mode"),
             },
         )
-        if not scope.is_empty:
+        if not scope.is_empty or pending:
             client = client or _query_client()
             chat_id, chat = await _ensure_chat_info(client, principal, scope)
             effective_internet = req.internetEnabled and _web_search_configured(chat)
@@ -2684,9 +2720,6 @@ async def _stream_run_events(
             if status == "completed":
                 answer = _with_equipment_hint(conversation, accumulated, status)
             if status == "failed":
-                public_citations = await _project_citations(
-                    db, citations, request, principal
-                )
                 await _save_failed_run(
                     db,
                     principal,
@@ -2703,6 +2736,7 @@ async def _stream_run_events(
                     citations=citations,
                     reasoning=reasoning,
                 )
+                public_citations = await _project_citations(db, citations, request, principal)
                 if answer != emitted_answer:
                     yield _sse(
                         "answer.replaced" if emitted_answer else "answer.delta",
@@ -2747,27 +2781,6 @@ async def _stream_run_events(
                 for item in pending
                 if item.attachment_id
             ]
-        if request is not None:
-            citation_started = perf_counter()
-            try:
-                public_citations = await _project_citations(
-                    db, citations, request, principal
-                )
-            except Exception:
-                public_citations = citations
-            record_timed_event(
-                run.get("_diagnostics"),
-                "citation_projection",
-                citation_started,
-                {
-                    "source": "gateway",
-                    "stage": "citation_projection",
-                    "citationCount": len(citations),
-                },
-            )
-            result["_public_citations"] = public_citations
-        else:
-            public_citations = citations
         _record_http_response_timing(run.get("_diagnostics"), request)
         diagnostics = finish_trace(run.get("_diagnostics"), outcome=status)
         if diagnostics:
@@ -2783,15 +2796,27 @@ async def _stream_run_events(
                   run_id=run["run_id"], content=answer, citations=citations,
                   business_status=status, reasoning=reasoning,
         )
-        if status == "completed" and not scope.is_empty:
-            schedule_memory_candidate(
-                principal,
-                chat_id=chat_id,
-                session_id=session_id,
-                user_input=question,
-                agent_response=answer,
-                request_id=run["run_id"],
+        if request is not None:
+            citation_started = perf_counter()
+            try:
+                public_citations = await _project_citations(
+                    db, citations, request, principal
+                )
+            except Exception:
+                public_citations = []
+            record_timed_event(
+                run.get("_diagnostics"),
+                "citation_projection",
+                citation_started,
+                {
+                    "source": "gateway",
+                    "stage": "citation_projection",
+                    "citationCount": len(citations),
+                },
             )
+            result["_public_citations"] = public_citations
+        else:
+            public_citations = []
         if live_streamed:
             if answer != emitted_answer:
                 yield _sse(
@@ -2954,8 +2979,13 @@ async def _result_events(result: dict) -> AsyncIterator[str]:
             "runId": result.get("runId"), "content": reasoning})
     yield _sse("answer.delta", {"conversationId": result["conversationId"],
         "runId": result.get("runId"), "content": result.get("answer", "")})
-    for citation in result["citations"]:
+    citations = result.get("citations", [])
+    for citation in citations:
         yield _sse("citation", citation)
+    if result.get("_error") or result.get("status") in {"failed", "失败"}:
+        yield _sse("run.failed", {**result.get("_error", {}).get("body", {}),
+            "conversationId": result["conversationId"], "runId": result.get("runId")})
+        return
     yield _sse(
         "answer.completed",
         {
@@ -2963,7 +2993,7 @@ async def _result_events(result: dict) -> AsyncIterator[str]:
             "runId": result.get("runId"),
             "messageId": result["messageId"],
             "status": v2_store.public_status(result["status"]),
-            "citations": result["citations"],
+            "citations": citations,
         },
     )
 
@@ -3157,18 +3187,16 @@ async def create_message(
             return _error(503, "RUN_INTERRUPTED", "Message run could not be prepared")
         if "answer" in run_or_result and "messageId" in run_or_result:
             result = run_or_result
-            if isinstance(result.get("_public_citations"), list):
-                public_citations = result["_public_citations"]
-            else:
-                public_citations = await _project_citations(
-                    db, result.get("citations") or [], request, principal
-                )
+            result = await _project_replay(db, principal, request, result)
+            public_citations = result["citations"]
             if "text/event-stream" in request.headers.get("accept", "").lower():
                 return StreamingResponse(
                     _result_events({**result, "citations": public_citations}),
                     media_type="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
                 )
+            if result.get("_error"):
+                return _error_response_from_result(result)
             return _public_run_payload(result, public_citations)
         run = run_or_result
         if pending:
@@ -3217,7 +3245,7 @@ async def get_citation(
     if not await _citation_allowed(db, principal, citation):
         return _error(403, "ACL_DENIED", "Access denied")
     projected = await _project_citations(db, [citation], request, principal)
-    return projected[0]
+    return projected[0] if projected else _error(503, "CITATION_UNAVAILABLE", "Citation is temporarily unavailable")
 
 
 @router.get(

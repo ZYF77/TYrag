@@ -70,6 +70,9 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         async def result_events(result):
             yield v2._sse('answer.completed', result)
         v2._result_events = result_events
+        async def project(db, principal, request, result):
+            return result
+        v2._project_replay = AsyncMock(side_effect=project)
         ops = ModuleType('enterprise.gateway.db.ops')
         async def write(db, fn, **kwargs):
             return await fn(db, **kwargs)
