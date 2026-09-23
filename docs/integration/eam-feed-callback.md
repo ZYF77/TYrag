@@ -93,7 +93,7 @@ expected       = "sha256=" + hex(HMAC-SHA256(outboundSecret, UTF-8(signed)))
 | `sourceSystem` | 建议 | `EAM` |
 | `qualityStatus` | 建议 | `passed` / `review_required` / `failed` / `unknown` / `null` |
 | `retrievable` | 建议 | 成功终态 `true`，否则 `false` |
-| `error` | `failed` / `review_required` | `{code,message,retryable[,reasonCodes]}`；成功为 `null` |
+| `error` | `failed` / `review_required` | `{code,message,retryable[,reasonCodes][,reasonMessages]}`；成功为 `null`。台账优先展示 `message`；明细用与 `reasonCodes` 同序的中文 `reasonMessages` |
 
 EAM 登记侧 ID 规则（回调应对齐）：
 
@@ -235,12 +235,13 @@ X-TY-Signature: sha256=<hex>
     "code": "DOCUMENT_REVIEW_REQUIRED",
     "message": "文档需要人工复核后才能使用。",
     "retryable": false,
-    "reasonCodes": ["REQUIRED_CAPABILITY_NOT_PASSED"]
+    "reasonCodes": ["REQUIRED_CAPABILITY_NOT_PASSED"],
+    "reasonMessages": ["必要解析能力未通过"]
   }
 }
 ```
 
-`review_required` 与 `failed` 一样会带 `error`。`reasonCodes` 为可选机器码（质量门原因）；台账展示优先用 `message`。
+`review_required` 与 `failed` 一样会带 `error`。`reasonCodes` 为可选机器码（质量门原因，契约兼容保留）。`reasonMessages` 与 `reasonCodes` 一一对应、同序，为稳定中文说明（未知码有中文兜底）。**台账优先展示 `message`；需要逐条原因时用 `reasonMessages`。**
 ---
 
 ## 10. 联调检查清单

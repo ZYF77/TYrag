@@ -136,6 +136,7 @@ def test_review_required_callback_includes_error_and_reason_codes():
     assert payload["error"]["message"] == "文档需要人工复核后才能使用。"
     assert payload["error"]["retryable"] is False
     assert payload["error"]["reasonCodes"] == ["REQUIRED_CAPABILITY_NOT_PASSED"]
+    assert payload["error"]["reasonMessages"] == ["必要解析能力未通过"]
 
 
 def test_internal_fixture_ids_are_skipped():
@@ -561,3 +562,44 @@ def test_build_terminal_payload_matches_freeze_fields():
         100,
     )
     assert signature.startswith("sha256=")
+
+
+def test_reason_code_message_known_and_unknown():
+    from enterprise.gateway.callback_delivery import reason_code_message
+
+    assert reason_code_message("CHUNK_COUNT_BELOW_MIN") == "切片数量低于最低要求"
+    assert reason_code_message("TEXT_COVERAGE_BELOW_MIN") == "文本覆盖率低于最低要求"
+    assert reason_code_message("GARBLED_RATIO_ABOVE_MAX") == "乱码比例过高"
+    assert reason_code_message("TABLE_RECALL_BELOW_MIN") == "表格召回率低于最低要求"
+    assert reason_code_message("VERSION_NOT_RETRIEVABLE") == "质检已通过但当前版本仍不可检索"
+    assert reason_code_message("SOME_NEW_CODE") == "未知质量原因（SOME_NEW_CODE）"
+    assert reason_code_message("  ") == "未知质量原因"
+
+
+def test_localize_reason_messages_preserve_order_with_codes():
+    from enterprise.gateway.callback_delivery import _localize_callback_error
+
+    localized = _localize_callback_error(
+        {
+            "code": "DOCUMENT_REVIEW_REQUIRED",
+            "message": "ignored english",
+            "retryable": False,
+            "reasonCodes": [
+                "CHUNK_COUNT_BELOW_MIN",
+                "UNKNOWN_REASON_XYZ",
+                "TABLE_RECALL_BELOW_MIN",
+                "",
+            ],
+        }
+    )
+    assert localized["reasonCodes"] == [
+        "CHUNK_COUNT_BELOW_MIN",
+        "UNKNOWN_REASON_XYZ",
+        "TABLE_RECALL_BELOW_MIN",
+    ]
+    assert localized["reasonMessages"] == [
+        "切片数量低于最低要求",
+        "未知质量原因（UNKNOWN_REASON_XYZ）",
+        "表格召回率低于最低要求",
+    ]
+    assert localized["message"] == "文档需要人工复核后才能使用。"

@@ -157,8 +157,40 @@ def resolve_callback_endpoint(
     return None
 
 
+
+# Stable Chinese copy for quality-gate reasonCodes (EAM ledger).
+# Unknown codes fall back via reason_code_message().
+REASON_CODE_MESSAGES_ZH: dict[str, str] = {
+    "REQUIRED_CAPABILITY_NOT_PASSED": "必要解析能力未通过",
+    "REQUIRED_CAPABILITY_INVALID": "必要解析能力配置无效",
+    "VERSION_NOT_RETRIEVABLE": "质检已通过但当前版本仍不可检索",
+    "CHUNK_COUNT_BELOW_MIN": "切片数量低于最低要求",
+    "EMPTY_PAGE_RATIO_ABOVE_MAX": "空白页比例过高",
+    "TEXT_COVERAGE_BELOW_MIN": "文本覆盖率低于最低要求",
+    "GARBLED_RATIO_ABOVE_MAX": "乱码比例过高",
+    "PAGE_COVERAGE_BELOW_MIN": "页面覆盖率低于最低要求",
+    "POSITION_COVERAGE_BELOW_MIN": "位置信息覆盖率低于最低要求",
+    "POSITION_PAGE_OUT_OF_RANGE": "位置页码超出范围",
+    "TABLE_RECALL_BELOW_MIN": "表格召回率低于最低要求",
+    "KEY_FIELD_ACCURACY_BELOW_MIN": "关键字段准确率低于最低要求",
+    "CITATION_PAGE_ACCURACY_BELOW_MIN": "引用页码准确率低于最低要求",
+    "RAGFLOW_PARSE_FAILED": "RAGFlow 解析失败",
+}
+
+
+def reason_code_message(code: str) -> str:
+    """Map a quality reasonCode to a stable Chinese message."""
+    key = (code or "").strip()
+    if not key:
+        return "未知质量原因"
+    return REASON_CODE_MESSAGES_ZH.get(key, f"未知质量原因（{key}）")
+
+
 def _localize_callback_error(error: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Expose Chinese user-facing messages to EAM; keep code/retryable/reasonCodes."""
+    """Expose Chinese user-facing messages to EAM; keep code/retryable/reasonCodes.
+
+    When reasonCodes are present, also emit reasonMessages (same order, Chinese).
+    """
     if not error:
         return None
     from enterprise.gateway.app import safe_error_message
@@ -179,6 +211,7 @@ def _localize_callback_error(error: dict[str, Any] | None) -> dict[str, Any] | N
         ][:32]
         if cleaned:
             localized["reasonCodes"] = cleaned
+            localized["reasonMessages"] = [reason_code_message(item) for item in cleaned]
     return localized
 
 
