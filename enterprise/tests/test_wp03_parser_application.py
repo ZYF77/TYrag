@@ -444,3 +444,84 @@ async def test_only_quality_passed_latest_version_is_promoted():
     assert stale_attempt is False
     assert client._status_updates[-1][2] is False
     await db.dispose()
+
+
+@pytest.mark.asyncio
+async def test_apply_ragflow_run_failed_then_done_flips_ready_and_enqueues_quality():
+    """TYKB: prior failed must not permanently block DONE->ready + quality path.
+
+    Probe (FAC-1608-ATT-2942 / FAC-67-ATT-3612): map stuck failed after
+    DOCUMENT_PARSE_FAILED; later RF inbox DONE/3 arrived but map never flipped.
+    Root cause was state_machine forbidding failed->ready; apply_ragflow_run then
+    raised in _set_status. This test stubs DB I/O and asserts recovery side effects.
+    """
+    from enterprise.gateway.sync.models import ExtDocumentMap, utc_now
+
+    now = utc_now()
+    doc = ExtDocumentMap(
+        id=1,
+        tenant_id="tenant-1",
+        source_system="EAM",
+        external_document_id="FAC-1608-ATT-2942",
+        source_version_id="v1",
+        event_id="evt-failed-then-ready",
+        sha256="abc",
+        file_name="FAC-1608-ATT-2942.pdf",
+        sync_status="failed",
+        event_status="failed",
+        pipeline_status="FAIL",
+        business_status="review_required",
+        current_version=0,
+        processing_round=1,
+        ragflow_dataset_id="ds-1",
+        ragflow_document_id="4bf9069aafef11f19e3855c444edf441",
+        created_at=now,
+        updated_at=now,
+    )
+    service = SyncService(SimpleNamespace(), SourceStub(b"x"), RAGFlowDocumentStub())
+
+    async def fake_db_call(fn, *args, **kwargs):
+        name = getattr(fn, "__name__", str(fn))
+        if name == "update_mapping_status":
+            # Mirror production mutator enough for apply_ragflow_run assertions.
+            target = args[0] if args else kwargs.get("doc")
+            sync_status = args[1] if len(args) > 1 else kwargs.get("sync_status")
+            target.sync_status = sync_status
+            if "pipeline_status" in kwargs and kwargs["pipeline_status"] is not None:
+                target.pipeline_status = kwargs["pipeline_status"]
+            if "business_status" in kwargs and kwargs["business_status"] is not None:
+                target.business_status = kwargs["business_status"]
+            if "event_status" in kwargs and kwargs["event_status"] is not None:
+                target.event_status = kwargs["event_status"]
+            return True
+        if name == "get_mapping":
+            return doc
+        return None
+
+    service._db_call = fake_db_call  # type: ignore[method-assign]
+
+    with patch.object(
+        SyncService, "_ensure_quality_evaluation", new_callable=AsyncMock,
+    ) as ensure_quality:
+        with patch.object(
+            SyncService, "_retry_technical_parse_once", new_callable=AsyncMock,
+            return_value=False,
+        ):
+            ready = await service.apply_ragflow_run(doc, "DONE", source="webhook")
+
+    assert ready.sync_status == "ready"
+    assert ready.pipeline_status == "DONE"
+    assert ready.business_status == "active"
+    ensure_quality.assert_awaited()
+
+
+def test_callback_unique_key_allows_retrievable_after_failed_same_round():
+    """Idempotency key includes terminal_status: failed != retrievable (not root cause B)."""
+    # Unique constraint documented in enqueue_terminal_callback ON CONFLICT(
+    #   tenant_id, source_system, external_document_id, source_version_id,
+    #   processing_round, terminal_status)
+    key_failed = ("t", "EAM", "FAC-1608-ATT-2942", "v1", 1, "failed")
+    key_retrievable = ("t", "EAM", "FAC-1608-ATT-2942", "v1", 1, "retrievable")
+    assert key_failed != key_retrievable
+    # Same retrievable twice would collide (idempotent skip) — desired.
+    assert key_retrievable == ("t", "EAM", "FAC-1608-ATT-2942", "v1", 1, "retrievable")

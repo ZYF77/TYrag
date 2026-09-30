@@ -59,7 +59,11 @@ _DOCUMENT_TRANSITIONS: dict[str, set[str]] = {
         "tracking", "registered", "queued", "parsing", "indexing", "validating",
         "failed",
     },
-    "failed": {"retry_wait", "accepted", "registered", "queued"},
+    # RF/ops re-run recovery: allow failed->parsing/ready so DONE can flip map+notify EAM.
+    "failed": {
+        "retry_wait", "accepted", "registered", "queued",
+        "parsing", "indexing", "validating", "ready", "review_required",
+    },
 }
 
 

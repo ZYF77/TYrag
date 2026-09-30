@@ -108,6 +108,15 @@ class TestStateMachine:
         with pytest.raises(ValueError):
             validate_transition("ready", "parsing")
 
+    def test_failed_can_recover_to_ready_and_parsing(self):
+        # TYKB: RF re-run DONE must be allowed after a prior failed terminal.
+        assert transition_allowed("failed", "ready")
+        assert transition_allowed("failed", "parsing")
+        assert transition_allowed("failed", "registered")
+        validate_transition("failed", "ready")
+        # ready still must not downgrade into parse.
+        assert not transition_allowed("ready", "parsing")
+
 
 class TestOutbox:
     @pytest.mark.asyncio
