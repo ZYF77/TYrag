@@ -800,7 +800,7 @@ class TestDocRoutesUnit:
 
         monkeypatch.setattr(module.DocumentService, "update_by_id", lambda _id, info: update_by_id_payloads.append(info) or True)
 
-        monkeypatch.setattr(module.DocumentService, "increment_chunk_num", lambda *args: decrements.append(args))
+        monkeypatch.setattr(module.DocumentService, "_apply_chunk_num_delta", lambda *args: decrements.append(args))
         monkeypatch.setattr(module.DocumentService, "filter_update", _capture_filter_update)
 
         monkeypatch.setattr(module.DocumentService, "query", lambda **_kwargs: [_DummyDoc(token_num=70, chunk_num=7, process_duration=1.5)])
@@ -970,7 +970,7 @@ class TestDocRoutesUnit:
             "fresh_doc",
             SimpleNamespace(id="doc-1", kb_id="kb-1", token_num=70, chunk_num=7, process_duration=1.5),
         )
-        monkeypatch.setattr(module.DocumentService, "increment_chunk_num", lambda *args: decrements.append(args))
+        monkeypatch.setattr(module.DocumentService, "_apply_chunk_num_delta", lambda *args: decrements.append(args))
         monkeypatch.setattr(
             module.DocumentService,
             "update_by_id",

@@ -802,48 +802,60 @@ class DocumentService(CommonService):
         return list(docs.dicts())
 
     @classmethod
+    def _apply_chunk_num_delta(cls, doc_id, kb_id, token_num, chunk_num, duration):
+        """Apply a chunk/token/duration delta to the document and KB ledgers.
+
+        Caller must already hold the DB connection (and any surrounding
+        ``atomic()`` transaction). Do not decorate this with
+        ``@DB.connection_context()`` -- nested close-on-exit while an outer
+        transaction is open raises
+        ``OperationalError(Attempting to close database while transaction is open)``.
+        """
+        num = (
+            cls.model.update(
+                token_num=cls.model.token_num + token_num,
+                chunk_num=cls.model.chunk_num + chunk_num,
+                process_duration=cls.model.process_duration + duration,
+            )
+            .where((cls.model.id == doc_id) & (cls.model.kb_id == kb_id))
+            .execute()
+        )
+        if num == 0:
+            logging.error(
+                "increment_chunk_num: no document matched doc_id=%s kb_id=%s token_num=%s chunk_num=%s duration=%s",
+                doc_id,
+                kb_id,
+                token_num,
+                chunk_num,
+                duration,
+            )
+            raise LookupError("Document not found which is supposed to be there")
+        num = (
+            Knowledgebase.update(
+                token_num=Knowledgebase.token_num + token_num,
+                chunk_num=Knowledgebase.chunk_num + chunk_num,
+            )
+            .where(Knowledgebase.id == kb_id)
+            .execute()
+        )
+        if num == 0:
+            logging.error(
+                "increment_chunk_num: no knowledgebase matched kb_id=%s for doc_id=%s token_num=%s chunk_num=%s duration=%s",
+                kb_id,
+                doc_id,
+                token_num,
+                chunk_num,
+                duration,
+            )
+            raise LookupError("Knowledgebase not found which is supposed to be there")
+        return num
+
+    @classmethod
     @DB.connection_context()
     def increment_chunk_num(cls, doc_id, kb_id, token_num, chunk_num, duration):
         """Atomically add chunk/token counters on the document and its knowledge base."""
         with DB.atomic():
-            num = (
-                cls.model.update(
-                    token_num=cls.model.token_num + token_num,
-                    chunk_num=cls.model.chunk_num + chunk_num,
-                    process_duration=cls.model.process_duration + duration,
-                )
-                .where((cls.model.id == doc_id) & (cls.model.kb_id == kb_id))
-                .execute()
-            )
-            if num == 0:
-                logging.error(
-                    "increment_chunk_num: no document matched doc_id=%s kb_id=%s token_num=%s chunk_num=%s duration=%s",
-                    doc_id,
-                    kb_id,
-                    token_num,
-                    chunk_num,
-                    duration,
-                )
-                raise LookupError("Document not found which is supposed to be there")
-            num = (
-                Knowledgebase.update(
-                    token_num=Knowledgebase.token_num + token_num,
-                    chunk_num=Knowledgebase.chunk_num + chunk_num,
-                )
-                .where(Knowledgebase.id == kb_id)
-                .execute()
-            )
-            if num == 0:
-                logging.error(
-                    "increment_chunk_num: no knowledgebase matched kb_id=%s for doc_id=%s token_num=%s chunk_num=%s duration=%s",
-                    kb_id,
-                    doc_id,
-                    token_num,
-                    chunk_num,
-                    duration,
-                )
-                raise LookupError("Knowledgebase not found which is supposed to be there")
-        return num
+            return cls._apply_chunk_num_delta(doc_id, kb_id, token_num, chunk_num, duration)
 
     @classmethod
     @DB.connection_context()

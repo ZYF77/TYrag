@@ -19,6 +19,7 @@ from api.db.db_models import DB, Document
 from api.db.services.document_service import DocumentService
 
 
+@DB.connection_context()
 def release_reparse_counters(doc_id):
     """Roll back a document's chunk, token, and duration counters and the owning
     knowledgebase's chunk/token totals so a re-parse starts from zero.
@@ -26,10 +27,12 @@ def release_reparse_counters(doc_id):
     The counters are re-read under a ``FOR UPDATE`` row lock in the same
     transaction as the decrement, so the release subtracts the row's committed
     value at release time rather than a request-time snapshot a concurrent worker
-    may have already moved past. ``increment_chunk_num`` updates both ledgers
-    together. This does not serialize a worker that writes its final counts in a
-    separate transaction after the release commits; fully closing the
-    stop-parse-during-parse race needs a worker-side cancel check.
+    may have already moved past. ``_apply_chunk_num_delta`` updates both ledgers
+    together without opening a nested ``connection_context`` (which would close
+    the connection while this transaction is still open). This does not serialize
+    a worker that writes its final counts in a separate transaction after the
+    release commits; fully closing the stop-parse-during-parse race needs a
+    worker-side cancel check.
 
     Raises ``LookupError`` if the document row no longer exists so callers can
     surface a not-found result.
@@ -41,7 +44,9 @@ def release_reparse_counters(doc_id):
         if not (fresh.token_num or fresh.chunk_num or fresh.process_duration):
             logging.debug("release_reparse_counters: nothing to release for document %s", doc_id)
             return
-        DocumentService.increment_chunk_num(fresh.id, fresh.kb_id, -fresh.token_num, -fresh.chunk_num, -fresh.process_duration)
+        DocumentService._apply_chunk_num_delta(
+            fresh.id, fresh.kb_id, -fresh.token_num, -fresh.chunk_num, -fresh.process_duration
+        )
         logging.debug(
             "release_reparse_counters: released document %s (token=%s chunk=%s duration=%s)",
             doc_id,
