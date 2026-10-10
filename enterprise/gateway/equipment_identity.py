@@ -36,6 +36,160 @@ class IdentityConflictError(ValueError):
     """The EAM snapshot conflicts with the current identity version."""
 
 
+class IdentityAmbiguousError(ValueError):
+    """The identifier maps to more than one equipment identity."""
+
+
+IDENTITY_ID_TYPES = ("equipment_id", "fixed_asset_no", "asset_id")
+
+
+@dataclass(frozen=True)
+class IdentityResolveResult:
+    identity: "CurrentEquipmentIdentity | None" = None
+    ambiguous: bool = False
+    matched_equipment_ids: tuple[str, ...] = ()
+
+
+async def _close_current_identifier(
+    conn,
+    *,
+    tenant_id: str,
+    id_type: str,
+    id_value: str | None,
+    now: str,
+    equipment_id: str | None = None,
+) -> None:
+    if not id_value:
+        return
+    if equipment_id:
+        await exec_sql(
+            conn,
+            """UPDATE ext_identifier_history
+                  SET status='historical', valid_to=?, updated_at=?
+                WHERE tenant_id=? AND equipment_id=? AND id_type=? AND id_value=?
+                  AND status='current'""",
+            (now, now, tenant_id, equipment_id, id_type, id_value),
+        )
+    else:
+        await exec_sql(
+            conn,
+            """UPDATE ext_identifier_history
+                  SET status='historical', valid_to=?, updated_at=?
+                WHERE tenant_id=? AND id_type=? AND id_value=?
+                  AND status='current'""",
+            (now, now, tenant_id, id_type, id_value),
+        )
+
+
+async def _open_current_identifier(
+    conn,
+    *,
+    tenant_id: str,
+    equipment_id: str,
+    id_type: str,
+    id_value: str | None,
+    identity_version: int,
+    now: str,
+) -> None:
+    if not id_value:
+        return
+    # Reuse: close any other equipment currently holding this identifier.
+    await _close_current_identifier(
+        conn, tenant_id=tenant_id, id_type=id_type, id_value=id_value, now=now
+    )
+    existing = await fetchone(
+        conn,
+        """SELECT id FROM ext_identifier_history
+            WHERE tenant_id=? AND equipment_id=? AND id_type=? AND id_value=?
+              AND status='current'""",
+        (tenant_id, equipment_id, id_type, id_value),
+    )
+    if existing:
+        await exec_sql(
+            conn,
+            """UPDATE ext_identifier_history
+                  SET identity_version=?, updated_at=?
+                WHERE id=?""",
+            (identity_version, now, existing["id"]),
+        )
+        return
+    await exec_sql(
+        conn,
+        """INSERT INTO ext_identifier_history
+           (tenant_id, equipment_id, id_type, id_value, status,
+            valid_from, valid_to, identity_version, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 'current', ?, NULL, ?, ?, ?)""",
+        (
+            tenant_id,
+            equipment_id,
+            id_type,
+            id_value,
+            now,
+            identity_version,
+            now,
+            now,
+        ),
+    )
+
+
+async def _sync_identifier_history(
+    conn,
+    *,
+    tenant_id: str,
+    equipment_id: str,
+    fixed_asset_no: str | None,
+    asset_id: str | None,
+    identity_version: int,
+    now: str,
+    previous: "CurrentEquipmentIdentity | None",
+) -> None:
+    await _open_current_identifier(
+        conn,
+        tenant_id=tenant_id,
+        equipment_id=equipment_id,
+        id_type="equipment_id",
+        id_value=equipment_id,
+        identity_version=identity_version,
+        now=now,
+    )
+    if previous and previous.fixed_asset_no and previous.fixed_asset_no != fixed_asset_no:
+        await _close_current_identifier(
+            conn,
+            tenant_id=tenant_id,
+            id_type="fixed_asset_no",
+            id_value=previous.fixed_asset_no,
+            now=now,
+            equipment_id=equipment_id,
+        )
+    if previous and previous.asset_id and previous.asset_id != asset_id:
+        await _close_current_identifier(
+            conn,
+            tenant_id=tenant_id,
+            id_type="asset_id",
+            id_value=previous.asset_id,
+            now=now,
+            equipment_id=equipment_id,
+        )
+    await _open_current_identifier(
+        conn,
+        tenant_id=tenant_id,
+        equipment_id=equipment_id,
+        id_type="fixed_asset_no",
+        id_value=fixed_asset_no,
+        identity_version=identity_version,
+        now=now,
+    )
+    await _open_current_identifier(
+        conn,
+        tenant_id=tenant_id,
+        equipment_id=equipment_id,
+        id_type="asset_id",
+        id_value=asset_id,
+        identity_version=identity_version,
+        now=now,
+    )
+
+
 @dataclass(frozen=True)
 class CurrentEquipmentIdentity:
     tenant_id: str
@@ -110,21 +264,114 @@ async def get_current_identity(
     return _identity_from_row(row) if row else None
 
 
-async def resolve_current_identity(
-    conn, tenant_id: str, identifier: str
-) -> CurrentEquipmentIdentity | None:
-    row = await fetchone(
+async def resolve_identity(
+    conn,
+    tenant_id: str,
+    identifier: str,
+    *,
+    as_of: str | None = None,
+) -> IdentityResolveResult:
+    """Resolve an identifier to a stable equipment identity.
+
+    Prefer a unique *current* match. When none exists, fall back to a unique
+    historical match. Multiple matches (current or historical) are ambiguous —
+    never collapse with ORDER BY … LIMIT 1.
+    """
+    identifier = (identifier or "").strip()
+    if not identifier:
+        return IdentityResolveResult()
+
+    if as_of:
+        rows = await fetchall(
+            conn,
+            """SELECT DISTINCT equipment_id
+                 FROM ext_identifier_history
+                WHERE tenant_id=? AND id_value=?
+                  AND valid_from<=?
+                  AND (valid_to IS NULL OR valid_to>?)
+                ORDER BY equipment_id""",
+            (tenant_id, identifier, as_of, as_of),
+        )
+        equipment_ids = tuple(str(row["equipment_id"]) for row in rows)
+        if len(equipment_ids) > 1:
+            return IdentityResolveResult(
+                ambiguous=True, matched_equipment_ids=equipment_ids
+            )
+        if len(equipment_ids) == 1:
+            identity = await get_current_identity(conn, tenant_id, equipment_ids[0])
+            return IdentityResolveResult(
+                identity=identity, matched_equipment_ids=equipment_ids
+            )
+        return IdentityResolveResult()
+
+    current_rows = await fetchall(
+        conn,
+        """SELECT DISTINCT equipment_id
+             FROM ext_identifier_history
+            WHERE tenant_id=? AND id_value=? AND status='current'
+            ORDER BY equipment_id""",
+        (tenant_id, identifier),
+    )
+    current_ids = tuple(str(row["equipment_id"]) for row in current_rows)
+    if len(current_ids) > 1:
+        return IdentityResolveResult(
+            ambiguous=True, matched_equipment_ids=current_ids
+        )
+    if len(current_ids) == 1:
+        identity = await get_current_identity(conn, tenant_id, current_ids[0])
+        return IdentityResolveResult(
+            identity=identity, matched_equipment_ids=current_ids
+        )
+
+    # Fallback: registry live projection (covers pre-history rows / races).
+    registry_rows = await fetchall(
         conn,
         """SELECT tenant_id, equipment_id, fixed_asset_no, asset_id,
                   source_system, identity_version, updated_at
              FROM ext_asset_registry
             WHERE tenant_id=?
               AND (equipment_id=? OR fixed_asset_no=? OR asset_id=?)
-            ORDER BY equipment_id
-            LIMIT 1""",
+            ORDER BY equipment_id""",
         (tenant_id, identifier, identifier, identifier),
     )
-    return _identity_from_row(row) if row else None
+    if len(registry_rows) > 1:
+        ids = tuple(str(row["equipment_id"]) for row in registry_rows)
+        return IdentityResolveResult(ambiguous=True, matched_equipment_ids=ids)
+    if len(registry_rows) == 1:
+        identity = _identity_from_row(registry_rows[0])
+        return IdentityResolveResult(
+            identity=identity, matched_equipment_ids=(identity.equipment_id,)
+        )
+
+    historical_rows = await fetchall(
+        conn,
+        """SELECT DISTINCT equipment_id
+             FROM ext_identifier_history
+            WHERE tenant_id=? AND id_value=? AND status='historical'
+            ORDER BY equipment_id""",
+        (tenant_id, identifier),
+    )
+    historical_ids = tuple(str(row["equipment_id"]) for row in historical_rows)
+    if len(historical_ids) > 1:
+        return IdentityResolveResult(
+            ambiguous=True, matched_equipment_ids=historical_ids
+        )
+    if len(historical_ids) == 1:
+        identity = await get_current_identity(conn, tenant_id, historical_ids[0])
+        return IdentityResolveResult(
+            identity=identity, matched_equipment_ids=historical_ids
+        )
+    return IdentityResolveResult()
+
+
+async def resolve_current_identity(
+    conn, tenant_id: str, identifier: str, *, as_of: str | None = None
+) -> CurrentEquipmentIdentity | None:
+    """Backward-compatible resolver; returns None on miss or ambiguity."""
+    result = await resolve_identity(conn, tenant_id, identifier, as_of=as_of)
+    if result.ambiguous:
+        return None
+    return result.identity
 
 
 async def list_current_identities(
@@ -278,6 +525,16 @@ async def upsert_current_identity(
               SET fixed_asset_no=?, asset_id=?, updated_at=?
             WHERE tenant_id=? AND equipment_id=?""",
         (fixed_asset_no, asset_id, now, tenant_id, equipment_id),
+    )
+    await _sync_identifier_history(
+        conn,
+        tenant_id=tenant_id,
+        equipment_id=equipment_id,
+        fixed_asset_no=fixed_asset_no,
+        asset_id=asset_id,
+        identity_version=identity_version,
+        now=now,
+        previous=existing,
     )
     current = await get_current_identity(conn, tenant_id, equipment_id)
     if current is None:
@@ -625,11 +882,15 @@ async def preview_equipment_recognition(
             )
         matches = []
         for candidate in candidates:
-            identity = await resolve_current_identity(conn, principal.tenant_id, candidate)
+            resolved = await resolve_identity(conn, principal.tenant_id, candidate)
             matches.append({
                 "candidate": candidate,
-                "equipmentId": identity.equipment_id if identity else None,
-                "matched": identity is not None,
+                "equipmentId": (
+                    resolved.identity.equipment_id if resolved.identity else None
+                ),
+                "matched": resolved.identity is not None and not resolved.ambiguous,
+                "ambiguous": resolved.ambiguous,
+                "matchedEquipmentIds": list(resolved.matched_equipment_ids),
             })
     return {"items": matches, "pattern": pattern, "enabled": settings["enabled"]}
 

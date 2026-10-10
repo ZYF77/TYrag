@@ -726,6 +726,71 @@ async def update_parser_application(
     doc.updated_at = now
 
 
+
+def is_equipment_bound_inline_json(doc: ExtDocumentMap) -> bool:
+    """True when INLINE_JSON external_document_id is bound to equipment_id.
+
+    Contract convention for ledger-style JSON:
+    - external_document_id == equipment_id, or
+    - external_document_id starts with "{equipment_id}:" / "EQ-MASTER:{equipment_id}"
+    """
+    if (doc.source_kind or "") != "INLINE_JSON":
+        return False
+    equipment_id = (doc.equipment_id or "").strip()
+    external_id = (doc.external_document_id or "").strip()
+    if not equipment_id or not external_id:
+        return False
+    if external_id == equipment_id:
+        return True
+    if external_id.startswith(f"{equipment_id}:"):
+        return True
+    if external_id.startswith(f"EQ-MASTER:{equipment_id}"):
+        return True
+    return False
+
+
+async def promote_equipment_inline_json_current(
+    conn: AsyncConnection, doc: ExtDocumentMap,
+) -> list[ExtDocumentMap]:
+    """Keep one current INLINE_JSON per tenant+equipment_id+document_type.
+
+    Called after version-axis promotion. Supersedes sibling equipment-bound
+    ledger JSON rows so old external_document_id values leave default retrieval.
+    """
+    if not is_equipment_bound_inline_json(doc):
+        return []
+    if not doc.document_type or not doc.equipment_id:
+        return []
+    now = utc_now()
+    await exec_sql(
+        conn,
+        """UPDATE ext_document_map
+              SET sync_status='superseded', business_status='superseded',
+                  current_version=0, updated_at=?
+            WHERE tenant_id=? AND equipment_id=? AND document_type=?
+              AND source_kind='INLINE_JSON'
+              AND id<>?
+              AND business_status IN ('active', 'review_required')""",
+        (
+            now,
+            doc.tenant_id,
+            doc.equipment_id,
+            doc.document_type,
+            doc.id,
+        ),
+    )
+    rows = await fetchall(
+        conn,
+        """SELECT * FROM ext_document_map
+            WHERE tenant_id=? AND equipment_id=? AND document_type=?
+              AND source_kind='INLINE_JSON'
+              AND business_status='superseded'
+              AND updated_at=?""",
+        (doc.tenant_id, doc.equipment_id, doc.document_type, now),
+    )
+    return [_row_to_mapping(row) for row in rows]
+
+
 async def promote_version_if_latest(
     conn: AsyncConnection, doc: ExtDocumentMap,
 ) -> bool:
@@ -766,6 +831,7 @@ async def promote_version_if_latest(
     doc.current_version = 1
     doc.event_status = "completed"
     doc.updated_at = now
+    await promote_equipment_inline_json_current(conn, doc)
     return True
 
 

@@ -28,6 +28,45 @@ ext_asset_registry = Table(
     Column("updated_at", Text, nullable=False, server_default=""),
 )
 
+
+ext_identifier_history = Table(
+    "ext_identifier_history",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("tenant_id", Text, nullable=False),
+    Column("equipment_id", Text, nullable=False),
+    Column("id_type", Text, nullable=False),
+    Column("id_value", Text, nullable=False),
+    Column("status", Text, nullable=False, server_default="current"),
+    Column("valid_from", Text, nullable=False),
+    Column("valid_to", Text),
+    Column("identity_version", Integer, nullable=False, server_default="0"),
+    Column("created_at", Text, nullable=False, server_default=""),
+    Column("updated_at", Text, nullable=False, server_default=""),
+    CheckConstraint(
+        "id_type IN ('equipment_id', 'fixed_asset_no', 'asset_id')",
+        name="ck_ext_identifier_history_id_type",
+    ),
+    CheckConstraint(
+        "status IN ('current', 'historical')",
+        name="ck_ext_identifier_history_status",
+    ),
+)
+
+Index(
+    "idx_id_hist_lookup",
+    ext_identifier_history.c.tenant_id,
+    ext_identifier_history.c.id_type,
+    ext_identifier_history.c.id_value,
+    ext_identifier_history.c.status,
+)
+Index(
+    "idx_id_hist_equipment",
+    ext_identifier_history.c.tenant_id,
+    ext_identifier_history.c.equipment_id,
+    ext_identifier_history.c.status,
+)
+
 ext_document_map = Table(
     "ext_document_map",
     metadata,
@@ -730,6 +769,7 @@ gateway_runtime_settings = Table(
 
 ALL_TABLES = (
     ext_asset_registry,
+    ext_identifier_history,
     ext_document_map,
     sync_outbox,
     ext_document_event_receipt,

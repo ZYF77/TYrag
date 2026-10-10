@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from enterprise.gateway.db.dialect import add_column_if_missing, exec_sql
 from enterprise.gateway.db.tables import metadata
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 
 def _quote_identifier(value: str) -> str:
@@ -211,6 +211,107 @@ async def _upgrade_v7_to_v8(conn) -> None:
     await add_column_if_missing(conn, "ext_v2_conversation", "workflow_session_id", "TEXT")
 
 
+
+async def _upgrade_v11_to_v12(conn) -> None:
+    """Persist identifier history for equipment identity reuse and as-of lookup."""
+    await exec_sql(
+        conn,
+        """CREATE TABLE IF NOT EXISTS ext_identifier_history (
+               id SERIAL PRIMARY KEY,
+               tenant_id TEXT NOT NULL,
+               equipment_id TEXT NOT NULL,
+               id_type TEXT NOT NULL,
+               id_value TEXT NOT NULL,
+               status TEXT NOT NULL DEFAULT 'current',
+               valid_from TEXT NOT NULL,
+               valid_to TEXT,
+               identity_version INTEGER NOT NULL DEFAULT 0,
+               created_at TEXT NOT NULL DEFAULT '',
+               updated_at TEXT NOT NULL DEFAULT '',
+               CONSTRAINT ck_ext_identifier_history_id_type
+                 CHECK (id_type IN ('equipment_id', 'fixed_asset_no', 'asset_id')),
+               CONSTRAINT ck_ext_identifier_history_status
+                 CHECK (status IN ('current', 'historical'))
+           )""",
+    )
+    await exec_sql(
+        conn,
+        """CREATE INDEX IF NOT EXISTS idx_id_hist_lookup
+              ON ext_identifier_history (tenant_id, id_type, id_value, status)""",
+    )
+    await exec_sql(
+        conn,
+        """CREATE INDEX IF NOT EXISTS idx_id_hist_equipment
+              ON ext_identifier_history (tenant_id, equipment_id, status)""",
+    )
+    await exec_sql(
+        conn,
+        """CREATE UNIQUE INDEX IF NOT EXISTS uq_id_hist_current
+              ON ext_identifier_history (tenant_id, id_type, id_value)
+              WHERE status = 'current'""",
+    )
+    # Backfill current rows from the live registry projection.
+    await exec_sql(
+        conn,
+        """INSERT INTO ext_identifier_history
+               (tenant_id, equipment_id, id_type, id_value, status,
+                valid_from, valid_to, identity_version, created_at, updated_at)
+           SELECT tenant_id, equipment_id, 'equipment_id', equipment_id, 'current',
+                  COALESCE(NULLIF(updated_at, ''), NOW()::text), NULL,
+                  COALESCE(identity_version, 0),
+                  COALESCE(NULLIF(updated_at, ''), NOW()::text),
+                  COALESCE(NULLIF(updated_at, ''), NOW()::text)
+             FROM ext_asset_registry r
+            WHERE NOT EXISTS (
+                  SELECT 1 FROM ext_identifier_history h
+                   WHERE h.tenant_id = r.tenant_id
+                     AND h.equipment_id = r.equipment_id
+                     AND h.id_type = 'equipment_id'
+                     AND h.status = 'current'
+            )""",
+    )
+    await exec_sql(
+        conn,
+        """INSERT INTO ext_identifier_history
+               (tenant_id, equipment_id, id_type, id_value, status,
+                valid_from, valid_to, identity_version, created_at, updated_at)
+           SELECT tenant_id, equipment_id, 'fixed_asset_no', fixed_asset_no, 'current',
+                  COALESCE(NULLIF(updated_at, ''), NOW()::text), NULL,
+                  COALESCE(identity_version, 0),
+                  COALESCE(NULLIF(updated_at, ''), NOW()::text),
+                  COALESCE(NULLIF(updated_at, ''), NOW()::text)
+             FROM ext_asset_registry r
+            WHERE fixed_asset_no IS NOT NULL AND TRIM(fixed_asset_no) <> ''
+              AND NOT EXISTS (
+                  SELECT 1 FROM ext_identifier_history h
+                   WHERE h.tenant_id = r.tenant_id
+                     AND h.id_type = 'fixed_asset_no'
+                     AND h.id_value = r.fixed_asset_no
+                     AND h.status = 'current'
+            )""",
+    )
+    await exec_sql(
+        conn,
+        """INSERT INTO ext_identifier_history
+               (tenant_id, equipment_id, id_type, id_value, status,
+                valid_from, valid_to, identity_version, created_at, updated_at)
+           SELECT tenant_id, equipment_id, 'asset_id', asset_id, 'current',
+                  COALESCE(NULLIF(updated_at, ''), NOW()::text), NULL,
+                  COALESCE(identity_version, 0),
+                  COALESCE(NULLIF(updated_at, ''), NOW()::text),
+                  COALESCE(NULLIF(updated_at, ''), NOW()::text)
+             FROM ext_asset_registry r
+            WHERE asset_id IS NOT NULL AND TRIM(asset_id) <> ''
+              AND NOT EXISTS (
+                  SELECT 1 FROM ext_identifier_history h
+                   WHERE h.tenant_id = r.tenant_id
+                     AND h.id_type = 'asset_id'
+                     AND h.id_value = r.asset_id
+                     AND h.status = 'current'
+            )""",
+    )
+
+
 async def initialize_schema(engine: AsyncEngine, *, schema: str = "public") -> None:
     """Create or upgrade the Gateway schema and reject unknown versions."""
     if not schema.replace("_", "").isalnum() or not schema[0].isalpha():
@@ -234,6 +335,7 @@ async def initialize_schema(engine: AsyncEngine, *, schema: str = "public") -> N
                 "gateway_runtime_settings",
                 "ragflow_status_inbox",
                 "gateway_equipment_recognition_settings",
+                "ext_identifier_history",
             }
             if extra or (missing and not set(missing).issubset(allowed_missing)):
                 raise RuntimeError(
@@ -272,6 +374,12 @@ async def initialize_schema(engine: AsyncEngine, *, schema: str = "public") -> N
             "TEXT",
         )
         await add_column_if_missing(conn, "ext_v2_conversation", "restart_required", "INTEGER NOT NULL DEFAULT 0")
+        await exec_sql(
+            conn,
+            """CREATE UNIQUE INDEX IF NOT EXISTS uq_id_hist_current
+                  ON ext_identifier_history (tenant_id, id_type, id_value)
+                  WHERE status = 'current'""",
+        )
         await add_column_if_missing(conn, "ext_v2_message", "reasoning_format", "TEXT")
         duplicates = await conn.execute(text("""SELECT COUNT(*) FROM (
             SELECT 1 FROM ext_v2_message_run WHERE status='running'
@@ -313,6 +421,9 @@ async def initialize_schema(engine: AsyncEngine, *, schema: str = "public") -> N
             values = [10]
         if values == [10]:
             values = [11]
+        if values == [11]:
+            await _upgrade_v11_to_v12(conn)
+            values = [12]
         elif values not in ([], [SCHEMA_VERSION]):
             raise RuntimeError(
                 f"unsupported Gateway schema version: {values!r}; "

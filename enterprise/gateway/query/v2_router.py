@@ -21,7 +21,11 @@ from enterprise.gateway.acl.schema import AclScope
 from enterprise.gateway.auth.middleware import require_capability
 from enterprise.gateway.auth.user_principal import UserPrincipal
 from enterprise.gateway.config import config
-from enterprise.gateway.equipment_identity import get_recognition_settings
+from enterprise.gateway.equipment_identity import (
+    get_current_identity,
+    get_recognition_settings,
+    resolve_identity,
+)
 from enterprise.gateway.query import v2_store
 from enterprise.gateway.query.attachment_context import (
     AttachmentObservation,
@@ -399,12 +403,94 @@ def _equipment_index(
     return index
 
 
+
+async def _identity_resolutions_for_tokens(
+    db, tenant_id: str, tokens: list[str]
+) -> dict[str, object]:
+    """Resolve question tokens via registry/history (prefer current, then unique historical)."""
+    if not tokens:
+        return {}
+
+    async def _load(conn):
+        out: dict[str, object] = {}
+        for token in tokens:
+            out[token] = await resolve_identity(conn, tenant_id, token)
+        return out
+
+    return await _gw_read(db, _load)
+
+
+def _merge_identity_into_equipment_index(
+    index: dict[str, set[str]],
+    resolutions: dict[str, object] | None,
+) -> tuple[dict[str, set[str]], set[str]]:
+    """Merge registry/history resolutions; return (index, ambiguous_tokens)."""
+    ambiguous: set[str] = set()
+    if not resolutions:
+        return index, ambiguous
+    for token, result in resolutions.items():
+        if getattr(result, "ambiguous", False):
+            ambiguous.add(token)
+            continue
+        identity = getattr(result, "identity", None)
+        if identity is None:
+            continue
+        index.setdefault(token, set()).add(identity.equipment_id)
+    return index, ambiguous
+
+
+def _format_current_identity_block(identities: list[object]) -> str:
+    """Render authoritative EAM current-identity facts for the prompt."""
+    lines: list[str] = []
+    for item in identities:
+        equipment_id = getattr(item, "equipment_id", None) or ""
+        fixed_asset_no = getattr(item, "fixed_asset_no", None) or ""
+        asset_id = getattr(item, "asset_id", None) or ""
+        version = getattr(item, "identity_version", None)
+        parts = [f"equipment_id={equipment_id}"]
+        if fixed_asset_no:
+            parts.append(f"fixed_asset_no={fixed_asset_no}")
+        if asset_id:
+            parts.append(f"asset_id={asset_id}")
+        if version is not None:
+            parts.append(f"identity_version={version}")
+        lines.append("；".join(parts))
+    if not lines:
+        return "（本轮无已解析的现行设备身份）"
+    return "\n".join(f"- {line}" for line in lines)
+
+
+async def _current_identity_for_conversation(db, principal, conversation: dict) -> str:
+    equipment_ids: list[str] = []
+    for value in conversation.get("_turn_entity_ids") or []:
+        if value and value not in equipment_ids:
+            equipment_ids.append(str(value))
+    active = conversation.get("equipment_id")
+    if active and active not in equipment_ids:
+        equipment_ids.append(str(active))
+    if not equipment_ids:
+        return "（本轮无已解析的现行设备身份）"
+
+    async def _load(conn):
+        items = []
+        for equipment_id in equipment_ids[:4]:
+            identity = await get_current_identity(
+                conn, principal.tenant_id, equipment_id
+            )
+            if identity is not None:
+                items.append(identity)
+        return _format_current_identity_block(items)
+
+    return await _gw_read(db, _load)
+
+
 def _explicit_equipment_ids(
     question: str,
     docs_by_internal_id: dict[str, ExtDocumentMap],
     *,
     pattern: str | None = None,
     enabled: bool = True,
+    identity_resolutions: dict[str, object] | None = None,
 ) -> tuple[list[str], bool]:
     """Resolve explicit equipment ids from the question.
 
@@ -422,6 +508,11 @@ def _explicit_equipment_ids(
     if not tokens:
         return [], False
     index = _equipment_index(docs_by_internal_id)
+    index, ambiguous_tokens = _merge_identity_into_equipment_index(
+        index, identity_resolutions
+    )
+    if ambiguous_tokens:
+        return [], True
     has_cue = _has_equipment_query_cue(question)
     resolved: list[str] = []
     unresolved_explicit = False
@@ -653,6 +744,7 @@ def _v2_completion_kwargs(
     reasoning_mode: str = "simple",
     retrieval_context: dict | None = None,
     user_memory: str | None = None,
+    current_identity: str | None = None,
 ) -> dict[str, Any]:
     # scope_identifiers mirrors allowed_identifiers so RAGFlow can inject a
     # generation-side identity block without mistaking the user question for a
@@ -689,6 +781,8 @@ def _v2_completion_kwargs(
         kwargs["enterprise_diagnostics"] = True
     if user_memory is not None:
         kwargs["user_memory"] = str(user_memory)
+    if current_identity is not None:
+        kwargs["current_identity"] = str(current_identity)
     return kwargs
 
 
@@ -1189,11 +1283,20 @@ async def _resolve_turn_scope(
     recognition = await _gw_read(
         db, get_recognition_settings, principal.tenant_id
     )
+    tokens = (
+        _device_like_identifiers(question, recognition["pattern"])
+        if recognition["enabled"]
+        else []
+    )
+    identity_resolutions = await _identity_resolutions_for_tokens(
+        db, principal.tenant_id, tokens
+    )
     explicit, unresolved = _explicit_equipment_ids(
         question,
         available,
         pattern=recognition["pattern"],
         enabled=recognition["enabled"],
+        identity_resolutions=identity_resolutions,
     )
     recent_records = await _gw_read(
         db,
@@ -2091,6 +2194,9 @@ async def _execute_json_run(
                 user_memory = await fetch_user_memory_text(
                     principal, question, request_id=run["run_id"]
                 )
+                current_identity = await _current_identity_for_conversation(
+                    db, principal, conversation
+                )
                 completion_kwargs = _v2_completion_kwargs(
                     conversation,
                     question,
@@ -2101,6 +2207,7 @@ async def _execute_json_run(
                     reasoning_mode=req.reasoningMode,
                     retrieval_context=retrieval_context,
                     user_memory=user_memory,
+                    current_identity=current_identity,
                 )
                 upstream_started = perf_counter()
                 upstream_status = "success"
@@ -2488,6 +2595,9 @@ async def _stream_run_events(
             user_memory = await fetch_user_memory_text(
                 principal, question, request_id=run["run_id"]
             )
+            current_identity = await _current_identity_for_conversation(
+                db, principal, conversation
+            )
             stream_kwargs = _v2_completion_kwargs(
                 conversation,
                 question,
@@ -2498,6 +2608,7 @@ async def _stream_run_events(
                 reasoning_mode=req.reasoningMode,
                 retrieval_context=retrieval_context,
                 user_memory=user_memory,
+                current_identity=current_identity,
             )
             upstream_started = perf_counter()
             async def iter_upstream():

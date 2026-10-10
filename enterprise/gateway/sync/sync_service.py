@@ -18,6 +18,7 @@ from enterprise.gateway.sync.models import (
     insert_mapping,
     list_all_mappings,
     promote_version_if_latest,
+    is_equipment_bound_inline_json,
     clear_ragflow_binding,
     get_outbox_by_event_id,
     reset_outbox_to_pending,
@@ -155,6 +156,13 @@ async def promote_quality_passed_version(
     versions = await get_versions_for_document(
         conn, doc.tenant_id, doc.source_system, doc.external_document_id,
     )
+    if is_equipment_bound_inline_json(doc) and doc.equipment_id:
+        equipment_versions = await list_mappings_for_equipment(
+            conn, doc.tenant_id, doc.equipment_id
+        )
+        for version in equipment_versions:
+            if version.id not in {v.id for v in versions}:
+                versions.append(version)
     old_docs: dict[str, list[str]] = {}
     for version in versions:
         if (
@@ -162,6 +170,13 @@ async def promote_quality_passed_version(
             and version.ragflow_document_id
             and version.ragflow_dataset_id
             and version.business_status == "superseded"
+            and (
+                version.external_document_id == doc.external_document_id
+                or (
+                    is_equipment_bound_inline_json(version)
+                    and version.document_type == doc.document_type
+                )
+            )
         ):
             old_docs.setdefault(version.ragflow_dataset_id, []).append(
                 version.ragflow_document_id
@@ -1149,6 +1164,13 @@ class SyncService:
                         doc.source_system,
                         doc.external_document_id,
                     )
+                    if is_equipment_bound_inline_json(doc) and doc.equipment_id:
+                        equipment_versions = await list_mappings_for_equipment(
+                            conn, doc.tenant_id, doc.equipment_id
+                        )
+                        for version in equipment_versions:
+                            if version.id not in {v.id for v in versions}:
+                                versions.append(version)
             if not promoted:
                 _validate_ragflow_response(
                     await self.ragflow_client.batch_update_status(
@@ -1167,6 +1189,13 @@ class SyncService:
                     and version.ragflow_document_id
                     and version.ragflow_dataset_id
                     and version.business_status == "superseded"
+                    and (
+                        version.external_document_id == doc.external_document_id
+                        or (
+                            is_equipment_bound_inline_json(version)
+                            and version.document_type == doc.document_type
+                        )
+                    )
                 ):
                     old_docs.setdefault(version.ragflow_dataset_id, []).append(
                         version.ragflow_document_id

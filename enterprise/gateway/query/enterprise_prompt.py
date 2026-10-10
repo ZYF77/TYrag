@@ -11,7 +11,7 @@ from typing import Any
 
 from enterprise.gateway.query.citation_select import ABSTAIN_PHRASE
 
-ENTERPRISE_PROMPT_MARKER = "enterprise_identity_metadata_v14"
+ENTERPRISE_PROMPT_MARKER = "enterprise_identity_metadata_v15"
 
 REFERENCE_METADATA_FIELDS = (
     "equipment_id",
@@ -25,9 +25,18 @@ _ENTERPRISE_SYSTEM_PROMPT = f"""你是企业设备知识库助手。仅依据当
 
 可用信息源只有：
 1. 当前会话中系统实际提供的临时附件内容；
-2. 系统提供的知识库内容。
+2. 系统提供的知识库内容；
+3. 系统提供的【现行设备身份】块（来自 EAM 现行台账投影）。
 
-知识库文档归属以 document_metadata 中的 equipment_id / fixed_asset_no 为准。
+【现行设备身份】：
+{{current_identity}}
+以上是现行设备身份。
+
+现行位号 / 固资 / asset_id / 设备编码以【现行设备身份】为准。
+知识库 PDF 或旧资料中出现的旧位号、旧固资号仅表示历史记载，不得覆盖现行身份。
+当用户询问「当前位号 / 当前固资号 / 现在是什么编号」时，必须回答【现行设备身份】中的值，并在需要时注明资料正文仍写着历史编号。
+
+知识库文档归属以 document_metadata 中的 equipment_id / fixed_asset_no 为准（可能仍是历史编号投影）。
 正文未出现设备编号，不代表文档不属于该设备。
 当 document_metadata.equipment_id（或 fixed_asset_no）等于用户点名的设备号时，禁止因正文未出现该设备号而写「无法按该编号匹配」「正文未找到该设备号」之类拒匹配表述；应依据该文档 Content 回答其中能够确认的事实。
 metadata 只证明文档归属；型号、出厂编号、厂家、维修、故障、工单、参数、记录、数量等具体事实，必须由 Content 实际内容支持。
@@ -79,6 +88,7 @@ def build_enterprise_prompt_config() -> dict[str, Any]:
         "parameters": [
             {"key": "knowledge", "optional": False},
             {"key": "user_memory", "optional": True},
+            {"key": "current_identity", "optional": True},
             {"key": "date", "optional": True},
         ],
         "empty_response": ABSTAIN_PHRASE,
@@ -123,10 +133,14 @@ def needs_enterprise_prompt_upgrade(chat: dict | None) -> bool:
         return True
     if "{user_memory}" not in system:
         return True
+    if "{current_identity}" not in system:
+        return True
     parameters = prompt_config.get("parameters") or []
     if not any(isinstance(p, dict) and p.get("key") == "knowledge" for p in parameters):
         return True
     if not any(isinstance(p, dict) and p.get("key") == "user_memory" for p in parameters):
+        return True
+    if not any(isinstance(p, dict) and p.get("key") == "current_identity" for p in parameters):
         return True
     ref = prompt_config.get("reference_metadata") or {}
     if not ref.get("include"):

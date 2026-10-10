@@ -345,6 +345,7 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
         doc_scope_mode: str | None = None,
         business_context: dict[str, Any] | None = None,
         user_memory: str | None = None,
+        current_identity: str | None = None,
         llm_id: str | None = None,
         timeout: float | None = None,
     ) -> dict:
@@ -400,6 +401,8 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
         if user_memory is not None:
             # Passed as dialog_service prompt parameter / kwargs (optional).
             body["user_memory"] = str(user_memory)
+        if current_identity is not None:
+            body["current_identity"] = str(current_identity)
         if llm_id:
             body["llm_id"] = str(llm_id)
         _trace_doc_ids(rid, doc_ids)
@@ -573,6 +576,7 @@ class RAGFlowQueryClient(RAGFlowDocumentClient):
         doc_scope_mode: str | None = None,
         business_context: dict[str, Any] | None = None,
         user_memory: str | None = None,
+        current_identity: str | None = None,
     ):
         """Stream RAGFlow chat completion over the public SSE API.
 
@@ -1001,6 +1005,7 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         doc_scope_mode: str | None = None,
         business_context: dict[str, Any] | None = None,
         user_memory: str | None = None,
+        current_identity: str | None = None,
         llm_id: str | None = None,
         timeout: float | None = None,
     ) -> dict:
@@ -1037,6 +1042,8 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
             self._last_completion_body["business_context"] = dict(business_context)
         if user_memory is not None:
             self._last_completion_body["user_memory"] = str(user_memory)
+        if current_identity is not None:
+            self._last_completion_body["current_identity"] = str(current_identity)
         if reasoning is not None:
             self._last_completion_body["reasoning"] = int(reasoning)
         if enterprise_diagnostics:
@@ -1217,6 +1224,7 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
         doc_scope_mode: str | None = None,
         business_context: dict[str, Any] | None = None,
         user_memory: str | None = None,
+        current_identity: str | None = None,
     ):
         if self._stream_fail_after == 0:
             completion = await self.chat_completion(
@@ -1239,6 +1247,7 @@ class RAGFlowQueryStub(RAGFlowDocumentStub):
                 doc_scope_mode=doc_scope_mode,
                 business_context=business_context,
                 user_memory=user_memory,
+                current_identity=current_identity,
             )
             data = completion.get("data", {})
             stream_id = None if self._omit_stream_id else (

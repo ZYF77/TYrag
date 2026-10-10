@@ -154,3 +154,17 @@ image contains `asyncpg`; it does not use SQLite.
 Do not expose MySQL, Elasticsearch, MinIO, or Redis ports to the network. Put
 TLS and a reverse proxy in front of the Gateway before changing its bind
 address from loopback.
+
+## Gateway schema upgrades (identity / PostgreSQL)
+
+Gateway-owned tables live in Compose service gateway-postgres (volume
+gateway_postgres_data), not in RAGFlow MySQL. Schema bumps such as
+SCHEMA_VERSION 11→12 (ext_identifier_history) run automatically via
+initialize_schema when the new Gateway process starts.
+
+For the 30 lab host rolling procedure, env/compose combination, pre/post
+checks, and hard bans (no mysql recreate, no deleting mysql_data /
+gateway_postgres_data, Gateway-only --no-deps), see
+docs/integration/update-30-server-agent.md §5B. Prefer a full `tyrag/enterprise-gateway` image that includes the schema code;
+do not treat schema migrations as a tiny Python overlay.
+

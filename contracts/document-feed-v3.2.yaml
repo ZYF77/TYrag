@@ -6,6 +6,14 @@ info:
     Document Feed 3.2 adds INLINE_JSON to the existing v3 FILE_SHARE endpoint.
     HTTP 202 is an acceptance receipt only. Terminal processing results use the
     existing file-share-callback-v1.yaml contract.
+
+    Equipment-bound INLINE_JSON (ledger / master-data style): prefer
+    externalDocumentId equal to metadata.equipment_id, or prefixed as
+    "{equipment_id}:..." / "EQ-MASTER:{equipment_id}". When promoted, Gateway
+    keeps a single current INLINE_JSON per tenant+equipment_id+document_type;
+    other equipment-bound siblings are superseded and disabled in RAGFlow.
+    Versioning on the same externalDocumentId still uses the existing
+    sourceVersionId promote/supersede axis.
 servers:
   - url: /
 tags:

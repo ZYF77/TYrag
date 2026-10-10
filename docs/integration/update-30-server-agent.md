@@ -108,13 +108,14 @@ Windows 上传的脚本先 `sed -i 's/\r$//'`。
 
 | 本地改动 | 30 上做法 |
 |---|---|
-| `enterprise/gateway/**` | overlay 打进 `tyrag/enterprise-gateway:v0.26.4`，只 recreate `enterprise-gateway` |
+| `enterprise/gateway/**`（**无** schema/迁移） | 小 overlay 打进现网 gateway tag，只 recreate `enterprise-gateway` |
+| `enterprise/gateway/**`（**含** `SCHEMA_VERSION` / `initialize_schema` / 新表） | **优先正式 gateway 镜像**（含完整 schema 代码）；**不要**只 overlay 几个业务 .py 却漏掉 `db/schema.py`；仍只 recreate `enterprise-gateway`，迁移由启动时 `initialize_schema` 完成 |
 | `enterprise/web/**` | 源码打到 30 构建 `tyrag/enterprise-web:v0.26.4`，只 recreate `enterprise-web` |
 | `ragflow/**`（Python/API/RAG/Go 等镜像内代码） | 必须把当前完整源码构建成新的 RAGFlow 镜像并导入，随后只 recreate `ragflow-cpu`；不能只 restart 或只更新 Gateway |
 | `ragflow/web/**`（8080 UI） | **优先** 把 `web/dist` `docker cp` 进正在跑的 RAGFlow + `nginx reload`，**不要** recreate |
 | 仅配置 / 未改代码 | 不要发版 |
 
-一次只动改动对应的服务。当前工作包已改 `ragflow/**`，所以必须更新 `ragflow-cpu`。
+一次只动改动对应的服务。设备身份治理（§5B）仅需 Gateway；仅当本次 diff 确实改了 `ragflow/**` 才更新 `ragflow-cpu`。
 
 30 现有 `docker-compose.yml` 不得被发布包整体覆盖。使用包内的
 `docker-compose.30-release.yml` 作为叠加文件；它只增加 Gateway PostgreSQL、切换三个镜像并
@@ -212,6 +213,74 @@ docker compose --env-file .env --env-file gateway-overrides.env \
 4. 只跑与本次改动对应的冒烟；JWT 在容器内从环境变量签发，**禁止打印 token**
 
 回滚：`docker tag $BACKUP $TAG`，同一条 compose recreate。
+
+---
+
+## 5B. 设备身份治理 / Gateway schema → v12（有迁移时）
+
+适用：`ext_identifier_history`、`SCHEMA_VERSION=12`、INLINE_JSON 按设备单现行、v2 先解析身份再 `doc_ids`、prompt `current_identity` 注入。  
+本变更 **含 Gateway PostgreSQL schema 升级**，**不算**「纯小 overlay」发版。
+
+### 结论（给 Deploy）
+
+- **可以 Gateway-only**：只换 / recreate `enterprise-gateway`，**不动** `ragflow-cpu` / `mysql` / `es01` / `redis` / `minio`，**禁止**整链 `up`、**禁止** recreate mysql、**禁止**删 `mysql_data` / `gateway_postgres_data`。
+- 升级路径：新 Gateway 进程启动时跑现有 **`initialize_schema`**（v11→v12：建 `ext_identifier_history`、从 `ext_asset_registry` 回填 current 行、写 `gateway_schema_version=12`）。**不要**手工改表、不要为迁库重建 PG 容器。
+- 镜像策略：优先 **正式 `tyrag/enterprise-gateway:<tag>`**（本机或构建机完整 build，含 `db/schema.py` / `tables.py` / `equipment_identity.py` 等）。仅当确认 **无 schema 变更** 时才用 §5 overlay；本次有 v12，漏打 schema 文件会导致启动拒迁或行为半新半旧。
+- 工作区：只把身份治理相关文件打进镜像；**无关 dirty**（本机 `.env` 端口、本地 overlay、未相关 artifacts）**勿**打进发布镜像。
+
+### 现网 Compose / env 组合（与迁卷文档一致）
+
+在 `/home/zkadmin/tyrag-production`，GW 滚动常用：
+
+```bash
+cd /home/zkadmin/tyrag-production
+docker compose \
+  --env-file .env \
+  --env-file gateway-overrides.env \
+  -f docker-compose.yml \
+  -f docker-compose.30-release.yml \
+  -f docker-compose.gateway-pg-fix.yml \
+  up -d --no-deps --force-recreate --pull never enterprise-gateway
+```
+
+说明：
+
+- 双 env-file + 三 compose；缺 `docker-compose.30-release.yml` 会丢 console / 镜像 env；`gateway-pg-fix.yml` 为现网叠加（见 `deploy/production/docs/volume-migrate-to-data.md` §4.0）。
+- 必须 `--no-deps --pull never`；**禁止**用 `production.env.example` recreate（会把 bind 打回 loopback，见 §1）。
+- 默认不改 30 上 `.env` / 密码 / secret。
+
+### 发版前核对（Probe / Deploy）
+
+在 **gateway-postgres**（或 Gateway 容器经现有连接）只读查询，记录现网版本：
+
+```sql
+SELECT version, applied_at FROM gateway_schema_version ORDER BY version;
+```
+
+预期发版前多为 `11`（或文档登记的当前值）。若已是 `12`，先确认是否重复发版、表是否已存在，再决定是否仅换代码镜像。
+
+同时记录当前 `enterprise-gateway` 镜像 tag / digest，便于回滚。
+
+### 发版后核对（Deploy 探活 + 交 Sim）
+
+1. 容器 `healthy`；`ss`：`0.0.0.0:5188`（及本次未动端口仍为 `0.0.0.0`）。
+2. **开发机**访问 `http://192.168.30.30:5188`（health）与 console/`3000`（若未动 web，确认仍可登）。
+3. Schema：
+
+```sql
+SELECT version FROM gateway_schema_version;  -- 应为 12
+SELECT to_regclass('public.ext_identifier_history');  -- 非 null
+SELECT COUNT(*) FROM ext_identifier_history WHERE status = 'current';
+```
+
+4. 容器内 marker：能看到 `SCHEMA_VERSION = 12`、`ext_identifier_history`、`current_identity` 相关符号（勿把 JWT/secret 打进日志）。
+5. **业务验收交 Sim**（勿用哈希冒烟凑数）：身份历史/改号解析、同设备 INLINE_JSON 仅一条现行、回答侧 `current_identity` 注入；正式提问在 30 测，不在本机构造正式问答。
+
+### 回滚
+
+- 保留发版前 gateway 镜像 backup tag；同一 env/compose 组合只 recreate `enterprise-gateway`。
+- Schema v12 为向前兼容加表/回填；回滚代码后表可残留。若必须回到仅识别 v11 的旧镜像，先确认旧 `initialize_schema` 是否拒绝「多表/高版本」；**仍禁止**删 PG 卷或 recreate mysql 来「清 schema」。
+
 
 ---
 
@@ -349,6 +418,8 @@ docker compose --env-file .env --env-file core.env --env-file dev-ragflow.env \
 - [ ] **开发机** 能打开 `192.168.30.30` 对应端口（不是只在 SSH 会话里 curl 127.0.0.1）
 - [ ] 容器 health=healthy
 - [ ] 线上代码/bundle 有本次 marker
+- [ ] 含 schema 发版时：`gateway_schema_version` 已升到目标版本，且新表（如 `ext_identifier_history`）存在；**未** recreate mysql / 未删数据卷 / 未整链 up
+- [ ] 业务验收已交 **Sim**（身份/现行事实类勿用哈希冒烟凑数）
 - [ ] 未把 secret 打进终端、聊天、脚本仓库
 - [ ] 上传到 `/tmp` 的源码包已删
 

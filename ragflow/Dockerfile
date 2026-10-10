@@ -106,6 +106,7 @@ COPY common common
 COPY memory memory
 COPY bin bin
 COPY tools/scripts tools/scripts
+RUN chmod +x /ragflow/tools/scripts/*.sh
 
 # Copy compiled web pages
 COPY --from=builder /ragflow/web/dist /ragflow/web/dist

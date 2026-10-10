@@ -25,11 +25,14 @@ def test_enterprise_prompt_has_knowledge_and_two_tier_relevance():
 
     assert "{knowledge}" in system
     assert "{user_memory}" in system
-    assert ENTERPRISE_PROMPT_MARKER == "enterprise_identity_metadata_v14"
+    assert ENTERPRISE_PROMPT_MARKER == "enterprise_identity_metadata_v15"
     assert ENTERPRISE_PROMPT_MARKER in system
     assert "document_metadata" in system
     assert "equipment_id" in system
     assert "fixed_asset_no" in system
+    assert "现行设备身份" in system
+    assert "{current_identity}" in system
+    assert "历史记载" in system
     assert "正文未出现设备编号" in system
     assert "禁止因正文未出现该设备号而写「无法按该编号匹配」" in system
     assert "正文未找到该设备号" in system
@@ -89,6 +92,7 @@ def test_needs_enterprise_prompt_upgrade_detects_default_chat():
         "enterprise_identity_metadata_v11",
         "enterprise_identity_metadata_v12",
         "enterprise_identity_metadata_v13",
+        "enterprise_identity_metadata_v14",
     ):
         legacy = build_enterprise_prompt_config()
         legacy["system"] = legacy["system"].replace(

@@ -5,10 +5,11 @@ import json
 
 import pytest
 
-from enterprise.gateway.db.dialect import exec_sql, fetchone
+from enterprise.gateway.db.dialect import exec_sql, fetchall, fetchone
 from enterprise.gateway.equipment_identity import (
     get_recognition_settings,
     preview_identifier_pattern,
+    resolve_identity,
     retry_identity_sync,
     save_recognition_settings,
     upsert_current_identity,
@@ -306,3 +307,108 @@ def test_preview_pattern_rejects_empty_and_returns_unique_candidates():
     ) == ["EQ-1001"]
     with pytest.raises(ValueError):
         preview_identifier_pattern("anything", r".*")
+
+@pytest.mark.asyncio
+async def test_identifier_history_tracks_reuse_and_ambiguity(gateway_db):
+    async with gateway_db.transaction(write=True) as conn:
+        await upsert_current_identity(
+            conn,
+            tenant_id="tenant-a",
+            source_system="EAM",
+            equipment_id="EQ-001",
+            fixed_asset_no="FA-B",
+            asset_id="ASSET-1",
+            identity_version=1,
+        )
+        await upsert_current_identity(
+            conn,
+            tenant_id="tenant-a",
+            source_system="EAM",
+            equipment_id="EQ-001",
+            fixed_asset_no="FA-C",
+            asset_id="ASSET-1",
+            identity_version=2,
+        )
+        rows = await fetchall(
+            conn,
+            """SELECT id_type, id_value, status, equipment_id
+                 FROM ext_identifier_history
+                WHERE tenant_id=? AND id_value IN ('FA-B', 'FA-C')
+                ORDER BY id_value, status""",
+            ("tenant-a",),
+        )
+        by_key = {(r["id_value"], r["status"]): r["equipment_id"] for r in rows}
+        assert by_key[("FA-B", "historical")] == "EQ-001"
+        assert by_key[("FA-C", "current")] == "EQ-001"
+
+        # Historical FA-B uniquely maps back to EQ-001
+        resolved = await resolve_identity(conn, "tenant-a", "FA-B")
+        assert resolved.ambiguous is False
+        assert resolved.identity is not None
+        assert resolved.identity.equipment_id == "EQ-001"
+        assert resolved.identity.fixed_asset_no == "FA-C"
+
+        # Reuse FA-B onto EQ-002
+        await upsert_current_identity(
+            conn,
+            tenant_id="tenant-a",
+            source_system="EAM",
+            equipment_id="EQ-002",
+            fixed_asset_no="FA-B",
+            asset_id="ASSET-2",
+            identity_version=1,
+        )
+        current = await resolve_identity(conn, "tenant-a", "FA-B")
+        assert current.ambiguous is False
+        assert current.identity.equipment_id == "EQ-002"
+
+        # Historical multi-equipment collision (no current holders) is ambiguous.
+        now = "2099-01-01T00:00:00+00:00"
+        for equipment_id in ("EQ-001", "EQ-002"):
+            await exec_sql(
+                conn,
+                """INSERT INTO ext_identifier_history
+                   (tenant_id, equipment_id, id_type, id_value, status,
+                    valid_from, valid_to, identity_version, created_at, updated_at)
+                   VALUES (?, ?, 'fixed_asset_no', 'FA-SHARED', 'historical',
+                           ?, ?, 1, ?, ?)""",
+                ("tenant-a", equipment_id, now, now, now, now),
+            )
+        amb = await resolve_identity(conn, "tenant-a", "FA-SHARED")
+        assert amb.ambiguous is True
+        assert set(amb.matched_equipment_ids) == {"EQ-001", "EQ-002"}
+
+
+@pytest.mark.asyncio
+async def test_resolve_identity_as_of_historical(gateway_db):
+    async with gateway_db.transaction(write=True) as conn:
+        await upsert_current_identity(
+            conn,
+            tenant_id="tenant-a",
+            source_system="EAM",
+            equipment_id="EQ-ASOF",
+            fixed_asset_no="FA-OLD",
+            asset_id=None,
+            identity_version=1,
+        )
+        row = await fetchone(
+            conn,
+            """SELECT valid_from FROM ext_identifier_history
+                WHERE tenant_id=? AND equipment_id=? AND id_value='FA-OLD'
+                  AND status='current'""",
+            ("tenant-a", "EQ-ASOF"),
+        )
+        valid_from = row["valid_from"]
+        await upsert_current_identity(
+            conn,
+            tenant_id="tenant-a",
+            source_system="EAM",
+            equipment_id="EQ-ASOF",
+            fixed_asset_no="FA-NEW",
+            asset_id=None,
+            identity_version=2,
+        )
+        asof = await resolve_identity(conn, "tenant-a", "FA-OLD", as_of=valid_from)
+        assert asof.identity is not None
+        assert asof.identity.equipment_id == "EQ-ASOF"
+
