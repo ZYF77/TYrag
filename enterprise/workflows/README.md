@@ -24,7 +24,7 @@ Begin（授权 / 业务上下文 / Memory）
 
 | 项 | 值 |
 |---|---|
-| 对话模型 | `ep-20260310093543-zl952@LLM@VolcEngine` |
+| 对话模型 | `ep-20260924111716-mw762@LLM@VolcEngine` |
 | rerank | `qwen3-rerank@千问@Tongyi-Qianwen` |
 | top_n / top_k | 6 / 10 |
 | similarity_threshold | 0.1 |
@@ -71,4 +71,4 @@ pytest enterprise/tests/test_workflow_artifacts.py -q
 
 不要自动导入 8080；由 Builder/Leader 决定何时 RF import + Console hot-set。
 
-`eam_ingestion_pipeline_v1.json` 是独立 Data Flow 模板（PDF/DeepDoc + JSON/JSONL + TokenChunker）。
+`eam_document_pipeline_v1.json`（`eam-document-v1`）和 `eam_record_pipeline_v1.json`（`eam-record-v1`）是两条可导入的 Data Flow。版式文档（PDF、Word、PPT、图片、文本、邮件、EPUB）走文档 Pipeline：DeepDOC 或原生解析，再按 512 token、10% 重叠切片。JSON/JSONL/LDJSON 走记录 Pipeline，一条记录一块，相邻记录不合并。CSV/Excel 继续内置 table，不进这两条画布。默认路径不挂 TitleChunker。画布 ID 由部署配置保存，不写入 Git。
