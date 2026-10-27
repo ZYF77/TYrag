@@ -34,7 +34,10 @@ from enterprise.gateway.auth.middleware import require_capability
 from enterprise.gateway.auth.user_principal import UserPrincipal
 from enterprise.gateway.config import require_ragflow_api_key
 from enterprise.gateway.quality.gate import enforce_quality_gate
-from enterprise.gateway.quality.models import get_latest_evaluation
+from enterprise.gateway.sync.readiness import (
+    document_evaluation_key,
+    get_latest_evaluations_batch,
+)
 from enterprise.gateway.query import conversation_store
 from enterprise.gateway.query.answer_split import (
     StreamThinkSplitter,
@@ -441,6 +444,8 @@ class FormalScopeResolver(ScopeResolver):
         self.source_system = source_system
         self.identity = identity
         self._docs: dict[str, ExtDocumentMap] = {}
+        # Latest evaluations loaded in the same resolve transaction (batch).
+        self._evaluations: dict[tuple[str, str, str, str], object] = {}
 
     async def resolve(self, context: AclContext) -> AclScope:
         if (
@@ -471,6 +476,13 @@ class FormalScopeResolver(ScopeResolver):
                 source_system=source_system,
                 statuses=["ready"],
             )
+            # One DISTINCT ON query replaces per-document get_latest_evaluation.
+            self._evaluations = await get_latest_evaluations_batch(
+                conn,
+                tenant_id=context.principal.tenant_id,
+                source_system=source_system,
+                docs=docs,
+            )
             allowed_docs: list[ExtDocumentMap] = []
             dataset_ids: set[str] = set()
             for doc in docs:
@@ -490,13 +502,7 @@ class FormalScopeResolver(ScopeResolver):
                 if doc.business_status != "active":
                     continue
                 if quality_required:
-                    evaluation = await get_latest_evaluation(
-                        conn,
-                        doc.tenant_id,
-                        doc.source_system,
-                        doc.external_document_id,
-                        doc.source_version_id,
-                    )
+                    evaluation = self._evaluations.get(document_evaluation_key(doc))
                     quality_allowed, _ = enforce_quality_gate(evaluation)
                     if not quality_allowed:
                         continue

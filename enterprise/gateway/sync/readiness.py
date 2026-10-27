@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Iterable
 
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from enterprise.gateway.db.dialect import fetchall
 from enterprise.gateway.quality.gate import enforce_quality_gate
-from enterprise.gateway.quality.models import get_latest_evaluation
+from enterprise.gateway.quality.models import (
+    QualityEvaluation,
+    get_latest_evaluation,
+    _row_to_evaluation,
+)
 from enterprise.gateway.sync.models import ExtDocumentMap
 
 _MANAGED_FEED_PIPELINE_DONE = frozenset({"DONE", "3"})
@@ -38,6 +44,31 @@ def query_quality_required() -> bool:
         "yes",
         "on",
     }
+
+
+def evaluation_lookup_key(
+    tenant_id: str,
+    source_system: str,
+    external_document_id: str,
+    source_version_id: str | None,
+) -> tuple[str, str, str, str]:
+    """Stable key for latest-evaluation maps used by scope/readiness."""
+
+    return (
+        str(tenant_id or ""),
+        str(source_system or ""),
+        str(external_document_id or ""),
+        str(source_version_id or ""),
+    )
+
+
+def document_evaluation_key(doc: ExtDocumentMap) -> tuple[str, str, str, str]:
+    return evaluation_lookup_key(
+        doc.tenant_id,
+        doc.source_system,
+        doc.external_document_id,
+        doc.source_version_id,
+    )
 
 
 def document_candidate_readiness(
@@ -97,22 +128,16 @@ def document_candidate_readiness(
     )
 
 
-async def document_candidate_readiness_from_db(
-    conn: AsyncConnection,
+def document_candidate_readiness_from_evaluation(
     doc: ExtDocumentMap,
+    evaluation: QualityEvaluation | None,
 ) -> tuple[DocumentCandidateReadiness, str | None]:
-    """Load quality evidence and evaluate the shared document gate."""
+    """Evaluate readiness from an already-loaded evaluation (no DB I/O)."""
 
     quality_required = query_quality_required() or doc.source_kind in {
-        "FILE_SHARE", "INLINE_JSON",
+        "FILE_SHARE",
+        "INLINE_JSON",
     }
-    evaluation = await get_latest_evaluation(
-        conn,
-        doc.tenant_id,
-        doc.source_system,
-        doc.external_document_id,
-        doc.source_version_id,
-    )
     if evaluation is not None:
         quality_allowed, quality_reason = enforce_quality_gate(evaluation)
     elif quality_required:
@@ -129,3 +154,66 @@ async def document_candidate_readiness_from_db(
         ),
         evaluation.parse_quality_status if evaluation else None,
     )
+
+
+async def get_latest_evaluations_batch(
+    conn: AsyncConnection,
+    *,
+    tenant_id: str,
+    source_system: str | None = None,
+    docs: Iterable[ExtDocumentMap] | None = None,
+) -> dict[tuple[str, str, str, str], QualityEvaluation]:
+    """Load latest parse_quality_evaluation rows in one query.
+
+    Semantics match repeated ``get_latest_evaluation(..., source_version_id=...)``
+    calls: for each (tenant, source_system, external_document_id, source_version_id)
+    keep the row with the greatest ``id``.
+    """
+
+    params: list[object] = [tenant_id]
+    clauses = ["tenant_id=?"]
+    if source_system is not None:
+        clauses.append("source_system=?")
+        params.append(source_system)
+
+    rows = await fetchall(
+        conn,
+        f"""SELECT DISTINCT ON (tenant_id, source_system, external_document_id, source_version_id)
+                   *
+            FROM parse_quality_evaluation
+            WHERE {" AND ".join(clauses)}
+            ORDER BY tenant_id, source_system, external_document_id, source_version_id, id DESC""",
+        params,
+    )
+    out: dict[tuple[str, str, str, str], QualityEvaluation] = {
+        evaluation_lookup_key(
+            row["tenant_id"],
+            row["source_system"],
+            row["external_document_id"],
+            row["source_version_id"],
+        ): _row_to_evaluation(row)
+        for row in rows
+    }
+    if docs is None:
+        return out
+    doc_list = list(docs)
+    if not doc_list:
+        return {}
+    wanted = {document_evaluation_key(doc) for doc in doc_list}
+    return {key: value for key, value in out.items() if key in wanted}
+
+
+async def document_candidate_readiness_from_db(
+    conn: AsyncConnection,
+    doc: ExtDocumentMap,
+) -> tuple[DocumentCandidateReadiness, str | None]:
+    """Load quality evidence and evaluate the shared document gate."""
+
+    evaluation = await get_latest_evaluation(
+        conn,
+        doc.tenant_id,
+        doc.source_system,
+        doc.external_document_id,
+        doc.source_version_id,
+    )
+    return document_candidate_readiness_from_evaluation(doc, evaluation)

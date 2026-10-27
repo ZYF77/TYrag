@@ -85,7 +85,10 @@ from enterprise.gateway.query.llm_provider_errors import classify_llm_provider_e
 from enterprise.gateway.query.ragflow_client import RAGFlowAPIError
 from enterprise.gateway.query.source_access import source_response
 from enterprise.gateway.sync.models import ExtDocumentMap
-from enterprise.gateway.sync.readiness import document_candidate_readiness_from_db
+from enterprise.gateway.sync.readiness import (
+    document_candidate_readiness_from_evaluation,
+    document_evaluation_key,
+)
 from enterprise.gateway.sync.transient_attachment import (
     ATTACHMENT_DISABLED_MESSAGE,
     TransientAttachmentError,
@@ -1144,10 +1147,13 @@ async def _available_context_scope(
     acl_scope = await compile_scope(AclContext(principal=principal), resolver)
     if acl_scope.is_empty:
         return acl_scope, {}
+    # Reuse batch evaluations from FormalScopeResolver — no per-doc _gw_read.
+    evaluations = getattr(resolver, "_evaluations", {}) or {}
     filtered: dict[str, ExtDocumentMap] = {}
     for internal_id, doc in resolver._docs.items():
-        readiness, _quality_status = await _gw_read(
-            db, document_candidate_readiness_from_db, doc
+        readiness, _quality_status = document_candidate_readiness_from_evaluation(
+            doc,
+            evaluations.get(document_evaluation_key(doc)),
         )
         if not readiness.retrievable:
             continue
@@ -1167,6 +1173,21 @@ async def _available_context_scope(
 async def _context_scope(
     db, principal: UserPrincipal, conversation: dict
 ) -> tuple[AclScope, dict[str, ExtDocumentMap]]:
+    # P0: reuse prepare turn snapshot; do not second-scan the library.
+    if conversation.get("_turn_scope_resolved"):
+        docs = conversation.get("_turn_docs_by_id")
+        policy_version = str(conversation.get("_turn_policy_version") or "")
+        if isinstance(docs, dict):
+            if not docs:
+                return AclScope.empty(policy_version), {}
+            return (
+                AclScope.materialized(
+                    tuple(sorted({doc.ragflow_dataset_id for doc in docs.values() if doc.ragflow_dataset_id})),
+                    tuple(sorted(docs)),
+                    policy_version=policy_version,
+                ),
+                docs,
+            )
     acl_scope, available = await _available_context_scope(db, principal, conversation)
     if acl_scope.is_empty:
         return acl_scope, {}
@@ -1423,6 +1444,8 @@ async def _resolve_turn_scope(
     conversation["_turn_scope_resolved"] = True
     conversation["_turn_entity_ids"] = list(entity_ids)
     conversation["_turn_document_ids"] = sorted(selected)
+    conversation["_turn_docs_by_id"] = dict(selected)
+    conversation["_turn_policy_version"] = getattr(_scope, "policy_version", "") or ""
     return conversation
 
 
@@ -1951,6 +1974,8 @@ async def _prepare_message_run(
     conversation: dict,
     req: CreateMessageRequest,
     pending: list[PendingAttachment] | None = None,
+    *,
+    defer_scope: bool = False,
 ) -> tuple[dict, str, dict | None, JSONResponse | None]:
     pending = pending or []
     try:
@@ -2006,6 +2031,10 @@ async def _prepare_message_run(
         return conversation, "", replay, response or _error(503, "RUN_INTERRUPTED", "Message run could not be reserved")
     identity = dict(conversation_id=conversation["conversation_id"], tenant_id=principal.tenant_id,
                     business_user_id=principal.business_user_id)
+    if defer_scope:
+        # SSE early-open: compute G after run.started; answer still waits for G.
+        run["_scope_deferred"] = True
+        return conversation, question, run, None
     token = active_run.set(dict(identity=identity, run_id=run["run_id"]))
     try:
         conversation = await _owned_conversation(db, principal, conversation["conversation_id"])
@@ -2024,6 +2053,47 @@ async def _prepare_message_run(
     finally:
         active_run.reset(token)
     return conversation, question, run, None
+
+
+async def _ensure_turn_scope_for_run(
+    db,
+    principal: UserPrincipal,
+    conversation: dict,
+    req: CreateMessageRequest,
+    question: str,
+    run: dict,
+) -> dict:
+    """Finish deferred prepare scope after run.started (SSE early-open)."""
+    if conversation.get("_turn_scope_resolved") and not run.get("_scope_deferred"):
+        return conversation
+    identity = dict(
+        conversation_id=conversation["conversation_id"],
+        tenant_id=principal.tenant_id,
+        business_user_id=principal.business_user_id,
+    )
+    token = active_run.set(dict(identity=identity, run_id=run["run_id"]))
+    try:
+        conversation = await _owned_conversation(
+            db, principal, conversation["conversation_id"]
+        )
+        conversation = await _resolve_turn_scope(db, principal, conversation, question)
+        snapshot = dict(
+            entity_scope=conversation.get("_turn_entity_ids") or [],
+            allowed_doc_ids=conversation.get("_turn_document_ids") or [],
+            retrieval_context=_retrieval_context_snapshot(conversation),
+        )
+        await _gw_write(
+            db, v2_store.save_run_scope, **identity, run_id=run["run_id"], **snapshot
+        )
+        run.update(
+            entity_scope_json=json.dumps(snapshot["entity_scope"]),
+            allowed_doc_ids_json=json.dumps(snapshot["allowed_doc_ids"]),
+            retrieval_context_json=json.dumps(snapshot["retrieval_context"]),
+        )
+        run.pop("_scope_deferred", None)
+        return conversation
+    finally:
+        active_run.reset(token)
 
 
 async def _save_failed_run(
@@ -2487,6 +2557,43 @@ async def _stream_run_events(
             "replayed": False,
         },
     )
+    if run.get("_scope_deferred") or not conversation.get("_turn_scope_resolved"):
+        try:
+            conversation = await _ensure_turn_scope_for_run(
+                db, principal, conversation, req, question, run
+            )
+        except _FormalQueryError as exc:
+            await _save_failed_run(
+                db, principal, conversation, req, run, assistant_message_id,
+                code=exc.code, status_code=exc.status_code, message=exc.message,
+                request=request,
+            )
+            yield _sse(
+                "run.failed",
+                {
+                    "conversationId": conversation_id,
+                    "runId": run["run_id"],
+                    "code": exc.code,
+                    "message": exc.message,
+                },
+            )
+            return
+        except Exception:
+            await _save_failed_run(
+                db, principal, conversation, req, run, assistant_message_id,
+                code="RUN_INTERRUPTED", status_code=503,
+                message="Message preparation failed", request=request,
+            )
+            yield _sse(
+                "run.failed",
+                {
+                    "conversationId": conversation_id,
+                    "runId": run["run_id"],
+                    "code": "RUN_INTERRUPTED",
+                    "message": "Message preparation failed",
+                },
+            )
+            return
     accumulated = ""
     accumulated_reasoning = ""
     final_delta: str | None = None
@@ -3287,8 +3394,9 @@ async def create_message(
         if conversation["status"] == "archived":
             return _error(409, "CONVERSATION_ARCHIVED", "Conversation is archived")
         try:
+            want_sse = "text/event-stream" in request.headers.get("accept", "").lower()
             conversation, question, run_or_result, error = await _prepare_message_run(
-                db, principal, conversation, req, pending
+                db, principal, conversation, req, pending, defer_scope=want_sse
             )
         except _FormalQueryError as exc:
             return _error(exc.status_code, exc.code, exc.message)

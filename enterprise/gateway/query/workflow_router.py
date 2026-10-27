@@ -1159,6 +1159,43 @@ async def _workflow_stream(
             "replayed": False,
         },
     )
+    if run.get("_scope_deferred") or not conversation.get("_turn_scope_resolved"):
+        try:
+            conversation = await v2._ensure_turn_scope_for_run(
+                db, principal, conversation, internal_req, question, run
+            )
+        except v2._FormalQueryError as exc:
+            await v2._save_failed_run(
+                db, principal, conversation, internal_req, run, assistant_message_id,
+                code=exc.code, status_code=exc.status_code, message=exc.message,
+                request=request,
+            )
+            yield v2._sse(
+                "run.failed",
+                {
+                    "conversationId": conversation["conversation_id"],
+                    "runId": run["run_id"],
+                    "code": exc.code,
+                    "message": exc.message,
+                },
+            )
+            return
+        except Exception:
+            await v2._save_failed_run(
+                db, principal, conversation, internal_req, run, assistant_message_id,
+                code="RUN_INTERRUPTED", status_code=503,
+                message="Message preparation failed", request=request,
+            )
+            yield v2._sse(
+                "run.failed",
+                {
+                    "conversationId": conversation["conversation_id"],
+                    "runId": run["run_id"],
+                    "code": "RUN_INTERRUPTED",
+                    "message": "Message preparation failed",
+                },
+            )
+            return
     try:
         question, client, observations = await v2._retrieval_question(
             db,
@@ -1582,8 +1619,9 @@ async def create_workflow_message(
                 "WORKFLOW_VERSION_MISMATCH",
                 "Conversation is bound to another Workflow version",
             )
+        want_sse = "text/event-stream" in request.headers.get("accept", "").lower()
         conversation, question, run_or_result, error = await v2._prepare_message_run(
-            db, principal, conversation, internal_req, pending
+            db, principal, conversation, internal_req, pending, defer_scope=want_sse
         )
         if error:
             return error
