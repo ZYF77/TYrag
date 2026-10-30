@@ -1427,6 +1427,7 @@ async def _workflow_stream(
             {
                 "conversationId": conversation["conversation_id"],
                 "runId": run["run_id"], "messageId": assistant_message_id,
+                "answer": accumulated,
                 "status": v2.v2_store.public_status(status),
                 "citations": public_citations,
                 "reasoning": reasoning,
